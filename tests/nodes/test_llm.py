@@ -1,4 +1,5 @@
 import pytest
+import litellm
 from unittest.mock import AsyncMock, MagicMock, patch
 from armature.nodes.llm import LLMNode
 from armature.spec.models import Stage, Role, RoleType, ModelTiers, ModelTierConfig, OutputMode
@@ -106,3 +107,78 @@ async def test_no_escalation_if_no_higher_tier():
         result = await node.execute({})
 
     assert result.get("_parse_error") is True  # gracefully returns parse error
+
+
+# ---------------------------------------------------------------------------
+# Task 2: LLM retry with exponential backoff
+# ---------------------------------------------------------------------------
+
+async def test_retries_on_rate_limit_and_succeeds():
+    """Should retry on RateLimitError and eventually return a valid result."""
+    stage = make_stage(RoleType.WORKER)
+    tiers = make_tiers()
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    call_count = 0
+
+    async def mock_completion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise litellm.RateLimitError(
+                message="rate limited",
+                llm_provider="openai",
+                model="test-model",
+            )
+        return make_litellm_response("hello")
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        result = await node.execute({})
+
+    assert call_count == 3
+    assert result.get("content") == "hello"
+
+
+async def test_raises_after_max_retries():
+    """Should re-raise RateLimitError after exhausting all retries."""
+    stage = make_stage(RoleType.WORKER)
+    tiers = make_tiers()
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    async def always_rate_limit(**kwargs):
+        raise litellm.RateLimitError(
+            message="always limited",
+            llm_provider="openai",
+            model="test-model",
+        )
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=always_rate_limit), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(litellm.RateLimitError):
+            await node.execute({})
+
+
+async def test_non_transient_error_not_retried():
+    """AuthenticationError should propagate immediately without any retry."""
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini"))
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    call_count = 0
+
+    async def auth_error(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise litellm.AuthenticationError(
+            message="bad key",
+            llm_provider="openai",
+            model="gpt-4o-mini",
+        )
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=auth_error), \
+         patch("asyncio.sleep", new_callable=AsyncMock):
+        with pytest.raises(litellm.AuthenticationError):
+            await node.execute({})
+
+    assert call_count == 1  # fired once, not retried

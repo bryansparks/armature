@@ -1,5 +1,7 @@
 from __future__ import annotations
+import asyncio
 import json
+import random
 from typing import Any
 import litellm
 from armature.nodes.base import BaseNode
@@ -9,6 +11,35 @@ from armature.runtime.prompt import PromptAssembler
 
 async def litellm_completion(**kwargs) -> Any:
     return await litellm.acompletion(**kwargs)
+
+
+def _retryable_errors() -> tuple[type[Exception], ...]:
+    errors: list[type[Exception]] = []
+    for name in ("RateLimitError", "ServiceUnavailableError", "APIConnectionError", "Timeout"):
+        cls = getattr(litellm, name, None)
+        if cls is not None:
+            errors.append(cls)
+    return tuple(errors) if errors else (Exception,)
+
+
+async def _call_with_retry(
+    model: str,
+    max_retries: int = 3,
+    **kwargs: Any,
+) -> Any:
+    retryable = _retryable_errors()
+    last_exc: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            return await litellm_completion(model=model, **kwargs)
+        except retryable as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = (2 ** attempt) + random.uniform(0.0, 0.5)
+                await asyncio.sleep(delay)
+
+    raise last_exc  # type: ignore[misc]
 
 
 _TIER_ORDER = ["tiny", "small", "medium", "large", "frontier"]
@@ -94,7 +125,7 @@ class LLMNode(BaseNode):
             tried.add(attempt_tier)
 
             model = self._model_string(tier_config)
-            response = await litellm_completion(model=model, **base_kwargs)
+            response = await _call_with_retry(model=model, **base_kwargs)
             content = response.choices[0].message.content
 
             usage = getattr(response, "usage", None)
