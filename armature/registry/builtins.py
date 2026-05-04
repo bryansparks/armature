@@ -4,6 +4,7 @@ from pathlib import Path
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
 from armature.skills import quorum as _quorum_skill
 from armature.skills import tessera as _tessera_skill
+from armature.skills import alembic as _alembic_skill
 
 
 async def _file_read(args: dict) -> dict:
@@ -73,5 +74,16 @@ def register_builtins(registry: ToolRegistry) -> None:
         parameters={
             "query": {"type": "string"},
             "top_k": {"type": "integer", "optional": True},
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="alembic.submit",
+        description="Submit a high-quality execution trace to Alembic for SLM fine-tuning",
+        permission=PermissionLevel.NETWORK,
+        handler=_alembic_skill.submit_trace,
+        parameters={
+            "trace": {"type": "object", "description": "TraceRecord as dict"},
+            "score": {"type": "number", "optional": True},
+            "alembic_url": {"type": "string", "optional": True},
         },
     ))
