@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  armature:
+    build: .
+    image: armature:latest
+    container_name: armature-service
+    ports:
+      - "${ARMATURE_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      ARMATURE_LOG_LEVEL: "${ARMATURE_LOG_LEVEL:-info}"
+    volumes:
+      - armature_runs:/root/.armature/runs
+      - "${ARMATURE_SPECS_DIR:-.}/specs:/specs:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  armature_runs:
