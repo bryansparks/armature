@@ -1,0 +1,21 @@
+name: echo-workflow
+version: "1.0"
+description: Minimal end-to-end test workflow using only script adapters
+
+adapters:
+  echo_message:
+    name: echo_message
+    type: script
+    cmd: "echo 'received: {{message}}'"
+  check_exit:
+    name: check_exit
+    type: script
+    cmd: "echo 'verified'"
+
+stages:
+  - id: echo
+    adapter: echo_message
+
+  - id: verify
+    depends_on: [echo]
+    adapter: check_exit
