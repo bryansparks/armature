@@ -1,0 +1,82 @@
+name: harness-optimizer
+version: "1.0"
+description: "Meta-Harness — reads execution traces and proposes workflow spec improvements"
+
+stages:
+  - id: analyze_traces
+    role:
+      name: trace_analyst
+      type: researcher
+      model_tier: frontier
+      description: |
+        Analyze the execution traces provided in the context and identify the single most
+        impactful failure pattern. Focus on: JSON parse errors (_parse_error in outputs),
+        high latency stages (latency_ms > 2000), repeated validation failures, stages with
+        success=false. Return structured analysis.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [top_failure, failure_count, affected_stage]
+      properties:
+        top_failure:
+          type: string
+          description: "Short description of the most common failure pattern"
+        failure_count:
+          type: integer
+          description: "Number of traces showing this pattern"
+        affected_stage:
+          type: string
+          description: "Stage ID most affected"
+
+  - id: propose_fix
+    depends_on: [analyze_traces]
+    role:
+      name: spec_optimizer
+      type: orchestrator
+      model_tier: frontier
+      description: |
+        Based on the failure analysis in context (top_failure, failure_count, affected_stage),
+        propose a minimal change to the workflow YAML spec that directly addresses the failure.
+        Output as a unified diff (--- original\n+++ proposed). Be conservative — change one
+        thing at a time. If the failure is JSON parse errors, suggest adding output_mode: guided_json
+        and an appropriate output_schema to the affected stage.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [proposed_diff, rationale, confidence]
+      properties:
+        proposed_diff:
+          type: string
+          description: "Unified diff format change to the YAML spec"
+        rationale:
+          type: string
+          description: "Why this change addresses the failure"
+        confidence:
+          type: number
+          description: "0.0-1.0 confidence the change will help"
+
+  - id: evaluate_proposal
+    depends_on: [propose_fix]
+    role:
+      name: spec_judge
+      type: judge
+      model_tier: frontier
+      description: |
+        Evaluate the proposed spec diff (proposed_diff, rationale, confidence) in context.
+        Will this change address the failure without breaking existing functionality?
+        Consider: Does the diff make sense given the failure? Is it minimal? Could it introduce
+        regressions? Score the proposal objectively.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept, score, feedback]
+      properties:
+        accept:
+          type: boolean
+          description: "True if the proposal should be accepted"
+        score:
+          type: number
+          description: "Quality score 0.0-1.0"
+        feedback:
+          type: string
+          description: "Reasoning for accept/reject decision"

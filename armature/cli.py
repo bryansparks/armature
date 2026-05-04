@@ -67,5 +67,42 @@ def serve(
     uvicorn.run(fastapi_app, host=host, port=port)
 
 
+@app.command()
+def optimize(
+    spec: Path = typer.Argument(..., help="Path to the workflow spec to optimize"),
+    trace_db: Path = typer.Option(
+        Path("~/.armature/traces.db").expanduser(),
+        "--traces",
+        help="Path to trace database",
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Apply the proposed diff if accepted"),
+):
+    """Run the Meta-Harness optimizer on a workflow spec."""
+    if not spec.exists():
+        typer.echo(f"Spec not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    from armature.optimizer.runner import OptimizerRunner
+
+    async def _run():
+        runner = OptimizerRunner(target_spec_path=spec, trace_db_path=trace_db)
+        return await runner.optimize()
+
+    typer.echo(f"Analyzing traces for: {spec.name}")
+    result = asyncio.run(_run())
+
+    if result is None:
+        typer.echo("Not enough trace data to optimize. Run more workflows first.")
+        return
+
+    typer.echo(f"\nOptimizer result (accepted={result.accepted}, score={result.score:.2f}):")
+    typer.echo(f"Rationale: {result.rationale}")
+    typer.echo(f"\nProposed diff:\n{result.proposed_diff}")
+
+    if result.accepted and apply:
+        typer.echo("\nApplying diff... (manual review recommended)")
+        typer.echo("Auto-apply not yet implemented. Review the diff and edit manually.")
+
+
 if __name__ == "__main__":
     app()
