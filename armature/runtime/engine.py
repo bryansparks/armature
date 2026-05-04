@@ -7,13 +7,12 @@ from armature.spec.loader import load_spec
 from armature.runtime.dag import DAGExecutor
 from armature.runtime.context import ContextManager
 from armature.runtime.prompt import PromptAssembler
-from armature.runtime.loop import LoopExecutor
 from armature.nodes.llm import LLMNode
 from armature.nodes.script import ScriptNode
 from armature.nodes.gate import HumanGateNode
 from armature.registry.registry import ToolRegistry
 from armature.registry.builtins import register_builtins
-from armature.hooks.lifecycle import HookRegistry
+from armature.hooks.lifecycle import HookRegistry, HookDecision
 from armature.state.session import SessionLog, SessionEvent
 from armature.state.artifacts import ArtifactStore
 
@@ -47,7 +46,9 @@ class Harness:
     async def _execute_stage(self, stage: Stage, context: dict[str, Any]) -> Any:
         await self._session.append(SessionEvent(type="stage_start", data={"stage": stage.id}))
 
-        await self._hooks.run_pre_stage(stage.id, context)
+        decision = await self._hooks.run_pre_stage(stage.id, context)
+        if decision == HookDecision.BLOCK:
+            raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
 
         if stage.gate == "human":
             node = HumanGateNode(stage=stage)
