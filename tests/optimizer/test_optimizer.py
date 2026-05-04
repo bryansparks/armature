@@ -205,6 +205,7 @@ async def test_metric_fn_scores_passed_to_workflow(tmp_path):
     assert "metric_scores_json" in ctx
     scores = json.loads(ctx["metric_scores_json"])
     assert len(scores) == 5
+    assert scores == pytest.approx([0.80, 0.85, 0.90, 0.95, 1.00], abs=1e-6)
 
 
 async def test_metric_fn_none_omits_keys(tmp_path):
@@ -251,10 +252,19 @@ async def test_metric_fn_exception_does_not_crash(tmp_path):
         )
         for _ in range(5)
     ]
+    captured_inputs: list[dict] = []
+
+    async def capture_workflow(inputs):
+        captured_inputs.append(inputs)
+        return make_mock_harness_result(accept=True)
 
     with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=fake_traces):
         with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock,
-                          return_value=make_mock_harness_result(accept=True)):
+                          side_effect=capture_workflow):
             result = await runner.optimize()
 
-    assert result is not None  # optimizer completed despite metric_fn failure
+    assert result is not None
+    assert len(captured_inputs) == 1
+    ctx = captured_inputs[0]
+    assert "metric_mean" not in ctx
+    assert "metric_scores_json" not in ctx

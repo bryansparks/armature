@@ -36,7 +36,7 @@ class OptimizerRunner:
         target_spec_path: Path | str,
         trace_db_path: Path | str,
         optimizer_spec_path: Path | str | None = None,
-        metric_fn: Callable[[dict], float] | None = None,
+        metric_fn: Callable[[dict[str, Any]], float] | None = None,
     ):
         self._target_spec_path = Path(target_spec_path)
         self._trace_db_path = Path(trace_db_path)
@@ -65,8 +65,7 @@ class OptimizerRunner:
             scores: list[float] = []
             for t in traces:
                 try:
-                    outputs = t.outputs if hasattr(t, "outputs") else {}
-                    scores.append(float(self._metric_fn(outputs)))
+                    scores.append(float(self._metric_fn(t.outputs)))
                 except Exception:
                     pass
             if scores:
