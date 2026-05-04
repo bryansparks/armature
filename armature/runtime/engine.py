@@ -17,6 +17,7 @@ from armature.hooks.lifecycle import HookRegistry, HookDecision
 from armature.state.session import SessionLog, SessionEvent
 from armature.state.artifacts import ArtifactStore
 from armature.state.traces import TraceStore, TraceRecord
+from armature.telemetry import get_tracer
 
 
 class Harness:
@@ -60,48 +61,60 @@ class Harness:
             raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
 
         t0 = time.monotonic()
+        tracer = get_tracer()
 
-        if stage.gate == "human":
-            node = HumanGateNode(stage=stage)
-            result = await node.execute(context)
-        elif stage.subagent_spec:
-            from armature.nodes.subagent import SubagentNode
-            node = SubagentNode(stage=stage, session_dir=self._session_dir)
-            result = await node.execute(context)
-        elif stage.adapter:
-            adapter = self._spec.adapters.get(stage.adapter)
-            if adapter is None:
-                raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
-            node = ScriptNode(adapter=adapter)
-            result = await node.execute(context)
-        elif stage.role:
-            node = LLMNode(
-                stage=stage,
-                tiers=self._spec.model_tiers,
-                assembler=self._assembler,
-                registry=self._registry,
-            )
-            result = await node.execute(context)
-            # Record trace for LLM stages
-            await self._ensure_traces()
-            latency = (time.monotonic() - t0) * 1000
-            output_valid = "_parse_error" not in result
-            await self._traces.record(TraceRecord(
-                run_id=self._run_id,
-                workflow_name=self._spec.name,
-                stage_id=stage.id,
-                role_type=stage.role.type.value,
-                model=node._resolve_model(),
-                input_tokens=result.pop("_input_tokens", 0),
-                output_tokens=result.pop("_output_tokens", 0),
-                latency_ms=latency,
-                success=True,
-                output_valid=output_valid,
-                inputs={k: str(v)[:200] for k, v in context.items()},
-                outputs={k: str(v)[:200] for k, v in result.items()},
-            ))
-        else:
-            raise ValueError(f"Stage '{stage.id}' has no role, adapter, or gate")
+        with tracer.start_as_current_span(
+            f"armature.stage.{stage.id}",
+            attributes={"stage": stage.id, "workflow": self._spec.name},
+        ) as span:
+            try:
+                if stage.gate == "human":
+                    node = HumanGateNode(stage=stage)
+                    result = await node.execute(context)
+                elif stage.subagent_spec:
+                    from armature.nodes.subagent import SubagentNode
+                    node = SubagentNode(stage=stage, session_dir=self._session_dir)
+                    result = await node.execute(context)
+                elif stage.adapter:
+                    adapter = self._spec.adapters.get(stage.adapter)
+                    if adapter is None:
+                        raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
+                    node = ScriptNode(adapter=adapter)
+                    result = await node.execute(context)
+                elif stage.role:
+                    node = LLMNode(
+                        stage=stage,
+                        tiers=self._spec.model_tiers,
+                        assembler=self._assembler,
+                        registry=self._registry,
+                    )
+                    result = await node.execute(context)
+                    await self._ensure_traces()
+                    latency = (time.monotonic() - t0) * 1000
+                    span.set_attribute("latency_ms", latency)
+                    output_valid = "_parse_error" not in result
+                    await self._traces.record(TraceRecord(
+                        run_id=self._run_id,
+                        workflow_name=self._spec.name,
+                        stage_id=stage.id,
+                        role_type=stage.role.type.value,
+                        model=node._resolve_model(),
+                        input_tokens=result.pop("_input_tokens", 0),
+                        output_tokens=result.pop("_output_tokens", 0),
+                        latency_ms=latency,
+                        success=True,
+                        output_valid=output_valid,
+                        inputs={k: str(v)[:200] for k, v in context.items()},
+                        outputs={k: str(v)[:200] for k, v in result.items()},
+                    ))
+                else:
+                    raise ValueError(f"Stage '{stage.id}' has no role, adapter, or gate")
+
+                span.set_attribute("success", True)
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_attribute("success", False)
+                raise
 
         await self._hooks.run_post_stage(stage.id, result, context)
         await self._session.append(SessionEvent(
@@ -137,20 +150,25 @@ class Harness:
         context = dict(inputs or {})
         context["run_id"] = self._run_id
 
-        await self._session.append(SessionEvent(
-            type="run_start", data={"run_id": self._run_id, "workflow": self._spec.name}
-        ))
+        tracer = get_tracer()
+        with tracer.start_as_current_span(
+            f"armature.run.{self._spec.name}",
+            attributes={"workflow": self._spec.name, "run_id": self._run_id},
+        ):
+            await self._session.append(SessionEvent(
+                type="run_start", data={"run_id": self._run_id, "workflow": self._spec.name}
+            ))
 
-        deps = {s.id: s.depends_on for s in self._spec.stages}
+            deps = {s.id: s.depends_on for s in self._spec.stages}
 
-        async def make_handler(stage: Stage):
-            async def handler(ctx):
-                return await self._execute_stage_with_recovery(stage, ctx)
-            return handler
+            async def make_handler(stage: Stage):
+                async def handler(ctx):
+                    return await self._execute_stage_with_recovery(stage, ctx)
+                return handler
 
-        handlers = {s.id: await make_handler(s) for s in self._spec.stages}
-        executor = DAGExecutor(handlers, deps)
-        results = await executor.run(context)
+            handlers = {s.id: await make_handler(s) for s in self._spec.stages}
+            executor = DAGExecutor(handlers, deps)
+            results = await executor.run(context)
 
-        await self._session.append(SessionEvent(type="run_complete", data={"run_id": self._run_id}))
-        return results
+            await self._session.append(SessionEvent(type="run_complete", data={"run_id": self._run_id}))
+            return results

@@ -35,7 +35,23 @@ async def _call_with_retry(
 
     for attempt in range(max_retries):
         try:
-            return await litellm_completion(model=model, **kwargs)
+            response = await litellm_completion(model=model, **kwargs)
+            try:
+                from armature.telemetry import get_tracer
+                usage = getattr(response, "usage", None)
+                with get_tracer().start_as_current_span(
+                    "armature.llm.completion",
+                    attributes={
+                        "model": model,
+                        "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                        "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+                        "attempt": attempt,
+                    },
+                ):
+                    pass
+            except Exception:
+                pass  # telemetry must never break execution
+            return response
         except retryable as exc:
             last_exc = exc
             if attempt < max_retries - 1:
