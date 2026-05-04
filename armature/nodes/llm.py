@@ -22,13 +22,16 @@ def _retryable_errors() -> tuple[type[Exception], ...]:
     return tuple(errors) if errors else (Exception,)
 
 
+_RETRYABLE_ERRORS = _retryable_errors()
+
+
 async def _call_with_retry(
     model: str,
     max_retries: int = 3,
     **kwargs: Any,
 ) -> Any:
-    retryable = _retryable_errors()
-    last_exc: Exception | None = None
+    retryable = _RETRYABLE_ERRORS
+    last_exc: Exception = RuntimeError(f"_call_with_retry called with max_retries={max_retries}")
 
     for attempt in range(max_retries):
         try:
@@ -39,7 +42,7 @@ async def _call_with_retry(
                 delay = (2 ** attempt) + random.uniform(0.0, 0.5)
                 await asyncio.sleep(delay)
 
-    raise last_exc  # type: ignore[misc]
+    raise last_exc
 
 
 _TIER_ORDER = ["tiny", "small", "medium", "large", "frontier"]

@@ -132,12 +132,14 @@ async def test_retries_on_rate_limit_and_succeeds():
             )
         return make_litellm_response("hello")
 
+    mock_sleep = AsyncMock()
     with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion), \
-         patch("asyncio.sleep", new_callable=AsyncMock):
+         patch("asyncio.sleep", mock_sleep):
         result = await node.execute({})
 
     assert call_count == 3
     assert result.get("content") == "hello"
+    assert mock_sleep.call_count == 2  # 2 failures → 2 sleeps before 3rd attempt
 
 
 async def test_raises_after_max_retries():
