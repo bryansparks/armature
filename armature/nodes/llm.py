@@ -29,6 +29,15 @@ class LLMNode(BaseNode):
         self._assembler = assembler or PromptAssembler()
         self._registry = registry
 
+    def _model_string(self, tier_config) -> str:
+        provider = tier_config.provider
+        model = tier_config.model
+        if provider == "ollama":
+            return f"ollama/{model}"
+        elif provider == "openrouter":
+            return f"openrouter/{model}"
+        return model
+
     def _resolve_model(self) -> str:
         tier_name = self._stage.role.model_tier
         tier_config = getattr(self._tiers, tier_name, None)
@@ -40,41 +49,68 @@ class LLMNode(BaseNode):
                     break
         if tier_config is None:
             raise ValueError(f"No model tier configured for '{tier_name}'")
-
-        provider = tier_config.provider
-        model = tier_config.model
-        if provider == "ollama":
-            return f"ollama/{model}"
-        elif provider == "anthropic":
-            return model
-        elif provider == "openrouter":
-            return f"openrouter/{model}"
-        return model
+        return self._model_string(tier_config)
 
     async def execute(self, context: dict[str, Any]) -> Any:
         role = self._stage.role
         tools = self._registry.descriptors() if self._registry else []
         system_prompt = self._assembler.build(role=role, tools=tools, context=context)
-        model = self._resolve_model()
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(context, default=str)},
         ]
 
-        response = await litellm_completion(model=model, messages=messages)
-        content = response.choices[0].message.content
+        kwargs: dict[str, Any] = {"messages": messages}
 
-        usage = getattr(response, "usage", None)
-        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
-        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        is_json_mode = self._stage.output_mode.value in ("json", "guided_json")
+        if is_json_mode and self._stage.output_schema:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": f"{self._stage.id}_output",
+                    "strict": True,
+                    "schema": self._stage.output_schema,
+                },
+            }
+        elif is_json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
 
-        if self._stage.output_mode.value in ("json", "guided_json"):
-            try:
-                parsed = json.loads(content)
-                parsed["_input_tokens"] = input_tokens
-                parsed["_output_tokens"] = output_tokens
-                return parsed
-            except json.JSONDecodeError:
-                return {"raw": content, "_parse_error": True, "_input_tokens": input_tokens, "_output_tokens": output_tokens}
-        return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens}
+        return await self._execute_with_escalation(kwargs, is_json_mode)
+
+    async def _execute_with_escalation(
+        self, base_kwargs: dict[str, Any], parse_as_json: bool
+    ) -> Any:
+        tier_name = self._stage.role.model_tier
+        tried: set[str] = set()
+        content = ""
+
+        for attempt_tier in [tier_name] + _TIER_ORDER:
+            if attempt_tier in tried:
+                continue
+            tier_config = getattr(self._tiers, attempt_tier, None)
+            if tier_config is None:
+                continue
+            tried.add(attempt_tier)
+
+            model = self._model_string(tier_config)
+            response = await litellm_completion(model=model, **base_kwargs)
+            content = response.choices[0].message.content
+
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(usage, "completion_tokens", 0) or 0
+
+            if parse_as_json:
+                try:
+                    result = json.loads(content)
+                    result["_input_tokens"] = input_tokens
+                    result["_output_tokens"] = output_tokens
+                    return result
+                except json.JSONDecodeError:
+                    continue  # escalate to next tier
+
+            return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens}
+
+        # All tiers exhausted without a valid parse
+        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0}
