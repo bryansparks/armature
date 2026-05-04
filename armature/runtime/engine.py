@@ -109,6 +109,30 @@ class Harness:
         ))
         return result
 
+    async def _execute_stage_with_recovery(
+        self, stage: Stage, context: dict[str, Any]
+    ) -> Any:
+        if stage.on_fail is None or stage.on_fail.loop is None:
+            return await self._execute_stage(stage, context)
+
+        loop_cfg = stage.on_fail.loop
+        last_exc: Exception | None = None
+        retry_ctx = dict(context)
+
+        for attempt in range(loop_cfg.max + 1):
+            try:
+                return await self._execute_stage(stage, retry_ctx)
+            except Exception as exc:
+                last_exc = exc
+                if attempt < loop_cfg.max:
+                    retry_ctx = {
+                        **retry_ctx,
+                        "_retry_attempt": attempt + 1,
+                        "_last_error": str(exc),
+                    }
+
+        raise last_exc  # type: ignore[misc]
+
     async def run(self, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         context = dict(inputs or {})
         context["run_id"] = self._run_id
@@ -121,7 +145,7 @@ class Harness:
 
         async def make_handler(stage: Stage):
             async def handler(ctx):
-                return await self._execute_stage(stage, ctx)
+                return await self._execute_stage_with_recovery(stage, ctx)
             return handler
 
         handlers = {s.id: await make_handler(s) for s in self._spec.stages}

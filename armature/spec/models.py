@@ -64,6 +64,10 @@ class LoopConfig(BaseModel):
     until: str | None = None
 
 
+class OnFailConfig(BaseModel):
+    loop: LoopConfig | None = None
+
+
 class Adapter(BaseModel):
     name: str
     type: str  # "python" | "script"
@@ -93,7 +97,7 @@ class Stage(BaseModel):
     gate: str | None = None
     signature: Signature | None = None
     output_mode: OutputMode = OutputMode.TEXT
-    on_fail: dict[str, Any] | None = None
+    on_fail: OnFailConfig | None = None
     present: str | None = None
     condition: str | None = None
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
