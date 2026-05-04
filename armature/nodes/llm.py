@@ -30,6 +30,14 @@ async def _call_with_retry(
     max_retries: int = 3,
     **kwargs: Any,
 ) -> Any:
+    """Call litellm with retry on transient errors.
+
+    Args:
+        max_retries: Total number of attempts (not retries after the first).
+                     Default 3 = 1 initial attempt + 2 retries.
+                     Note: LoopConfig.max in stage recovery means retries after
+                     the first attempt, so LoopConfig.max=2 also yields 3 total calls.
+    """
     retryable = _RETRYABLE_ERRORS
     last_exc: Exception = RuntimeError(f"_call_with_retry called with max_retries={max_retries}")
 

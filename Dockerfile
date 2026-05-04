@@ -12,7 +12,7 @@ RUN uv pip install --system ".[service]"
 
 COPY armature/ armature/
 
-RUN useradd -m -u 1000 armature
+RUN useradd -m -u 1000 armature && chown -R armature:armature /app
 USER armature
 
 EXPOSE 8080
