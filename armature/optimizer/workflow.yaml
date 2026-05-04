@@ -2,6 +2,11 @@ name: harness-optimizer
 version: "1.0"
 description: "Meta-Harness — reads execution traces and proposes workflow spec improvements"
 
+model_tiers:
+  frontier:
+    provider: anthropic
+    model: claude-opus-4-7
+
 stages:
   - id: analyze_traces
     role:
