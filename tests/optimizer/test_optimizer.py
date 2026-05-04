@@ -1,3 +1,4 @@
+import json
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -167,3 +168,93 @@ async def test_ab_test_empty_inputs_returns_tie(tmp_path):
     assert result.winner == "tie"
     assert result.n_inputs == 0
     mock_score.assert_not_called()
+
+
+async def test_metric_fn_scores_passed_to_workflow(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+        metric_fn=lambda outputs: float(outputs.get("confidence", 0.0)),
+    )
+    from armature.state.traces import TraceRecord
+    fake_traces = [
+        TraceRecord(
+            run_id=f"r{i}", workflow_name="echo-workflow", stage_id="s",
+            role_type="worker", model="m", latency_ms=100.0,
+            success=True, output_valid=True,
+            outputs={"confidence": 0.8 + i * 0.05},
+        )
+        for i in range(5)
+    ]
+    captured_inputs: list[dict] = []
+
+    async def capture_workflow(inputs):
+        captured_inputs.append(inputs)
+        return make_mock_harness_result(accept=True)
+
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=fake_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock,
+                          side_effect=capture_workflow):
+            await runner.optimize()
+
+    assert len(captured_inputs) == 1
+    ctx = captured_inputs[0]
+    assert "metric_mean" in ctx
+    assert ctx["metric_mean"] == pytest.approx(0.9, abs=1e-6)  # (0.80+0.85+0.90+0.95+1.00)/5
+    assert "metric_scores_json" in ctx
+    scores = json.loads(ctx["metric_scores_json"])
+    assert len(scores) == 5
+
+
+async def test_metric_fn_none_omits_keys(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+        # no metric_fn
+    )
+    mock_traces = [object()] * 5
+    captured_inputs: list[dict] = []
+
+    async def capture_workflow(inputs):
+        captured_inputs.append(inputs)
+        return make_mock_harness_result(accept=True)
+
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock,
+                          side_effect=capture_workflow):
+            await runner.optimize()
+
+    ctx = captured_inputs[0]
+    assert "metric_mean" not in ctx
+    assert "metric_scores_json" not in ctx
+
+
+async def test_metric_fn_exception_does_not_crash(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+
+    def bad_metric(outputs):
+        raise ValueError("metric blew up")
+
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+        metric_fn=bad_metric,
+    )
+    from armature.state.traces import TraceRecord
+    fake_traces = [
+        TraceRecord(
+            run_id="r0", workflow_name="echo-workflow", stage_id="s",
+            role_type="worker", model="m", latency_ms=100.0,
+            success=True, output_valid=True,
+        )
+        for _ in range(5)
+    ]
+
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=fake_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock,
+                          return_value=make_mock_harness_result(accept=True)):
+            result = await runner.optimize()
+
+    assert result is not None  # optimizer completed despite metric_fn failure

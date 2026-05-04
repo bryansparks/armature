@@ -36,12 +36,14 @@ class OptimizerRunner:
         target_spec_path: Path | str,
         trace_db_path: Path | str,
         optimizer_spec_path: Path | str | None = None,
+        metric_fn: Callable[[dict], float] | None = None,
     ):
         self._target_spec_path = Path(target_spec_path)
         self._trace_db_path = Path(trace_db_path)
         self._optimizer_spec_path = optimizer_spec_path or (
             Path(__file__).parent / "workflow.yaml"
         )
+        self._metric_fn = metric_fn
 
     async def optimize(self) -> OptimizationResult | None:
         traces = await self._load_traces()
@@ -54,10 +56,24 @@ class OptimizerRunner:
             default=str,
         )
 
-        workflow_result = await self._run_optimizer_workflow({
+        workflow_inputs: dict[str, Any] = {
             "traces_json": traces_json,
             "spec_yaml": spec_yaml,
-        })
+        }
+
+        if self._metric_fn is not None:
+            scores: list[float] = []
+            for t in traces:
+                try:
+                    outputs = t.outputs if hasattr(t, "outputs") else {}
+                    scores.append(float(self._metric_fn(outputs)))
+                except Exception:
+                    pass
+            if scores:
+                workflow_inputs["metric_mean"] = sum(scores) / len(scores)
+                workflow_inputs["metric_scores_json"] = json.dumps(scores)
+
+        workflow_result = await self._run_optimizer_workflow(workflow_inputs)
 
         propose = workflow_result.get("propose_fix", {})
         evaluate = workflow_result.get("evaluate_proposal", {})
