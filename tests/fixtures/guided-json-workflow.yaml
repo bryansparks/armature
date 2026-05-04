@@ -1,0 +1,21 @@
+name: guided-json-workflow
+version: "1.0"
+description: Tests script adapter output with JSON content
+
+adapters:
+  classify:
+    name: classify
+    type: script
+    cmd: "echo '{\"label\": \"positive\", \"confidence\": 0.95}'"
+  summarize:
+    name: summarize
+    type: script
+    cmd: "echo 'classification complete'"
+
+stages:
+  - id: classify
+    adapter: classify
+
+  - id: report
+    depends_on: [classify]
+    adapter: summarize
