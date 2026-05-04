@@ -24,6 +24,16 @@ class TraceRecord(BaseModel):
     outputs: dict[str, Any] = Field(default_factory=dict)
 
 
+class IhrResult(BaseModel):
+    run_id: str
+    ihr: float
+    output_valid_rate: float
+    success_rate: float
+    avg_quorum_score: float
+    latency_score: float
+    n_traces: int
+
+
 _CREATE_SQL = """
     CREATE TABLE IF NOT EXISTS traces (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,3 +130,59 @@ class TraceStore:
         self, workflow_name: str, min_score: float = 0.85
     ) -> list[TraceRecord]:
         return await self.query(workflow_name=workflow_name, min_quorum_score=min_score)
+
+    async def query_by_run(self, run_id: str) -> list[TraceRecord]:
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM traces WHERE run_id = ? ORDER BY timestamp ASC", (run_id,)
+            )
+            rows = await cursor.fetchall()
+        return [
+            TraceRecord(
+                run_id=r["run_id"],
+                workflow_name=r["workflow_name"],
+                stage_id=r["stage_id"],
+                role_type=r["role_type"],
+                model=r["model"],
+                input_tokens=r["input_tokens"] or 0,
+                output_tokens=r["output_tokens"] or 0,
+                latency_ms=r["latency_ms"] or 0.0,
+                success=bool(r["success"]),
+                output_valid=bool(r["output_valid"]),
+                quorum_score=r["quorum_score"],
+                timestamp=r["timestamp"],
+                inputs=json.loads(r["inputs_json"] or "{}"),
+                outputs=json.loads(r["outputs_json"] or "{}"),
+            )
+            for r in rows
+        ]
+
+    async def compute_ihr(self, run_id: str) -> "IhrResult | None":
+        traces = await self.query_by_run(run_id)
+        if not traces:
+            return None
+
+        n = len(traces)
+        output_valid_rate = sum(1 for t in traces if t.output_valid) / n
+        success_rate = sum(1 for t in traces if t.success) / n
+        quorum_scores = [t.quorum_score for t in traces if t.quorum_score is not None]
+        avg_quorum_score = sum(quorum_scores) / len(quorum_scores) if quorum_scores else 0.5
+        avg_latency_ms = sum(t.latency_ms for t in traces) / n
+        latency_score = max(0.0, 1.0 - avg_latency_ms / 5000.0)
+
+        ihr = (
+            0.40 * output_valid_rate
+            + 0.30 * success_rate
+            + 0.20 * avg_quorum_score
+            + 0.10 * latency_score
+        )
+        return IhrResult(
+            run_id=run_id,
+            ihr=ihr,
+            output_valid_rate=output_valid_rate,
+            success_rate=success_rate,
+            avg_quorum_score=avg_quorum_score,
+            latency_score=latency_score,
+            n_traces=n,
+        )

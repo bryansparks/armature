@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from armature.state.traces import TraceStore, TraceRecord
+from armature.state.traces import TraceStore, TraceRecord, IhrResult
 
 @pytest.fixture
 async def store(tmp_path):
@@ -52,3 +52,67 @@ async def test_init_is_idempotent(tmp_path):
     await store.init()  # second call must not raise
     results = await store.query()
     assert results == []
+
+
+async def _populate_run(store, run_id: str, n: int, **kwargs) -> None:
+    for i in range(n):
+        await store.record(TraceRecord(
+            run_id=run_id,
+            workflow_name=kwargs.get("workflow_name", "wf"),
+            stage_id=f"s{i}",
+            role_type="worker",
+            model="test/model",
+            latency_ms=kwargs.get("latency_ms", 500.0),
+            success=kwargs.get("success", True),
+            output_valid=kwargs.get("output_valid", True),
+            quorum_score=kwargs.get("quorum_score", None),
+        ))
+
+
+async def test_compute_ihr_perfect(store):
+    await _populate_run(store, "r1", 4,
+        latency_ms=0.0, success=True, output_valid=True, quorum_score=1.0)
+    result = await store.compute_ihr("r1")
+    assert isinstance(result, IhrResult)
+    assert result.run_id == "r1"
+    assert result.ihr == pytest.approx(1.0, abs=1e-6)
+
+
+async def test_compute_ihr_no_quorum_defaults_half(store):
+    await _populate_run(store, "r2", 2,
+        latency_ms=0.0, success=True, output_valid=True, quorum_score=None)
+    result = await store.compute_ihr("r2")
+    # latency_score=1.0, output_valid_rate=1.0, success_rate=1.0, quorum=0.5
+    expected = 0.40 * 1.0 + 0.30 * 1.0 + 0.20 * 0.5 + 0.10 * 1.0
+    assert result.ihr == pytest.approx(expected, abs=1e-6)
+
+
+async def test_compute_ihr_partial_failures(store):
+    await store.record(TraceRecord(
+        run_id="r3", workflow_name="wf", stage_id="s1", role_type="worker",
+        model="m", latency_ms=1000.0, success=True, output_valid=True, quorum_score=0.8))
+    await store.record(TraceRecord(
+        run_id="r3", workflow_name="wf", stage_id="s2", role_type="worker",
+        model="m", latency_ms=3000.0, success=False, output_valid=False, quorum_score=0.4))
+    result = await store.compute_ihr("r3")
+    avg_latency = 2000.0
+    latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
+    expected = (0.40 * 0.5    # output_valid_rate: 1/2
+              + 0.30 * 0.5    # success_rate: 1/2
+              + 0.20 * 0.6    # avg_quorum: (0.8+0.4)/2
+              + 0.10 * latency_score)
+    assert result.ihr == pytest.approx(expected, abs=1e-6)
+    assert result.n_traces == 2
+
+
+async def test_compute_ihr_unknown_run_returns_none(store):
+    result = await store.compute_ihr("nonexistent")
+    assert result is None
+
+
+async def test_query_by_run_returns_only_that_run(store):
+    await _populate_run(store, "runA", 3, workflow_name="wf")
+    await _populate_run(store, "runB", 2, workflow_name="wf")
+    records = await store.query_by_run("runA")
+    assert len(records) == 3
+    assert all(r.run_id == "runA" for r in records)
