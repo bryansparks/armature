@@ -1,14 +1,7 @@
 from __future__ import annotations
-from enum import Enum
 from typing import Callable, Any
 from pydantic import BaseModel
-
-
-class PermissionLevel(str, Enum):
-    READ_ONLY = "read_only"
-    WORKSPACE = "workspace"
-    NETWORK = "network"
-    DESTRUCTIVE = "destructive"
+from armature.permissions.permissions import PermissionLevel, requires_approval
 
 
 class ToolDescriptor(BaseModel):
@@ -41,4 +34,9 @@ class ToolRegistry:
         desc = self.get(name)
         if desc is None:
             raise KeyError(f"Tool not found: {name}")
+        if requires_approval(desc.permission):
+            raise PermissionError(
+                f"Tool '{name}' requires explicit approval (permission: {desc.permission}). "
+                "Register a pre-tool hook to gate DESTRUCTIVE tools."
+            )
         return await desc.handler(args)

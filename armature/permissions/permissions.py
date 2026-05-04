@@ -1,4 +1,13 @@
-from armature.registry.registry import PermissionLevel
+from __future__ import annotations
+from enum import Enum
+
+
+class PermissionLevel(str, Enum):
+    READ_ONLY = "read_only"
+    WORKSPACE = "workspace"
+    NETWORK = "network"
+    DESTRUCTIVE = "destructive"
+
 
 _READONLY_PREFIXES = (
     "ls", "cat", "grep", "find", "head", "tail", "wc", "echo",
