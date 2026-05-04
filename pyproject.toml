@@ -26,6 +26,10 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
 ]
+service = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

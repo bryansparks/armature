@@ -51,5 +51,21 @@ def run(
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
+    port: int = typer.Option(8080, "--port", "-p", help="Bind port"),
+):
+    """Start the Armature HTTP service."""
+    try:
+        import uvicorn
+        from armature.service.app import app as fastapi_app
+    except ImportError:
+        typer.echo("FastAPI/uvicorn not installed. Run: pip install 'armature[service]'", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Starting Armature service on {host}:{port}")
+    uvicorn.run(fastapi_app, host=host, port=port)
+
+
 if __name__ == "__main__":
     app()
