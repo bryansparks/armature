@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from pydantic import BaseModel
 from armature.state.traces import TraceStore
 
@@ -13,6 +13,15 @@ class OptimizationResult(BaseModel):
     confidence: float
     score: float
     feedback: str
+
+
+class ABTestResult(BaseModel):
+    original_ihr: float
+    proposed_ihr: float
+    delta: float
+    winner: str  # "original" | "proposed" | "tie"
+    n_runs: int
+    n_inputs: int
 
 
 class OptimizerRunner:
@@ -75,3 +84,59 @@ class OptimizerRunner:
         spec = load_spec(self._optimizer_spec_path)
         harness = Harness(spec=spec)
         return await harness.run(inputs)
+
+    async def _run_one_and_score(
+        self, spec_path: Path, inputs: dict[str, Any]
+    ) -> "IhrResult | None":
+        from armature.runtime.engine import Harness
+        from armature.spec.loader import load_spec
+        from armature.state.traces import TraceStore, IhrResult
+
+        spec = load_spec(spec_path)
+        harness = Harness(spec=spec)
+        result = await harness.run(inputs)
+        run_id = result.get("run_id") or inputs.get("run_id")
+        if not run_id:
+            return None
+        store = TraceStore(harness._traces._path)
+        return await store.compute_ihr(run_id)
+
+    async def a_b_test(
+        self,
+        proposed_spec_path: Path | str,
+        inputs_sample: list[dict[str, Any]],
+        n_runs: int = 5,
+    ) -> ABTestResult:
+        proposed_spec_path = Path(proposed_spec_path)
+
+        async def score_spec(spec_path: Path) -> list[float]:
+            scores: list[float] = []
+            for _ in range(n_runs):
+                for inp in inputs_sample:
+                    ihr = await self._run_one_and_score(spec_path, inp)
+                    if ihr is not None:
+                        scores.append(ihr.ihr)
+            return scores
+
+        original_scores = await score_spec(self._target_spec_path)
+        proposed_scores = await score_spec(proposed_spec_path)
+
+        original_ihr = sum(original_scores) / len(original_scores) if original_scores else 0.0
+        proposed_ihr = sum(proposed_scores) / len(proposed_scores) if proposed_scores else 0.0
+        delta = proposed_ihr - original_ihr
+
+        if delta > 0.01:
+            winner = "proposed"
+        elif delta < -0.01:
+            winner = "original"
+        else:
+            winner = "tie"
+
+        return ABTestResult(
+            original_ihr=original_ihr,
+            proposed_ihr=proposed_ihr,
+            delta=delta,
+            winner=winner,
+            n_runs=n_runs,
+            n_inputs=len(inputs_sample),
+        )
