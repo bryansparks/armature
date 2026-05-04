@@ -94,12 +94,9 @@ class OptimizerRunner:
 
         spec = load_spec(spec_path)
         harness = Harness(spec=spec)
-        result = await harness.run(inputs)
-        run_id = result.get("run_id") or inputs.get("run_id")
-        if not run_id:
-            return None
+        await harness.run(inputs)
         store = TraceStore(harness._traces._path)
-        return await store.compute_ihr(run_id)
+        return await store.compute_ihr(harness._run_id)
 
     async def a_b_test(
         self,
