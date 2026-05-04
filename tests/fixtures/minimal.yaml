@@ -1,0 +1,10 @@
+name: minimal-workflow
+version: "1.0"
+description: "Minimal test workflow"
+
+stages:
+  - id: step1
+    role:
+      name: worker1
+      type: worker
+      description: "Do a simple task"
