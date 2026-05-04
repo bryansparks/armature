@@ -1,9 +1,13 @@
 from __future__ import annotations
 import json
+import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from pydantic import BaseModel
 from armature.state.traces import TraceStore
+
+if TYPE_CHECKING:
+    from armature.state.traces import IhrResult
 
 
 class OptimizationResult(BaseModel):
@@ -19,7 +23,7 @@ class ABTestResult(BaseModel):
     original_ihr: float
     proposed_ihr: float
     delta: float
-    winner: str  # "original" | "proposed" | "tie"
+    winner: Literal["original", "proposed", "tie"]
     n_runs: int
     n_inputs: int
 
@@ -90,13 +94,13 @@ class OptimizerRunner:
     ) -> "IhrResult | None":
         from armature.runtime.engine import Harness
         from armature.spec.loader import load_spec
-        from armature.state.traces import TraceStore, IhrResult
 
         spec = load_spec(spec_path)
-        harness = Harness(spec=spec)
-        await harness.run(inputs)
-        store = TraceStore(harness._traces._path)
-        return await store.compute_ihr(harness._run_id)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            harness = Harness(spec=spec, session_dir=Path(tmp_dir))
+            await harness.run(inputs)
+            store = TraceStore(harness._traces._path)
+            return await store.compute_ihr(harness._run_id)
 
     async def a_b_test(
         self,

@@ -131,3 +131,39 @@ async def test_ab_test_original_wins(tmp_path):
         )
     assert result.winner == "original"
     assert result.delta == pytest.approx(-0.25, abs=1e-6)
+
+
+async def test_ab_test_all_none_scores_returns_tie(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    with patch.object(runner, "_run_one_and_score", new_callable=AsyncMock) as mock_score:
+        mock_score.return_value = None  # all calls return None
+        result = await runner.a_b_test(
+            proposed_spec_path=fixtures / "echo-workflow.yaml",
+            inputs_sample=[{"x": 1}, {"x": 2}],
+            n_runs=1,
+        )
+    assert result.winner == "tie"
+    assert result.delta == pytest.approx(0.0, abs=1e-6)
+    assert result.original_ihr == pytest.approx(0.0, abs=1e-6)
+    assert result.proposed_ihr == pytest.approx(0.0, abs=1e-6)
+
+
+async def test_ab_test_empty_inputs_returns_tie(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    with patch.object(runner, "_run_one_and_score", new_callable=AsyncMock) as mock_score:
+        result = await runner.a_b_test(
+            proposed_spec_path=fixtures / "echo-workflow.yaml",
+            inputs_sample=[],
+            n_runs=5,
+        )
+    assert result.winner == "tie"
+    assert result.n_inputs == 0
+    mock_score.assert_not_called()
