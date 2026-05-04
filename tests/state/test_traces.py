@@ -116,3 +116,21 @@ async def test_query_by_run_returns_only_that_run(store):
     records = await store.query_by_run("runA")
     assert len(records) == 3
     assert all(r.run_id == "runA" for r in records)
+
+
+async def test_compute_ihr_mixed_quorum_ignores_none_traces(store):
+    # 2 traces with quorum, 1 without — None is excluded from average
+    await store.record(TraceRecord(
+        run_id="r4", workflow_name="wf", stage_id="s1", role_type="worker",
+        model="m", latency_ms=0.0, success=True, output_valid=True, quorum_score=0.9))
+    await store.record(TraceRecord(
+        run_id="r4", workflow_name="wf", stage_id="s2", role_type="worker",
+        model="m", latency_ms=0.0, success=True, output_valid=True, quorum_score=0.7))
+    await store.record(TraceRecord(
+        run_id="r4", workflow_name="wf", stage_id="s3", role_type="worker",
+        model="m", latency_ms=0.0, success=True, output_valid=True, quorum_score=None))
+    result = await store.compute_ihr("r4")
+    # avg_quorum = (0.9 + 0.7) / 2 = 0.8  (None trace excluded)
+    expected = 0.40 * 1.0 + 0.30 * 1.0 + 0.20 * 0.8 + 0.10 * 1.0
+    assert result.ihr == pytest.approx(expected, abs=1e-6)
+    assert result.avg_quorum_score == pytest.approx(0.8, abs=1e-6)

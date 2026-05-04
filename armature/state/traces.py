@@ -106,30 +106,31 @@ class TraceStore:
                 f"SELECT * FROM traces {where} ORDER BY timestamp DESC LIMIT ?", params
             )
             rows = await cursor.fetchall()
-        return [
-            TraceRecord(
-                run_id=r["run_id"],
-                workflow_name=r["workflow_name"],
-                stage_id=r["stage_id"],
-                role_type=r["role_type"],
-                model=r["model"],
-                input_tokens=r["input_tokens"] or 0,
-                output_tokens=r["output_tokens"] or 0,
-                latency_ms=r["latency_ms"] or 0.0,
-                success=bool(r["success"]),
-                output_valid=bool(r["output_valid"]),
-                quorum_score=r["quorum_score"],
-                timestamp=r["timestamp"],
-                inputs=json.loads(r["inputs_json"] or "{}"),
-                outputs=json.loads(r["outputs_json"] or "{}"),
-            )
-            for r in rows
-        ]
+        return [self._row_to_trace(r) for r in rows]
 
     async def high_quality_traces(
         self, workflow_name: str, min_score: float = 0.85
     ) -> list[TraceRecord]:
         return await self.query(workflow_name=workflow_name, min_quorum_score=min_score)
+
+    @staticmethod
+    def _row_to_trace(r: "aiosqlite.Row") -> TraceRecord:
+        return TraceRecord(
+            run_id=r["run_id"],
+            workflow_name=r["workflow_name"],
+            stage_id=r["stage_id"],
+            role_type=r["role_type"],
+            model=r["model"],
+            input_tokens=r["input_tokens"] or 0,
+            output_tokens=r["output_tokens"] or 0,
+            latency_ms=r["latency_ms"] or 0.0,
+            success=bool(r["success"]),
+            output_valid=bool(r["output_valid"]),
+            quorum_score=r["quorum_score"],
+            timestamp=r["timestamp"],
+            inputs=json.loads(r["inputs_json"] or "{}"),
+            outputs=json.loads(r["outputs_json"] or "{}"),
+        )
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:
         async with aiosqlite.connect(self._path) as db:
@@ -138,25 +139,7 @@ class TraceStore:
                 "SELECT * FROM traces WHERE run_id = ? ORDER BY timestamp ASC", (run_id,)
             )
             rows = await cursor.fetchall()
-        return [
-            TraceRecord(
-                run_id=r["run_id"],
-                workflow_name=r["workflow_name"],
-                stage_id=r["stage_id"],
-                role_type=r["role_type"],
-                model=r["model"],
-                input_tokens=r["input_tokens"] or 0,
-                output_tokens=r["output_tokens"] or 0,
-                latency_ms=r["latency_ms"] or 0.0,
-                success=bool(r["success"]),
-                output_valid=bool(r["output_valid"]),
-                quorum_score=r["quorum_score"],
-                timestamp=r["timestamp"],
-                inputs=json.loads(r["inputs_json"] or "{}"),
-                outputs=json.loads(r["outputs_json"] or "{}"),
-            )
-            for r in rows
-        ]
+        return [self._row_to_trace(r) for r in rows]
 
     async def compute_ihr(self, run_id: str) -> "IhrResult | None":
         traces = await self.query_by_run(run_id)
