@@ -2,6 +2,8 @@ import subprocess
 import httpx
 from pathlib import Path
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
+from armature.skills import quorum as _quorum_skill
+from armature.skills import tessera as _tessera_skill
 
 
 async def _file_read(args: dict) -> dict:
@@ -51,4 +53,25 @@ def register_builtins(registry: ToolRegistry) -> None:
         name="http_get", description="Make an HTTP GET request",
         permission=PermissionLevel.NETWORK, handler=_http_get,
         parameters={"url": {"type": "string"}},
+    ))
+    registry.register(ToolDescriptor(
+        name="quorum.deliberate",
+        description="Run structured multi-agent deliberation on a topic via Quorum",
+        permission=PermissionLevel.NETWORK,
+        handler=_quorum_skill.deliberate,
+        parameters={
+            "topic": {"type": "string"},
+            "brief": {"type": "string", "optional": True},
+            "agents": {"type": "array", "optional": True},
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="tessera.retrieve",
+        description="Retrieve relevant document chunks from Tessera RAG",
+        permission=PermissionLevel.NETWORK,
+        handler=_tessera_skill.retrieve,
+        parameters={
+            "query": {"type": "string"},
+            "top_k": {"type": "integer", "optional": True},
+        },
     ))
