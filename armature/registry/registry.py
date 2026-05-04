@@ -1,0 +1,44 @@
+from __future__ import annotations
+from enum import Enum
+from typing import Callable, Any
+from pydantic import BaseModel
+
+
+class PermissionLevel(str, Enum):
+    READ_ONLY = "read_only"
+    WORKSPACE = "workspace"
+    NETWORK = "network"
+    DESTRUCTIVE = "destructive"
+
+
+class ToolDescriptor(BaseModel):
+    name: str
+    description: str
+    permission: PermissionLevel
+    handler: Callable
+    parameters: dict[str, Any] = {}
+
+    model_config = {"arbitrary_types_allowed": True}
+
+
+class ToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, ToolDescriptor] = {}
+
+    def register(self, descriptor: ToolDescriptor) -> None:
+        self._tools[descriptor.name] = descriptor
+
+    def get(self, name: str) -> ToolDescriptor | None:
+        return self._tools.get(name)
+
+    def descriptors(self) -> list[dict[str, Any]]:
+        return [
+            {"name": d.name, "description": d.description, "parameters": d.parameters}
+            for d in self._tools.values()
+        ]
+
+    async def dispatch(self, name: str, args: dict[str, Any]) -> Any:
+        desc = self.get(name)
+        if desc is None:
+            raise KeyError(f"Tool not found: {name}")
+        return await desc.handler(args)
