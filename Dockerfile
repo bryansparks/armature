@@ -12,6 +12,9 @@ RUN uv pip install --system ".[service]"
 
 COPY armature/ armature/
 
+RUN useradd -m -u 1000 armature
+USER armature
+
 EXPOSE 8080
 
 CMD ["armature", "serve", "--host", "0.0.0.0", "--port", "8080"]
