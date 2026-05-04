@@ -1,5 +1,6 @@
 from __future__ import annotations
 import uuid
+import time
 from pathlib import Path
 from typing import Any
 from armature.spec.models import HarnessSpec, Stage
@@ -15,6 +16,7 @@ from armature.registry.builtins import register_builtins
 from armature.hooks.lifecycle import HookRegistry, HookDecision
 from armature.state.session import SessionLog, SessionEvent
 from armature.state.artifacts import ArtifactStore
+from armature.state.traces import TraceStore, TraceRecord
 
 
 class Harness:
@@ -33,6 +35,8 @@ class Harness:
         self._hooks = HookRegistry()
         self._context = ContextManager()
         self._assembler = PromptAssembler()
+        self._session_dir = base_dir
+        self._traces = TraceStore(base_dir / "traces.db")
 
     @property
     def name(self) -> str:
@@ -43,6 +47,11 @@ class Harness:
         spec = load_spec(path, vars=vars)
         return cls(spec=spec)
 
+    async def _ensure_traces(self) -> None:
+        if not hasattr(self, "_traces_initialized"):
+            await self._traces.init()
+            self._traces_initialized = True
+
     async def _execute_stage(self, stage: Stage, context: dict[str, Any]) -> Any:
         await self._session.append(SessionEvent(type="stage_start", data={"stage": stage.id}))
 
@@ -50,8 +59,14 @@ class Harness:
         if decision == HookDecision.BLOCK:
             raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
 
+        t0 = time.monotonic()
+
         if stage.gate == "human":
             node = HumanGateNode(stage=stage)
+            result = await node.execute(context)
+        elif stage.subagent_spec:
+            from armature.nodes.subagent import SubagentNode
+            node = SubagentNode(stage=stage, session_dir=self._session_dir)
             result = await node.execute(context)
         elif stage.adapter:
             adapter = self._spec.adapters.get(stage.adapter)
@@ -67,6 +82,24 @@ class Harness:
                 registry=self._registry,
             )
             result = await node.execute(context)
+            # Record trace for LLM stages
+            await self._ensure_traces()
+            latency = (time.monotonic() - t0) * 1000
+            output_valid = "_parse_error" not in result
+            await self._traces.record(TraceRecord(
+                run_id=self._run_id,
+                workflow_name=self._spec.name,
+                stage_id=stage.id,
+                role_type=stage.role.type.value,
+                model=node._resolve_model(),
+                input_tokens=result.pop("_input_tokens", 0),
+                output_tokens=result.pop("_output_tokens", 0),
+                latency_ms=latency,
+                success=True,
+                output_valid=output_valid,
+                inputs={k: str(v)[:200] for k, v in context.items()},
+                outputs={k: str(v)[:200] for k, v in result.items()},
+            ))
         else:
             raise ValueError(f"Stage '{stage.id}' has no role, adapter, or gate")
 

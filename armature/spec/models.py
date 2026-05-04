@@ -96,6 +96,8 @@ class Stage(BaseModel):
     on_fail: dict[str, Any] | None = None
     present: str | None = None
     condition: str | None = None
+    output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
+    subagent_spec: str | None = None              # Path to child workflow spec file
 
 
 class TraceConfig(BaseModel):

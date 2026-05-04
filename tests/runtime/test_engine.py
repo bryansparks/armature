@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from armature.runtime.engine import Harness
 from armature.spec.models import HarnessSpec, Stage, Role, RoleType
+from armature.state.traces import TraceStore
 
 def make_minimal_spec() -> HarnessSpec:
     return HarnessSpec(
@@ -28,6 +29,13 @@ async def test_harness_run_returns_result():
 
     assert result is not None
     mock_exec.assert_called_once()
+
+async def test_harness_initializes_trace_store(tmp_path):
+    spec = make_minimal_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+    assert hasattr(harness, "_traces")
+    assert isinstance(harness._traces, TraceStore)
+
 
 def test_harness_from_file(tmp_path):
     spec_file = tmp_path / "test.yaml"

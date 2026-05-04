@@ -65,9 +65,16 @@ class LLMNode(BaseNode):
         response = await litellm_completion(model=model, messages=messages)
         content = response.choices[0].message.content
 
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        output_tokens = getattr(usage, "completion_tokens", 0) or 0
+
         if self._stage.output_mode.value in ("json", "guided_json"):
             try:
-                return json.loads(content)
+                parsed = json.loads(content)
+                parsed["_input_tokens"] = input_tokens
+                parsed["_output_tokens"] = output_tokens
+                return parsed
             except json.JSONDecodeError:
-                return {"raw": content, "_parse_error": True}
-        return {"content": content}
+                return {"raw": content, "_parse_error": True, "_input_tokens": input_tokens, "_output_tokens": output_tokens}
+        return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens}
