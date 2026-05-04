@@ -1,0 +1,13 @@
+name: child-workflow
+version: "1.0"
+description: Simple child workflow for subagent tests
+
+adapters:
+  greet:
+    name: greet
+    type: script
+    cmd: "echo 'child says: {{greeting}}'"
+
+stages:
+  - id: respond
+    adapter: greet
