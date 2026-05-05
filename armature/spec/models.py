@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -82,6 +82,19 @@ class Failure(BaseModel):
     max_retries: int = 3
 
 
+class SafetyCondition(BaseModel):
+    field: str
+    op: Literal["contains", "not_contains", "equals", "not_equals", "matches_regex", "truthy"]
+    value: str = ""
+
+
+class ToolSafetyRule(BaseModel):
+    tool: str
+    condition: SafetyCondition
+    action: Literal["block", "warn", "log"]
+    message: str = ""
+
+
 class FileState(BaseModel):
     enabled: bool = False
     base: str = "~/.armature/runs/{{run_id}}/"
@@ -122,3 +135,4 @@ class HarnessSpec(BaseModel):
     model_tiers: ModelTiers = Field(default_factory=ModelTiers)
     file_state: FileState = Field(default_factory=FileState)
     trace: TraceConfig = Field(default_factory=TraceConfig)
+    safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
