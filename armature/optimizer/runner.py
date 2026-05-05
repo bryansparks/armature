@@ -29,6 +29,13 @@ class ABTestResult(BaseModel):
     n_inputs: int
 
 
+class LoopResult(BaseModel):
+    iterations: list[OptimizationResult]
+    accepted_count: int
+    rejected_count: int
+    n_iterations_run: int
+
+
 class OptimizerRunner:
     MIN_TRACES = 5
 
@@ -187,4 +194,21 @@ class OptimizerRunner:
             winner=winner,
             n_runs=n_runs,
             n_inputs=len(inputs_sample),
+        )
+
+    async def run_loop(self, n_iterations: int = 5) -> LoopResult:
+        iterations: list[OptimizationResult] = []
+        for _ in range(n_iterations):
+            result = await self.optimize()
+            if result is None:
+                break   # not enough traces — no point continuing
+            iterations.append(result)
+
+        accepted = sum(1 for r in iterations if r.accepted)
+        rejected = sum(1 for r in iterations if not r.accepted)
+        return LoopResult(
+            iterations=iterations,
+            accepted_count=accepted,
+            rejected_count=rejected,
+            n_iterations_run=len(iterations),
         )

@@ -364,3 +364,69 @@ async def test_optimize_no_proposal_db_still_works(tmp_path):
 
     assert result is not None
     assert "proposal_history_json" not in captured_inputs[0]
+
+
+from armature.optimizer.runner import LoopResult
+
+
+async def test_run_loop_runs_n_iterations(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+        proposal_db_path=tmp_path / "proposals.db",
+    )
+    call_count = 0
+
+    async def mock_optimize():
+        nonlocal call_count
+        call_count += 1
+        return OptimizationResult(
+            accepted=True,
+            proposed_diff=f"diff-{call_count}",
+            rationale="test",
+            confidence=0.8,
+            score=0.8,
+            feedback="ok",
+        )
+
+    with patch.object(runner, "optimize", new_callable=AsyncMock, side_effect=mock_optimize):
+        loop_result = await runner.run_loop(n_iterations=3)
+
+    assert call_count == 3
+    assert isinstance(loop_result, LoopResult)
+    assert len(loop_result.iterations) == 3
+    assert loop_result.accepted_count == 3
+
+
+async def test_run_loop_stops_early_on_none(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    results = [
+        OptimizationResult(accepted=True, proposed_diff="d", rationale="r",
+                           confidence=0.8, score=0.8, feedback="ok"),
+        None,   # not enough traces on second pass — stop
+        OptimizationResult(accepted=True, proposed_diff="d2", rationale="r",
+                           confidence=0.8, score=0.8, feedback="ok"),
+    ]
+    with patch.object(runner, "optimize", new_callable=AsyncMock, side_effect=results):
+        loop_result = await runner.run_loop(n_iterations=3)
+
+    assert len(loop_result.iterations) == 1   # stopped after None; None itself not appended
+    assert loop_result.accepted_count == 1
+
+
+async def test_run_loop_zero_iterations(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    with patch.object(runner, "optimize", new_callable=AsyncMock) as mock_opt:
+        loop_result = await runner.run_loop(n_iterations=0)
+    mock_opt.assert_not_called()
+    assert loop_result.iterations == []
+    assert loop_result.accepted_count == 0
