@@ -33,6 +33,7 @@ async def test_record_and_load(store):
     assert history[0].proposal_id == "abc12345"
     assert history[0].accepted is True
     assert history[0].confidence == pytest.approx(0.85)
+    assert history[0].timestamp  # default_factory populated a non-empty ISO timestamp
 
 
 async def test_load_history_filters_by_workflow(store):
