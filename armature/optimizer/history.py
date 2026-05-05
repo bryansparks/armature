@@ -65,7 +65,7 @@ class ProposalStore:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 """SELECT * FROM proposals WHERE workflow_name = ?
-                   ORDER BY timestamp DESC LIMIT ?""",
+                   ORDER BY timestamp DESC, id DESC LIMIT ?""",
                 (workflow_name, limit),
             )
             rows = await cursor.fetchall()

@@ -115,7 +115,7 @@ class OptimizerRunner:
         if proposal_store is not None:
             from armature.optimizer.history import ProposalRecord
             await proposal_store.record(ProposalRecord(
-                proposal_id=str(uuid.uuid4())[:8],
+                proposal_id=str(uuid.uuid4()),
                 workflow_name=self._target_spec_path.stem,
                 proposed_diff=result.proposed_diff,
                 rationale=result.rationale,
