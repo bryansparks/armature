@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import tempfile
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from pydantic import BaseModel
@@ -37,6 +38,7 @@ class OptimizerRunner:
         trace_db_path: Path | str,
         optimizer_spec_path: Path | str | None = None,
         metric_fn: Callable[[dict[str, Any]], float] | None = None,
+        proposal_db_path: Path | str | None = None,
     ):
         self._target_spec_path = Path(target_spec_path)
         self._trace_db_path = Path(trace_db_path)
@@ -44,6 +46,7 @@ class OptimizerRunner:
             Path(__file__).parent / "workflow.yaml"
         )
         self._metric_fn = metric_fn
+        self._proposal_db_path = Path(proposal_db_path) if proposal_db_path else None
 
     async def optimize(self) -> OptimizationResult | None:
         traces = await self._load_traces()
@@ -72,6 +75,16 @@ class OptimizerRunner:
                 workflow_inputs["metric_mean"] = sum(scores) / len(scores)
                 workflow_inputs["metric_scores_json"] = json.dumps(scores)
 
+        if self._proposal_db_path is not None:
+            from armature.optimizer.history import ProposalStore
+            proposal_store = ProposalStore(self._proposal_db_path)
+            await proposal_store.init()
+            history = await proposal_store.load_history(self._target_spec_path.stem)
+            if history:
+                workflow_inputs["proposal_history_json"] = json.dumps(
+                    [p.model_dump() for p in history], default=str
+                )
+
         workflow_result = await self._run_optimizer_workflow(workflow_inputs)
 
         propose = workflow_result.get("propose_fix", {})
@@ -80,7 +93,7 @@ class OptimizerRunner:
         if not propose.get("proposed_diff") or evaluate.get("accept") is None:
             return None
 
-        return OptimizationResult(
+        result = OptimizationResult(
             accepted=bool(evaluate.get("accept", False)),
             proposed_diff=propose.get("proposed_diff", ""),
             rationale=propose.get("rationale", ""),
@@ -88,6 +101,23 @@ class OptimizerRunner:
             score=float(evaluate.get("score", 0.0)),
             feedback=evaluate.get("feedback", ""),
         )
+
+        if self._proposal_db_path is not None:
+            from armature.optimizer.history import ProposalStore, ProposalRecord
+            proposal_store = ProposalStore(self._proposal_db_path)
+            await proposal_store.init()
+            await proposal_store.record(ProposalRecord(
+                proposal_id=str(uuid.uuid4())[:8],
+                workflow_name=self._target_spec_path.stem,
+                proposed_diff=result.proposed_diff,
+                rationale=result.rationale,
+                confidence=result.confidence,
+                accepted=result.accepted,
+                score=result.score,
+                feedback=result.feedback,
+            ))
+
+        return result
 
     async def _load_traces(self):
         if not self._trace_db_path.exists():
