@@ -88,6 +88,8 @@ class Harness:
                         tool_args = {"cmd": adapter.cmd or ""}
                         decision = await self._hooks.run_pre_tool(stage.adapter, tool_args, context)
                         if decision == HookDecision.BLOCK:
+                            # Fallback for programmatic hooks that return BLOCK without raising.
+                            # SafetyHookBuilder hooks raise ToolBlocked directly (carrying rule.message).
                             from armature.hooks.lifecycle import ToolBlocked
                             raise ToolBlocked(stage.adapter, adapter.cmd or "", "blocked by safety rule")
                         result = await node.execute(context)
