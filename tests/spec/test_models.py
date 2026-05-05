@@ -94,3 +94,33 @@ def test_harness_spec_accepts_safety_rules():
     )
     assert len(spec.safety_rules) == 1
     assert spec.safety_rules[0].action == "block"
+
+
+def test_stage_fan_out_defaults():
+    stage = Stage(id="s1", subagent_spec="child.yaml")
+    assert stage.fan_out is None
+    assert stage.fan_in == "list"
+    assert stage.partition_key is None
+
+
+def test_stage_fan_out_explicit():
+    stage = Stage(
+        id="s1",
+        subagent_spec="child.yaml",
+        fan_out=4,
+        fan_in="merge",
+        partition_key="documents",
+    )
+    assert stage.fan_out == 4
+    assert stage.fan_in == "merge"
+    assert stage.partition_key == "documents"
+
+
+def test_stage_fan_in_first():
+    stage = Stage(id="s1", subagent_spec="child.yaml", fan_out=3, fan_in="first")
+    assert stage.fan_in == "first"
+
+
+def test_stage_fan_out_none_means_single():
+    stage = Stage(id="s1", subagent_spec="child.yaml", fan_out=None)
+    assert stage.fan_out is None

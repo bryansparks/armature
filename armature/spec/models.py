@@ -115,6 +115,9 @@ class Stage(BaseModel):
     condition: str | None = None
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
     subagent_spec: str | None = None              # Path to child workflow spec file
+    fan_out: int | None = None
+    fan_in: Literal["list", "merge", "first"] = "list"
+    partition_key: str | None = None
 
 
 class TraceConfig(BaseModel):
