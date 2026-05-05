@@ -75,15 +75,19 @@ class OptimizerRunner:
                 workflow_inputs["metric_mean"] = sum(scores) / len(scores)
                 workflow_inputs["metric_scores_json"] = json.dumps(scores)
 
+        proposal_store = None
         if self._proposal_db_path is not None:
             from armature.optimizer.history import ProposalStore
             proposal_store = ProposalStore(self._proposal_db_path)
             await proposal_store.init()
-            history = await proposal_store.load_history(self._target_spec_path.stem)
-            if history:
-                workflow_inputs["proposal_history_json"] = json.dumps(
-                    [p.model_dump() for p in history], default=str
-                )
+            try:
+                history = await proposal_store.load_history(self._target_spec_path.stem)
+                if history:
+                    workflow_inputs["proposal_history_json"] = json.dumps(
+                        [p.model_dump() for p in history], default=str
+                    )
+            except Exception:
+                pass  # history is advisory — never block optimization on DB errors
 
         workflow_result = await self._run_optimizer_workflow(workflow_inputs)
 
@@ -102,10 +106,8 @@ class OptimizerRunner:
             feedback=evaluate.get("feedback", ""),
         )
 
-        if self._proposal_db_path is not None:
-            from armature.optimizer.history import ProposalStore, ProposalRecord
-            proposal_store = ProposalStore(self._proposal_db_path)
-            await proposal_store.init()
+        if proposal_store is not None:
+            from armature.optimizer.history import ProposalRecord
             await proposal_store.record(ProposalRecord(
                 proposal_id=str(uuid.uuid4())[:8],
                 workflow_name=self._target_spec_path.stem,
