@@ -154,6 +154,9 @@ class Harness:
             try:
                 return await self._execute_stage(stage, retry_ctx)
             except Exception as exc:
+                from armature.hooks.lifecycle import ToolBlocked
+                if isinstance(exc, ToolBlocked):
+                    raise  # policy violation — retrying won't change the outcome
                 last_exc = exc
                 if attempt < loop_cfg.max:
                     retry_ctx = {

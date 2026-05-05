@@ -1,8 +1,11 @@
 from __future__ import annotations
+import logging
 import re
 import warnings
 from enum import Enum
 from typing import TYPE_CHECKING, Callable, Any
+
+_safety_log = logging.getLogger("armature.safety")
 
 if TYPE_CHECKING:
     from armature.spec.models import ToolSafetyRule
@@ -102,7 +105,9 @@ class SafetyHookBuilder:
                         f"[armature safety] Tool '{tool_name}': {rule.message}",
                         stacklevel=2,
                     )
-                # "warn" and "log" both fall through to ALLOW
+                elif rule.action == "log":
+                    _safety_log.info("tool=%s rule=%s msg=%s", tool_name, rule.tool, rule.message)
+                # all non-block actions fall through to ALLOW
             return HookDecision.ALLOW
 
         registry.register(HookPhase.PRE_TOOL, safety_hook)
