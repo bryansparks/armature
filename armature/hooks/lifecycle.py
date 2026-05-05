@@ -96,7 +96,7 @@ class SafetyHookBuilder:
                     continue
 
                 if rule.action == "block":
-                    return HookDecision.BLOCK  # caller (engine) raises ToolBlocked on BLOCK
+                    raise ToolBlocked(tool_name, args.get("cmd", ""), rule.message)
                 if rule.action == "warn":
                     warnings.warn(
                         f"[armature safety] Tool '{tool_name}': {rule.message}",

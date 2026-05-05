@@ -34,6 +34,9 @@ class Harness:
         self._registry = ToolRegistry()
         register_builtins(self._registry)
         self._hooks = HookRegistry()
+        if self._spec.safety_rules:
+            from armature.hooks.lifecycle import SafetyHookBuilder
+            SafetyHookBuilder.register(self._hooks, self._spec.safety_rules)
         self._context = ContextManager()
         self._assembler = PromptAssembler()
         self._session_dir = base_dir
@@ -82,7 +85,13 @@ class Harness:
                         if adapter is None:
                             raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
                         node = ScriptNode(adapter=adapter)
+                        tool_args = {"cmd": adapter.cmd or ""}
+                        decision = await self._hooks.run_pre_tool(stage.adapter, tool_args, context)
+                        if decision == HookDecision.BLOCK:
+                            from armature.hooks.lifecycle import ToolBlocked
+                            raise ToolBlocked(stage.adapter, adapter.cmd or "", "blocked by safety rule")
                         result = await node.execute(context)
+                        await self._hooks.run_post_tool(stage.adapter, result, context)
                     elif stage.role:
                         node = LLMNode(
                             stage=stage,
