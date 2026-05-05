@@ -96,13 +96,13 @@ class SafetyHookBuilder:
                     continue
 
                 if rule.action == "block":
-                    return HookDecision.BLOCK
+                    return HookDecision.BLOCK  # caller (engine) raises ToolBlocked on BLOCK
                 if rule.action == "warn":
                     warnings.warn(
                         f"[armature safety] Tool '{tool_name}': {rule.message}",
                         stacklevel=2,
                     )
-                    # fall through to ALLOW
+                # "warn" and "log" both fall through to ALLOW
             return HookDecision.ALLOW
 
         registry.register(HookPhase.PRE_TOOL, safety_hook)
