@@ -14,10 +14,23 @@ stages:
       type: researcher
       model_tier: frontier
       description: |
-        Analyze the execution traces provided in the context and identify the single most
-        impactful failure pattern. Focus on: JSON parse errors (_parse_error in outputs),
+        Analyze the execution traces and proposal history provided in the context.
+
+        Context includes:
+        - traces_json: Recent execution traces (stage outcomes, latencies, parse errors)
+        - proposal_history_json (if present): Prior optimization proposals, whether each
+          was accepted, and its quality score. Use this to avoid re-proposing changes that
+          were already tried and rejected, and to build on changes that worked.
+
+        Identify the single most impactful failure pattern NOT already addressed by a
+        prior accepted proposal. Focus on: JSON parse errors (_parse_error in outputs),
         high latency stages (latency_ms > 2000), repeated validation failures, stages with
-        success=false. Return structured analysis.
+        success=false.
+
+        If proposal_history_json shows a prior accepted diff for the same failure type,
+        look for the next most impactful issue instead.
+
+        Return structured analysis.
     output_mode: guided_json
     output_schema:
       type: object
