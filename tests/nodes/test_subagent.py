@@ -115,6 +115,13 @@ async def test_fan_out_partition_key_missing_gives_full_context(tmp_path):
     assert len(result["results"]) == 2
 
 
+async def test_fan_out_zero_raises(tmp_path):
+    stage = make_fanout_stage(0, fan_in="list")
+    node = SubagentNode(stage=stage, session_dir=tmp_path)
+    with pytest.raises(ValueError, match="fan_out must be >= 1"):
+        await node.execute({"greeting": "zero"})
+
+
 async def test_fan_out_one_wraps_in_fan_in(tmp_path):
     stage_fanout = make_fanout_stage(1, fan_in="list")
     stage_single = Stage(

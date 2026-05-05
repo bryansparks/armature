@@ -7,7 +7,7 @@ from armature.spec.models import Stage
 from armature.spec.loader import load_spec
 
 
-def _partition(items: list, n: int) -> list[list]:
+def _partition(items: list, n: int) -> list[list[Any]]:
     size, rem = divmod(len(items), n)
     chunks, start = [], 0
     for i in range(n):
@@ -64,11 +64,13 @@ class SubagentNode(BaseNode):
         n = self._stage.fan_out
         if n is None:
             return await self._run_child(context, 0)
+        if n < 1:
+            raise ValueError(f"Stage '{self._stage.id}': fan_out must be >= 1, got {n}")
         if n == 1:
             result = await self._run_child(context, 0)
             return _fan_in([result], self._stage.fan_in)
 
         contexts = self._build_contexts(context, n)
         tasks = [self._run_child(ctx, i) for i, ctx in enumerate(contexts)]
-        results = await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=False)
         return _fan_in(list(results), self._stage.fan_in)
