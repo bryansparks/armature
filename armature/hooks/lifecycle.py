@@ -1,6 +1,11 @@
 from __future__ import annotations
+import re
+import warnings
 from enum import Enum
-from typing import Callable, Any
+from typing import TYPE_CHECKING, Callable, Any
+
+if TYPE_CHECKING:
+    from armature.spec.models import ToolSafetyRule
 
 
 class HookPhase(str, Enum):
@@ -14,6 +19,14 @@ class HookDecision(str, Enum):
     ALLOW = "allow"
     BLOCK = "block"
     MODIFY = "modify"
+
+
+class ToolBlocked(Exception):
+    def __init__(self, tool_name: str, cmd: str, message: str) -> None:
+        super().__init__(f"Tool '{tool_name}' blocked: {message} (cmd={cmd!r})")
+        self.tool_name = tool_name
+        self.cmd = cmd
+        self.message = message
 
 
 class HookRegistry:
@@ -44,3 +57,52 @@ class HookRegistry:
     async def run_post_stage(self, stage_id: str, result: Any, ctx: dict) -> None:
         for hook in self._hooks[HookPhase.POST_STAGE]:
             await hook(HookPhase.POST_STAGE, stage_id, result, ctx)
+
+
+def _evaluate_condition(condition, args: dict) -> bool:
+    raw = args.get(condition.field)
+    value = str(raw) if raw is not None else None
+
+    if value is None:
+        return False
+
+    op = condition.op
+    if op == "contains":
+        return condition.value in value
+    if op == "not_contains":
+        return condition.value not in value
+    if op == "equals":
+        return value == condition.value
+    if op == "not_equals":
+        return value != condition.value
+    if op == "matches_regex":
+        return bool(re.search(condition.value, value))
+    if op == "truthy":
+        return bool(value)
+    return False
+
+
+class SafetyHookBuilder:
+    @staticmethod
+    def register(registry: HookRegistry, rules: "list[ToolSafetyRule]") -> None:
+        if not rules:
+            return
+
+        async def safety_hook(phase: HookPhase, tool_name: str, args: dict, ctx: dict) -> HookDecision:
+            for rule in rules:
+                if rule.tool != "*" and rule.tool != tool_name:
+                    continue
+                if not _evaluate_condition(rule.condition, args):
+                    continue
+
+                if rule.action == "block":
+                    return HookDecision.BLOCK
+                if rule.action == "warn":
+                    warnings.warn(
+                        f"[armature safety] Tool '{tool_name}': {rule.message}",
+                        stacklevel=2,
+                    )
+                    # fall through to ALLOW
+            return HookDecision.ALLOW
+
+        registry.register(HookPhase.PRE_TOOL, safety_hook)
