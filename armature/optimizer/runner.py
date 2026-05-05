@@ -33,7 +33,6 @@ class LoopResult(BaseModel):
     iterations: list[OptimizationResult]
     accepted_count: int
     rejected_count: int
-    n_iterations_run: int
 
 
 class OptimizerRunner:
@@ -205,10 +204,8 @@ class OptimizerRunner:
             iterations.append(result)
 
         accepted = sum(1 for r in iterations if r.accepted)
-        rejected = sum(1 for r in iterations if not r.accepted)
         return LoopResult(
             iterations=iterations,
             accepted_count=accepted,
-            rejected_count=rejected,
-            n_iterations_run=len(iterations),
+            rejected_count=len(iterations) - accepted,
         )
