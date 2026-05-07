@@ -1,0 +1,31 @@
+# Minimal single-stage workflow.
+# Demonstrates: LLM stage, text output, runtime inputs.
+#
+# Usage:
+#   armature run examples/01_hello_world.yml --input topic="quantum computing"
+#
+# Python:
+#   harness = Harness.from_spec("examples/01_hello_world.yml")
+#   result = await harness.run({"topic": "quantum computing"})
+#   print(result["explainer"]["content"])
+
+name: hello_world
+version: "1.0"
+description: Single-stage explainer workflow
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+
+stages:
+  - id: explainer
+    role:
+      name: Explainer
+      type: worker
+      model_tier: small
+      description: |
+        Explain the following topic clearly and concisely in 3-5 sentences.
+        Write for a technically literate but non-specialist audience.
+    output_mode: text
+    depends_on: []

@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 from armature.state.traces import TraceStore, TraceRecord, IhrResult
 
+
 @pytest.fixture
 async def store(tmp_path):
     s = TraceStore(tmp_path / "traces.db")
@@ -134,3 +135,34 @@ async def test_compute_ihr_mixed_quorum_ignores_none_traces(store):
     expected = 0.40 * 1.0 + 0.30 * 1.0 + 0.20 * 0.8 + 0.10 * 1.0
     assert result.ihr == pytest.approx(expected, abs=1e-6)
     assert result.avg_quorum_score == pytest.approx(0.8, abs=1e-6)
+
+
+async def test_error_type_stored_and_retrieved(store):
+    await store.record(TraceRecord(
+        run_id="r5", workflow_name="wf", stage_id="s1", role_type="worker",
+        model="m", latency_ms=100.0, success=False, output_valid=False,
+        error_type="RateLimitError",
+    ))
+    results = await store.query(workflow_name="wf")
+    assert results[0].error_type == "RateLimitError"
+
+
+async def test_escalation_count_in_ihr(store):
+    for i in range(3):
+        await store.record(TraceRecord(
+            run_id="r6", workflow_name="wf", stage_id=f"s{i}", role_type="worker",
+            model="m", latency_ms=0.0, success=True, output_valid=True,
+            escalation_count=i,  # 0, 1, 2
+        ))
+    result = await store.compute_ihr("r6")
+    assert result.avg_escalation_count == pytest.approx(1.0)  # (0+1+2)/3
+
+
+async def test_spec_version_stored_and_retrieved(store):
+    await store.record(TraceRecord(
+        run_id="r7", workflow_name="wf", stage_id="s1", role_type="worker",
+        model="m", latency_ms=50.0, success=True, output_valid=True,
+        spec_version="abc123def456",
+    ))
+    results = await store.query(workflow_name="wf")
+    assert results[0].spec_version == "abc123def456"

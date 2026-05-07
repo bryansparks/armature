@@ -22,6 +22,9 @@ class TraceRecord(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] = Field(default_factory=dict)
+    error_type: str | None = None
+    escalation_count: int = 0
+    spec_version: str = ""
 
 
 class IhrResult(BaseModel):
@@ -32,6 +35,7 @@ class IhrResult(BaseModel):
     avg_quorum_score: float
     latency_score: float
     n_traces: int
+    avg_escalation_count: float = 0.0
 
 
 _CREATE_SQL = """
@@ -50,7 +54,10 @@ _CREATE_SQL = """
         quorum_score REAL,
         timestamp   TEXT NOT NULL,
         inputs_json TEXT DEFAULT '{}',
-        outputs_json TEXT DEFAULT '{}'
+        outputs_json TEXT DEFAULT '{}',
+        error_type  TEXT,
+        escalation_count INTEGER DEFAULT 0,
+        spec_version TEXT DEFAULT ''
     )
 """
 
@@ -63,6 +70,16 @@ class TraceStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self._path) as db:
             await db.execute(_CREATE_SQL)
+            for col_def in [
+                "error_type TEXT",
+                "escalation_count INTEGER DEFAULT 0",
+                "spec_version TEXT DEFAULT ''",
+            ]:
+                col = col_def.split()[0]
+                try:
+                    await db.execute(f"ALTER TABLE traces ADD COLUMN {col_def}")
+                except Exception:
+                    pass  # column already exists
             await db.commit()
 
     async def record(self, trace: TraceRecord) -> None:
@@ -71,8 +88,9 @@ class TraceStore:
                 """INSERT INTO traces
                    (run_id, workflow_name, stage_id, role_type, model,
                     input_tokens, output_tokens, latency_ms, success, output_valid,
-                    quorum_score, timestamp, inputs_json, outputs_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    quorum_score, timestamp, inputs_json, outputs_json,
+                    error_type, escalation_count, spec_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -80,6 +98,7 @@ class TraceStore:
                     int(trace.success), int(trace.output_valid),
                     trace.quorum_score, trace.timestamp,
                     json.dumps(trace.inputs), json.dumps(trace.outputs),
+                    trace.error_type, trace.escalation_count, trace.spec_version,
                 ),
             )
             await db.commit()
@@ -130,6 +149,9 @@ class TraceStore:
             timestamp=r["timestamp"],
             inputs=json.loads(r["inputs_json"] or "{}"),
             outputs=json.loads(r["outputs_json"] or "{}"),
+            error_type=r["error_type"] or None,
+            escalation_count=r["escalation_count"] or 0,
+            spec_version=r["spec_version"] or "",
         )
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:
@@ -153,6 +175,7 @@ class TraceStore:
         avg_quorum_score = sum(quorum_scores) / len(quorum_scores) if quorum_scores else 0.5
         avg_latency_ms = sum(t.latency_ms for t in traces) / n
         latency_score = max(0.0, 1.0 - avg_latency_ms / 5000.0)
+        avg_escalation_count = sum(t.escalation_count for t in traces) / n
 
         ihr = (
             0.40 * output_valid_rate
@@ -168,4 +191,5 @@ class TraceStore:
             avg_quorum_score=avg_quorum_score,
             latency_score=latency_score,
             n_traces=n,
+            avg_escalation_count=avg_escalation_count,
         )

@@ -7,6 +7,15 @@ from armature.runtime.engine import Harness
 app = typer.Typer(name="armature", help="ELF ecosystem agent harness runner", no_args_is_help=True)
 
 
+@app.command()
+def new(
+    output: Path = typer.Argument(None, help="Output YAML file path (prompted if omitted)"),
+):
+    """Interactively create a new workflow spec (YAML)."""
+    from armature.cli_wizard import run_wizard
+    run_wizard(output_path=output)
+
+
 @app.callback()
 def main():
     """Armature — ELF ecosystem agent harness runner."""
@@ -100,8 +109,11 @@ def optimize(
     typer.echo(f"\nProposed diff:\n{result.proposed_diff}")
 
     if result.accepted and apply:
-        typer.echo("\nApplying diff... (manual review recommended)")
-        typer.echo("Auto-apply not yet implemented. Review the diff and edit manually.")
+        from armature.optimizer.runner import OptimizerRunner
+        ok, msg = OptimizerRunner.apply_diff(spec, result.proposed_diff)
+        typer.echo(f"\n{'Applied' if ok else 'Apply failed'}: {msg}")
+    elif result.accepted and not apply:
+        typer.echo("\nProposal accepted — re-run with --apply to patch the spec file.")
 
 
 if __name__ == "__main__":

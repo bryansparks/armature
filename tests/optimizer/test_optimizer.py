@@ -430,3 +430,85 @@ async def test_run_loop_zero_iterations(tmp_path):
     mock_opt.assert_not_called()
     assert loop_result.iterations == []
     assert loop_result.accepted_count == 0
+
+
+# ---------------------------------------------------------------------------
+# apply_diff tests
+# ---------------------------------------------------------------------------
+
+import shutil
+
+
+def test_apply_diff_patches_file(tmp_path):
+    spec = tmp_path / "workflow.yaml"
+    spec.write_text("name: original\nstages: []\n")
+
+    diff = (
+        "--- original\n"
+        "+++ proposed\n"
+        "@@ -1,2 +1,2 @@\n"
+        "-name: original\n"
+        "+name: updated\n"
+        " stages: []\n"
+    )
+
+    ok, msg = OptimizerRunner.apply_diff(spec, diff)
+    assert ok, f"apply_diff failed: {msg}"
+    assert "name: updated" in spec.read_text()
+    assert (tmp_path / "workflow.yaml.orig").exists()
+
+
+def test_apply_diff_bad_diff_returns_false(tmp_path):
+    spec = tmp_path / "workflow.yaml"
+    spec.write_text("name: original\nstages: []\n")
+
+    ok, msg = OptimizerRunner.apply_diff(spec, "this is not a valid diff")
+    assert not ok
+    assert spec.read_text() == "name: original\nstages: []\n"  # unchanged
+
+
+def test_apply_diff_no_patch_binary_returns_false(tmp_path):
+    spec = tmp_path / "workflow.yaml"
+    spec.write_text("name: x\n")
+
+    with patch("shutil.which", return_value=None):
+        ok, msg = OptimizerRunner.apply_diff(spec, "--- a\n+++ b\n")
+    assert not ok
+    assert "patch" in msg.lower()
+
+
+async def test_run_loop_auto_apply_calls_apply_diff(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    accepted_result = OptimizationResult(
+        accepted=True, proposed_diff="diff-text",
+        rationale="r", confidence=0.8, score=0.8, feedback="ok",
+    )
+
+    with patch.object(runner, "optimize", new_callable=AsyncMock, return_value=accepted_result):
+        with patch.object(OptimizerRunner, "apply_diff", return_value=(True, "Applied")) as mock_apply:
+            loop_result = await runner.run_loop(n_iterations=1, auto_apply=True)
+
+    mock_apply.assert_called_once_with(runner._target_spec_path, "diff-text")
+    assert "Applied" in loop_result.iterations[0].feedback
+
+
+async def test_run_loop_no_auto_apply_skips_apply_diff(tmp_path):
+    fixtures = Path(__file__).parent.parent / "fixtures"
+    runner = OptimizerRunner(
+        target_spec_path=fixtures / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    accepted_result = OptimizationResult(
+        accepted=True, proposed_diff="diff-text",
+        rationale="r", confidence=0.8, score=0.8, feedback="ok",
+    )
+
+    with patch.object(runner, "optimize", new_callable=AsyncMock, return_value=accepted_result):
+        with patch.object(OptimizerRunner, "apply_diff") as mock_apply:
+            await runner.run_loop(n_iterations=1, auto_apply=False)
+
+    mock_apply.assert_not_called()

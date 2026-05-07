@@ -21,6 +21,10 @@ class ModelTierConfig(BaseModel):
     provider: str
     model: str
     api_base: str | None = None
+    api_key_env: str | None = None    # env var name holding the API key for this tier
+    temperature: float | None = None  # default temperature for calls on this tier
+    max_tokens: int | None = None     # default max output tokens for this tier
+    tool_calling: bool | None = None  # None → auto-detect by provider; True/False → explicit override
 
 # Alias for convenience
 ModelTier = ModelTierConfig
@@ -32,6 +36,19 @@ class ModelTiers(BaseModel):
     medium: ModelTierConfig | None = None
     large: ModelTierConfig | None = None
     frontier: ModelTierConfig | None = None
+
+
+class RoleTypeDefaults(BaseModel):
+    """Maps each role type to the tier it uses when model_tier is not set on the role.
+
+    These defaults encode the intent: workers are cheap/fast, judges and
+    orchestrators need the best reasoning, researchers need strong synthesis.
+    Override in the spec's role_type_defaults section.
+    """
+    worker: str = "small"
+    orchestrator: str = "frontier"
+    judge: str = "frontier"
+    researcher: str = "large"
 
 
 class Contract(BaseModel):
@@ -54,7 +71,9 @@ class Role(BaseModel):
     description: str
     tools: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
-    model_tier: str = "small"
+    model_tier: str | None = None      # None → resolved from role_type_defaults
+    temperature: float | None = None   # overrides tier-level temperature
+    max_tokens: int | None = None      # overrides tier-level max_tokens
 
 
 class LoopConfig(BaseModel):
@@ -74,6 +93,7 @@ class Adapter(BaseModel):
     fn: str | None = None
     cmd: str | None = None
     args: dict[str, Any] = Field(default_factory=dict)
+    timeout: int = 60
 
 
 class Failure(BaseModel):
@@ -108,11 +128,13 @@ class Stage(BaseModel):
     depends_on: list[str] = Field(default_factory=list)
     adapter: str | None = None
     gate: str | None = None
+    tool_call: ToolCallConfig | None = None
     signature: Signature | None = None
     output_mode: OutputMode = OutputMode.TEXT
     on_fail: OnFailConfig | None = None
     present: str | None = None
     condition: str | None = None
+    skip_if: str | None = None                    # Jinja2 expr; stage skipped when it renders truthy
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
     subagent_spec: str | None = None              # Path to child workflow spec file
     fan_out: int | None = None
@@ -126,6 +148,28 @@ class TraceConfig(BaseModel):
     filesystem: str = "~/.armature/traces/{{run_id}}/"
 
 
+class MemoryCapture(BaseModel):
+    stage: str           # stage id whose output to capture
+    key: str             # output key to persist
+    max_entries: int = 5 # rolling window size — oldest entry evicted first
+
+
+class MemoryConfig(BaseModel):
+    enabled: bool = True
+    capture: list[MemoryCapture] = Field(default_factory=list)
+    inject_as: str = "_memory"   # context key injected at run start
+    db: str | None = None        # override db path; defaults to ~/.armature/memory/{name}.db
+
+
+class ToolModule(BaseModel):
+    module: str  # dotted Python import path; must expose register(registry) -> None
+
+
+class ToolCallConfig(BaseModel):
+    name: str                                    # registered tool name to invoke
+    args: dict[str, Any] = Field(default_factory=dict)  # args; string values are Jinja2-rendered against context
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -136,6 +180,9 @@ class HarnessSpec(BaseModel):
     adapters: dict[str, Adapter] = Field(default_factory=dict)
     failures: dict[str, Failure] = Field(default_factory=dict)
     model_tiers: ModelTiers = Field(default_factory=ModelTiers)
+    role_type_defaults: RoleTypeDefaults = Field(default_factory=RoleTypeDefaults)
     file_state: FileState = Field(default_factory=FileState)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
+    memory: MemoryConfig | None = None
+    tools: list[ToolModule] = Field(default_factory=list)

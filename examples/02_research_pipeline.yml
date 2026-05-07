@@ -1,0 +1,164 @@
+# Three-stage sequential pipeline: researcher → writer → critic.
+# Demonstrates: depends_on, multiple stages, guided_json output,
+#               context flow between stages, human gate.
+#
+# Usage:
+#   armature run examples/02_research_pipeline.yml \
+#     --input topic="Impact of remote work on urban real estate" \
+#     --input audience="executive leadership"
+#
+# Python:
+#   harness = Harness.from_spec("examples/02_research_pipeline.yml")
+#   result = await harness.run({
+#       "topic": "Impact of remote work on urban real estate",
+#       "audience": "executive leadership",
+#   })
+#   print(result["critic"]["overall_score"])
+#   print(result["writer"]["content"])
+
+name: research_pipeline
+version: "1.0"
+description: Research → Write → Critique pipeline with human approval gate
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+stages:
+
+  # Stage 1: Gather and structure research findings
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      model_tier: small
+      description: |
+        Research the following topic thoroughly and return structured findings.
+
+        TOPIC: {{ topic }}
+
+        Identify key facts, trends, evidence, and open questions.
+        Be specific — avoid vague generalizations.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [key_findings, trends, gaps]
+      properties:
+        key_findings:
+          type: array
+          description: Top factual findings, each one specific and concrete
+          items:
+            type: string
+        trends:
+          type: array
+          description: Emerging patterns or directional signals
+          items:
+            type: string
+        gaps:
+          type: array
+          description: Important unknowns or areas lacking evidence
+          items:
+            type: string
+        sources_consulted:
+          type: array
+          description: Types of sources that would support this research
+          items:
+            type: string
+    depends_on: []
+
+  # Stage 2: Write a briefing based on research findings
+  # (Automatically receives researcher's output in context)
+  - id: writer
+    role:
+      name: Writer
+      type: worker
+      model_tier: small
+      description: |
+        Write a clear, well-structured briefing based on the researcher's findings.
+
+        TOPIC: {{ topic }}
+        AUDIENCE: {{ audience }}
+
+        The briefing should:
+        - Open with a clear executive summary (2-3 sentences)
+        - Cover the key findings with appropriate depth for the audience
+        - Address trends and their implications
+        - Acknowledge gaps and what they mean for decision-making
+        - Close with 2-3 actionable recommendations
+
+        Use professional, direct language appropriate for the specified audience.
+    output_mode: text
+    depends_on: [researcher]
+
+  # Stage 3: Critically evaluate the written briefing
+  # (Receives both researcher output and writer output in context)
+  - id: critic
+    role:
+      name: Critic
+      type: judge
+      model_tier: frontier
+      description: |
+        Evaluate the writer's briefing against the researcher's findings.
+
+        Assess whether the briefing:
+        - Accurately represents the research (no distortion or omission of key findings)
+        - Is appropriately scoped for the stated audience
+        - Makes claims that are supported by the research
+        - Has actionable recommendations grounded in the evidence
+        - Is well-structured and clear
+
+        Be specific in your critique. Identify both strengths and weaknesses.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [overall_score, strengths, weaknesses, verdict]
+      properties:
+        overall_score:
+          type: number
+          description: Score from 0.0 (poor) to 1.0 (excellent)
+          minimum: 0.0
+          maximum: 1.0
+        strengths:
+          type: array
+          description: Specific things the briefing does well
+          items:
+            type: string
+        weaknesses:
+          type: array
+          description: Specific problems or gaps in the briefing
+          items:
+            type: string
+        unsupported_claims:
+          type: array
+          description: Claims in the briefing not backed by research findings
+          items:
+            type: string
+        verdict:
+          type: string
+          description: "APPROVED, REVISE, or REJECT with one-sentence rationale"
+    depends_on: [researcher, writer]
+
+  # Gate: Human reviews the critic's assessment before the run completes
+  - id: review_gate
+    gate: human
+    present: |
+      ============================================================
+      PIPELINE COMPLETE — CRITIC'S ASSESSMENT
+      ============================================================
+
+      Overall Score: {{ critic.overall_score }}
+      Verdict: {{ critic.verdict }}
+
+      Strengths:
+      {% for s in critic.strengths %}- {{ s }}
+      {% endfor %}
+      Weaknesses:
+      {% for w in critic.weaknesses %}- {{ w }}
+      {% endfor %}
+
+      Approve to accept this output, or provide feedback.
+    depends_on: [critic]

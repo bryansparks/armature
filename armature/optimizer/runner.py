@@ -1,5 +1,7 @@
 from __future__ import annotations
 import json
+import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -195,12 +197,17 @@ class OptimizerRunner:
             n_inputs=len(inputs_sample),
         )
 
-    async def run_loop(self, n_iterations: int = 5) -> LoopResult:
+    async def run_loop(
+        self, n_iterations: int = 5, auto_apply: bool = False
+    ) -> LoopResult:
         iterations: list[OptimizationResult] = []
         for _ in range(n_iterations):
             result = await self.optimize()
             if result is None:
                 break   # not enough traces — no point continuing
+            if result.accepted and auto_apply:
+                ok, msg = self.apply_diff(self._target_spec_path, result.proposed_diff)
+                result = result.model_copy(update={"feedback": f"{result.feedback} | apply: {msg}"})
             iterations.append(result)
 
         accepted = sum(1 for r in iterations if r.accepted)
@@ -209,3 +216,33 @@ class OptimizerRunner:
             accepted_count=accepted,
             rejected_count=len(iterations) - accepted,
         )
+
+    @staticmethod
+    def apply_diff(spec_path: Path, diff_text: str) -> tuple[bool, str]:
+        """Apply a unified diff to spec_path using the system patch utility.
+
+        Creates a .orig backup of the original file before patching.
+        Returns (success, message).
+        """
+        if not shutil.which("patch"):
+            return False, "'patch' command not found — install GNU patch and retry"
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".patch", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(diff_text)
+            patch_file = Path(f.name)
+
+        try:
+            proc = subprocess.run(
+                ["patch", "--backup", str(spec_path), str(patch_file)],
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                return True, f"Patched {spec_path.name} (backup at {spec_path.name}.orig)"
+            return False, (proc.stderr or proc.stdout).strip()
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            patch_file.unlink(missing_ok=True)

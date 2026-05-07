@@ -1,5 +1,5 @@
 from pathlib import Path
-from jinja2 import Environment, BaseLoader
+from jinja2 import ChainableUndefined, Environment, BaseLoader
 from ruamel.yaml import YAML
 from armature.spec.models import HarnessSpec
 
@@ -12,7 +12,7 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     raw = path.read_text(encoding="utf-8")
 
     if vars:
-        env = Environment(loader=BaseLoader(), variable_start_string="{{", variable_end_string="}}")
+        env = Environment(loader=BaseLoader(), variable_start_string="{{", variable_end_string="}}", undefined=ChainableUndefined)
         template = env.from_string(raw)
         raw = template.render(**(vars or {}))
 

@@ -1,0 +1,446 @@
+# ============================================================
+# Armature Starter Template
+# ============================================================
+# Copy this file, rename it, and fill in your own role
+# descriptions and model choices. Every section is annotated.
+#
+# Usage:
+#   armature run examples/starter_template.yml \
+#     --input topic="impact of remote work on urban planning"
+#
+# Python:
+#   harness = Harness.from_spec("examples/starter_template.yml")
+#   result = await harness.run({"topic": "your topic here"})
+#   print(result["synthesizer"]["recommendation"])
+# ============================================================
+
+name: research_and_recommend
+version: "1.0"
+description: |
+  Research a topic, analyze the findings, score quality, and
+  produce a final recommendation — demonstrating the full
+  Armature feature set in a single file.
+
+
+# ============================================================
+# MODEL TIERS
+# ============================================================
+# Tiers decouple your workflow from specific model choices.
+# Name the slots anything from: tiny, small, medium, large, frontier.
+# You only need to define the tiers your workflow actually uses.
+#
+# Benefits:
+#   - Swap models globally without editing every stage
+#   - Assign cheaper models to routine tasks, premium models to
+#     high-stakes decisions
+#   - The engine automatically escalates to the next tier when
+#     a JSON parse fails (tiny → small → medium → large → frontier)
+#
+# Any provider supported by litellm works here:
+# anthropic, openai, openrouter, ollama, azure, bedrock, etc.
+# ============================================================
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+    temperature: 0.5          # default temperature for this tier
+    max_tokens: 2048          # default max output for this tier
+
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    # api_key_env: ANTHROPIC_API_KEY  # override which env var holds the key
+    temperature: 0.7
+
+
+# ============================================================
+# ROLE TYPE DEFAULTS
+# ============================================================
+# Maps each role type to a model tier so individual stages
+# don't need to declare model_tier explicitly.
+#
+# Built-in defaults (apply when you omit this section):
+#   worker: small  |  orchestrator: frontier
+#   judge: frontier  |  researcher: large
+#
+# Override here to match your cost/quality trade-offs.
+# A role that sets model_tier explicitly always wins.
+# ============================================================
+role_type_defaults:
+  worker: small       # cost-optimized task executors
+  researcher: small   # use small here; promote to frontier if quality suffers
+  judge: frontier     # adjudication needs the strongest reasoning
+
+
+# ============================================================
+# ADAPTERS
+# ============================================================
+# Adapters let stages run shell commands or Python callables
+# instead of calling an LLM. Define them here, then reference
+# by name in a stage with `adapter: <name>`.
+#
+# type: script  → runs `cmd` as a shell command
+# type: python  → calls `fn` (a dotted importable callable)
+#
+# Adapter output (stdout, exit_code, stderr) becomes the stage
+# result dict, available to all downstream stages.
+# ============================================================
+adapters:
+  fetch_sources:
+    name: fetch_sources
+    type: script
+    cmd: "echo 'Fetching sources for: {{ topic }}'"   # replace with a real fetch
+    timeout: 30   # seconds before the command is killed
+
+
+# ============================================================
+# SAFETY RULES
+# ============================================================
+# Declarative rules that evaluate adapter arguments before
+# any script/command runs. The engine checks these automatically
+# — no code required.
+#
+# Supported operators: contains, not_contains, equals,
+#   not_equals, matches_regex, truthy
+#
+# Actions:
+#   block  → raise ToolBlocked, halt the stage (never retried)
+#   warn   → log a warning and continue
+#   log    → log at info level and continue
+# ============================================================
+safety_rules:
+  - tool: fetch_sources
+    condition:
+      field: cmd
+      op: contains
+      value: "rm -rf"
+    action: block
+    message: "Destructive filesystem operations are not permitted."
+
+
+# ============================================================
+# MEMORY
+# ============================================================
+# Cross-run memory lets stages learn from prior runs.
+# On each run start, the engine loads previously captured
+# values and injects them into context under `inject_as`.
+# After each target stage completes, the specified output key
+# is appended to the rolling store (max_entries per key).
+#
+# The injected context key is a nested dict:
+#   context["_memory"] = {
+#     "synthesizer": {
+#       "recommendation": ["run 5 value", "run 4 value", ...]
+#     }
+#   }
+#
+# Stages that want to see prior memory should declare it in
+# their signature.input (see the synthesizer stage below).
+#
+# Memory persists to: ~/.armature/memory/<workflow_name>.db
+# Override with: db: /path/to/custom.db
+# ============================================================
+memory:
+  enabled: true
+  capture:
+    - stage: synthesizer      # capture output from this stage
+      key: recommendation     # which output key to store
+      max_entries: 5          # rolling window — oldest entry evicted first
+  inject_as: _memory          # context key available to all stages
+
+
+# ============================================================
+# TOOLS (OPTIONAL)
+# ============================================================
+# Reference external tool modules by dotted Python import path.
+# The harness imports each module at startup and calls its
+# `register(registry) -> None` function to load tools into
+# the registry. Tool code lives in your codebase; the spec
+# just declares which modules to load.
+#
+# Builtin tools (always registered, no declaration needed):
+#   file_read   — read a file from disk
+#   file_write  — write content to a file
+#   shell       — run a shell command
+#   http_get    — make an HTTP GET request
+#
+# Once registered, any LLM stage can call a tool by listing it
+# in role.tools. Stages without role.tools get no tool access.
+# The model drives tool use: when it returns a tool call the
+# engine dispatches it, feeds the result back, and re-invokes
+# the model — up to 10 iterations per stage by default.
+#
+# Uncomment and replace the module path with your own:
+# tools:
+#   - module: myapp.tools.search_tools   # must expose register(registry)
+#   - module: myapp.tools.database_tools
+# ============================================================
+
+
+# ============================================================
+# STAGES
+# ============================================================
+# Stages are the nodes of the DAG. Each stage declares what it
+# depends_on; the engine resolves execution order automatically.
+#
+# Stage types:
+#   role       → LLM call (requires a `role` block)
+#   adapter    → script or Python callable (requires `adapter`)
+#   gate       → pause for human review (requires `gate: human`)
+#   subagent   → spawn a child workflow (requires `subagent_spec`)
+#   tool_call  → call a registered tool directly, no LLM (requires `tool_call`)
+#
+# Any stage can declare `skip_if: "{{ expr }}"` — a Jinja2 expression evaluated
+# against context before the stage runs. If it renders truthy, the stage returns
+# {"_skipped": True} without executing. Missing variables are never truthy.
+# ============================================================
+stages:
+
+  # ----------------------------------------------------------
+  # STAGE 1: Fetch raw sources (script stage)
+  # ----------------------------------------------------------
+  # Script stages run before LLM stages in this workflow.
+  # The adapter's stdout is parsed and stored under context["fetch"].
+  # Downstream LLM stages will see it in their context automatically.
+  # ----------------------------------------------------------
+  - id: fetch
+    adapter: fetch_sources
+    depends_on: []
+
+
+  # ----------------------------------------------------------
+  # STAGE 2: Research (LLM stage — text mode)
+  # ----------------------------------------------------------
+  # The researcher role gathers and synthesizes information.
+  # output_mode: text → result stored as {"content": "..."}
+  # Downstream stages access this as context["research"]["content"].
+  #
+  # This stage has no signature.input, so it receives the full
+  # context (topic + fetch result + _memory).
+  # ----------------------------------------------------------
+  - id: research
+    role:
+      name: Researcher
+      type: researcher      # picks up "small" from role_type_defaults
+      description: |
+        Gather and synthesize information about the following topic.
+        Organize your findings into: key facts, open questions,
+        and relevant context. Be specific and cite your reasoning.
+
+        If prior memory is available under _memory, consider what
+        was recommended in previous runs and note any patterns.
+      # temperature: 0.3  # uncomment to override the tier default
+      #
+      # Uncomment to give this stage native tool access. The model
+      # can call http_get (builtin) to fetch URLs it needs, then
+      # incorporate the responses into its output. The engine runs
+      # the dispatch loop automatically — no code required.
+      # tools: [http_get]
+    output_mode: text
+    depends_on: [fetch]
+
+
+  # ----------------------------------------------------------
+  # STAGE 3: Analyze (LLM stage — guided JSON)
+  # ----------------------------------------------------------
+  # Guided JSON forces the model to return a specific schema.
+  # The engine passes response_format to providers that support
+  # it (OpenAI, Anthropic); Ollama falls back to prompt-guided
+  # JSON with automatic extraction.
+  #
+  # If JSON parsing fails, the engine escalates to the next
+  # model tier automatically (small → frontier here).
+  #
+  # signature.input restricts which context keys are visible in
+  # this stage's prompt. The analyst only needs the research
+  # output, not the raw fetch data or memory state.
+  # ----------------------------------------------------------
+  - id: analyst
+    role:
+      name: Analyst
+      type: worker          # picks up "small" from role_type_defaults
+      description: |
+        Analyze the research findings and produce a structured
+        assessment. Be objective and evidence-based.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [key_insights, confidence, risks]
+      additionalProperties: false
+      properties:
+        key_insights:
+          type: array
+          items:
+            type: string
+          description: Top 3-5 insights from the research
+        confidence:
+          type: number
+          description: How confident you are in the analysis (0.0–1.0)
+        risks:
+          type: array
+          items:
+            type: string
+          description: Potential weaknesses or unknowns in the findings
+    signature:
+      input:
+        topic: The original research topic
+        research: The researcher's findings
+        _memory: Prior run recommendations (if any)
+    depends_on: [research]
+
+
+  # ----------------------------------------------------------
+  # STAGE 4: Judge (LLM stage — quality scoring)
+  # ----------------------------------------------------------
+  # Judge stages evaluate output quality. The engine extracts
+  # a quorum_score automatically from the output by scanning for
+  # a field named: score, quality_score, or confidence (in order).
+  # This score feeds into the IHR (Implicit Harness Rating) and
+  # guides the Meta-Harness optimizer.
+  #
+  # Judge stages default to the "frontier" tier (best reasoning)
+  # per role_type_defaults. You can override with model_tier.
+  # ----------------------------------------------------------
+  - id: evaluator
+    role:
+      name: Evaluator
+      type: judge           # picks up "frontier" from role_type_defaults
+      description: |
+        Evaluate the quality of the analyst's assessment.
+        Score the output on these dimensions:
+          - Evidence quality: are claims grounded in the research?
+          - Completeness: are significant gaps missed?
+          - Reasoning: is the logic sound?
+
+        Return a single overall quality_score from 0.0 to 1.0.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [quality_score, feedback, should_escalate]
+      additionalProperties: false
+      properties:
+        quality_score:
+          type: number
+          description: Overall quality score 0.0 (poor) to 1.0 (excellent)
+        feedback:
+          type: string
+          description: Specific, actionable feedback on the analysis
+        should_escalate:
+          type: boolean
+          description: true if the analysis needs rework before proceeding
+    signature:
+      input:
+        topic: The original research topic
+        analyst: The structured analysis to evaluate
+    depends_on: [analyst]
+
+
+  # ----------------------------------------------------------
+  # STAGE 5: Synthesize (LLM stage — final output)
+  # ----------------------------------------------------------
+  # The synthesizer reads research + analysis + evaluation and
+  # produces the final recommendation.
+  #
+  # signature.input filters context to only the keys this stage
+  # needs — it does not see raw fetch output, internal IDs, etc.
+  # This keeps prompts focused and reduces token cost.
+  #
+  # The `recommendation` output key is captured by the memory
+  # section above — it will appear in context["_memory"] on the
+  # next run, giving the synthesizer continuity across runs.
+  # ----------------------------------------------------------
+  - id: synthesizer
+    role:
+      name: Synthesizer
+      type: worker
+      model_tier: frontier  # explicit override — this is the most important stage
+      description: |
+        Produce a final, actionable recommendation based on the
+        full deliberation: research findings, structured analysis,
+        and quality evaluation.
+
+        If prior recommendations exist in _memory, consider whether
+        this run's findings reinforce, contradict, or refine them.
+        Note any evolution in your thinking.
+
+        Be direct. Lead with the recommendation, then the reasoning.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [recommendation, reasoning, confidence, next_steps]
+      additionalProperties: false
+      properties:
+        recommendation:
+          type: string
+          description: The final, one-sentence recommendation
+        reasoning:
+          type: string
+          description: The key reasoning behind the recommendation
+        confidence:
+          type: number
+          description: Confidence in the recommendation (0.0–1.0)
+        next_steps:
+          type: array
+          items:
+            type: string
+          description: Concrete actions to take (2-4 items)
+    signature:
+      input:
+        topic: The original research topic
+        research: The researcher's raw findings
+        analyst: The structured analysis
+        evaluator: The quality evaluation and feedback
+        _memory: Prior run recommendations from memory
+    depends_on: [evaluator]
+
+
+  # ----------------------------------------------------------
+  # STAGE 6 (alternate): Direct tool call (tool_call stage)
+  # ----------------------------------------------------------
+  # Use tool_call when you know exactly which tool to call and
+  # need a deterministic, LLM-free result. The tool must be
+  # registered (via the `tools:` section or the builtins).
+  #
+  # String args are Jinja2-rendered against the current context;
+  # non-string values pass through unchanged. The tool's return
+  # value is stored as context["count_words"] and available to
+  # all downstream stages.
+  # ----------------------------------------------------------
+  # - id: count_words
+  #   tool_call:
+  #     name: http_get               # builtin — no tools: section needed
+  #     args:
+  #       url: "https://api.example.com/wordcount"
+  #       payload: "{{ research.content }}"
+  #   depends_on: [research]
+
+
+  # ----------------------------------------------------------
+  # STAGE 7: Human gate (optional approval checkpoint)
+  # ----------------------------------------------------------
+  # Uncomment to add a human review step before the run ends.
+  # Gates block execution until a human approves or provides
+  # feedback at the terminal.
+  #
+  # The `present` field supports Jinja2 syntax — embed upstream
+  # stage outputs directly in the approval prompt.
+  # ----------------------------------------------------------
+  # - id: approval
+  #   gate: human
+  #   present: |
+  #     ## Final Recommendation — Please Review
+  #
+  #     Topic: {{ topic }}
+  #
+  #     Recommendation: {{ synthesizer.recommendation }}
+  #     Confidence: {{ synthesizer.confidence }}
+  #
+  #     Reasoning: {{ synthesizer.reasoning }}
+  #
+  #     Next steps:
+  #     {% for step in synthesizer.next_steps %}
+  #     - {{ step }}
+  #     {% endfor %}
+  #
+  #     Quality score from evaluator: {{ evaluator.quality_score }}
+  #   depends_on: [synthesizer]

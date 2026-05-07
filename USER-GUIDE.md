@@ -1,0 +1,1323 @@
+# Armature User Guide
+
+This guide covers everything you need to build agentic workflows with Armature: spec structure, stage types, role configuration, context flow, templates, and advanced patterns.
+
+---
+
+## Table of Contents
+
+1. [Core concepts](#1-core-concepts)
+2. [Spec structure](#2-spec-structure)
+3. [Model tiers](#3-model-tiers)
+   - [Tier configuration fields](#tier-configuration-fields)
+   - [Role type defaults](#role-type-defaults)
+4. [Stage types](#4-stage-types)
+   - [LLM stage](#41-llm-stage)
+   - [Script/adapter stage](#42-scriptadapter-stage)
+   - [Human gate](#43-human-gate)
+   - [Direct tool call stage](#44-direct-tool-call-stage)
+   - [Subagent stage](#45-subagent-stage)
+   - [Conditional execution (skip_if)](#46-conditional-stage-execution-skip_if)
+5. [Role types](#5-role-types)
+6. [Output modes](#6-output-modes)
+7. [Context and data flow](#7-context-and-data-flow)
+   - [Context filtering (signature.input)](#context-filtering-signatureinput)
+8. [Cross-run memory](#8-cross-run-memory)
+9. [Jinja2 variables in specs](#9-jinja2-variables-in-specs)
+10. [Retry and recovery](#10-retry-and-recovery)
+11. [Safety rules](#11-safety-rules)
+12. [Fan-out / Fan-in](#12-fan-out--fan-in)
+13. [Human gates in detail](#13-human-gates-in-detail)
+14. [Templates](#14-templates)
+15. [The optimizer](#15-the-optimizer)
+16. [Running workflows](#16-running-workflows)
+17. [Integrating with a host application](#17-integrating-with-a-host-application)
+    - [Declaring tool modules in the spec](#declaring-tool-modules-in-the-spec)
+    - [Pattern A — embedded library](#pattern-a--embedded-library)
+    - [Pattern B — HTTP sidecar](#pattern-b--http-sidecar)
+    - [Pattern C — subprocess](#pattern-c--subprocess)
+    - [Input shaping](#input-shaping)
+    - [Output extraction](#output-extraction)
+    - [Async lifecycle](#async-lifecycle)
+    - [Error contracts](#error-contracts)
+
+---
+
+## 1. Core concepts
+
+### The DAG
+
+A workflow is a **directed acyclic graph (DAG)** of stages. Each stage declares which stages it `depends_on`. The engine resolves execution order automatically using topological sort — you never specify an order explicitly.
+
+```
+researcher ──────┐
+                 ▼
+strategist ──► synthesizer ──► human_gate
+```
+
+### Context
+
+There is one shared **context dict** per run. It starts with the inputs you pass to `harness.run()`. As each stage completes, its result is stored in the context under the stage's `id`. Every downstream stage sees the full accumulated context — including all upstream stage outputs — in its system prompt.
+
+This means you do not need to wire data manually between stages. A stage that `depends_on: [researcher]` will automatically have `researcher`'s output available in its context.
+
+### Stages vs. roles
+
+A **stage** is a node in the graph — it has an id, dependencies, and configuration.
+
+A **role** is the LLM identity within a stage — it has a name, type, description (system prompt body), and model tier. Not every stage has a role; script stages and gates do not.
+
+---
+
+## 2. Spec structure
+
+A complete spec file at a glance:
+
+```yaml
+name: my_workflow
+version: "1.0"
+description: "Optional description"
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+# role_type_defaults lets stages omit model_tier — type drives tier assignment
+role_type_defaults:
+  worker: small
+  researcher: small
+  judge: frontier
+  orchestrator: frontier
+
+adapters:
+  run_script:
+    name: run_script
+    type: script
+    cmd: "python scripts/process.py"
+
+safety_rules:
+  - tool: run_script
+    condition:
+      field: cmd
+      op: contains
+      value: "rm -rf"
+    action: block
+    message: "Destructive commands are not permitted."
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher        # picks up "small" from role_type_defaults
+      description: |
+        Gather relevant information about: {{ topic }}
+    output_mode: text
+    depends_on: []
+
+  - id: writer
+    role:
+      name: Writer
+      type: worker            # picks up "small" from role_type_defaults
+      description: |
+        Write a clear summary based on the researcher's findings.
+    output_mode: text
+    depends_on: [researcher]
+
+  - id: review_gate
+    gate: human
+    present: "Review the writer's output before continuing.\n\n{{ writer.content }}"
+    depends_on: [writer]
+```
+
+### Top-level fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Workflow name (used in traces and logs) |
+| `version` | string | no | Spec version string |
+| `description` | string | no | Human-readable description |
+| `model_tiers` | object | yes | Named model configurations (see §3) |
+| `role_type_defaults` | object | no | Default tier per role type — workers, judges, etc. (see §3) |
+| `adapters` | object | no | Script/command adapters (see §4.2) |
+| `safety_rules` | list | no | Declarative tool safety rules (see §11) |
+| `memory` | object | no | Cross-run memory capture and injection (see §8) |
+| `tools` | list | no | External tool modules to load into the registry (see §17) |
+| `stages` | list | yes | The workflow stages (see §4) |
+
+---
+
+## 3. Model tiers
+
+Model tiers decouple your workflow logic from specific model choices. Stages reference a tier name; the tier maps to a provider and model. This lets you swap models globally without editing every stage.
+
+The tier names (`tiny`, `small`, `medium`, `large`, `frontier`) are fixed schema — you define what each one means for your application. You do not need to define all five — only the ones your workflow uses.
+
+```yaml
+model_tiers:
+  tiny:
+    provider: ollama
+    model: qwen2.5:7b
+    api_base: http://localhost:11434
+    temperature: 0.3
+    max_tokens: 1024
+
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+
+  medium:
+    provider: openai
+    model: gpt-4o-mini
+
+  large:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+  frontier:
+    provider: openrouter
+    model: anthropic/claude-opus-4-7
+    api_key_env: OPENROUTER_API_KEY
+```
+
+### Tier configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `provider` | string | `anthropic`, `openai`, `openrouter`, `ollama` — any litellm-supported provider |
+| `model` | string | Model identifier as accepted by the provider |
+| `api_base` | string | Endpoint URL — required for Ollama and self-hosted models |
+| `api_key_env` | string | Name of the env var holding this tier's API key (e.g. `OPENROUTER_API_KEY`). Overrides the provider default. |
+| `temperature` | float | Default sampling temperature for this tier. Can be overridden at the role level. |
+| `max_tokens` | int | Default max output tokens for this tier. Can be overridden at the role level. |
+| `tool_calling` | bool | `true` to force native tool injection; `false` to disable it; omit to auto-detect by provider. |
+
+**Providers:** Any provider supported by [litellm](https://github.com/BerriAI/litellm) works — Anthropic, OpenAI, OpenRouter, Ollama, Azure, Bedrock, and more.
+
+**Credentials:** API keys are read from environment variables. For most providers litellm finds the key automatically (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). Use `api_key_env` to name a different variable for a specific tier.
+
+**Escalation:** If a stage's assigned tier produces an unparseable JSON response (when `output_mode: guided_json`), the engine automatically escalates to the next defined tier and retries. Only tiers you have actually configured participate — the escalation order is always `tiny → small → medium → large → frontier`.
+
+**Provider-aware structured output:** Providers that support native structured output (OpenAI, Anthropic) receive a `response_format` kwarg enforcing the output schema. Providers that do not (Ollama) fall back to prompt-guided JSON with automatic extraction. This is re-evaluated per escalation tier, so switching providers mid-escalation uses the right strategy automatically.
+
+**Per-tier tool calling override:** By default the engine injects native tool specs for OpenAI/Anthropic providers and uses prompt-based tool descriptions for Ollama. Set `tool_calling: true` on any Ollama tier running a model that supports tool calling (e.g. Llama 3.1+, Qwen 2.5) to enable native dispatch. Set `tool_calling: false` to disable it for any provider.
+
+### Role type defaults
+
+Instead of setting `model_tier` on every role individually, use `role_type_defaults` to establish a mapping at the spec level:
+
+```yaml
+role_type_defaults:
+  worker: small        # cost-optimized task executors
+  orchestrator: frontier
+  judge: frontier      # needs the best reasoning for adjudication
+  researcher: large
+```
+
+Built-in defaults (applied if you omit this section):
+
+| Role type | Default tier |
+|---|---|
+| `worker` | `small` |
+| `orchestrator` | `frontier` |
+| `judge` | `frontier` |
+| `researcher` | `large` |
+
+A role that sets `model_tier` explicitly always overrides the type default.
+
+---
+
+## 4. Stage types
+
+### 4.1 LLM stage
+
+An LLM stage calls a language model. It requires a `role`.
+
+```yaml
+- id: analyst
+  role:
+    name: Analyst
+    type: researcher
+    model_tier: small
+    description: |
+      Analyze the provided data and identify the top 3 trends.
+      Be specific and cite evidence from the context.
+  output_mode: guided_json
+  output_schema:
+    type: object
+    required: [trends]
+    properties:
+      trends:
+        type: array
+        items:
+          type: object
+          properties:
+            title:
+              type: string
+            evidence:
+              type: string
+  depends_on: []
+```
+
+**Role fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Display name for this agent |
+| `type` | string | yes | Role type — see §5 |
+| `description` | string | yes | The body of the system prompt |
+| `model_tier` | string | no | Which tier to use (`small`, `frontier`, etc.). Omit to inherit from `role_type_defaults`. |
+| `temperature` | float | no | Sampling temperature — overrides the tier-level default |
+| `max_tokens` | int | no | Max output tokens — overrides the tier-level default |
+| `tools` | list | no | Tool names this stage may call — filters the registry to only these names; empty means no tool access |
+| `skills` | list | no | Skill names |
+
+**Tool calling**
+
+When a stage declares `tools`, the LLM can invoke those tools natively during its response. The harness runs a ReAct-style dispatch loop: if the model returns tool calls, each is executed via the tool registry, results are fed back, and the model is called again — repeating until the model gives a final text/JSON response or the iteration limit (default 10) is reached.
+
+```yaml
+- id: researcher
+  role:
+    name: Researcher
+    type: researcher
+    description: |
+      Research the given topic. Use the search tool to find relevant information
+      before writing your summary.
+    tools: [search, http_get]   # only these tools are visible and callable
+  output_mode: text
+  depends_on: []
+```
+
+Rules:
+- Only tool names listed in `role.tools` are exposed — other registered tools are invisible to this stage
+- Tool names not present in the registry are silently skipped (a typo won't crash the run)
+- Providers in `_NO_STRUCTURED_OUTPUT` (Ollama) do not receive native tool specs in the API call; they still see a `## Available Tools` section in the system prompt but cannot make structured tool calls
+- The dispatch loop resets its iteration counter on tier escalation
+
+**Stage fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `output_mode` | string | `text`, `json`, or `guided_json` (see §6) |
+| `output_schema` | object | JSON Schema — required for `guided_json` |
+| `depends_on` | list | Stage IDs this stage waits for |
+| `on_fail` | object | Retry configuration (see §9) |
+| `condition` | string | Skip this stage if condition evaluates false |
+
+---
+
+### 4.2 Script/adapter stage
+
+A script stage runs a Python function or shell command. It requires an `adapter` defined at the top level and referenced by name.
+
+```yaml
+adapters:
+  fetch_data:
+    name: fetch_data
+    type: script
+    cmd: "python scripts/fetch.py --source {{ source_url }}"
+
+stages:
+  - id: fetch
+    adapter: fetch_data
+    depends_on: []
+```
+
+**Adapter fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Adapter identifier |
+| `type` | string | `script` or `python` |
+| `cmd` | string | Shell command to run |
+| `fn` | string | Python callable path (for `type: python`) |
+| `args` | object | Static arguments merged into context |
+
+Script stage output is passed downstream as a dict under the stage's id.
+
+---
+
+### 4.3 Human gate
+
+A human gate pauses execution for human review. The run blocks until the operator responds.
+
+```yaml
+- id: approval
+  gate: human
+  present: |
+    Please review the proposed plan before we proceed.
+
+    PLAN:
+    {{ planner.content }}
+
+    Approve to continue, or provide feedback to revise.
+  depends_on: [planner]
+```
+
+The `present` field supports Jinja2 template syntax — you can embed upstream stage outputs directly in the approval prompt using `{{ stage_id.field }}`.
+
+**Output:** `{"approved": true, "feedback": null}` or `{"approved": false, "feedback": "the operator's text"}`. Downstream stages can branch on `approval.approved`.
+
+---
+
+### 4.4 Direct tool call stage
+
+A `tool_call` stage invokes a registered tool directly — no LLM involved. This is ideal for deterministic steps where you know exactly which tool to call and with what arguments.
+
+```yaml
+- id: scan
+  tool_call:
+    name: my_scanner          # registered tool name
+    args:
+      dir: "{{ workspace }}"  # Jinja2-rendered against context
+      timeout: 30             # non-string values pass through unchanged
+  depends_on: []
+```
+
+The tool's return value is stored in context under the stage id, exactly like an LLM stage result. Downstream stages can reference it with `{{ scan.some_field }}`.
+
+**When to use over an LLM stage:**
+- You already know which tool to call (no reasoning needed)
+- The step is deterministic and must not hallucinate arguments
+- You want to avoid an LLM call and its latency/cost
+
+The tool must be registered with the harness — either via the `tools:` spec section (see §3) or by calling `harness._registry.register(...)` after construction.
+
+---
+
+### 4.5 Subagent stage
+
+A subagent stage spawns a child workflow (another spec file) as a nested execution. The child receives the current context as its inputs.
+
+```yaml
+- id: deep_analysis
+  subagent_spec: workflows/deep_analysis.yml
+  depends_on: [initial_scan]
+```
+
+The child spec is itself a full `HarnessSpec` — it can have its own model tiers, stages, and safety rules. Its final context dict is returned as the subagent stage's result.
+
+**Variables:** The child spec is loaded with the current context as Jinja2 variables, so any `{{ variable }}` in the child spec resolves from the parent's context.
+
+#### Fan-out / Fan-in
+
+Subagent stages support parallel fan-out — spawn N copies of the child workflow simultaneously and merge the results.
+
+```yaml
+- id: parallel_reviews
+  subagent_spec: workflows/reviewer.yml
+  fan_out: 4                 # spawn 4 parallel child runs
+  fan_in: list               # collect results as a list
+  partition_key: documents   # split context["documents"] evenly across the 4 children
+  depends_on: [loader]
+```
+
+See §11 for full fan-out/fan-in documentation.
+
+---
+
+### 4.6 Conditional stage execution (`skip_if`)
+
+Any stage type can declare `skip_if` — a Jinja2 expression evaluated against the current context before the stage runs. If the expression renders truthy, the stage is bypassed entirely and returns `{"_skipped": True}`.
+
+```yaml
+- id: escalate
+  role:
+    name: Escalator
+    type: orchestrator
+    description: "Handle edge cases that the evaluator flagged."
+    model_tier: frontier
+  skip_if: "{{ evaluator.quality_score >= 0.9 }}"
+  depends_on: [evaluator]
+```
+
+**Expression rules:**
+- The expression is a full Jinja2 template; any Python expression Jinja2 supports is valid
+- Truthy result: the rendered string equals `true`, `1`, or `yes` (case-insensitive) — the stage is skipped
+- All other outputs (including undefined variables, which render as empty string) are falsy — the stage runs normally
+- Missing or undefined variables never cause a skip (they evaluate to empty string)
+
+**What gets skipped:**
+- The stage execution (no LLM call, no tool dispatch, no script run)
+- The retry loop (`on_fail.loop`) — skipped stages do not retry
+- Session events `stage_start` and `stage_complete` (a `stage_skipped` event is emitted instead)
+
+**Downstream access:** The skipped stage's context entry is `{"_skipped": True}`. Downstream stages that reference `{{ skipped_stage.some_field }}` receive an empty string (ChainableUndefined). Check `{{ skipped_stage._skipped }}` explicitly if downstream logic needs to branch on whether the stage ran.
+
+**Common patterns:**
+
+```yaml
+# Skip expensive analysis when a judge already gave a high score
+- id: deep_analysis
+  skip_if: "{{ judge.confidence >= 0.95 }}"
+
+# Skip a retry stage when the first attempt succeeded
+- id: retry_fetch
+  skip_if: "{{ not fetch._skipped and fetch.exit_code == 0 }}"
+
+# Skip human review in automated runs
+- id: approval_gate
+  gate: human
+  skip_if: "{{ auto_mode }}"   # auto_mode passed as input to harness.run()
+```
+
+---
+
+## 5. Role types
+
+Role type affects the preamble prepended to the system prompt by the engine. It also communicates intent to anyone reading the spec.
+
+| Type | Preamble | Use for |
+|---|---|---|
+| `worker` | "You are a focused task executor. Produce structured output that matches the required schema exactly." | Executing a bounded, well-defined task |
+| `orchestrator` | "You are coordinating a multi-step workflow. Plan carefully, delegate to appropriate tools, and track progress." | Planning and routing across sub-tasks |
+| `judge` | "You are evaluating output quality. Assess carefully, score objectively, and identify specific issues." | Critique, scoring, synthesis, adjudication |
+| `researcher` | "You are gathering and synthesizing information. Search broadly, filter for credibility, and structure your findings." | Information gathering, analysis, perspective-taking |
+
+The preamble is prepended to the role's `description`. Write `description` as if the preamble is already there — you do not need to repeat it.
+
+---
+
+## 6. Output modes
+
+| Mode | Description | When to use |
+|---|---|---|
+| `text` | Raw text response stored under `{"content": "..."}` | Freeform responses, intermediate analysis |
+| `json` | Model asked to return valid JSON; parsed automatically | Structured output without a strict schema |
+| `guided_json` | Model asked to return JSON matching `output_schema`; strictly validated | When downstream stages depend on specific fields |
+
+For `guided_json`, provide an `output_schema` as a JSON Schema object. Providers that support structured output (OpenAI, Anthropic) will use native schema enforcement. Ollama and other providers fall back to prompt-guided JSON with automatic extraction.
+
+If a `guided_json` response fails to parse, the engine escalates to the next model tier automatically.
+
+---
+
+## 7. Context and data flow
+
+The context dict is the single shared data bus for a run. Understanding how it flows is the key to writing effective specs.
+
+### Initial context
+
+```python
+result = await harness.run({
+    "topic": "renewable energy",
+    "documents": "...",
+    "user_id": "abc123",
+})
+```
+
+All keys you pass become immediately available in every stage's context.
+
+### Stage output accumulation
+
+When a stage completes, its result is stored as `context[stage_id]`. For LLM stages:
+
+- `text` mode: `context["my_stage"] = {"content": "the model's response"}`
+- `json` / `guided_json`: `context["my_stage"] = {"field1": ..., "field2": ...}`
+
+For subagent stages, the child's full result dict is stored. For `tool_call` stages, the tool's return value is stored directly.
+
+### How a stage sees context
+
+The `PromptAssembler` builds each stage's system prompt as:
+
+```
+[role type preamble]
+
+## Your Role
+[role.description]
+
+## Current Context
+- run_id: abc123
+- topic: renewable energy
+- researcher: {"findings": [...], "gaps": [...]}
+- strategist: {"opportunities": [...]}
+```
+
+Every stage sees everything accumulated before it. You do not need to explicitly pass data between stages — `depends_on` ensures ordering, and the context carries the content.
+
+### Referencing upstream output in `present` (human gates)
+
+Use Jinja2 syntax in the `present` field:
+
+```yaml
+present: "Review this plan:\n\n{{ planner.content }}"
+```
+
+### Context filtering (signature.input)
+
+By default every stage sees the entire accumulated context. For complex workflows this can include dozens of keys — some irrelevant to a specific stage, some potentially leaking internal details.
+
+Add a `signature.input` block to a stage to restrict which context keys appear in that stage's system prompt:
+
+```yaml
+- id: analyst
+  role:
+    name: Analyst
+    type: worker
+    description: |
+      Analyze the research findings and produce a structured assessment.
+  signature:
+    input:
+      topic: The research topic
+      research: The researcher's findings
+  depends_on: [research]
+```
+
+When `signature.input` is non-empty, the `PromptAssembler` strips every key not listed before building the `## Current Context` section. The values in the dict are descriptions — they document intent, not constraints.
+
+Benefits:
+
+- **Focused prompts:** The model only sees what it needs, reducing noise and token cost.
+- **Information hiding:** Internal keys (`run_id`, raw fetch output, temporary state) are not exposed.
+- **Self-documenting:** The input signature documents exactly what a stage depends on beyond `depends_on`.
+
+When `signature.input` is empty or the `signature` block is absent, all context keys are passed through (backward compatible default).
+
+---
+
+## 8. Cross-run memory
+
+Cross-run memory lets stages accumulate knowledge across multiple workflow runs. Unlike context (which resets every run), memory persists to SQLite and is injected at the start of each new run.
+
+### How it works
+
+1. **Inject:** At run start, the engine loads prior captured values and adds them to context under `inject_as` (default: `_memory`).
+2. **Use:** Stages that declare `_memory` in their `signature.input` receive the prior values in their prompt.
+3. **Capture:** After each configured stage completes, the specified output key is appended to the rolling store.
+4. **Trim:** The store keeps only the newest `max_entries` values per stage/key pair — oldest are evicted automatically.
+
+### Configuration
+
+```yaml
+memory:
+  enabled: true
+  capture:
+    - stage: synthesizer      # stage id whose output to capture
+      key: recommendation     # output key to persist
+      max_entries: 5          # rolling window — oldest evicted first
+    - stage: evaluator
+      key: quality_score
+      max_entries: 10
+  inject_as: _memory          # context key injected at run start
+  # db: /custom/path/mem.db  # override default (~/.armature/memory/<name>.db)
+```
+
+### Memory fields
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Set to `false` to disable entirely without removing the config |
+| `capture` | list | Stages and output keys to persist |
+| `inject_as` | string | Context key under which memories are injected (default: `_memory`) |
+| `db` | string | Override the default DB path (`~/.armature/memory/<workflow_name>.db`) |
+
+Each `capture` entry:
+
+| Field | Type | Description |
+|---|---|---|
+| `stage` | string | Stage id to capture from |
+| `key` | string | Output key from the stage's result dict |
+| `max_entries` | int | Max entries to keep (default: 5) |
+
+### Injected structure
+
+The context key (`_memory`) is a nested dict: `{stage_id: {capture_key: [newest, ..., oldest]}}`.
+
+For example, after five runs capturing `synthesizer.recommendation`:
+
+```python
+context["_memory"] == {
+    "synthesizer": {
+        "recommendation": [
+            "Run 5: adopt the proposal with modification X",
+            "Run 4: reject until compliance review completes",
+            "Run 3: adopt — risk is acceptable",
+            "Run 2: defer for more data",
+            "Run 1: insufficient information to decide",
+        ]
+    }
+}
+```
+
+### Making memory visible to a stage
+
+Declare `_memory` (or whatever `inject_as` is set to) in `signature.input` so the stage's system prompt includes it:
+
+```yaml
+- id: synthesizer
+  role:
+    name: Synthesizer
+    type: worker
+    description: |
+      Produce a final recommendation. If prior recommendations
+      exist in _memory, consider whether this run's findings
+      reinforce, contradict, or refine them.
+  signature:
+    input:
+      topic: The original topic
+      analyst: The structured analysis
+      evaluator: The quality evaluation
+      _memory: Prior run recommendations from memory
+  depends_on: [evaluator]
+```
+
+### Default storage location
+
+Memory is stored globally per workflow name — it survives session restarts and accumulates across all runs:
+
+```
+~/.armature/memory/<workflow_name>.db
+```
+
+To use a shared memory DB across machines or reset the rolling window, use the `db` field to point to a specific path.
+
+---
+
+## 9. Jinja2 variables in specs
+
+Spec files support Jinja2 variable substitution, applied at load time. This lets you write reusable specs that are parameterized at call time.
+
+### In Python:
+
+```python
+harness = Harness.from_spec(
+    "workflows/my_workflow.yml",
+    vars={
+        "objective": "Evaluate the vendor contract",
+        "provider": "anthropic",
+        "specialist_model": "claude-haiku-4-5-20251001",
+    }
+)
+```
+
+### In the spec:
+
+```yaml
+name: "{{ name | default('my_workflow') }}"
+
+model_tiers:
+  small:
+    provider: "{{ provider | default('anthropic') }}"
+    model: "{{ specialist_model | default('claude-haiku-4-5-20251001') }}"
+
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: |
+        Analyze the following objective and provide your findings.
+
+        OBJECTIVE: {{ objective }}
+    depends_on: []
+```
+
+### In the CLI:
+
+```bash
+armature run workflows/my_workflow.yml \
+  --input objective="Evaluate the vendor contract" \
+  --input provider=anthropic
+```
+
+**Note:** Jinja2 substitution happens at spec load time, before the Pydantic models are built. Runtime context (from `harness.run(inputs)`) is different — it flows through the context dict, not Jinja2.
+
+Use Jinja2 vars for **structural** parameterization (model names, role descriptions, workflow names). Use runtime inputs for **data** (documents, user content, query strings).
+
+---
+
+## 10. Retry and recovery
+
+Stages can be configured to retry on failure using `on_fail.loop`.
+
+```yaml
+- id: extractor
+  role:
+    name: Extractor
+    type: worker
+    model_tier: small
+    description: |
+      Extract structured data from the provided text.
+      Return valid JSON only.
+  output_mode: guided_json
+  output_schema:
+    type: object
+    required: [items]
+    properties:
+      items:
+        type: array
+        items:
+          type: string
+  on_fail:
+    loop:
+      stage: extractor      # which stage to retry (usually itself)
+      max: 2                # retry up to 2 times (3 total attempts)
+      context: retry        # context mode
+  depends_on: []
+```
+
+On each retry, the context is augmented with:
+- `_retry_attempt`: current attempt number (1-based)
+- `_last_error`: the error message from the previous failure
+
+The stage's role description can reference these to improve the retry:
+
+```yaml
+description: |
+  Extract structured data from the provided text.
+
+  {% if _retry_attempt %}
+  PREVIOUS ATTEMPT FAILED: {{ _last_error }}
+  Please correct the issue and try again.
+  {% endif %}
+```
+
+**Safety note:** `ToolBlocked` exceptions from safety rules are never retried — a policy violation will not succeed on the next attempt.
+
+---
+
+## 11. Safety rules
+
+Safety rules declaratively block, warn, or log when a tool is called with specific argument values. They are evaluated before any script/adapter stage runs.
+
+```yaml
+safety_rules:
+  - tool: shell_runner
+    condition:
+      field: cmd
+      op: contains
+      value: "rm -rf"
+    action: block
+    message: "Destructive filesystem operations are not permitted."
+
+  - tool: api_caller
+    condition:
+      field: endpoint
+      op: matches_regex
+      value: ".*/admin/.*"
+    action: warn
+    message: "Admin endpoint access — verify this is intentional."
+```
+
+### Condition operators
+
+| Operator | Description |
+|---|---|
+| `contains` | Field value contains the string |
+| `not_contains` | Field value does not contain the string |
+| `equals` | Field value exactly equals the string |
+| `not_equals` | Field value does not equal the string |
+| `matches_regex` | Field value matches the regex pattern |
+| `truthy` | Field value is truthy (non-empty, non-zero, non-null) |
+
+### Actions
+
+| Action | Behavior |
+|---|---|
+| `block` | Raise `ToolBlocked` — halts the stage, no retry |
+| `warn` | Log a warning, continue execution |
+| `log` | Log at info level, continue execution |
+
+---
+
+## 12. Fan-out / Fan-in
+
+Fan-out spawns multiple parallel copies of a subagent workflow and merges the results. This is useful for parallel analysis, ensemble evaluation, or processing a partitioned dataset.
+
+```yaml
+- id: ensemble_reviewers
+  subagent_spec: workflows/reviewer.yml
+  fan_out: 3
+  fan_in: list
+  depends_on: [loader]
+```
+
+### `fan_out`
+
+Integer ≥ 1. Number of parallel child workflow instances to spawn.
+
+### `fan_in`
+
+How to merge the list of child results:
+
+| Value | Behavior |
+|---|---|
+| `list` | (default) Returns `{"results": [result0, result1, ...]}` |
+| `merge` | Shallow-merges all child result dicts; later children overwrite earlier on key conflicts |
+| `first` | Returns only the first child's result |
+
+### `partition_key`
+
+When set, the named context key (which must be a list) is split evenly across the child instances. Each child receives a slice of the original list rather than the full list.
+
+```yaml
+- id: batch_processor
+  subagent_spec: workflows/processor.yml
+  fan_out: 4
+  fan_in: list
+  partition_key: documents    # context["documents"] is split into 4 chunks
+  depends_on: [loader]
+```
+
+If `partition_key` is not set, all children receive identical context.
+
+---
+
+## 13. Human gates in detail
+
+Human gates block execution until a person approves or provides feedback. They are appropriate at decision checkpoints, before irreversible actions, or for quality review.
+
+```yaml
+- id: final_approval
+  gate: human
+  present: |
+    ## Workflow Complete — Final Review
+
+    The workflow has produced the following recommendation:
+
+    **Decision:** {{ synthesizer.decision }}
+    **Confidence:** {{ synthesizer.confidence }}
+    **Reasoning:** {{ synthesizer.reasoning }}
+
+    Do you approve this recommendation?
+  depends_on: [synthesizer]
+```
+
+The gate prints the `present` message to stdout and prompts:
+
+```
+Approve? [yes/no/feedback]:
+```
+
+- `yes` / `y` / `approve` → `{"approved": true, "feedback": null}`
+- anything else → prompts for feedback text → `{"approved": false, "feedback": "..."}`
+
+Downstream stages can branch on the gate result using the `condition` field (not yet implemented — check the stage based on `gate_id.approved` in your application code for now).
+
+---
+
+## 14. Templates
+
+Templates are pre-built, parameterized spec files that implement proven agentic patterns. They live in `armature/templates/` and are loaded like any other spec.
+
+### Six Thinking Hats
+
+Edward de Bono's Six Thinking Hats methodology — structured multi-perspective deliberation with a mandatory facilitator and synthesizer.
+
+**DAG topology:**
+
+```
+white_hat ──► red_hat ──► black_hat ──► yellow_hat ──► green_hat
+                                                              │
+                                     ┌────────────────────────┘
+                                     ▼
+                                 blue_hat (facilitator)
+                                     │
+                                     ▼
+                                synthesizer (decision)
+```
+
+**R1 (sequential):** The six perspective hats run in a chain so each hat sees prior hats' outputs. Each hat has strict constraints on what it may and may not say:
+
+| Hat | Perspective | Constraint |
+|---|---|---|
+| White | Facts and data | No interpretation, no opinion |
+| Red | Gut feelings and intuition | No justification, no data |
+| Black | Risks and failure modes | No benefits, pure pessimist |
+| Yellow | Benefits and opportunities | No risks, pure optimist |
+| Green | Creative alternatives | No evaluation, generation only |
+
+**R2:** The Blue Hat is a *facilitator*, not an advocate. It maps tensions and alignment between the hats and produces a priority list for the Synthesizer.
+
+**R3:** The Synthesizer adjudicates the full deliberation and produces structured JSON: `{decision, reasoning, confidence, key_evidence, dissenting_opinions, risk_factors, open_questions, green_hat_considered}`.
+
+**Usage:**
+
+```python
+harness = Harness.from_spec(
+    "armature/templates/six_thinking_hats.yml",
+    vars={
+        "objective": "Should we adopt this new vendor contract?",
+        # Optional overrides:
+        "provider": "anthropic",
+        "specialist_model": "claude-haiku-4-5-20251001",  # R1 + R2
+        "synthesizer_model": "claude-sonnet-4-6",         # R3
+    }
+)
+
+result = await harness.run({
+    "documents": "Contract text and supporting materials...",
+    "background": "Additional context...",
+})
+
+synthesis = result["synthesizer"]
+print(synthesis["decision"])
+print(f"Confidence: {synthesis['confidence']}")
+```
+
+**Adding domain specialists:** To add a domain-specific analyst alongside the hats (e.g., a legal analyst for contract decisions), add a stage with `depends_on: [green_hat]` and add it to `blue_hat` and `synthesizer`'s `depends_on` lists. Start from the template and extend it.
+
+---
+
+## 15. The optimizer
+
+The optimizer reads trace history for a workflow and uses an LLM to propose improvements to prompts or model tier assignments.
+
+```bash
+armature optimize my_workflow.yml --traces ~/.armature/traces.db
+```
+
+Every LLM stage run is recorded in the trace database: model, input/output tokens, latency, whether the output parsed correctly, and a snapshot of inputs/outputs. The optimizer analyzes this history and generates a proposed unified diff.
+
+The proposed diff is always printed for review. Add `--apply` to patch the spec file in place — the original is backed up as `<spec>.orig` before patching.
+
+```bash
+# Review only (default)
+armature optimize my_workflow.yml --traces ~/.armature/traces.db
+
+# Review and apply if accepted
+armature optimize my_workflow.yml --traces ~/.armature/traces.db --apply
+```
+
+You can also run the optimizer in a loop from Python, with optional auto-apply:
+
+```python
+from armature.optimizer.runner import OptimizerRunner
+
+runner = OptimizerRunner(
+    target_spec_path="my_workflow.yml",
+    trace_db_path="~/.armature/traces.db",
+)
+
+# Run 5 optimization iterations, auto-applying accepted proposals
+loop_result = await runner.run_loop(n_iterations=5, auto_apply=True)
+print(f"Accepted: {loop_result.accepted_count}, Rejected: {loop_result.rejected_count}")
+```
+
+The optimizer requires at least 5 traces to produce a proposal. Run your workflow a few times before optimizing.
+
+---
+
+## 16. Running workflows
+
+### Python API
+
+```python
+import asyncio
+from armature import Harness
+
+# Load from a spec file
+harness = Harness.from_spec("my_workflow.yml")
+
+# Or with Jinja2 vars
+harness = Harness.from_spec(
+    "armature/templates/six_thinking_hats.yml",
+    vars={"objective": "..."}
+)
+
+# Run with inputs
+result = await harness.run({
+    "documents": "...",
+    "topic": "...",
+})
+
+# Access stage results
+print(result["my_stage_id"])
+```
+
+### Event callbacks
+
+Subscribe to stage lifecycle events during a run:
+
+```python
+def on_event(event_type: str, data: dict):
+    if event_type == "stage_start":
+        print(f"Starting: {data['stage']} ({data['kind']})")
+    elif event_type == "stage_complete":
+        print(f"Done: {data['stage']} in {data['elapsed_s']}s")
+
+harness = Harness(spec=spec, on_event=on_event)
+```
+
+### Transcript
+
+After a run, `harness.transcript` contains the full conversation log for all LLM stages:
+
+```python
+result = await harness.run(inputs)
+
+for entry in harness.transcript:
+    print(entry["stage_id"], entry["role_name"], entry["model"])
+    print(entry["response"][:200])
+```
+
+### HTTP service
+
+```bash
+armature serve --port 8080
+```
+
+The service exposes a REST API for running workflows over HTTP. Requires `pip install 'armature[service]'`.
+
+### Artifacts and session logs
+
+Each run writes to `~/.armature/runs/<run_id>/`:
+
+```
+~/.armature/runs/<run_id>/
+├── session.jsonl     # structured event log for the run
+├── traces.db         # SQLite trace store (tokens, latency, outputs)
+└── artifacts/        # any artifacts written by script stages
+```
+
+Override the session directory:
+
+```python
+from pathlib import Path
+harness = Harness(spec=spec, session_dir=Path("./my_run_output"))
+```
+
+---
+
+## 17. Integrating with a host application
+
+An Armature workflow is typically one component inside a larger application — a FastAPI service, a background job, a CLI tool — that handles user sessions, persistence, auth, and other concerns. This section describes how to wire the two together.
+
+There are three integration patterns. Pick the one that matches your deployment and coupling requirements.
+
+---
+
+### Declaring tool modules in the spec
+
+The `tools:` section lets a spec reference external Python modules by dotted import path. The harness imports each module at startup and calls its `register()` function to add tools to the registry. Tool code lives in your codebase — the spec just says which modules to load.
+
+```yaml
+tools:
+  - module: myapp.tools.search_tools
+  - module: myapp.tools.database_tools
+```
+
+Each referenced module must expose a single function:
+
+```python
+# myapp/tools/search_tools.py
+from armature.registry.registry import ToolRegistry, ToolDescriptor
+from armature.permissions.permissions import PermissionLevel
+
+async def _search(args: dict) -> dict:
+    query = args["query"]
+    # ... your search logic ...
+    return {"results": [...]}
+
+def register(registry: ToolRegistry) -> None:
+    registry.register(ToolDescriptor(
+        name="search",
+        description="Search the knowledge base",
+        permission=PermissionLevel.NETWORK,
+        handler=_search,
+        parameters={"query": {"type": "string", "description": "Search query"}},
+    ))
+```
+
+Once registered, tools are available to any LLM stage whose role lists them:
+
+```yaml
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      description: "Research the given topic using available tools."
+      tools: [search, database.lookup]
+    depends_on: []
+```
+
+**Rules:**
+- The module must be importable from wherever the harness runs (i.e. on `PYTHONPATH` or installed in the environment)
+- Missing `register` function → `AttributeError` at harness startup with a clear message
+- Module not found → `ModuleNotFoundError` at harness startup
+- A user module can re-register a builtin name — the last registration wins; this is intentional and lets you replace builtins with project-specific implementations
+
+---
+
+### Pattern A — embedded library
+
+Import Armature directly into your application. The workflow runs in the same process as the host.
+
+**Best for:** Python applications where the agentic team is a core feature, not a separate service. Single process, easiest debugging, no network round-trips.
+
+```python
+import asyncio
+from armature import Harness
+
+# Load once at startup (or per-tenant if specs vary)
+harness = Harness.from_spec("workflows/research_pipeline.yml")
+
+async def handle_research_request(topic: str, documents: str) -> dict:
+    result = await harness.run({
+        "topic": topic,
+        "documents": documents,
+    })
+    # Extract just the keys your app cares about
+    return {
+        "summary": result["synthesizer"],
+        "citations": result.get("analyst", {}).get("citations", []),
+    }
+```
+
+For sync callers (Django views, Flask routes):
+
+```python
+def handle_sync(topic: str) -> dict:
+    return asyncio.run(handle_research_request(topic, documents=""))
+```
+
+**Tradeoff:** Armature's dependencies (LiteLLM, ruamel.yaml, etc.) become your app's dependencies. Workflow failures raise exceptions in your process.
+
+---
+
+### Pattern B — HTTP sidecar
+
+Run Armature as a separate service and call it over HTTP. Your host application is language-agnostic.
+
+```bash
+# Start the sidecar (requires pip install 'armature[service]')
+armature serve --port 8080
+```
+
+```python
+import httpx
+
+async def call_workflow(inputs: dict) -> dict:
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            "http://localhost:8080/run",
+            json={"spec": "workflows/research_pipeline.yml", "inputs": inputs},
+        )
+        resp.raise_for_status()
+        return resp.json()["result"]
+```
+
+**Tradeoff:** Independent scaling and failure isolation, but adds a network hop and requires the sidecar to be running. Long-running workflows may require async polling rather than a synchronous HTTP response.
+
+---
+
+### Pattern C — subprocess
+
+Shell out to the CLI. Works from any language; useful for scripting and one-shot integrations.
+
+```python
+import subprocess, json
+
+def run_workflow(spec_path: str, inputs: dict) -> dict:
+    args = ["armature", "run", spec_path]
+    for k, v in inputs.items():
+        args += ["--input", f"{k}={v}"]
+    out = subprocess.check_output(args)
+    return json.loads(out)
+```
+
+**Tradeoff:** Simplest integration, zero shared dependencies. Poor fit for structured inputs with nested data (everything serializes to strings), and a new Python interpreter starts per call. Not suitable for latency-sensitive paths.
+
+---
+
+### Input shaping
+
+The host application maps its domain objects to the flat `vars` dict that `harness.run()` (or `--input`) accepts. The first stage's `signature.input` is the natural contract boundary — it declares exactly which keys the workflow expects.
+
+```yaml
+stages:
+  - id: analyst
+    role: ...
+    signature:
+      input:
+        topic: "The research topic"
+        documents: "Source documents to analyze"
+```
+
+This both documents the interface and filters irrelevant context from the stage's prompt. Your host application should treat `signature.input` keys as the workflow's public API:
+
+```python
+# Explicit mapping from app domain → workflow contract
+result = await harness.run({
+    "topic": request.query,          # app field → workflow key
+    "documents": "\n".join(docs),    # app list → workflow string
+})
+```
+
+For typed inputs, convert to strings before passing; use `guided_json` output stages and `signature.input` on the consuming stage if the downstream workflow needs structured data.
+
+---
+
+### Output extraction
+
+`harness.run()` returns the full context dict — every stage's output is present under its `id`. Your host application should extract only the keys it needs rather than forwarding the entire dict.
+
+```python
+result = await harness.run(inputs)
+
+# Typed extraction — the workflow contract
+summary: str    = result["synthesizer"]          # text stage output
+analysis: dict  = result["analyst"]              # guided_json stage output
+score: float    = result["evaluator"]["score"]   # nested field
+```
+
+When using `guided_json` or `text` output modes, outputs are already parsed Python objects (dict or str). `raw` mode returns the LLM's response string unparsed.
+
+If the workflow has a dedicated output stage, document its id and expected fields as the integration's response schema. Avoid reaching into intermediate stage outputs — treat those as implementation details of the workflow.
+
+---
+
+### Async lifecycle
+
+The embedded pattern is fully `async`. Common host patterns:
+
+**FastAPI** (async natively):
+```python
+@app.post("/research")
+async def research(req: ResearchRequest):
+    result = await harness.run({"topic": req.topic, "documents": req.documents})
+    return {"summary": result["synthesizer"]}
+```
+
+**Background task** (Celery / ARQ / asyncio.create_task):
+```python
+# asyncio task within a running loop
+async def background_research(job_id: str, inputs: dict):
+    result = await harness.run(inputs)
+    await db.store_result(job_id, result["synthesizer"])
+```
+
+**Persistent harness** — load the spec once at app startup, reuse the `Harness` object across requests. `harness.run()` is safe to call concurrently; each call maintains its own context and transcript internally.
+
+```python
+# At startup
+_harness = Harness.from_spec("workflows/research.yml")
+
+# Per request — concurrent calls are safe
+result = await _harness.run(request_inputs)
+```
+
+---
+
+### Error contracts
+
+When a stage exhausts its retry budget (`on_fail.loop.max`), the engine raises an exception that propagates out of `harness.run()`. Wrap calls in try/except to handle this at the host boundary:
+
+```python
+from armature.runtime.engine import StageError  # raised on unrecoverable failure
+
+try:
+    result = await harness.run(inputs)
+except StageError as e:
+    logger.error("Workflow stage failed: %s — %s", e.stage_id, e)
+    raise HTTPException(status_code=502, detail="Workflow unavailable")
+```
+
+For stages with `on_fail.loop`, the loop exhaustion is the error signal. If you need soft failure (partial results), add a final stage that consolidates whatever context is available rather than relying on exception handling in the host.

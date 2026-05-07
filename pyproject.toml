@@ -31,6 +31,10 @@ service = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
 ]
+wizard = [
+    "questionary>=2.0",
+    "rich>=13.0",
+]
 telemetry = [
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24",

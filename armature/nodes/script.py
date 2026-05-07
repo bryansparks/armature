@@ -24,7 +24,7 @@ class ScriptNode(BaseNode):
                 "Use a HumanGateNode before this stage or register a pre-tool hook."
             )
 
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=self._adapter.timeout)
         return {
             "stdout": result.stdout,
             "stderr": result.stderr,

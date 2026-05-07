@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""
+Convenience runner — use this if 'armature' is not on your PATH.
+
+  ./armature_cli new team.yml
+  ./armature_cli run my_workflow.yml --input topic="AI safety"
+  ./armature_cli optimize my_workflow.yml --apply
+
+Equivalent to: python -m armature.cli <args>
+"""
+import sys
+from armature.cli import app
+
+if __name__ == "__main__":
+    app()

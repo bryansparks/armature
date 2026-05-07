@@ -7,12 +7,11 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 async def test_trace_store_populated_after_run(tmp_path):
-    """Engine records traces for LLM stages; script stages don't record (no LLM).
+    """Engine records traces for all stage types including script stages.
 
     Run a script-only workflow and verify:
     - The harness completes without error
-    - The TraceStore wired to tmp_path produces zero LLM trace records (correct
-      behavior — script stages never call the LLM)
+    - The TraceStore wired to tmp_path records one trace with role_type="script"
     """
     harness = Harness.from_spec(
         FIXTURES / "echo-workflow.yaml",
@@ -29,12 +28,13 @@ async def test_trace_store_populated_after_run(tmp_path):
     assert "echo" in result
     assert result["echo"]["exit_code"] == 0
 
-    # Script stages do not record LLM traces, so the DB should not have been
-    # created (init() is only called by the LLM branch).
-    if trace_db.exists():
-        store = TraceStore(trace_db)
-        traces = await store.query()
-        assert traces == [], "Script-only workflow should produce zero LLM traces"
+    # Script stages now record traces with role_type="script".
+    store = TraceStore(trace_db)
+    await store.init()
+    traces = await store.query()
+    assert len(traces) >= 1, "Script stages should produce at least one trace record each"
+    assert all(t.role_type == "script" for t in traces)
+    assert all(t.success is True for t in traces)
 
 
 async def test_subagent_fan_out_end_to_end(tmp_path):

@@ -1,8 +1,9 @@
 from __future__ import annotations
+import hashlib
 import uuid
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from armature.spec.models import HarnessSpec, Stage
 from armature.spec.loader import load_spec
 from armature.runtime.dag import DAGExecutor
@@ -20,19 +21,42 @@ from armature.state.traces import TraceStore, TraceRecord
 from armature.telemetry import get_tracer
 
 
+_QUORUM_SCORE_KEYS = ("score", "quality_score", "confidence")
+
+
+def _extract_quorum_score(role_type: str, result: dict) -> float | None:
+    """Extract a 0–1 quality score from a judge stage's output for IHR tracking.
+
+    Scans result for score/quality_score/confidence (in that priority).
+    Only judge stages produce quorum scores; all other role types return None.
+    """
+    if role_type != "judge":
+        return None
+    for key in _QUORUM_SCORE_KEYS:
+        val = result.get(key)
+        if isinstance(val, (int, float)) and 0.0 <= float(val) <= 1.0:
+            return float(val)
+    return None
+
+
 class Harness:
     def __init__(
         self,
         spec: HarnessSpec,
         session_dir: Path | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ):
         self._spec = spec
+        self._spec_version = hashlib.sha256(
+            self._spec.model_dump_json().encode()
+        ).hexdigest()[:12]
         self._run_id = str(uuid.uuid4())[:8]
         base_dir = Path(session_dir or f"~/.armature/runs/{self._run_id}").expanduser()
         self._session = SessionLog(base_dir / "session.jsonl")
         self._artifacts = ArtifactStore(base_dir / "artifacts")
         self._registry = ToolRegistry()
         register_builtins(self._registry)
+        self._load_tool_modules()
         self._hooks = HookRegistry()
         if self._spec.safety_rules:
             from armature.hooks.lifecycle import SafetyHookBuilder
@@ -41,6 +65,36 @@ class Harness:
         self._assembler = PromptAssembler()
         self._session_dir = base_dir
         self._traces = TraceStore(base_dir / "traces.db")
+        self._on_event = on_event
+        self._transcript: list[dict[str, Any]] = []
+
+        mem_cfg = self._spec.memory
+        if mem_cfg and mem_cfg.enabled:
+            from armature.state.memory import MemoryStore
+            if mem_cfg.db:
+                mem_path = Path(mem_cfg.db).expanduser()
+            else:
+                mem_path = Path(f"~/.armature/memory/{self._spec.name}.db").expanduser()
+            self._memory_store: "MemoryStore | None" = MemoryStore(mem_path)
+            self._memory_config = mem_cfg
+        else:
+            self._memory_store = None
+            self._memory_config = None
+
+    def _load_tool_modules(self) -> None:
+        import importlib
+        for tool_mod in self._spec.tools:
+            mod = importlib.import_module(tool_mod.module)
+            if not hasattr(mod, "register"):
+                raise AttributeError(
+                    f"Tool module '{tool_mod.module}' must expose a "
+                    "`register(registry: ToolRegistry) -> None` function"
+                )
+            mod.register(self._registry)
+
+    @property
+    def transcript(self) -> list[dict[str, Any]]:
+        return self._transcript
 
     @property
     def name(self) -> str:
@@ -59,12 +113,27 @@ class Harness:
     async def _execute_stage(self, stage: Stage, context: dict[str, Any]) -> Any:
         await self._session.append(SessionEvent(type="stage_start", data={"stage": stage.id}))
 
+        if self._on_event:
+            if stage.gate:
+                stage_kind = "gate"
+            elif stage.tool_call:
+                stage_kind = "tool_call"
+            elif stage.adapter:
+                stage_kind = "script"
+            else:
+                stage_kind = "llm"
+            role_label = f"{stage.role.name} ({stage.role.type.value})" if stage.role else None
+            self._on_event("stage_start", {"stage": stage.id, "kind": stage_kind, "role": role_label})
+
         decision = await self._hooks.run_pre_stage(stage.id, context)
         if decision == HookDecision.BLOCK:
             raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
 
         t0 = time.monotonic()
         tracer = get_tracer()
+
+        _llm_node: "LLMNode | None" = None
+        _stage_type = "unknown"
 
         _stage_succeeded = False
         try:
@@ -74,13 +143,21 @@ class Harness:
             ) as span:
                 try:
                     if stage.gate == "human":
+                        _stage_type = "gate"
                         node = HumanGateNode(stage=stage)
                         result = await node.execute(context)
                     elif stage.subagent_spec:
+                        _stage_type = "subagent"
                         from armature.nodes.subagent import SubagentNode
                         node = SubagentNode(stage=stage, session_dir=self._session_dir)
                         result = await node.execute(context)
+                    elif stage.tool_call:
+                        _stage_type = "tool_call"
+                        from armature.nodes.tool_call import ToolCallNode
+                        node = ToolCallNode(stage=stage, registry=self._registry)
+                        result = await node.execute(context)
                     elif stage.adapter:
+                        _stage_type = "script"
                         adapter = self._spec.adapters.get(stage.adapter)
                         if adapter is None:
                             raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
@@ -94,14 +171,32 @@ class Harness:
                             raise ToolBlocked(stage.adapter, adapter.cmd or "", "blocked by safety rule")
                         result = await node.execute(context)
                         await self._hooks.run_post_tool(stage.adapter, result, context)
+                        await self._ensure_traces()
+                        script_latency = (time.monotonic() - t0) * 1000
+                        await self._traces.record(TraceRecord(
+                            run_id=self._run_id,
+                            workflow_name=self._spec.name,
+                            stage_id=stage.id,
+                            role_type="script",
+                            model="",
+                            latency_ms=script_latency,
+                            success=result.get("exit_code", 0) == 0,
+                            output_valid=True,
+                            spec_version=self._spec_version,
+                            inputs={k: str(v)[:200] for k, v in context.items()},
+                            outputs={k: str(v)[:200] for k, v in result.items()},
+                        ))
                     elif stage.role:
-                        node = LLMNode(
+                        _stage_type = "llm"
+                        _llm_node = LLMNode(
                             stage=stage,
                             tiers=self._spec.model_tiers,
+                            role_type_defaults=self._spec.role_type_defaults,
                             assembler=self._assembler,
                             registry=self._registry,
+                            transcript=self._transcript,
                         )
-                        result = await node.execute(context)
+                        result = await _llm_node.execute(context)
                         await self._ensure_traces()
                         latency = (time.monotonic() - t0) * 1000
                         span.set_attribute("latency_ms", latency)
@@ -111,23 +206,49 @@ class Harness:
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type=stage.role.type.value,
-                            model=node._resolve_model(),
+                            model=_llm_node._resolve_model(),
                             input_tokens=result.pop("_input_tokens", 0),
                             output_tokens=result.pop("_output_tokens", 0),
                             latency_ms=latency,
                             success=True,
                             output_valid=output_valid,
+                            quorum_score=_extract_quorum_score(stage.role.type.value, result),
+                            escalation_count=result.pop("_escalation_count", 0),
+                            spec_version=self._spec_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
                         ))
                     else:
-                        raise ValueError(f"Stage '{stage.id}' has no role, adapter, or gate")
+                        raise ValueError(
+                            f"Stage '{stage.id}' has no role, adapter, gate, or tool_call"
+                        )
 
                     _stage_succeeded = True
                     span.set_attribute("success", True)
                 except Exception as exc:
                     span.record_exception(exc)
                     span.set_attribute("success", False)
+                    if _stage_type in ("llm", "script"):
+                        try:
+                            await self._ensure_traces()
+                            _fail_latency = (time.monotonic() - t0) * 1000
+                            _fail_role = stage.role.type.value if _stage_type == "llm" else "script"
+                            _fail_model = (_llm_node._resolve_model() if _llm_node else "unknown") if _stage_type == "llm" else ""
+                            await self._traces.record(TraceRecord(
+                                run_id=self._run_id,
+                                workflow_name=self._spec.name,
+                                stage_id=stage.id,
+                                role_type=_fail_role,
+                                model=_fail_model,
+                                latency_ms=_fail_latency,
+                                success=False,
+                                output_valid=False,
+                                error_type=type(exc).__name__,
+                                spec_version=self._spec_version,
+                                inputs={k: str(v)[:200] for k, v in context.items()},
+                            ))
+                        except Exception:
+                            pass  # telemetry must never block execution
                     raise
         except Exception:
             if not _stage_succeeded:
@@ -135,14 +256,45 @@ class Harness:
             # else: OTel span.__exit__ raised — swallow, execution continues
 
         await self._hooks.run_post_stage(stage.id, result, context)
+
+        if self._memory_store is not None and self._memory_config is not None:
+            for cap in self._memory_config.capture:
+                if cap.stage == stage.id:
+                    value = result.get(cap.key) if isinstance(result, dict) else None
+                    if value is not None:
+                        try:
+                            await self._memory_store.record(
+                                workflow_name=self._spec.name,
+                                stage_id=stage.id,
+                                capture_key=cap.key,
+                                value=value,
+                                max_entries=cap.max_entries,
+                            )
+                        except Exception:
+                            pass  # memory capture must never block execution
+
         await self._session.append(SessionEvent(
             type="stage_complete", data={"stage": stage.id, "result": str(result)[:500]}
         ))
+
+        if self._on_event:
+            elapsed = round(time.monotonic() - t0, 1)
+            self._on_event("stage_complete", {"stage": stage.id, "elapsed_s": elapsed})
+
         return result
 
     async def _execute_stage_with_recovery(
         self, stage: Stage, context: dict[str, Any]
     ) -> Any:
+        if stage.skip_if is not None:
+            from jinja2 import ChainableUndefined, Environment, BaseLoader
+            env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+            rendered = env.from_string(stage.skip_if).render(**context).strip().lower()
+            if rendered in ("true", "1", "yes"):
+                if self._on_event:
+                    self._on_event("stage_skipped", {"stage": stage.id})
+                return {"_skipped": True}
+
         if stage.on_fail is None or stage.on_fail.loop is None:
             return await self._execute_stage(stage, context)
 
@@ -170,6 +322,11 @@ class Harness:
     async def run(self, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         context = dict(inputs or {})
         context["run_id"] = self._run_id
+
+        if self._memory_store is not None:
+            await self._memory_store.init()
+            memories = await self._memory_store.load(self._spec.name)
+            context[self._memory_config.inject_as] = memories  # type: ignore[union-attr]
 
         tracer = get_tracer()
         with tracer.start_as_current_span(
