@@ -185,6 +185,56 @@ def test_fan_out_with_partition_source_passes():
     assert validate_spec(spec, strict=False) == []
 
 
+def test_fan_out_zero_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"),
+                      fan_out=0, partition_source="{{ items }}", depends_on=[])],
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "INVALID_FAN_OUT" in codes(errors)
+
+
+def test_fan_out_negative_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"),
+                      fan_out=-3, partition_source="{{ items }}", depends_on=[])],
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "INVALID_FAN_OUT" in codes(errors)
+
+
+def test_fan_out_one_passes():
+    spec = _valid_spec(stages=[Stage(
+        id="s", tool_call=ToolCallConfig(name="t"),
+        fan_out=1, partition_source="{{ items }}", depends_on=[],
+    )])
+    assert validate_spec(spec, strict=False) == []
+
+
+def test_inject_file_as_without_partition_source_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"),
+                      inject_file_as="body", depends_on=[])],
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "INJECT_FILE_MISSING_PARTITION_SOURCE" in codes(errors)
+
+
+def test_inject_file_as_with_partition_source_passes():
+    spec = _valid_spec(stages=[Stage(
+        id="s", tool_call=ToolCallConfig(name="t"),
+        fan_out=2, partition_source="{{ files }}",
+        inject_file_as="body", depends_on=[],
+    )])
+    assert validate_spec(spec, strict=False) == []
+
+
 # ── on_fail.loop stage reference ──────────────────────────────────────────────
 
 def test_on_fail_loop_undefined_stage_detected():

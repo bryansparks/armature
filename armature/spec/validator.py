@@ -103,6 +103,18 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 message="Stage has partition_source set but fan_out is missing",
                 stage_id=stage.id,
             ))
+        if stage.fan_out is not None and stage.fan_out < 1:
+            errors.append(SpecError(
+                code="INVALID_FAN_OUT",
+                message=f"fan_out must be >= 1, got {stage.fan_out}",
+                stage_id=stage.id,
+            ))
+        if stage.inject_file_as is not None and stage.partition_source is None:
+            errors.append(SpecError(
+                code="INJECT_FILE_MISSING_PARTITION_SOURCE",
+                message="inject_file_as only has effect inside a fan-out stage; partition_source is missing",
+                stage_id=stage.id,
+            ))
 
     # ── on_fail.loop points to a valid stage ──────────────────────────────
     for stage in spec.stages:
