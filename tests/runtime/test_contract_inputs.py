@@ -9,14 +9,14 @@ from armature.registry.registry import ToolDescriptor
 from armature.permissions.permissions import PermissionLevel
 
 
-def _make_harness(stages: list[Stage], contracts: Contract, tmp_path: Path) -> Harness:
+def _make_harness(stages: list[Stage], contracts: Contract, tmp_path: Path, *, validate: bool = True) -> Harness:
     spec = HarnessSpec(
         name="test_wf",
         stages=stages,
         contracts=contracts,
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    h = Harness(spec=spec, session_dir=tmp_path)
+    h = Harness(spec=spec, session_dir=tmp_path, validate=validate)
     for s in stages:
         if s.tool_call:
             async def noop(args): return {"ok": True}
@@ -76,9 +76,11 @@ def test_validate_inputs_empty_list_always_passes(tmp_path):
 
 
 def test_validate_inputs_skips_entries_without_name(tmp_path):
+    # validate=False: this test checks runtime tolerance for malformed specs,
+    # but the validator (correctly) flags missing "name" as an error.
     harness = _make_harness([_stage()], Contract(inputs=[
-        {"required": True}  # no "name" — skip silently
-    ]), tmp_path)
+        {"required": True}  # no "name" — skip silently at runtime
+    ]), tmp_path, validate=False)
     harness._validate_inputs({})
 
 

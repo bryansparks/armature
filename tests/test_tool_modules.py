@@ -12,7 +12,7 @@ from armature.permissions.permissions import PermissionLevel
 def _make_spec(tool_modules: list[str]) -> HarnessSpec:
     return HarnessSpec.model_validate({
         "name": "test_wf",
-        "stages": [{"id": "s1", "depends_on": []}],
+        "stages": [{"id": "s1", "tool_call": {"name": "noop"}, "depends_on": []}],
         "tools": [{"module": m} for m in tool_modules],
     })
 

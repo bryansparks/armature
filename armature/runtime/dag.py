@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 from collections import defaultdict, deque
 from typing import Callable, Any
 
@@ -34,6 +35,13 @@ def topological_order(deps: dict[str, list[str]]) -> list[str]:
 
 
 class DAGExecutor:
+    """Execute a DAG of async handlers, running independent stages concurrently.
+
+    Stages whose dependencies have all completed form a "ready wave" and are
+    launched together via asyncio.gather. Results are merged into a shared
+    context dict after each wave, so downstream stages see all upstream outputs.
+    """
+
     def __init__(
         self,
         handlers: dict[str, Callable],
@@ -43,14 +51,37 @@ class DAGExecutor:
         self._deps = deps
 
     async def run(self, initial_ctx: dict[str, Any]) -> dict[str, Any]:
-        order = topological_order(self._deps)
         results: dict[str, Any] = dict(initial_ctx)
 
-        for stage_id in order:
-            if stage_id not in self._handlers:
-                continue
-            handler = self._handlers[stage_id]
-            stage_result = await handler(results)
-            results[stage_id] = stage_result
+        stage_ids = set(self._handlers.keys())
+
+        # remaining[s] = set of dependency stage ids still to complete
+        remaining: dict[str, set[str]] = {
+            sid: {d for d in self._deps.get(sid, []) if d in stage_ids}
+            for sid in stage_ids
+        }
+        completed: set[str] = set()
+
+        while len(completed) < len(stage_ids):
+            # Stages whose all dependencies are satisfied
+            wave = [
+                sid for sid in stage_ids
+                if sid not in completed and not remaining[sid] - completed
+            ]
+
+            if not wave:
+                raise ValueError(
+                    "DAG deadlock — all remaining stages have unresolvable dependencies"
+                )
+
+            # Run this wave concurrently; raise immediately on first failure
+            async def _run_one(sid: str) -> tuple[str, Any]:
+                return sid, await self._handlers[sid](results)
+
+            wave_results = await asyncio.gather(*[_run_one(sid) for sid in wave])
+
+            for sid, result in wave_results:
+                results[sid] = result
+                completed.add(sid)
 
         return results

@@ -46,7 +46,13 @@ class Harness:
         spec: HarnessSpec,
         session_dir: Path | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        *,
+        validate: bool = True,
     ):
+        if validate:
+            from armature.spec.validator import validate_spec
+            validate_spec(spec)
+
         self._spec = spec
         self._spec_version = hashlib.sha256(
             self._spec.model_dump_json().encode()
@@ -341,7 +347,7 @@ class Harness:
         return list(results)
 
     async def _run_with_retry(self, stage: Stage, context: dict[str, Any]) -> Any:
-        """Execute stage with optional on_fail.loop retry. Does not handle timeout or fail_as_value."""
+        """Execute stage with optional on_fail.loop retry and exponential backoff."""
         if stage.on_fail is None or stage.on_fail.loop is None:
             return await self._execute_stage(stage, context)
 
@@ -363,6 +369,12 @@ class Harness:
                         "_retry_attempt": attempt + 1,
                         "_last_error": str(exc),
                     }
+                    if loop_cfg.backoff_s is not None:
+                        delay = min(
+                            loop_cfg.backoff_s * (2 ** attempt),
+                            loop_cfg.backoff_max_s,
+                        )
+                        await asyncio.sleep(delay)
 
         raise last_exc  # type: ignore[misc]
 

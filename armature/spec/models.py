@@ -82,6 +82,8 @@ class LoopConfig(BaseModel):
     context: str = "retry"
     max: int = 3
     until: str | None = None
+    backoff_s: float | None = None   # initial wait before retry 1; doubles each subsequent attempt
+    backoff_max_s: float = 60.0      # cap on per-attempt wait time
 
 
 class OnFailConfig(BaseModel):
