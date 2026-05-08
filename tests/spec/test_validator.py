@@ -307,6 +307,51 @@ def test_strict_false_returns_errors_without_raising():
     assert len(errors) > 0
 
 
+# ── Contract.outputs validation ───────────────────────────────────────────────
+
+def test_contract_output_missing_stage_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[_valid_stage()],
+        contracts=Contract(outputs=[{"key": "result", "required": True}]),  # no "stage"
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "CONTRACT_OUTPUT_MISSING_STAGE" in codes(errors)
+
+
+def test_contract_output_undefined_stage_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[_valid_stage()],
+        contracts=Contract(outputs=[{"stage": "nonexistent", "key": "x", "required": True}]),
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "CONTRACT_OUTPUT_UNDEFINED_STAGE" in codes(errors)
+
+
+def test_contract_output_missing_key_detected():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[_valid_stage()],
+        contracts=Contract(outputs=[{"stage": "s", "required": True}]),  # no "key"
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "CONTRACT_OUTPUT_MISSING_KEY" in codes(errors)
+
+
+def test_contract_output_valid_passes():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[_valid_stage()],
+        contracts=Contract(outputs=[{"stage": "s", "key": "result", "required": True}]),
+        model_tiers=_small_tiers(),
+    )
+    assert validate_spec(spec, strict=False) == []
+
+
 # ── Harness constructor integration ──────────────────────────────────────────
 
 def test_harness_raises_on_invalid_spec(tmp_path):

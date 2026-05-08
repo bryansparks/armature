@@ -138,6 +138,29 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 stage_id=None,
             ))
 
+    # ── Contract.outputs reference valid stage ids and have a key ─────────
+    for i, out in enumerate(spec.contracts.outputs):
+        if "stage" not in out:
+            errors.append(SpecError(
+                code="CONTRACT_OUTPUT_MISSING_STAGE",
+                message=f"contracts.outputs[{i}] is missing the 'stage' field",
+                stage_id=None,
+            ))
+        elif out["stage"] not in stage_ids:
+            errors.append(SpecError(
+                code="CONTRACT_OUTPUT_UNDEFINED_STAGE",
+                message=(
+                    f"contracts.outputs[{i}] references unknown stage '{out['stage']}'"
+                ),
+                stage_id=None,
+            ))
+        if "key" not in out:
+            errors.append(SpecError(
+                code="CONTRACT_OUTPUT_MISSING_KEY",
+                message=f"contracts.outputs[{i}] is missing the 'key' field",
+                stage_id=None,
+            ))
+
     if strict and errors:
         raise SpecValidationError(errors)
 

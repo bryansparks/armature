@@ -9,14 +9,14 @@ from armature.registry.registry import ToolDescriptor
 from armature.permissions.permissions import PermissionLevel
 
 
-def _make_harness(stages, contracts, tmp_path) -> Harness:
+def _make_harness(stages, contracts, tmp_path, *, validate=True) -> Harness:
     spec = HarnessSpec(
         name="wf",
         stages=stages,
         contracts=contracts,
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    h = Harness(spec=spec, session_dir=tmp_path)
+    h = Harness(spec=spec, session_dir=tmp_path, validate=validate)
     for s in stages:
         if s.tool_call:
             async def noop(args): return {"ok": True}
@@ -68,21 +68,23 @@ def test_validate_outputs_skips_optional(tmp_path):
 
 
 def test_validate_outputs_skips_entry_without_stage(tmp_path):
+    # validate=False: runtime is lenient, but spec validator catches missing "stage"
     harness = _make_harness(
         [Stage(id="s", tool_call=ToolCallConfig(name="s"), depends_on=[])],
         Contract(outputs=[{"key": "result", "required": True}]),  # no "stage"
-        tmp_path,
+        tmp_path, validate=False,
     )
-    harness._validate_outputs({"s": {}})  # skips silently
+    harness._validate_outputs({"s": {}})  # skips silently at runtime
 
 
 def test_validate_outputs_skips_entry_without_key(tmp_path):
+    # validate=False: runtime is lenient, but spec validator catches missing "key"
     harness = _make_harness(
         [Stage(id="s", tool_call=ToolCallConfig(name="s"), depends_on=[])],
         Contract(outputs=[{"stage": "s", "required": True}]),  # no "key"
-        tmp_path,
+        tmp_path, validate=False,
     )
-    harness._validate_outputs({"s": {}})  # skips silently
+    harness._validate_outputs({"s": {}})  # skips silently at runtime
 
 
 def test_validate_outputs_empty_list_always_passes(tmp_path):
@@ -95,10 +97,11 @@ def test_validate_outputs_empty_list_always_passes(tmp_path):
 
 
 def test_validate_outputs_missing_stage_in_results_raises(tmp_path):
+    # validate=False: testing runtime raises when referenced stage has no results
     harness = _make_harness(
         [Stage(id="s", tool_call=ToolCallConfig(name="s"), depends_on=[])],
         Contract(outputs=[{"stage": "missing_stage", "key": "x", "required": True}]),
-        tmp_path,
+        tmp_path, validate=False,
     )
     with pytest.raises(ValueError, match="missing_stage"):
         harness._validate_outputs({"s": {"x": "val"}})
