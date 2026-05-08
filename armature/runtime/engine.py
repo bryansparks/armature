@@ -96,6 +96,7 @@ class Harness:
         else:
             self._checkpoint = None
         self._checkpoint_prior: dict[str, Any] = {}
+        self._llm_call_count: int = 0
 
     def _load_tool_modules(self) -> None:
         import importlib
@@ -204,6 +205,13 @@ class Harness:
                         ))
                     elif stage.role:
                         _stage_type = "llm"
+                        limit = self._spec.contracts.max_llm_calls
+                        if limit > 0 and self._llm_call_count >= limit:
+                            raise RuntimeError(
+                                f"max_llm_calls limit ({limit}) reached — "
+                                f"stage '{stage.id}' cannot execute"
+                            )
+                        self._llm_call_count += 1
                         _llm_node = LLMNode(
                             stage=stage,
                             tiers=self._spec.model_tiers,
@@ -589,7 +597,16 @@ class Harness:
             _run_t0 = time.monotonic()
             handlers = {s.id: await make_handler(s) for s in self._spec.stages}
             executor = DAGExecutor(handlers, deps)
-            results = await executor.run(context)
+            timeout_s = self._spec.contracts.timeout_hours * 3600
+            try:
+                results = await asyncio.wait_for(
+                    executor.run(context), timeout=timeout_s
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(
+                    f"Workflow '{self._spec.name}' exceeded "
+                    f"timeout_hours={self._spec.contracts.timeout_hours}"
+                )
             self._validate_outputs(results)
 
             await self._session.append(SessionEvent(type="run_complete", data={"run_id": self._run_id}))
