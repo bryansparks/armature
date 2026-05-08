@@ -133,13 +133,28 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         if getattr(spec.model_tiers, name) is not None
     }
     for stage in spec.stages:
-        if stage.role is not None and stage.role.model_tier is not None:
-            if stage.role.model_tier not in defined_tiers:
-                errors.append(SpecError(
-                    code="UNDEFINED_MODEL_TIER",
-                    message=f"Role references model_tier '{stage.role.model_tier}' which is not defined in model_tiers",
-                    stage_id=stage.id,
-                ))
+        if stage.role is not None:
+            if stage.role.model_tier is not None:
+                if stage.role.model_tier not in defined_tiers:
+                    errors.append(SpecError(
+                        code="UNDEFINED_MODEL_TIER",
+                        message=f"Role references model_tier '{stage.role.model_tier}' which is not defined in model_tiers",
+                        stage_id=stage.id,
+                    ))
+            elif defined_tiers:
+                # No explicit model_tier — will resolve through role_type_defaults.
+                # Only flag misconfiguration when the spec has at least one tier defined;
+                # a spec with no model_tiers at all is not necessarily broken (e.g. tests).
+                default_tier = getattr(spec.role_type_defaults, stage.role.type.value, None)
+                if default_tier and default_tier not in defined_tiers:
+                    errors.append(SpecError(
+                        code="DEFAULT_TIER_NOT_CONFIGURED",
+                        message=(
+                            f"Role type '{stage.role.type.value}' defaults to tier '{default_tier}' "
+                            f"(from role_type_defaults) but that tier is not defined in model_tiers"
+                        ),
+                        stage_id=stage.id,
+                    ))
 
     # ── Contract.inputs entries have required name field ──────────────────
     for i, inp in enumerate(spec.contracts.inputs):

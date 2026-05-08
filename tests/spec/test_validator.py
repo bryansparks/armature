@@ -288,13 +288,64 @@ def test_defined_model_tier_passes():
 
 
 def test_null_model_tier_not_checked():
-    # role.model_tier=None means "use default" — should not trigger validation
+    # role.model_tier=None means "use default" — no error when default tier is configured
     spec = _valid_spec(stages=[Stage(
         id="s",
         role=Role(name="r", type=RoleType.WORKER, description="d"),
         depends_on=[],
     )])
     assert validate_spec(spec, strict=False) == []
+
+
+# ── DEFAULT_TIER_NOT_CONFIGURED ───────────────────────────────────────────────
+
+def test_default_tier_not_configured_detected():
+    """Worker role with no explicit model_tier uses role_type_defaults.worker='small',
+    but small is not configured in model_tiers (frontier IS configured) →
+    DEFAULT_TIER_NOT_CONFIGURED. The check only fires when at least one tier is defined."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(
+            id="s",
+            role=Role(name="r", type=RoleType.WORKER, description="d"),
+            depends_on=[],
+        )],
+        model_tiers=ModelTiers(
+            frontier=ModelTierConfig(provider="anthropic", model="claude-opus-4-7")
+        ),  # frontier configured but not small
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "DEFAULT_TIER_NOT_CONFIGURED" in codes(errors)
+    stage_errors = [e for e in errors if e.code == "DEFAULT_TIER_NOT_CONFIGURED"]
+    assert stage_errors[0].stage_id == "s"
+
+
+def test_default_tier_configured_passes():
+    """Worker role with no explicit model_tier — default 'small' is configured."""
+    spec = _valid_spec(stages=[Stage(
+        id="s",
+        role=Role(name="r", type=RoleType.WORKER, description="d"),
+        depends_on=[],
+    )])
+    errors = validate_spec(spec, strict=False)
+    assert "DEFAULT_TIER_NOT_CONFIGURED" not in codes(errors)
+
+
+def test_explicit_tier_triggers_undefined_not_default_check():
+    """Stage with explicit model_tier='xlarge' triggers UNDEFINED_MODEL_TIER,
+    not DEFAULT_TIER_NOT_CONFIGURED."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(
+            id="s",
+            role=Role(name="r", type=RoleType.WORKER, description="d", model_tier="xlarge"),
+            depends_on=[],
+        )],
+        model_tiers=_small_tiers(),
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_MODEL_TIER" in codes(errors)
+    assert "DEFAULT_TIER_NOT_CONFIGURED" not in codes(errors)
 
 
 # ── Contract.inputs name field ────────────────────────────────────────────────
