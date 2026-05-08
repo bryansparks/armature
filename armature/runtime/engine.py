@@ -444,13 +444,24 @@ class Harness:
                 self._on_event("stage_resumed", {"stage": stage.id})
             return self._checkpoint_prior[stage.id]
 
+        # Evaluate skip_if (negative gate) and condition (positive gate).
+        # condition is the inverse: stage runs only when truthy, skips when falsy.
+        # Both are evaluated; if either triggers a skip, the stage is skipped.
+        from jinja2 import ChainableUndefined, Environment, BaseLoader
+        _jinja_env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+
         if stage.skip_if is not None:
-            from jinja2 import ChainableUndefined, Environment, BaseLoader
-            env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
-            rendered = env.from_string(stage.skip_if).render(**context).strip().lower()
+            rendered = _jinja_env.from_string(stage.skip_if).render(**context).strip().lower()
             if rendered in ("true", "1", "yes"):
                 if self._on_event:
-                    self._on_event("stage_skipped", {"stage": stage.id})
+                    self._on_event("stage_skipped", {"stage": stage.id, "reason": "skip_if"})
+                return {"_skipped": True}
+
+        if stage.condition is not None:
+            rendered = _jinja_env.from_string(stage.condition).render(**context).strip().lower()
+            if rendered not in ("true", "1", "yes"):
+                if self._on_event:
+                    self._on_event("stage_skipped", {"stage": stage.id, "reason": "condition"})
                 return {"_skipped": True}
 
         if stage.partition_source is not None:
@@ -509,6 +520,20 @@ class Harness:
             if inp.get("required", False) and (name not in context or context[name] is None):
                 raise ValueError(f"Required input '{name}' missing from context")
 
+    def _validate_outputs(self, results: dict[str, Any]) -> None:
+        for out in self._spec.contracts.outputs:
+            stage_id = out.get("stage")
+            key = out.get("key")
+            if stage_id is None or key is None:
+                continue
+            if not out.get("required", False):
+                continue
+            stage_result = results.get(stage_id)
+            if not isinstance(stage_result, dict) or stage_result.get(key) is None:
+                raise ValueError(
+                    f"Required output '{key}' from stage '{stage_id}' missing or None in results"
+                )
+
     async def run(
         self,
         inputs: dict[str, Any] | None = None,
@@ -553,6 +578,7 @@ class Harness:
             handlers = {s.id: await make_handler(s) for s in self._spec.stages}
             executor = DAGExecutor(handlers, deps)
             results = await executor.run(context)
+            self._validate_outputs(results)
 
             await self._session.append(SessionEvent(type="run_complete", data={"run_id": self._run_id}))
 
