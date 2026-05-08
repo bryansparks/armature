@@ -58,6 +58,7 @@ class Contract(BaseModel):
     max_iterations: int = 20
     max_llm_calls: int = 100
     timeout_hours: float = 8.0
+    output_max_chars: int | None = None  # default per-stage output truncation limit
 
 
 class Signature(BaseModel):
@@ -144,6 +145,7 @@ class Stage(BaseModel):
     partition_key: str | None = None    # context variable name for each partition item
     partition_source: str | None = None # Jinja2 expression resolving to a list of items
     inject_file_as: str | None = None   # if set, read each item as a file path and inject content under this key
+    output_max_chars: int | None = None # per-stage override; truncates stored result; falls back to contracts.output_max_chars
 
 
 class TraceConfig(BaseModel):
@@ -178,6 +180,7 @@ class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
     description: str = ""
+    checkpoint: bool = False             # persist completed stage results for resume across runs
     contracts: Contract = Field(default_factory=Contract)
     roles: dict[str, Role] = Field(default_factory=dict)
     stages: list[Stage]

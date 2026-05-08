@@ -82,6 +82,15 @@ class Harness:
             self._memory_store = None
             self._memory_config = None
 
+        if self._spec.checkpoint:
+            from armature.runtime.checkpoint import CheckpointStore
+            self._checkpoint: "CheckpointStore | None" = CheckpointStore(
+                base_dir / "checkpoint.json"
+            )
+        else:
+            self._checkpoint = None
+        self._checkpoint_prior: dict[str, Any] = {}
+
     def _load_tool_modules(self) -> None:
         import importlib
         for tool_mod in self._spec.tools:
@@ -357,9 +366,34 @@ class Harness:
 
         raise last_exc  # type: ignore[misc]
 
+    def _effective_output_limit(self, stage: Stage) -> int | None:
+        if stage.output_max_chars is not None:
+            return stage.output_max_chars
+        return self._spec.contracts.output_max_chars
+
+    def _maybe_truncate(self, stage: Stage, result: Any) -> Any:
+        limit = self._effective_output_limit(stage)
+        if limit is None:
+            return result
+        from armature.runtime.truncation import truncate_result
+        return truncate_result(result, limit)
+
+    def _checkpoint_write(self, stage_id: str, result: Any) -> None:
+        if self._checkpoint is None:
+            return
+        self._checkpoint.write(stage_id, result, self._checkpoint_prior)
+        self._checkpoint_prior[stage_id] = result
+
     async def _execute_stage_with_recovery(
         self, stage: Stage, context: dict[str, Any]
     ) -> Any:
+        # Return cached result from a prior run (checkpoint resume).
+        # Skip conditions are not checkpointed — they are re-evaluated each run.
+        if self._checkpoint is not None and stage.id in self._checkpoint_prior:
+            if self._on_event:
+                self._on_event("stage_resumed", {"stage": stage.id})
+            return self._checkpoint_prior[stage.id]
+
         if stage.skip_if is not None:
             from jinja2 import ChainableUndefined, Environment, BaseLoader
             env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
@@ -370,33 +404,67 @@ class Harness:
                 return {"_skipped": True}
 
         if stage.partition_source is not None:
-            return await self._execute_fan_out_stage(stage, context)
+            result = await self._execute_fan_out_stage(stage, context)
+            result = self._maybe_truncate(stage, result)
+            self._checkpoint_write(stage.id, result)
+            return result
 
         try:
             coro = self._run_with_retry(stage, context)
             if stage.timeout_s is not None:
-                return await asyncio.wait_for(coro, timeout=stage.timeout_s)
-            return await coro
+                result = await asyncio.wait_for(coro, timeout=stage.timeout_s)
+            else:
+                result = await coro
+            result = self._maybe_truncate(stage, result)
+            self._checkpoint_write(stage.id, result)
+            return result
         except asyncio.TimeoutError:
             if stage.fail_as_value:
-                return {
+                failed = {
                     "_failed": True,
                     "_failed_reason": f"timed out after {stage.timeout_s}s",
                     "_failed_type": "TimeoutError",
                 }
+                self._checkpoint_write(stage.id, failed)
+                return failed
             raise TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
         except Exception as exc:
             if stage.fail_as_value:
-                return {
+                failed = {
                     "_failed": True,
                     "_failed_reason": str(exc),
                     "_failed_type": type(exc).__name__,
                 }
+                self._checkpoint_write(stage.id, failed)
+                return failed
             raise
 
-    async def run(self, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _validate_inputs(self, context: dict[str, Any]) -> None:
+        for inp in self._spec.contracts.inputs:
+            name = inp.get("name")
+            if name is None:
+                continue
+            if inp.get("required", False) and (name not in context or context[name] is None):
+                raise ValueError(f"Required input '{name}' missing from context")
+
+    async def run(
+        self,
+        inputs: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
         context = dict(inputs or {})
         context["run_id"] = self._run_id
+        self._validate_inputs(context)
+
+        # Load prior checkpoint results so downstream stages can reference them
+        if self._checkpoint is not None and not force:
+            self._checkpoint_prior: dict[str, Any] = self._checkpoint.load()
+            context.update(self._checkpoint_prior)
+        else:
+            self._checkpoint_prior = {}
+            if self._checkpoint is not None and force:
+                self._checkpoint.clear()
 
         if self._memory_store is not None:
             await self._memory_store.init()
