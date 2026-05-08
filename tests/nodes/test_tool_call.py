@@ -103,10 +103,11 @@ def test_render_args_resolves_nested_context():
     assert result["path"] == "/tmp/run-42/scan"
 
 
-def test_render_args_undefined_variable_empty_string():
+def test_render_args_undefined_variable_is_falsy():
+    # NativeEnvironment returns ChainableUndefined (not "") for missing vars
     args = {"dir": "{{ missing_var }}"}
     result = _render_args(args, {})
-    assert result["dir"] == ""
+    assert not result["dir"]
 
 
 def test_render_args_no_templates_returns_unchanged():

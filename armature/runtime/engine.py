@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import hashlib
 import uuid
 import time
@@ -330,21 +331,8 @@ class Harness:
         results = await asyncio.gather(*[_run_one(item) for item in items])
         return list(results)
 
-    async def _execute_stage_with_recovery(
-        self, stage: Stage, context: dict[str, Any]
-    ) -> Any:
-        if stage.skip_if is not None:
-            from jinja2 import ChainableUndefined, Environment, BaseLoader
-            env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
-            rendered = env.from_string(stage.skip_if).render(**context).strip().lower()
-            if rendered in ("true", "1", "yes"):
-                if self._on_event:
-                    self._on_event("stage_skipped", {"stage": stage.id})
-                return {"_skipped": True}
-
-        if stage.partition_source is not None:
-            return await self._execute_fan_out_stage(stage, context)
-
+    async def _run_with_retry(self, stage: Stage, context: dict[str, Any]) -> Any:
+        """Execute stage with optional on_fail.loop retry. Does not handle timeout or fail_as_value."""
         if stage.on_fail is None or stage.on_fail.loop is None:
             return await self._execute_stage(stage, context)
 
@@ -368,6 +356,43 @@ class Harness:
                     }
 
         raise last_exc  # type: ignore[misc]
+
+    async def _execute_stage_with_recovery(
+        self, stage: Stage, context: dict[str, Any]
+    ) -> Any:
+        if stage.skip_if is not None:
+            from jinja2 import ChainableUndefined, Environment, BaseLoader
+            env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+            rendered = env.from_string(stage.skip_if).render(**context).strip().lower()
+            if rendered in ("true", "1", "yes"):
+                if self._on_event:
+                    self._on_event("stage_skipped", {"stage": stage.id})
+                return {"_skipped": True}
+
+        if stage.partition_source is not None:
+            return await self._execute_fan_out_stage(stage, context)
+
+        try:
+            coro = self._run_with_retry(stage, context)
+            if stage.timeout_s is not None:
+                return await asyncio.wait_for(coro, timeout=stage.timeout_s)
+            return await coro
+        except asyncio.TimeoutError:
+            if stage.fail_as_value:
+                return {
+                    "_failed": True,
+                    "_failed_reason": f"timed out after {stage.timeout_s}s",
+                    "_failed_type": "TimeoutError",
+                }
+            raise TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
+        except Exception as exc:
+            if stage.fail_as_value:
+                return {
+                    "_failed": True,
+                    "_failed_reason": str(exc),
+                    "_failed_type": type(exc).__name__,
+                }
+            raise
 
     async def run(self, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         context = dict(inputs or {})

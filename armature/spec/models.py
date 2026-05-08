@@ -135,6 +135,8 @@ class Stage(BaseModel):
     present: str | None = None
     condition: str | None = None
     skip_if: str | None = None                    # Jinja2 expr; stage skipped when it renders truthy
+    timeout_s: float | None = None                # wall-clock limit for the whole stage (incl. retries)
+    fail_as_value: bool = False                   # on failure, return {"_failed": True, ...} instead of raising
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
     subagent_spec: str | None = None              # Path to child workflow spec file
     fan_out: int | None = None          # max parallelism; if set, stage fans out over partition_source
