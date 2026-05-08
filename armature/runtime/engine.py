@@ -346,37 +346,68 @@ class Harness:
         results = await asyncio.gather(*[_run_one(item) for item in items])
         return list(results)
 
+    @staticmethod
+    def _eval_until(expr: str, result: Any, context: dict[str, Any]) -> bool:
+        """Evaluate a Jinja2 `until` expression against stage result + context.
+
+        The result's keys (if it's a dict) are merged into the template context
+        so authors can write `until: "{{ status == 'done' }}"` directly.
+        """
+        from jinja2 import Environment, BaseLoader, ChainableUndefined
+        env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+        eval_ctx = {**context}
+        if isinstance(result, dict):
+            eval_ctx.update(result)
+        else:
+            eval_ctx["_result"] = result
+        rendered = env.from_string(expr).render(**eval_ctx).strip().lower()
+        return rendered in ("true", "1", "yes")
+
     async def _run_with_retry(self, stage: Stage, context: dict[str, Any]) -> Any:
-        """Execute stage with optional on_fail.loop retry and exponential backoff."""
+        """Execute stage with optional on_fail.loop retry, until condition, and backoff."""
         if stage.on_fail is None or stage.on_fail.loop is None:
             return await self._execute_stage(stage, context)
 
         loop_cfg = stage.on_fail.loop
         last_exc: Exception | None = None
+        last_result: Any = None
         retry_ctx = dict(context)
 
         for attempt in range(loop_cfg.max + 1):
             try:
-                return await self._execute_stage(stage, retry_ctx)
+                result = await self._execute_stage(stage, retry_ctx)
+                last_result = result
+                last_exc = None
             except Exception as exc:
                 from armature.hooks.lifecycle import ToolBlocked
                 if isinstance(exc, ToolBlocked):
                     raise  # policy violation — retrying won't change the outcome
                 last_exc = exc
-                if attempt < loop_cfg.max:
-                    retry_ctx = {
-                        **retry_ctx,
-                        "_retry_attempt": attempt + 1,
-                        "_last_error": str(exc),
-                    }
-                    if loop_cfg.backoff_s is not None:
-                        delay = min(
-                            loop_cfg.backoff_s * (2 ** attempt),
-                            loop_cfg.backoff_max_s,
-                        )
-                        await asyncio.sleep(delay)
 
-        raise last_exc  # type: ignore[misc]
+            # Stop if successful and until condition satisfied (or no until condition)
+            if last_exc is None:
+                if loop_cfg.until is None or self._eval_until(loop_cfg.until, last_result, retry_ctx):
+                    return last_result
+
+            # Need another attempt — update context and apply backoff
+            if attempt < loop_cfg.max:
+                update: dict[str, Any] = {"_retry_attempt": attempt + 1}
+                if last_exc is not None:
+                    update["_last_error"] = str(last_exc)
+                elif last_result is not None:
+                    update["_last_result"] = last_result
+                retry_ctx = {**retry_ctx, **update}
+                if loop_cfg.backoff_s is not None:
+                    delay = min(
+                        loop_cfg.backoff_s * (2 ** attempt),
+                        loop_cfg.backoff_max_s,
+                    )
+                    await asyncio.sleep(delay)
+
+        # Loop exhausted
+        if last_exc is not None:
+            raise last_exc
+        return last_result  # until never satisfied — return best result
 
     def _effective_output_limit(self, stage: Stage) -> int | None:
         if stage.output_max_chars is not None:
