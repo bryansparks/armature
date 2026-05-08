@@ -397,6 +397,13 @@ class Harness:
                 elif last_result is not None:
                     update["_last_result"] = last_result
                 retry_ctx = {**retry_ctx, **update}
+                if self._on_event:
+                    self._on_event("retry_attempt", {
+                        "stage": stage.id,
+                        "attempt": attempt + 1,
+                        "max": loop_cfg.max,
+                        "reason": str(last_exc) if last_exc else "until condition not satisfied",
+                    })
                 if loop_cfg.backoff_s is not None:
                     delay = min(
                         loop_cfg.backoff_s * (2 ** attempt),
@@ -468,6 +475,12 @@ class Harness:
                     "_failed_reason": f"timed out after {stage.timeout_s}s",
                     "_failed_type": "TimeoutError",
                 }
+                if self._on_event:
+                    self._on_event("stage_failed", {
+                        "stage": stage.id,
+                        "type": "TimeoutError",
+                        "reason": failed["_failed_reason"],
+                    })
                 self._checkpoint_write(stage.id, failed)
                 return failed
             raise TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
@@ -478,6 +491,12 @@ class Harness:
                     "_failed_reason": str(exc),
                     "_failed_type": type(exc).__name__,
                 }
+                if self._on_event:
+                    self._on_event("stage_failed", {
+                        "stage": stage.id,
+                        "type": type(exc).__name__,
+                        "reason": str(exc),
+                    })
                 self._checkpoint_write(stage.id, failed)
                 return failed
             raise
@@ -530,9 +549,34 @@ class Harness:
                     return await self._execute_stage_with_recovery(stage, ctx)
                 return handler
 
+            _run_t0 = time.monotonic()
             handlers = {s.id: await make_handler(s) for s in self._spec.stages}
             executor = DAGExecutor(handlers, deps)
             results = await executor.run(context)
 
             await self._session.append(SessionEvent(type="run_complete", data={"run_id": self._run_id}))
+
+            if self._on_event:
+                stage_ids = [s.id for s in self._spec.stages]
+                n_resumed = sum(1 for sid in stage_ids if sid in self._checkpoint_prior)
+                n_skipped = sum(
+                    1 for sid in stage_ids
+                    if isinstance(results.get(sid), dict) and results[sid].get("_skipped")
+                )
+                n_failed = sum(
+                    1 for sid in stage_ids
+                    if isinstance(results.get(sid), dict) and results[sid].get("_failed")
+                )
+                n_ran = len(stage_ids) - n_resumed - n_skipped
+                self._on_event("run_summary", {
+                    "run_id": self._run_id,
+                    "workflow": self._spec.name,
+                    "elapsed_s": round(time.monotonic() - _run_t0, 2),
+                    "stages_total": len(stage_ids),
+                    "stages_ran": n_ran,
+                    "stages_skipped": n_skipped,
+                    "stages_resumed": n_resumed,
+                    "stages_failed": n_failed,
+                })
+
             return results
