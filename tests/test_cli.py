@@ -168,3 +168,46 @@ def test_on_event_retry_attempt_prints():
 def test_on_event_stage_failed_prints():
     cb = _make_on_event(quiet=False)
     cb("stage_failed", {"stage": "s1", "type": "ValueError", "reason": "something went wrong"})
+
+
+# ── armature run (actual execution) ──────────────────────────────────────────
+
+def test_run_echo_workflow_produces_json():
+    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hello"])
+    assert result.exit_code == 0
+    # JSON output on stdout
+    output = result.output
+    # Find the JSON block (after the progress lines)
+    json_start = output.find("{")
+    assert json_start >= 0, f"No JSON found in output: {output!r}"
+    data = json.loads(output[json_start:])
+    assert data["echo"]["exit_code"] == 0
+    assert "hello" in data["echo"]["stdout"]
+
+
+def test_run_echo_workflow_quiet_suppresses_progress():
+    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hi", "--quiet"])
+    assert result.exit_code == 0
+    # Quiet mode: no "Running:", no "→", no "✓" progress
+    assert "Running:" not in result.output
+    assert "→" not in result.output
+    # But JSON result is still emitted
+    data = json.loads(result.output)
+    assert data["echo"]["exit_code"] == 0
+
+
+def test_run_echo_workflow_output_file(tmp_path):
+    out = tmp_path / "result.json"
+    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=file", "--output", str(out)])
+    assert result.exit_code == 0
+    assert out.exists()
+    data = json.loads(out.read_text())
+    assert data["echo"]["exit_code"] == 0
+
+
+def test_run_echo_workflow_stage_events_in_output():
+    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=events"])
+    assert result.exit_code == 0
+    assert "→ echo" in result.output
+    assert "✓ echo" in result.output
+    assert "Done in" in result.output
