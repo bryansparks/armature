@@ -32,11 +32,78 @@ def parse_inputs(raw: list[str]) -> dict:
     return result
 
 
+def _make_on_event(quiet: bool):
+    """Return an on_event callback that prints live progress."""
+    if quiet:
+        return None
+
+    def on_event(event_type: str, data: dict) -> None:
+        if event_type == "stage_start":
+            kind = data.get("kind", "?")
+            role = f" [{data['role']}]" if data.get("role") else ""
+            typer.echo(f"  → {data['stage']} ({kind}){role}")
+        elif event_type == "stage_complete":
+            typer.echo(f"  ✓ {data['stage']} ({data['elapsed_s']}s)")
+        elif event_type == "stage_skipped":
+            reason = data.get("reason", "")
+            typer.echo(f"  - {data['stage']} [skipped: {reason}]")
+        elif event_type == "stage_resumed":
+            typer.echo(f"  ↩ {data['stage']} [resumed from checkpoint]")
+        elif event_type == "stage_failed":
+            typer.echo(f"  ✗ {data['stage']} [{data['type']}]: {data['reason'][:80]}", err=True)
+        elif event_type == "retry_attempt":
+            typer.echo(f"  ⟳ {data['stage']} retry {data['attempt']}/{data['max']}: {data['reason'][:60]}")
+        elif event_type == "run_summary":
+            typer.echo(
+                f"\nDone in {data['elapsed_s']}s — "
+                f"{data['stages_ran']} ran, "
+                f"{data['stages_skipped']} skipped, "
+                f"{data['stages_resumed']} resumed, "
+                f"{data['stages_failed']} failed"
+            )
+
+    return on_event
+
+
+@app.command()
+def validate(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+):
+    """Validate a workflow spec file and report all errors."""
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    from armature.spec.loader import load_spec
+    from armature.spec.validator import validate_spec, SpecValidationError
+
+    try:
+        loaded = load_spec(spec)
+    except Exception as exc:
+        typer.echo(f"Failed to parse spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    errors = validate_spec(loaded, strict=False)
+
+    if not errors:
+        typer.echo(f"✓ '{loaded.name}' is valid ({len(loaded.stages)} stages)")
+        return
+
+    typer.echo(f"✗ '{loaded.name}' has {len(errors)} validation error(s):\n", err=True)
+    for e in errors:
+        stage_label = f"  stage='{e.stage_id}'" if e.stage_id else ""
+        typer.echo(f"  [{e.code}]{stage_label}: {e.message}", err=True)
+    raise typer.Exit(1)
+
+
 @app.command()
 def run(
     spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
     inputs: list[str] = typer.Option([], "--input", "-i", help="Input values as key=value"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate spec without executing"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output"),
+    output_file: Path = typer.Option(None, "--output", "-o", help="Write result JSON to file"),
+    force: bool = typer.Option(False, "--force", help="Ignore checkpoint and rerun all stages"),
 ):
     """Run a workflow from a YAML spec file."""
     if not spec.exists():
@@ -44,20 +111,35 @@ def run(
         raise typer.Exit(1)
 
     parsed_inputs = parse_inputs(inputs)
-    harness = Harness.from_spec(spec, vars=parsed_inputs)
+
+    from armature.spec.validator import SpecValidationError
+    try:
+        harness = Harness.from_spec(spec, vars=parsed_inputs)
+    except SpecValidationError as exc:
+        typer.echo(f"Spec validation failed:\n{exc}", err=True)
+        raise typer.Exit(1)
 
     if dry_run:
-        typer.echo(f"Spec '{harness.name}' loaded successfully ({len(harness._spec.stages)} stages)")
+        typer.echo(f"✓ Spec '{harness.name}' is valid ({len(harness._spec.stages)} stages)")
         typer.echo("Dry run — no execution.")
         return
 
-    typer.echo(f"Running workflow: {harness.name}")
+    if not quiet:
+        typer.echo(f"Running: {harness.name}")
+    harness._on_event = _make_on_event(quiet)
 
     async def _run():
-        return await harness.run(parsed_inputs)
+        return await harness.run(parsed_inputs, force=force)
 
     result = asyncio.run(_run())
-    typer.echo(json.dumps(result, indent=2, default=str))
+
+    result_json = json.dumps(result, indent=2, default=str)
+    if output_file:
+        output_file.write_text(result_json)
+        if not quiet:
+            typer.echo(f"Result written to {output_file}")
+    else:
+        typer.echo(result_json)
 
 
 @app.command()
