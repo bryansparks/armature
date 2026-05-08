@@ -283,6 +283,53 @@ class Harness:
 
         return result
 
+    async def _execute_fan_out_stage(
+        self, stage: Stage, context: dict[str, Any]
+    ) -> list[Any]:
+        """Run a fan-out stage: execute the LLM/tool once per item in partition_source.
+
+        The partition_source Jinja2 expression must resolve to a Python list.
+        Each item is bound to partition_key in a per-item context copy.
+        If inject_file_as is set, each item is treated as a file path whose
+        content is read and added to context under that key.
+        Concurrency is bounded by the fan_out integer (default 20).
+        Per-item exceptions are caught and reported as empty results so a single
+        failing file never aborts the entire fan-out.
+        """
+        import asyncio
+        from pathlib import Path as _Path
+        from jinja2.nativetypes import NativeEnvironment
+        from jinja2 import ChainableUndefined
+
+        env = NativeEnvironment(undefined=ChainableUndefined)
+        items = env.from_string(stage.partition_source).render(**context)
+
+        if not isinstance(items, (list, tuple)):
+            raise ValueError(
+                f"Stage '{stage.id}' partition_source resolved to "
+                f"{type(items).__name__}, expected list"
+            )
+
+        max_concurrent = stage.fan_out or 20
+        semaphore = asyncio.Semaphore(max_concurrent)
+        partition_key = stage.partition_key or "item"
+
+        async def _run_one(item: Any) -> Any:
+            async with semaphore:
+                per_ctx = {**context, partition_key: item}
+                if stage.inject_file_as is not None:
+                    try:
+                        per_ctx[stage.inject_file_as] = _Path(str(item)).read_text(errors="replace")
+                    except Exception:
+                        per_ctx[stage.inject_file_as] = ""
+                try:
+                    return await self._execute_stage(stage, per_ctx)
+                except Exception as exc:
+                    return {"_fan_out_error": str(exc), "vulnerabilities": []}
+
+        results = await asyncio.gather(*[_run_one(item) for item in items])
+        return list(results)
+
     async def _execute_stage_with_recovery(
         self, stage: Stage, context: dict[str, Any]
     ) -> Any:
@@ -294,6 +341,9 @@ class Harness:
                 if self._on_event:
                     self._on_event("stage_skipped", {"stage": stage.id})
                 return {"_skipped": True}
+
+        if stage.partition_source is not None:
+            return await self._execute_fan_out_stage(stage, context)
 
         if stage.on_fail is None or stage.on_fail.loop is None:
             return await self._execute_stage(stage, context)

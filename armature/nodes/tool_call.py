@@ -25,11 +25,18 @@ class ToolCallNode(BaseNode):
 
 
 def _render_args(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """Jinja2-render string values in args against context. Non-strings pass through."""
+    """Jinja2-render string values in args against context.
+
+    Uses NativeEnvironment so that expressions like {{ analyze_file }} return the
+    actual Python object (list, dict, etc.) rather than a string representation.
+    Templates with surrounding text (e.g. /tmp/argus-{{ run_id }}) still return strings.
+    Non-string arg values pass through unchanged.
+    """
     if not any(isinstance(v, str) and "{{" in v for v in args.values()):
         return args
-    from jinja2 import ChainableUndefined, Environment, BaseLoader
-    env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+    from jinja2.nativetypes import NativeEnvironment
+    from jinja2 import ChainableUndefined
+    env = NativeEnvironment(undefined=ChainableUndefined)
     rendered = {}
     for k, v in args.items():
         if isinstance(v, str) and "{{" in v:

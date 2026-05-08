@@ -137,9 +137,11 @@ class Stage(BaseModel):
     skip_if: str | None = None                    # Jinja2 expr; stage skipped when it renders truthy
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
     subagent_spec: str | None = None              # Path to child workflow spec file
-    fan_out: int | None = None
+    fan_out: int | None = None          # max parallelism; if set, stage fans out over partition_source
     fan_in: Literal["list", "merge", "first"] = "list"
-    partition_key: str | None = None
+    partition_key: str | None = None    # context variable name for each partition item
+    partition_source: str | None = None # Jinja2 expression resolving to a list of items
+    inject_file_as: str | None = None   # if set, read each item as a file path and inject content under this key
 
 
 class TraceConfig(BaseModel):
