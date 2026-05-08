@@ -343,8 +343,20 @@ class Harness:
                 except Exception as exc:
                     return {"_fan_out_error": str(exc), "vulnerabilities": []}
 
-        results = await asyncio.gather(*[_run_one(item) for item in items])
-        return list(results)
+        raw = await asyncio.gather(*[_run_one(item) for item in items])
+        results = list(raw)
+
+        strategy = stage.fan_in
+        if strategy == "merge":
+            merged: dict[str, Any] = {}
+            for r in results:
+                if isinstance(r, dict):
+                    merged.update(r)
+            return merged
+        if strategy == "first":
+            return results[0] if results else {}
+        # "list" (default): return the raw list
+        return results
 
     @staticmethod
     def _eval_until(expr: str, result: Any, context: dict[str, Any]) -> bool:
