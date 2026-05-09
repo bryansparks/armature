@@ -203,3 +203,54 @@ async def test_fan_in_merge_result_accessible_downstream(tmp_path):
     result = await harness.run({"items": ["a", "b"]})
     assert isinstance(result["gather"], dict)  # merged, not list
     assert result["agg"]["total"] == 42
+
+
+# ── Error handling ────────────────────────────────────────────────────────────
+
+async def test_partition_source_non_list_raises_value_error(tmp_path):
+    """If partition_source resolves to non-list, ValueError is raised."""
+    async def t(args): return {"ok": True}
+
+    harness = _make_harness([Stage(
+        id="s",
+        tool_call=ToolCallConfig(name="t"),
+        partition_source="{{ not_a_list }}",  # will resolve to a string
+        partition_key="item",
+        fan_out=2,
+        depends_on=[],
+    )], tmp_path)
+    _register(harness, "t", t)
+
+    with pytest.raises(ValueError, match="expected list"):
+        await harness.run({"not_a_list": "string-value"})
+
+
+async def test_per_item_exception_caught_as_fan_out_error(tmp_path):
+    """A failing item returns _fan_out_error key rather than aborting all items."""
+    call_count = 0
+
+    async def fail_on_second(args):
+        nonlocal call_count
+        call_count += 1
+        if args.get("item") == "bad":
+            raise RuntimeError("item failed")
+        return {"item": args.get("item"), "ok": True}
+
+    harness = _make_harness([Stage(
+        id="s",
+        tool_call=ToolCallConfig(name="proc", args={"item": "{{ item }}"}),
+        partition_source="{{ items }}",
+        partition_key="item",
+        fan_out=2,
+        fan_in="list",
+        depends_on=[],
+    )], tmp_path)
+    _register(harness, "proc", fail_on_second)
+
+    result = await harness.run({"items": ["good", "bad"]})
+    results = result["s"]
+    assert len(results) == 2
+    good = next(r for r in results if r.get("ok"))
+    bad = next(r for r in results if "_fan_out_error" in r)
+    assert good["item"] == "good"
+    assert "item failed" in bad["_fan_out_error"]
