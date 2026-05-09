@@ -118,3 +118,32 @@ async def test_run_missing_required_input_returns_500(app, tmp_path):
         })
     assert response.status_code == 500
     assert "repo" in response.json()["detail"]
+
+
+async def test_health_returns_version(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/health")
+    assert response.json()["version"] == "0.1.0"
+
+
+async def test_run_spec_not_found_detail_contains_path(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/run", json={
+            "spec_path": "/does/not/exist.yaml",
+            "inputs": {},
+        })
+    assert response.status_code == 404
+    assert "exist.yaml" in response.json()["detail"]
+
+
+async def test_run_result_echo_stdout_contains_message(app, tmp_path):
+    """The echo stage stdout should contain the message context variable."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/run", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "unique-payload-abc"},
+            "session_dir": str(tmp_path),
+        })
+    assert response.status_code == 200
+    echo_stdout = response.json()["result"]["echo"]["stdout"]
+    assert "unique-payload-abc" in echo_stdout

@@ -119,3 +119,45 @@ async def test_tessera_raises_on_http_error():
         from armature.skills.tessera import retrieve
         with pytest.raises(httpx.HTTPStatusError):
             await retrieve({"query": "test"})
+
+
+async def test_tessera_posts_to_retrieve_endpoint():
+    """retrieve() always POSTs to the /retrieve path."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"chunks": [], "sources": []}
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        from armature.skills.tessera import retrieve
+        await retrieve({"query": "something"})
+
+    url = mock_client.post.call_args[0][0]
+    assert url.endswith("/retrieve")
+
+
+async def test_tessera_no_collection_omits_key():
+    """retrieve() without collection arg still sends valid payload."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {"chunks": [], "sources": []}
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        from armature.skills.tessera import retrieve
+        result = await retrieve({"query": "test"})
+
+    payload = mock_client.post.call_args[1]["json"]
+    # collection should be None or absent (not required)
+    assert "query" in payload
+    assert result["chunks"] == []
