@@ -74,3 +74,22 @@ def test_no_compaction_below_budget():
         mgr.add_message("user", f"msg {i}")
     assert len(mgr.messages()) == 5
     assert mgr.estimated_tokens() < 10000
+
+
+def test_estimated_tokens_proportional_to_length():
+    """Token estimate grows with message length."""
+    mgr = ContextManager(token_budget=10000)
+    mgr.add_message("user", "a" * 400)
+    assert mgr.estimated_tokens() > 90  # 400 chars / 4 + 1 = 101
+
+
+def test_compaction_trims_to_at_most_keep_recent_plus_summary():
+    """When many long messages are added, at most keep_recent + summary remain."""
+    mgr = ContextManager(token_budget=20, keep_recent=1)
+    for i in range(5):
+        mgr.add_message("user", f"message {i} with extra padding here")
+    msgs = mgr.messages()
+    # With keep_recent=1, compaction should keep [summary, last_msg] at minimum
+    assert any(m["role"] == "system" for m in msgs)
+    # Total should be small since budget is tight
+    assert len(msgs) <= 3
