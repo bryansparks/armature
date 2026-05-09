@@ -1,7 +1,10 @@
 from armature.spec.models import (
     HarnessSpec, Stage, Role, Contract, Failure, Adapter,
     ModelTier, ModelTierConfig, RoleType, OutputMode,
-    SafetyCondition, ToolSafetyRule,
+    SafetyCondition, ToolSafetyRule, LoopConfig, OnFailConfig,
+    ModelTiers, RoleTypeDefaults, FileState, TraceConfig,
+    MemoryCapture, MemoryConfig, ToolModule, ToolCallConfig,
+    Signature,
 )
 import pytest
 
@@ -124,3 +127,219 @@ def test_stage_fan_in_first():
 def test_stage_fan_out_none_means_single():
     stage = Stage(id="s1", subagent_spec="child.yaml", fan_out=None)
     assert stage.fan_out is None
+
+
+# ── LoopConfig ────────────────────────────────────────────────────────────────
+
+def test_loop_config_defaults():
+    lc = LoopConfig(stage="my_stage")
+    assert lc.context == "retry"
+    assert lc.max == 3
+    assert lc.until is None
+    assert lc.backoff_s is None
+    assert lc.backoff_max_s == 60.0
+
+
+def test_loop_config_with_backoff():
+    lc = LoopConfig(stage="s", backoff_s=2.0, backoff_max_s=30.0, max=5)
+    assert lc.backoff_s == 2.0
+    assert lc.backoff_max_s == 30.0
+    assert lc.max == 5
+
+
+def test_on_fail_config_with_loop():
+    lc = LoopConfig(stage="retry_stage", max=2)
+    ofc = OnFailConfig(loop=lc)
+    assert ofc.loop is not None
+    assert ofc.loop.stage == "retry_stage"
+
+
+def test_on_fail_config_empty():
+    ofc = OnFailConfig()
+    assert ofc.loop is None
+
+
+# ── Failure ───────────────────────────────────────────────────────────────────
+
+def test_failure_defaults():
+    f = Failure(condition="exit_code != 0", recovery="retry")
+    assert f.max_retries == 3
+    assert f.condition == "exit_code != 0"
+    assert f.recovery == "retry"
+
+
+# ── ModelTiers / RoleTypeDefaults ─────────────────────────────────────────────
+
+def test_model_tiers_all_none_by_default():
+    mt = ModelTiers()
+    assert mt.tiny is None
+    assert mt.small is None
+    assert mt.frontier is None
+
+
+def test_model_tiers_partial():
+    mt = ModelTiers(
+        small=ModelTierConfig(provider="openai", model="gpt-4o-mini"),
+        frontier=ModelTierConfig(provider="anthropic", model="claude-opus-4-7"),
+    )
+    assert mt.medium is None
+    assert mt.small.model == "gpt-4o-mini"
+    assert mt.frontier.model == "claude-opus-4-7"
+
+
+def test_role_type_defaults_custom():
+    rtd = RoleTypeDefaults(worker="tiny", orchestrator="large")
+    assert rtd.worker == "tiny"
+    assert rtd.orchestrator == "large"
+    assert rtd.judge == "frontier"  # unchanged default
+
+
+def test_role_type_defaults_default_values():
+    rtd = RoleTypeDefaults()
+    assert rtd.worker == "small"
+    assert rtd.orchestrator == "frontier"
+    assert rtd.judge == "frontier"
+    assert rtd.researcher == "large"
+
+
+# ── FileState / TraceConfig ───────────────────────────────────────────────────
+
+def test_file_state_defaults():
+    fs = FileState()
+    assert fs.enabled is False
+    assert "{{run_id}}" in fs.base
+    assert fs.workspace == "workspace/"
+
+
+def test_trace_config_defaults():
+    tc = TraceConfig()
+    assert tc.enabled is True
+    assert tc.metrics == []
+    assert "{{run_id}}" in tc.filesystem
+
+
+# ── MemoryCapture / MemoryConfig ─────────────────────────────────────────────
+
+def test_memory_capture_defaults():
+    mc = MemoryCapture(stage="summarize", key="summary")
+    assert mc.max_entries == 5
+    assert mc.stage == "summarize"
+    assert mc.key == "summary"
+
+
+def test_memory_config_defaults():
+    mc = MemoryConfig()
+    assert mc.enabled is True
+    assert mc.capture == []
+    assert mc.inject_as == "_memory"
+    assert mc.db is None
+
+
+def test_harness_spec_memory_none_by_default():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"))],
+    )
+    assert spec.memory is None
+
+
+def test_harness_spec_memory_configured():
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"))],
+        memory=MemoryConfig(
+            enabled=True,
+            capture=[MemoryCapture(stage="s", key="result", max_entries=3)],
+            inject_as="_ctx_memory",
+        ),
+    )
+    assert spec.memory is not None
+    assert spec.memory.inject_as == "_ctx_memory"
+    assert spec.memory.capture[0].max_entries == 3
+
+
+# ── Stage extras ──────────────────────────────────────────────────────────────
+
+def test_stage_partition_source_and_inject():
+    stage = Stage(
+        id="process",
+        subagent_spec="child.yaml",
+        partition_source="{{ documents }}",
+        inject_file_as="doc_content",
+    )
+    assert stage.partition_source == "{{ documents }}"
+    assert stage.inject_file_as == "doc_content"
+
+
+def test_stage_output_schema():
+    stage = Stage(
+        id="judge",
+        role=Role(name="r", type=RoleType.JUDGE, description="d"),
+        output_schema={"type": "object", "properties": {"score": {"type": "number"}}},
+        output_mode=OutputMode.GUIDED_JSON,
+    )
+    assert stage.output_mode == OutputMode.GUIDED_JSON
+    assert "score" in stage.output_schema["properties"]
+
+
+def test_stage_fail_as_value_default():
+    stage = Stage(id="s", tool_call=ToolCallConfig(name="t"))
+    assert stage.fail_as_value is False
+
+
+def test_stage_timeout_default_none():
+    stage = Stage(id="s", tool_call=ToolCallConfig(name="t"))
+    assert stage.timeout_s is None
+
+
+# ── ToolModule / ToolCallConfig ───────────────────────────────────────────────
+
+def test_tool_module():
+    tm = ToolModule(module="mypackage.tools")
+    assert tm.module == "mypackage.tools"
+
+
+def test_tool_call_config_defaults():
+    tc = ToolCallConfig(name="file_read")
+    assert tc.args == {}
+    assert tc.name == "file_read"
+
+
+def test_tool_call_config_with_args():
+    tc = ToolCallConfig(name="shell", args={"cmd": "echo hi"})
+    assert tc.args["cmd"] == "echo hi"
+
+
+# ── Signature ─────────────────────────────────────────────────────────────────
+
+def test_signature_defaults():
+    sig = Signature()
+    assert sig.input == {}
+    assert sig.output == {}
+
+
+def test_signature_with_fields():
+    sig = Signature(
+        input={"query": "str", "limit": "int"},
+        output={"result": "str"},
+    )
+    assert "query" in sig.input
+    assert "result" in sig.output
+
+
+# ── ModelTierConfig extras ────────────────────────────────────────────────────
+
+def test_model_tier_config_full():
+    mtc = ModelTierConfig(
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        api_base="https://api.anthropic.com",
+        api_key_env="ANTHROPIC_API_KEY",
+        temperature=0.7,
+        max_tokens=4096,
+        tool_calling=True,
+    )
+    assert mtc.temperature == 0.7
+    assert mtc.max_tokens == 4096
+    assert mtc.tool_calling is True
+    assert mtc.api_key_env == "ANTHROPIC_API_KEY"
