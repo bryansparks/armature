@@ -1,8 +1,75 @@
 import pytest
 import litellm
 from unittest.mock import AsyncMock, MagicMock, patch
-from armature.nodes.llm import LLMNode
+from armature.nodes.llm import LLMNode, _extract_json_from_response
 from armature.spec.models import Stage, Role, RoleType, ModelTiers, ModelTierConfig, OutputMode
+
+
+# ── _extract_json_from_response ───────────────────────────────────────────────
+
+def test_extract_plain_json():
+    assert _extract_json_from_response('{"key": "value"}') == {"key": "value"}
+
+
+def test_extract_json_with_leading_text():
+    content = 'Here is my analysis:\n{"decision": "approve", "score": 0.9}'
+    result = _extract_json_from_response(content)
+    assert result == {"decision": "approve", "score": 0.9}
+
+
+def test_extract_json_in_markdown_fence():
+    content = '```json\n{"result": true}\n```'
+    assert _extract_json_from_response(content) == {"result": True}
+
+
+def test_extract_json_in_unnamed_fence():
+    content = '```\n{"result": 42}\n```'
+    assert _extract_json_from_response(content) == {"result": 42}
+
+
+def test_extract_json_with_think_block():
+    """JSON after a <think> reasoning block is extracted correctly."""
+    content = "<think>I need to analyze this carefully.</think>\n\n{\"decision\": \"proceed\"}"
+    result = _extract_json_from_response(content)
+    assert result == {"decision": "proceed"}
+
+
+def test_extract_no_json_returns_none():
+    assert _extract_json_from_response("This is just plain text with no JSON.") is None
+
+
+def test_extract_empty_string_returns_none():
+    assert _extract_json_from_response("") is None
+
+
+def test_extract_picks_last_json_object():
+    """When multiple JSON objects appear, the last one is returned."""
+    content = 'First: {"x": 1}\nFinal: {"x": 2}'
+    result = _extract_json_from_response(content)
+    assert result == {"x": 2}
+
+
+def test_extract_nested_json():
+    content = '{"outer": {"inner": [1, 2, 3]}}'
+    result = _extract_json_from_response(content)
+    assert result == {"outer": {"inner": [1, 2, 3]}}
+
+
+def test_extract_json_with_unicode():
+    content = '{"greeting": "héllo wörld"}'
+    result = _extract_json_from_response(content)
+    assert result["greeting"] == "héllo wörld"
+
+
+def test_extract_malformed_json_returns_none():
+    assert _extract_json_from_response('{"key": "unclosed') is None
+
+
+def test_extract_partial_json_skips_to_valid():
+    """Partial JSON in preamble is skipped; valid JSON at end is returned."""
+    content = 'Here is some {broken json and then {"valid": true}'
+    result = _extract_json_from_response(content)
+    assert result == {"valid": True}
 
 def make_stage(role_type: RoleType = RoleType.WORKER) -> Stage:
     return Stage(
