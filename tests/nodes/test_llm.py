@@ -588,3 +588,162 @@ async def test_all_tiers_empty_returns_empty_not_parse_error():
 
     assert result.get("content") == ""
     assert "_parse_error" not in result
+
+
+# ── _model_string ─────────────────────────────────────────────────────────────
+
+def test_model_string_ollama_adds_prefix():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="ollama", model="llama3"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    cfg = tiers.small
+    assert node._model_string(cfg) == "ollama/llama3"
+
+
+def test_model_string_openrouter_adds_prefix():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="openrouter", model="mistralai/mistral-7b"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    cfg = tiers.small
+    assert node._model_string(cfg) == "openrouter/mistralai/mistral-7b"
+
+
+def test_model_string_anthropic_no_prefix():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    cfg = tiers.small
+    assert node._model_string(cfg) == "claude-haiku-4-5-20251001"
+
+
+# ── _resolve_tier_name ────────────────────────────────────────────────────────
+
+def test_resolve_tier_name_uses_explicit_model_tier():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.model_tier = "frontier"
+    tiers = ModelTiers(
+        small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"),
+        frontier=ModelTierConfig(provider="anthropic", model="claude-sonnet-4-6"),
+    )
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._resolve_tier_name() == "frontier"
+
+
+def test_resolve_tier_name_falls_back_to_role_type_defaults():
+    stage = make_stage(RoleType.WORKER)
+    # Worker defaults to "small"
+    tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._resolve_tier_name() == "small"
+
+
+def test_resolve_tier_name_judge_defaults_frontier():
+    stage = make_stage(RoleType.JUDGE)
+    stage.role.model_tier = None  # clear make_stage's "small" default so role_type_defaults takes over
+    tiers = ModelTiers(
+        small=ModelTierConfig(provider="anthropic", model="haiku"),
+        frontier=ModelTierConfig(provider="anthropic", model="sonnet"),
+    )
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._resolve_tier_name() == "frontier"
+
+
+# ── _tier_extra_kwargs ────────────────────────────────────────────────────────
+
+def test_tier_extra_kwargs_includes_api_base():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="ollama", model="llama3", api_base="http://localhost:11434"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert extra["api_base"] == "http://localhost:11434"
+
+
+def test_tier_extra_kwargs_reads_api_key_env(monkeypatch):
+    monkeypatch.setenv("MY_API_KEY", "secret123")
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="openai", model="gpt-4o", api_key_env="MY_API_KEY"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert extra["api_key"] == "secret123"
+
+
+def test_tier_extra_kwargs_missing_api_key_env_omitted(monkeypatch):
+    monkeypatch.delenv("MISSING_KEY", raising=False)
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="openai", model="gpt-4o", api_key_env="MISSING_KEY"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert "api_key" not in extra
+
+
+def test_tier_extra_kwargs_role_temperature_overrides_tier():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.temperature = 0.2
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001", temperature=0.8
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert extra["temperature"] == pytest.approx(0.2)
+
+
+def test_tier_extra_kwargs_tier_temperature_when_no_role_override():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.temperature = None
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001", temperature=0.5
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert extra["temperature"] == pytest.approx(0.5)
+
+
+def test_tier_extra_kwargs_max_tokens_role_overrides_tier():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.max_tokens = 512
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001", max_tokens=2048
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    extra = node._tier_extra_kwargs(tiers.small)
+    assert extra["max_tokens"] == 512
+
+
+# ── _supports_tool_calling ─────────────────────────────────────────────────────
+
+def test_supports_tool_calling_explicit_true_overrides_provider():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="ollama", model="llama3", tool_calling=True
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._supports_tool_calling(tiers.small) is True
+
+
+def test_supports_tool_calling_explicit_false_overrides_provider():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001", tool_calling=False
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._supports_tool_calling(tiers.small) is False
+
+
+def test_supports_tool_calling_ollama_defaults_false():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="ollama", model="llama3"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._supports_tool_calling(tiers.small) is False
+
+
+def test_supports_tool_calling_anthropic_defaults_true():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._supports_tool_calling(tiers.small) is True
