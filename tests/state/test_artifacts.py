@@ -73,3 +73,20 @@ async def test_base_dir_created_on_init(tmp_path):
     new_dir = tmp_path / "new" / "nested" / "dir"
     ArtifactStore(base_dir=new_dir)
     assert new_dir.exists()
+
+
+async def test_read_text_finds_txt_extension(tmp_path):
+    """read_text falls back to .txt when no .md file exists."""
+    store = ArtifactStore(base_dir=tmp_path)
+    (tmp_path / "notes.txt").write_text("from txt file", encoding="utf-8")
+    text = await store.read_text("notes")
+    assert text == "from txt file"
+
+
+async def test_read_text_prefers_md_over_txt(tmp_path):
+    """When both .md and .txt exist, .md wins."""
+    store = ArtifactStore(base_dir=tmp_path)
+    (tmp_path / "notes.md").write_text("from md file", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("from txt file", encoding="utf-8")
+    text = await store.read_text("notes")
+    assert text == "from md file"
