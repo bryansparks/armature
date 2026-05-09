@@ -7,18 +7,11 @@ FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 async def test_trace_store_populated_after_run(tmp_path):
-    """Engine records traces for all stage types including script stages.
-
-    Run a script-only workflow and verify:
-    - The harness completes without error
-    - The TraceStore wired to tmp_path records one trace with role_type="script"
-    """
+    """Engine records traces for all stage types including script stages."""
     harness = Harness.from_spec(
         FIXTURES / "echo-workflow.yaml",
         vars={"message": "trace-test"},
     )
-    # Redirect both the session log and trace DB to tmp_path so the test is
-    # hermetic and doesn't touch ~/.armature.
     harness._session._path = tmp_path / "session.jsonl"
     trace_db = tmp_path / "traces.db"
     harness._traces = TraceStore(trace_db)
@@ -28,11 +21,10 @@ async def test_trace_store_populated_after_run(tmp_path):
     assert "echo" in result
     assert result["echo"]["exit_code"] == 0
 
-    # Script stages now record traces with role_type="script".
     store = TraceStore(trace_db)
     await store.init()
     traces = await store.query()
-    assert len(traces) >= 1, "Script stages should produce at least one trace record each"
+    assert len(traces) >= 1
     assert all(t.role_type == "script" for t in traces)
     assert all(t.success is True for t in traces)
 
@@ -56,7 +48,6 @@ async def test_subagent_fan_out_end_to_end(tmp_path):
 
     assert "child_run" in result
     child_result = result["child_run"]
-    # SubagentNode.execute returns child.run(context) which is {stage_id: result}
     assert "respond" in child_result
     assert "integration-test" in child_result["respond"]["stdout"]
 
@@ -82,3 +73,83 @@ async def test_service_run_via_http(tmp_path):
     body = response.json()
     assert body["status"] == "complete"
     assert body["result"]["echo"]["exit_code"] == 0
+
+
+async def test_trace_records_spec_version(tmp_path):
+    """Traces include the spec_version fingerprint."""
+    harness = Harness.from_spec(FIXTURES / "echo-workflow.yaml")
+    harness._session._path = tmp_path / "session.jsonl"
+    trace_db = tmp_path / "traces.db"
+    harness._traces = TraceStore(trace_db)
+
+    await harness.run({"message": "version-test"})
+
+    store = TraceStore(trace_db)
+    await store.init()
+    traces = await store.query()
+    assert all(t.spec_version is not None for t in traces)
+    assert all(len(t.spec_version) == 12 for t in traces)
+
+
+async def test_run_id_present_in_context_for_all_stages(tmp_path):
+    """run_id is injected into the context and accessible by all stages."""
+    from armature.spec.models import HarnessSpec, Stage, Adapter
+
+    captured_ctx = []
+
+    class TrackingHarness(Harness):
+        async def _execute_stage(self, stage, context):
+            captured_ctx.append(dict(context))
+            return await super()._execute_stage(stage, context)
+
+    spec = HarnessSpec(
+        name="ctx-test",
+        stages=[Stage(id="s1", adapter="echo_cmd")],
+        adapters={"echo_cmd": Adapter(name="echo_cmd", type="script", cmd="echo ok")},
+    )
+    harness = TrackingHarness(spec=spec, session_dir=tmp_path)
+    await harness.run({})
+
+    assert all("run_id" in ctx for ctx in captured_ctx)
+
+
+async def test_two_script_stages_both_recorded_in_traces(tmp_path):
+    """Each script stage produces its own trace record."""
+    harness = Harness.from_spec(FIXTURES / "echo-workflow.yaml")
+    harness._session._path = tmp_path / "session.jsonl"
+    trace_db = tmp_path / "traces.db"
+    harness._traces = TraceStore(trace_db)
+
+    await harness.run({"message": "two-stage-trace"})
+
+    store = TraceStore(trace_db)
+    await store.init()
+    traces = await store.query()
+    stage_ids = {t.stage_id for t in traces}
+    assert "echo" in stage_ids
+    assert "verify" in stage_ids
+
+
+async def test_run_summary_event_emitted(tmp_path):
+    """The run_summary on_event callback fires at end with execution statistics."""
+    events = []
+
+    def on_event(name, data):
+        events.append((name, data))
+
+    harness = Harness.from_spec(
+        FIXTURES / "echo-workflow.yaml",
+        vars={"message": "event-test"},
+    )
+    harness._session._path = tmp_path / "session.jsonl"
+    harness._on_event = on_event
+
+    await harness.run({"message": "event-test"})
+
+    event_names = [e[0] for e in events]
+    assert "run_summary" in event_names
+    summary_data = next(d for n, d in events if n == "run_summary")
+    assert "stages_total" in summary_data
+    assert summary_data["stages_total"] == 2
+    assert "elapsed_s" in summary_data
+    assert summary_data["elapsed_s"] >= 0
