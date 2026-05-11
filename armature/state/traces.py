@@ -106,6 +106,7 @@ class TraceStore:
     async def query(
         self,
         workflow_name: str | None = None,
+        stage_id: str | None = None,
         min_quorum_score: float | None = None,
         limit: int = 100,
     ) -> list[TraceRecord]:
@@ -114,6 +115,9 @@ class TraceStore:
         if workflow_name:
             conditions.append("workflow_name = ?")
             params.append(workflow_name)
+        if stage_id is not None:
+            conditions.append("stage_id = ?")
+            params.append(stage_id)
         if min_quorum_score is not None:
             conditions.append("quorum_score >= ?")
             params.append(min_quorum_score)

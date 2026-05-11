@@ -39,6 +39,7 @@ class PromptAssembler:
         context: dict[str, Any],
         signature: "Signature | None" = None,
         output_schema: dict[str, Any] | None = None,
+        examples: list[dict] | None = None,
     ) -> str:
         import json as _json
 
@@ -65,6 +66,14 @@ class PromptAssembler:
         if tools:
             tool_lines = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
             sections.append(f"## Available Tools\n{tool_lines}")
+
+        if examples:
+            ex_parts = []
+            for i, ex in enumerate(examples, 1):
+                inp = _json.dumps(ex.get("inputs", {}), indent=2)
+                out = _json.dumps(ex.get("outputs", {}), indent=2)
+                ex_parts.append(f"### Example {i}\nInputs:\n{inp}\nOutputs:\n{out}")
+            sections.append("## Examples\n" + "\n\n".join(ex_parts))
 
         if visible:
             ctx_items = "\n".join(f"- {k}: {v}" for k, v in visible.items() if v is not None)

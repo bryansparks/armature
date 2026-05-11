@@ -119,6 +119,7 @@ class LLMNode(BaseNode):
         assembler: PromptAssembler | None = None,
         registry=None,
         transcript: list[dict] | None = None,
+        workflow_name: str = "",
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -128,6 +129,8 @@ class LLMNode(BaseNode):
         self._assembler = assembler or PromptAssembler()
         self._registry = registry
         self._transcript = transcript
+        self._workflow_name = workflow_name
+        self._bootstrap_store = None
         self._max_tool_iterations = 10
 
     def _active_tier_order(self) -> list[str]:
@@ -252,12 +255,21 @@ class LLMNode(BaseNode):
             stage_tools = []
 
         output_schema = self._stage.output_schema if self._stage.output_mode.value == "guided_json" else None
+
+        examples: list[dict] = []
+        if self._bootstrap_store is not None:
+            examples = await self._bootstrap_store.examples_for_stage(
+                workflow_name=self._workflow_name,
+                stage_id=self._stage.id,
+            )
+
         system_prompt = self._assembler.build(
             role=role,
             tools=stage_tools,
             context=context,
             signature=self._stage.signature,
             output_schema=output_schema,
+            examples=examples,
         )
 
         # Apply the same signature.input filter to the user message that PromptAssembler
