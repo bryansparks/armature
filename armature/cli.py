@@ -198,5 +198,42 @@ def optimize(
         typer.echo("\nProposal accepted — re-run with --apply to patch the spec file.")
 
 
+@app.command()
+def report(
+    run_id: str = typer.Option(..., "--run-id", help="Run ID to report on"),
+    traces: Path = typer.Option(None, "--traces", help="Path to traces.db (default: ~/.armature/runs/{run_id}/traces.db)"),
+    evals: Path = typer.Option(None, "--evals", help="Path to evaluations database"),
+    knowledge: Path = typer.Option(None, "--knowledge", help="Path to knowledge database"),
+    session_log: Path = typer.Option(None, "--session-log", help="Path to session.jsonl"),
+):
+    """Print a human-readable report for a completed workflow run."""
+    from armature.reporting import load_report_data, ReportBuilder
+
+    # Resolve per-run traces.db if not explicitly provided
+    resolved_traces = traces or Path(f"~/.armature/runs/{run_id}/traces.db").expanduser()
+    resolved_session = session_log or Path(f"~/.armature/runs/{run_id}/session.jsonl").expanduser()
+
+    async def _load():
+        return await load_report_data(
+            run_id=run_id,
+            traces_db=resolved_traces,
+            evals_db=evals,
+            knowledge_db=knowledge,
+            session_log=resolved_session,
+        )
+
+    data = asyncio.run(_load())
+    if data is None:
+        typer.echo(
+            f"No traces found for run_id='{run_id}'.\n"
+            f"  Looked in: {resolved_traces}\n"
+            f"  Run 'armature report --list' or check ~/.armature/runs/ for valid run IDs.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(ReportBuilder(data).build())
+
+
 if __name__ == "__main__":
     app()
