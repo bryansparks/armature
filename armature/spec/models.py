@@ -148,6 +148,7 @@ class Stage(BaseModel):
     partition_source: str | None = None # Jinja2 expression resolving to a list of items
     inject_file_as: str | None = None   # if set, read each item as a file path and inject content under this key
     output_max_chars: int | None = None # per-stage override; truncates stored result; falls back to contracts.output_max_chars
+    evaluate: list[str] = Field(default_factory=list)  # declarative quality criteria evaluated post-run
 
 
 class TraceConfig(BaseModel):
@@ -165,8 +166,10 @@ class MemoryCapture(BaseModel):
 class MemoryConfig(BaseModel):
     enabled: bool = True
     capture: list[MemoryCapture] = Field(default_factory=list)
-    inject_as: str = "_memory"   # context key injected at run start
-    db: str | None = None        # override db path; defaults to ~/.armature/memory/{name}.db
+    inject_as: str = "_memory"        # context key injected at run start
+    db: str | None = None             # override db path; defaults to ~/.armature/memory/{name}.db
+    extract_knowledge: bool = False   # run KnowledgeExtractor post-run to build long-term facts
+    inject_knowledge_as: str = "_knowledge"  # context key for injected knowledge facts
 
 
 class ToolModule(BaseModel):

@@ -84,9 +84,25 @@ class Harness:
                 mem_path = Path(f"~/.armature/memory/{self._spec.name}.db").expanduser()
             self._memory_store: "MemoryStore | None" = MemoryStore(mem_path)
             self._memory_config = mem_cfg
+
+            if mem_cfg.extract_knowledge:
+                from armature.state.knowledge import KnowledgeStore
+                from armature.state.extractor import KnowledgeExtractor
+                knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
+                self._knowledge_store = KnowledgeStore(knowledge_path)
+                self._knowledge_extractor = KnowledgeExtractor(
+                    model=self._spec.model_tiers.small.model
+                    if self._spec.model_tiers.small else "gpt-4o-mini",
+                    knowledge_store=self._knowledge_store,
+                )
+            else:
+                self._knowledge_store = None
+                self._knowledge_extractor = None
         else:
             self._memory_store = None
             self._memory_config = None
+            self._knowledge_store = None
+            self._knowledge_extractor = None
 
         if self._spec.checkpoint:
             from armature.runtime.checkpoint import CheckpointStore
@@ -578,6 +594,17 @@ class Harness:
             memories = await self._memory_store.load(self._spec.name)
             context[self._memory_config.inject_as] = memories  # type: ignore[union-attr]
 
+            if self._knowledge_store is not None:
+                await self._knowledge_store.init()
+                mem_cfg = self._memory_config  # type: ignore[union-attr]
+                knowledge = await self._knowledge_store.search(
+                    self._spec.name, query=self._spec.name, top_k=10
+                )
+                context[mem_cfg.inject_knowledge_as] = [
+                    {"entity": k.entity, "fact": k.fact, "confidence": k.confidence}
+                    for k in knowledge
+                ]
+
         tracer = get_tracer()
         with tracer.start_as_current_span(
             f"armature.run.{self._spec.name}",
@@ -634,4 +661,39 @@ class Harness:
                     "stages_failed": n_failed,
                 })
 
+            # Post-run knowledge extraction (non-blocking)
+            if self._knowledge_extractor is not None and self._memory_store is not None:
+                try:
+                    updated_memories = await self._memory_store.load(self._spec.name)
+                    await self._knowledge_extractor.extract(
+                        updated_memories,
+                        workflow_name=self._spec.name,
+                        run_id=self._run_id,
+                    )
+                except Exception:
+                    pass  # extraction must never block execution
+
             return results
+
+    async def evaluate(
+        self,
+        run_id: str | None = None,
+        model: str | None = None,
+    ) -> "list[Any]":
+        """Score stage outputs against their declarative evaluate criteria.
+
+        run_id defaults to the most recent run. Returns a list of EvaluationResult,
+        one per stage that has evaluate criteria and a recorded trace.
+        """
+        from armature.state.evaluator import EvaluationRunner, EvaluationStore
+
+        rid = run_id or self._run_id
+        eval_model = model or (
+            self._spec.model_tiers.small.model if self._spec.model_tiers.small else "gpt-4o-mini"
+        )
+        eval_store = EvaluationStore(self._session_dir / "evaluations.db")
+        await eval_store.init()
+
+        runner = EvaluationRunner(model=eval_model, evaluation_store=eval_store)
+        await self._ensure_traces()
+        return await runner.evaluate_run(run_id=rid, spec=self._spec, trace_store=self._traces)
