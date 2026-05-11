@@ -188,6 +188,55 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 stage_id=None,
             ))
 
+    # ── Cross-stage signature type compatibility ──────────────────────────
+    # Build a map of stage_id → Signature for quick lookup.
+    sig_by_id = {s.id: s.signature for s in spec.stages if s.signature is not None}
+
+    # Determine keys that are valid workflow-level inputs (from contracts.inputs).
+    workflow_input_keys = {
+        inp["name"] for inp in spec.contracts.inputs if "name" in inp
+    }
+
+    for stage in spec.stages:
+        if stage.signature is None or not stage.depends_on:
+            continue
+        for dep_id in stage.depends_on:
+            dep_sig = sig_by_id.get(dep_id)
+            if dep_sig is None:
+                continue
+            # Check type compatibility for shared keys.
+            for key, downstream_type in stage.signature.input.items():
+                if key not in dep_sig.output:
+                    continue
+                upstream_type = dep_sig.output[key]
+                if upstream_type != downstream_type:
+                    errors.append(SpecError(
+                        code="SIGNATURE_TYPE_MISMATCH",
+                        message=(
+                            f"Key '{key}': stage '{dep_id}' outputs type '{upstream_type}' "
+                            f"but stage '{stage.id}' expects '{downstream_type}'"
+                        ),
+                        stage_id=stage.id,
+                    ))
+
+        # Check that every input key is either a workflow input or output by an upstream stage.
+        if stage.depends_on:
+            all_upstream_outputs: set[str] = set()
+            for dep_id in stage.depends_on:
+                dep_sig = sig_by_id.get(dep_id)
+                if dep_sig is not None:
+                    all_upstream_outputs.update(dep_sig.output.keys())
+            for key in stage.signature.input:
+                if key not in all_upstream_outputs and key not in workflow_input_keys:
+                    errors.append(SpecError(
+                        code="UNDEFINED_SIGNATURE_INPUT",
+                        message=(
+                            f"Stage '{stage.id}' signature.input key '{key}' is not output "
+                            f"by any depends_on stage and is not in contracts.inputs"
+                        ),
+                        stage_id=stage.id,
+                    ))
+
     if strict and errors:
         raise SpecValidationError(errors)
 
