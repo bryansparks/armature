@@ -469,3 +469,49 @@ def test_cli_report_full_run_produces_output(tmp_path):
     assert "run1" in result.output
     assert "demo_wf" in result.output
     assert "Temperatures are rising." in result.output
+
+
+# ── Failure Signatures / Diagnostics section ──────────────────────────────────
+
+def test_report_shows_diagnostics_section_when_failures_present():
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    data = ReportData(
+        run_id="fail-run",
+        workflow_name="wf",
+        traces=[make_trace(success=False, output_valid=False)],
+        diagnostics=[
+            DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="research", details="RuntimeError"),
+            DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="research", details="schema mismatch"),
+        ],
+    )
+    report = ReportBuilder(data).build()
+    assert "Failure Signatures" in report
+    assert "stage_failed" in report
+    assert "output_invalid" in report
+    assert "RuntimeError" in report
+
+
+def test_report_omits_diagnostics_section_when_clean():
+    data = ReportData(
+        run_id="ok-run",
+        workflow_name="wf",
+        traces=[make_trace()],
+        diagnostics=[],
+    )
+    report = ReportBuilder(data).build()
+    assert "Failure Signatures" not in report
+
+
+def test_report_shows_low_confidence_diagnostic():
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    data = ReportData(
+        run_id="low-conf-run",
+        workflow_name="wf",
+        traces=[make_trace(role_type="judge", quorum_score=0.15)],
+        diagnostics=[
+            DiagnosticResult(code=DiagnosticCode.LOW_CONFIDENCE, stage_id="research", details="confidence=0.15"),
+        ],
+    )
+    report = ReportBuilder(data).build()
+    assert "low_confidence" in report
+    assert "confidence=0.15" in report

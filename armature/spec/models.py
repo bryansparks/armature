@@ -1,7 +1,7 @@
 from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RoleType(str, Enum):
@@ -31,11 +31,22 @@ ModelTier = ModelTierConfig
 
 
 class ModelTiers(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     tiny: ModelTierConfig | None = None
     small: ModelTierConfig | None = None
     medium: ModelTierConfig | None = None
     large: ModelTierConfig | None = None
     frontier: ModelTierConfig | None = None
+
+    @model_validator(mode="after")
+    def _coerce_extra_tiers(self) -> "ModelTiers":
+        """Coerce extra tier entries (e.g. 'synthesis') from raw dicts/CommentedMaps."""
+        if self.__pydantic_extra__:
+            for key, val in list(self.__pydantic_extra__.items()):
+                if val is not None and not isinstance(val, ModelTierConfig):
+                    self.__pydantic_extra__[key] = ModelTierConfig.model_validate(dict(val))
+        return self
 
 
 class RoleTypeDefaults(BaseModel):
@@ -149,6 +160,7 @@ class Stage(BaseModel):
     inject_file_as: str | None = None   # if set, read each item as a file path and inject content under this key
     output_max_chars: int | None = None # per-stage override; truncates stored result; falls back to contracts.output_max_chars
     evaluate: list[str] = Field(default_factory=list)  # declarative quality criteria evaluated post-run
+    post_run: bool = False             # when True, stage runs after all normal stages with full transcript + diagnostics
 
 
 class TraceConfig(BaseModel):
@@ -165,6 +177,7 @@ class MemoryCapture(BaseModel):
 
 class MemoryConfig(BaseModel):
     enabled: bool = True
+    fresh: bool = False               # when True, skip loading prior memories (start each run clean)
     capture: list[MemoryCapture] = Field(default_factory=list)
     inject_as: str = "_memory"        # context key injected at run start
     db: str | None = None             # override db path; defaults to ~/.armature/memory/{name}.db

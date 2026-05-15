@@ -5,6 +5,7 @@ import textwrap
 from dataclasses import dataclass, field
 from typing import Any
 
+from armature.state.diagnostics import DiagnosticResult
 from armature.state.evaluator import EvaluationResult
 from armature.state.knowledge import KnowledgeRecord
 from armature.state.session import SessionEvent
@@ -25,6 +26,7 @@ class ReportData:
     events: list[SessionEvent] = field(default_factory=list)
     evaluations: list[EvaluationResult] = field(default_factory=list)
     knowledge: list[KnowledgeRecord] = field(default_factory=list)
+    diagnostics: list[DiagnosticResult] = field(default_factory=list)
     ihr: IhrResult | None = None
 
 
@@ -50,6 +52,8 @@ class ReportBuilder:
 
         parts += ["", self._key_outputs()]
 
+        if self._d.diagnostics:
+            parts += ["", self._diagnostics_section()]
         if self._d.evaluations:
             parts += ["", self._evaluation_section()]
         if self._d.knowledge:
@@ -196,6 +200,13 @@ class ReportBuilder:
 
         return "\n".join(lines)
 
+    def _diagnostics_section(self) -> str:
+        lines = ["Failure Signatures", _SEP2]
+        for d in self._d.diagnostics:
+            detail = f"  — {d.details}" if d.details else ""
+            lines.append(f"  [{d.stage_id}]  {d.code.value}{detail}")
+        return "\n".join(lines)
+
     def _evaluation_section(self) -> str:
         lines = ["Evaluation Scores", _SEP2]
         for ev in self._d.evaluations:
@@ -322,6 +333,9 @@ async def load_report_data(
             slog = SessionLog(slog_path)
             events = await slog.read_all()
 
+    from armature.state.diagnostics import DiagnosticAnalyzer
+    diagnostics = DiagnosticAnalyzer(traces).analyze()
+
     return ReportData(
         run_id=run_id,
         workflow_name=workflow_name,
@@ -329,5 +343,6 @@ async def load_report_data(
         events=events,
         evaluations=evaluations,
         knowledge=knowledge,
+        diagnostics=diagnostics,
         ihr=ihr,
     )

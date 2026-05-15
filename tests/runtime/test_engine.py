@@ -448,3 +448,223 @@ async def test_no_memory_config_is_backward_compatible(tmp_path):
         await harness.run({})
 
     assert "_memory" not in received[0]
+
+
+# ---------------------------------------------------------------------------
+# Memory: fresh=True skips loading prior memories
+# ---------------------------------------------------------------------------
+
+async def test_fresh_memory_skips_loading_prior_entries(tmp_path):
+    """When memory.fresh=True, the _memory context is empty even if prior runs saved data."""
+    db = str(tmp_path / "mem.db")
+
+    from armature.state.memory import MemoryStore
+    store = MemoryStore(db)
+    await store.init()
+    await store.record("fresh-test", "s1", "result", "prior output")
+
+    spec = HarnessSpec(
+        name="fresh-test",
+        stages=[Stage(
+            id="s1",
+            role=Role(name="W", type=RoleType.WORKER, description="work", model_tier="small"),
+        )],
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        memory=MemoryConfig(
+            enabled=True,
+            fresh=True,
+            capture=[MemoryCapture(stage="s1", key="result", max_entries=5)],
+            inject_as="_memory",
+            db=db,
+        ),
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path / "run")
+
+    received = []
+
+    async def mock_execute(context):
+        received.append(dict(context))
+        return {"result": "new output", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert received[0]["_memory"] == {}
+
+
+async def test_fresh_memory_still_captures_new_output(tmp_path):
+    """fresh=True skips loading, but new outputs are still captured for future runs."""
+    db = str(tmp_path / "mem.db")
+    spec = HarnessSpec(
+        name="fresh-capture",
+        stages=[Stage(
+            id="stage_a",
+            role=Role(name="W", type=RoleType.WORKER, description="work", model_tier="small"),
+        )],
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        memory=MemoryConfig(
+            enabled=True,
+            fresh=True,
+            capture=[MemoryCapture(stage="stage_a", key="content", max_entries=5)],
+            inject_as="_memory",
+            db=db,
+        ),
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path / "run")
+
+    async def mock_execute(context):
+        return {"content": "fresh output", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    from armature.state.memory import MemoryStore
+    store = MemoryStore(db)
+    memories = await store.load("fresh-capture")
+    assert memories["stage_a"]["content"] == ["fresh output"]
+
+
+async def test_memory_without_fresh_loads_prior_data(tmp_path):
+    """Sanity: when fresh is False (default), prior data is loaded as before."""
+    db = str(tmp_path / "mem.db")
+    from armature.state.memory import MemoryStore
+    store = MemoryStore(db)
+    await store.init()
+    await store.record("normal-test", "s1", "result", "prior output")
+
+    spec = HarnessSpec(
+        name="normal-test",
+        stages=[Stage(
+            id="s1",
+            role=Role(name="W", type=RoleType.WORKER, description="work", model_tier="small"),
+        )],
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        memory=MemoryConfig(
+            enabled=True,
+            fresh=False,
+            capture=[],
+            inject_as="_memory",
+            db=db,
+        ),
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path / "run")
+    received = []
+
+    async def mock_execute(context):
+        received.append(dict(context))
+        return {"result": "ok", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert received[0]["_memory"]["s1"]["result"] == ["prior output"]
+
+
+# ---------------------------------------------------------------------------
+# post_run stages: run after all normal stages with transcript + diagnostics
+# ---------------------------------------------------------------------------
+
+def _make_post_run_spec() -> HarnessSpec:
+    return HarnessSpec(
+        name="post-run-test",
+        stages=[
+            Stage(
+                id="worker",
+                role=Role(name="W", type=RoleType.WORKER, description="do work", model_tier="small"),
+            ),
+            Stage(
+                id="refiner",
+                post_run=True,
+                role=Role(name="R", type=RoleType.RESEARCHER, description="analyze run", model_tier="small"),
+            ),
+        ],
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+    )
+
+
+async def test_post_run_stage_receives_transcript(tmp_path):
+    spec = _make_post_run_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    refiner_ctx: dict = {}
+
+    async def mock_execute(context):
+        if "_transcript" in context:
+            refiner_ctx.update(context)
+        return {"content": "ok", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert "_transcript" in refiner_ctx
+
+
+async def test_post_run_stage_receives_prior_stage_results(tmp_path):
+    spec = _make_post_run_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    refiner_ctx: dict = {}
+    call_count = [0]
+
+    async def mock_execute(context):
+        call_count[0] += 1
+        if call_count[0] == 2:
+            refiner_ctx.update(context)
+        return {"result": "worker output", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert "worker" in refiner_ctx
+
+
+async def test_post_run_stage_receives_diagnostics(tmp_path):
+    spec = _make_post_run_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    refiner_ctx: dict = {}
+
+    async def mock_execute(context):
+        if "_diagnostics" in context:
+            refiner_ctx.update(context)
+        return {"content": "ok", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert "_diagnostics" in refiner_ctx
+
+
+async def test_post_run_stage_runs_after_worker(tmp_path):
+    spec = _make_post_run_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    actual_order: list[str] = []
+
+    async def mock_execute(context):
+        if "_transcript" in context:
+            actual_order.append("refiner")
+        else:
+            actual_order.append("worker")
+        return {"content": "ok", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        await harness.run({})
+
+    assert actual_order == ["worker", "refiner"]
+
+
+async def test_post_run_result_included_in_run_output(tmp_path):
+    spec = _make_post_run_spec()
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    async def mock_execute(context):
+        if "_transcript" in context:
+            return {"suggestions": ["improve prompt"], "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+        return {"result": "done", "_input_tokens": 1, "_output_tokens": 1, "_escalation_count": 0}
+
+    with patch("armature.nodes.llm.LLMNode.execute", side_effect=mock_execute):
+        results = await harness.run({})
+
+    assert "refiner" in results
+    assert results["refiner"]["suggestions"] == ["improve prompt"]

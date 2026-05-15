@@ -591,12 +591,15 @@ class Harness:
 
         if self._memory_store is not None:
             await self._memory_store.init()
-            memories = await self._memory_store.load(self._spec.name)
-            context[self._memory_config.inject_as] = memories  # type: ignore[union-attr]
+            mem_cfg = self._memory_config  # type: ignore[union-attr]
+            if mem_cfg.fresh:
+                memories: dict = {}
+            else:
+                memories = await self._memory_store.load(self._spec.name)
+            context[mem_cfg.inject_as] = memories
 
             if self._knowledge_store is not None:
                 await self._knowledge_store.init()
-                mem_cfg = self._memory_config  # type: ignore[union-attr]
                 knowledge = await self._knowledge_store.search(
                     self._spec.name, query=self._spec.name, top_k=10
                 )
@@ -614,7 +617,10 @@ class Harness:
                 type="run_start", data={"run_id": self._run_id, "workflow": self._spec.name}
             ))
 
-            deps = {s.id: s.depends_on for s in self._spec.stages}
+            normal_stages = [s for s in self._spec.stages if not s.post_run]
+            post_run_stages = [s for s in self._spec.stages if s.post_run]
+
+            deps = {s.id: s.depends_on for s in normal_stages}
 
             async def make_handler(stage: Stage):
                 async def handler(ctx):
@@ -622,7 +628,7 @@ class Harness:
                 return handler
 
             _run_t0 = time.monotonic()
-            handlers = {s.id: await make_handler(s) for s in self._spec.stages}
+            handlers = {s.id: await make_handler(s) for s in normal_stages}
             executor = DAGExecutor(handlers, deps)
             timeout_s = self._spec.contracts.timeout_hours * 3600
             try:
@@ -672,6 +678,27 @@ class Harness:
                     )
                 except Exception:
                     pass  # extraction must never block execution
+
+            # Compute failure-signature diagnostics from this run's traces
+            from armature.state.diagnostics import DiagnosticAnalyzer
+            try:
+                run_traces = await self._traces.query_by_run(self._run_id)
+                diagnostics = DiagnosticAnalyzer(run_traces).analyze()
+            except Exception:
+                diagnostics = []
+
+            # Execute post_run stages sequentially with enriched context
+            if post_run_stages:
+                post_ctx = {
+                    **context,
+                    **results,
+                    "_transcript": self._transcript,
+                    "_diagnostics": [d.model_dump() for d in diagnostics],
+                }
+                for stage in post_run_stages:
+                    stage_result = await self._execute_stage_with_recovery(stage, post_ctx)
+                    results[stage.id] = stage_result
+                    post_ctx[stage.id] = stage_result
 
             return results
 
