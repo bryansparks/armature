@@ -296,5 +296,70 @@ def export_traces(
     )
 
 
+@app.command()
+def improve(
+    spec: Path = typer.Argument(..., help="Path to the workflow spec to improve"),
+    trace_db: Path = typer.Option(
+        None, "--traces", help="Path to traces database (default: ~/.armature/traces.db)"
+    ),
+    model: str = typer.Option("claude-sonnet-4-6", "--model", help="LLM used by SpecRefiner"),
+    target_ihr: float = typer.Option(0.90, "--target-ihr", help="IHR threshold below which improvement is triggered"),
+    min_traces: int = typer.Option(3, "--min-traces", help="Minimum traces required before analysis"),
+    apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
+    log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL (default: <spec>.improve_log.jsonl)"),
+):
+    """Analyze traces and propose/apply a targeted spec improvement."""
+    if not spec.exists():
+        typer.echo(f"Spec not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    from armature.synthesis.improve import SelfImproveRunner
+
+    db_path = trace_db or Path("~/.armature/traces.db").expanduser()
+
+    async def _run():
+        runner = SelfImproveRunner(
+            spec,
+            db_path,
+            model=model,
+            target_ihr=target_ihr,
+            min_traces=min_traces,
+            auto_apply=apply,
+            log_path=log,
+        )
+        return await runner.analyze()
+
+    typer.echo(f"Analyzing: {spec.name}")
+    report = asyncio.run(_run())
+
+    typer.echo(f"  traces: {report.n_traces}  IHR: {f'{report.ihr_before:.3f}' if report.ihr_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}")
+
+    if report.n_traces == 0:
+        typer.echo("No traces found — run the workflow first.")
+        return
+
+    if not report.needs_improvement:
+        typer.echo("Workflow is healthy — no improvement needed.")
+        return
+
+    if report.proposed_spec is None:
+        typer.echo("Refiner could not produce a valid revised spec.", err=True)
+        return
+
+    if report.applied:
+        typer.echo(f"Applied revised spec → {spec}")
+    else:
+        typer.echo("Proposed revision available (--no-apply was set — spec not written).")
+
+    if report.diagnostics:
+        typer.echo("Failure signatures:")
+        for d in report.diagnostics:
+            detail = f" — {d.details}" if d.details else ""
+            typer.echo(f"  [{d.stage_id}] {d.code.value}{detail}")
+
+    if report.log_path:
+        typer.echo(f"Log: {report.log_path}")
+
+
 if __name__ == "__main__":
     app()
