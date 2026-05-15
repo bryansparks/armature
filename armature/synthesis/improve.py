@@ -4,11 +4,17 @@ Analyzes accumulated traces for a workflow, diagnoses failure signatures,
 proposes a targeted spec revision via SpecRefiner, and optionally applies it.
 Every analysis cycle is logged to a JSONL file for traceability.
 
+Each proposed revision also declares which failure signatures it predicts will
+be resolved (predicted_fixes) and which might temporarily worsen
+(predicted_regressions).  The next cycle verifies those predictions against the
+observed diagnostic shift, building an accountability record over time.
+
 Usage:
     runner = SelfImproveRunner("monitoring.yaml", "~/.armature/traces.db")
     report = await runner.analyze()
     # report.applied tells you if the spec was updated
     # report.proposed_spec has the revised HarnessSpec (even if not applied)
+    # report.verified_fixes shows which previous predictions came true
 
 CLI:
     armature improve monitoring.yaml --traces ~/.armature/traces.db
@@ -16,7 +22,7 @@ CLI:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,8 +61,29 @@ Rules:
 - If a stage has OUTPUT_INVALID: relax or correct the output_schema required fields.
 - If a stage has HIGH_ESCALATION: increase on_fail.loop.max or upgrade model_tier.
 - If a stage has STAGE_FAILED: add a timeout_s or upgrade model_tier.
-- Return ONLY the complete revised YAML — no markdown fences, no explanation.
+
+Output format — two sections, in order:
+1. The complete revised YAML (no markdown fences, no explanation).
+2. The literal separator line (nothing else on that line):
+   ---PREDICTIONS---
+3. A single JSON object declaring your falsifiable contract:
+   {"predicted_fixes": [...], "predicted_regressions": [...]}
+
+   predicted_fixes: list of "code:stage_id" strings you expect to resolve
+   predicted_regressions: list of "code:stage_id" strings that might temporarily worsen
+   Valid codes: stage_failed, output_invalid, low_confidence, high_escalation
+   Example: {"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}
+   Use [] for empty lists. These predictions will be verified in the next cycle.
 """
+
+
+@dataclass
+class RefinerResult:
+    """Parsed output from SpecRefiner.refine()."""
+    spec: HarnessSpec
+    yaml_text: str
+    predicted_fixes: list[str] = field(default_factory=list)
+    predicted_regressions: list[str] = field(default_factory=list)
 
 
 class SpecRefiner:
@@ -71,8 +98,8 @@ class SpecRefiner:
         diagnostics: list[DiagnosticResult],
         ihr: "IhrResult | None",
         refiner_suggestions: str | None = None,
-    ) -> "tuple[HarnessSpec, str] | None":
-        """Return (HarnessSpec, raw_yaml) or None if the LLM output can't be parsed."""
+    ) -> RefinerResult | None:
+        """Return RefinerResult (spec, yaml_text, predictions) or None if unparseable."""
         diag_lines = "\n".join(
             f"  [{d.stage_id}] {d.code.value}: {d.details}" for d in diagnostics
         ) or "  (none)"
@@ -103,25 +130,37 @@ class SpecRefiner:
             ],
         )
         raw = response.choices[0].message.content or ""
-        spec = self._parse(raw)
-        if spec is None:
-            return None
-        return spec, raw
+        return self._parse(raw)
 
     @staticmethod
-    def _parse(yaml_text: str) -> HarnessSpec | None:
+    def _parse(text: str) -> RefinerResult | None:
         import yaml as _yaml
 
-        text = yaml_text.strip()
-        if text.startswith("```"):
-            first_nl = text.find("\n")
+        # Split off predictions block before any other processing
+        parts = text.split("---PREDICTIONS---", 1)
+        yaml_part = parts[0]
+
+        predicted_fixes: list[str] = []
+        predicted_regressions: list[str] = []
+        if len(parts) > 1:
+            try:
+                preds = json.loads(parts[1].strip())
+                predicted_fixes = preds.get("predicted_fixes", [])
+                predicted_regressions = preds.get("predicted_regressions", [])
+            except (json.JSONDecodeError, AttributeError):
+                pass
+
+        # Strip markdown fences from YAML
+        yaml_text = yaml_part.strip()
+        if yaml_text.startswith("```"):
+            first_nl = yaml_text.find("\n")
             if first_nl != -1:
-                inner = text[first_nl + 1:]
+                inner = yaml_text[first_nl + 1:]
                 end = inner.rfind("```")
-                text = inner[:end].strip() if end != -1 else inner.strip()
+                yaml_text = inner[:end].strip() if end != -1 else inner.strip()
 
         try:
-            data = _yaml.safe_load(text)
+            data = _yaml.safe_load(yaml_text)
         except _yaml.YAMLError:
             return None
 
@@ -131,9 +170,15 @@ class SpecRefiner:
         try:
             spec = HarnessSpec(**data, validate=False)
             validate_spec(spec)
-            return spec
         except Exception:
             return None
+
+        return RefinerResult(
+            spec=spec,
+            yaml_text=yaml_text,
+            predicted_fixes=predicted_fixes,
+            predicted_regressions=predicted_regressions,
+        )
 
 
 # ── Data structures ───────────────────────────────────────────────────────────
@@ -148,8 +193,15 @@ class ImprovementReport:
     applied: bool
     diagnostics: list[DiagnosticResult]
     proposed_spec: HarnessSpec | None = None
-    proposed_yaml: str | None = None    # raw YAML text for review/diff
+    proposed_yaml: str | None = None
     log_path: Path | None = None
+    # Prediction fields (from AHE prediction-verification loop)
+    predicted_fixes: list[str] = field(default_factory=list)
+    predicted_regressions: list[str] = field(default_factory=list)
+    # Verification fields — populated by comparing against previous cycle's predictions
+    verified_fixes: list[str] = field(default_factory=list)
+    missed_predictions: list[str] = field(default_factory=list)
+    unexpected_regressions: list[str] = field(default_factory=list)
 
 
 # ── SelfImproveRunner ─────────────────────────────────────────────────────────
@@ -159,15 +211,18 @@ class SelfImproveRunner:
     Analyzes accumulated traces for a workflow and proposes/applies spec improvements.
 
     Flow:
-        1. Load traces for the workflow from the trace DB
-        2. Compute rolling IHR across all loaded traces
-        3. Run DiagnosticAnalyzer to identify failure signatures
-        4. If IHR < target_ihr AND n_traces >= min_traces:
+        1. Load last log entry to retrieve previous cycle's predictions
+        2. Load traces for the workflow from the trace DB
+        3. Compute rolling IHR across all loaded traces
+        4. Run DiagnosticAnalyzer to identify failure signatures
+        5. Verify previous predictions against current diagnostic state
+        6. If IHR < target_ihr AND n_traces >= min_traces:
            a. Call SpecRefiner with current spec + diagnostics
            b. If refiner returns a valid revised spec:
               - Apply if auto_apply=True (overwrite spec file)
-              - Log the cycle to log_path
-        5. Return ImprovementReport
+              - Extract predictions from RefinerResult
+        7. Log the cycle (always) including predictions and verification
+        8. Return ImprovementReport
     """
 
     def __init__(
@@ -197,6 +252,9 @@ class SelfImproveRunner:
             self._log_path = self._spec_path.parent / f"{stem}.improve_log.jsonl"
 
     async def analyze(self) -> ImprovementReport:
+        # Load previous cycle's predictions for verification
+        prev_entry = self._load_last_log_entry()
+
         spec = load_spec(self._spec_path)
         store = TraceStore(self._trace_db)
 
@@ -208,6 +266,9 @@ class SelfImproveRunner:
         needs_improvement = False
         applied = False
         proposed_spec: HarnessSpec | None = None
+        proposed_yaml: str | None = None
+        predicted_fixes: list[str] = []
+        predicted_regressions: list[str] = []
 
         if n > 0:
             ihr_result = self._compute_ihr(traces)
@@ -215,7 +276,15 @@ class SelfImproveRunner:
             diagnostics = DiagnosticAnalyzer(traces).analyze()
             needs_improvement = n >= self._min_traces and ihr_before < self._target_ihr
 
-        proposed_yaml: str | None = None
+        # Compute verification against previous cycle's predictions
+        curr_diag_keys = self._diag_keys(diagnostics)
+        verified_fixes, missed_predictions, unexpected_regressions = self._verify_predictions(
+            prev_diag_keys=set(prev_entry.get("diagnostics_keys", [])) if prev_entry else set(),
+            predicted_fixes=prev_entry.get("predicted_fixes", []) if prev_entry else [],
+            predicted_regressions=prev_entry.get("predicted_regressions", []) if prev_entry else [],
+            curr_diag_keys=curr_diag_keys,
+        )
+
         if needs_improvement:
             refiner = SpecRefiner(self._model)
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
@@ -226,7 +295,10 @@ class SelfImproveRunner:
                 ihr=ihr_obj,
             )
             if result is not None:
-                proposed_spec, proposed_yaml = result
+                proposed_spec = result.spec
+                proposed_yaml = result.yaml_text
+                predicted_fixes = result.predicted_fixes
+                predicted_regressions = result.predicted_regressions
                 if self._auto_apply:
                     self._spec_path.write_text(proposed_yaml, encoding="utf-8")
                     applied = True
@@ -236,8 +308,14 @@ class SelfImproveRunner:
             n_traces=n,
             ihr_before=ihr_before,
             diagnostics=diagnostics,
+            diagnostics_keys=sorted(curr_diag_keys),
             needs_improvement=needs_improvement,
             applied=applied,
+            predicted_fixes=predicted_fixes,
+            predicted_regressions=predicted_regressions,
+            verified_fixes=verified_fixes,
+            missed_predictions=missed_predictions,
+            unexpected_regressions=unexpected_regressions,
         )
 
         return ImprovementReport(
@@ -251,9 +329,51 @@ class SelfImproveRunner:
             proposed_spec=proposed_spec,
             proposed_yaml=proposed_yaml,
             log_path=self._log_path,
+            predicted_fixes=predicted_fixes,
+            predicted_regressions=predicted_regressions,
+            verified_fixes=verified_fixes,
+            missed_predictions=missed_predictions,
+            unexpected_regressions=unexpected_regressions,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _diag_keys(diagnostics: list[DiagnosticResult]) -> set[str]:
+        return {f"{d.code.value}:{d.stage_id}" for d in diagnostics}
+
+    @staticmethod
+    def _verify_predictions(
+        *,
+        prev_diag_keys: set[str],
+        predicted_fixes: list[str],
+        predicted_regressions: list[str],
+        curr_diag_keys: set[str],
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Return (verified_fixes, missed_predictions, unexpected_regressions)."""
+        resolved = prev_diag_keys - curr_diag_keys
+        new_issues = curr_diag_keys - prev_diag_keys
+
+        fixes_set = set(predicted_fixes)
+        regressions_set = set(predicted_regressions)
+
+        verified_fixes = sorted(fixes_set & resolved)
+        missed_predictions = sorted(fixes_set & curr_diag_keys)
+        unexpected_regressions = sorted(new_issues - regressions_set)
+
+        return verified_fixes, missed_predictions, unexpected_regressions
+
+    def _load_last_log_entry(self) -> dict | None:
+        if not self._log_path.exists():
+            return None
+        try:
+            lines = [
+                line for line in self._log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            return json.loads(lines[-1]) if lines else None
+        except (json.JSONDecodeError, OSError):
+            return None
 
     @staticmethod
     def _compute_ihr(traces: list) -> IhrResult:
@@ -283,8 +403,14 @@ class SelfImproveRunner:
         n_traces: int,
         ihr_before: float | None,
         diagnostics: list[DiagnosticResult],
+        diagnostics_keys: list[str],
         needs_improvement: bool,
         applied: bool,
+        predicted_fixes: list[str],
+        predicted_regressions: list[str],
+        verified_fixes: list[str],
+        missed_predictions: list[str],
+        unexpected_regressions: list[str],
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -299,6 +425,14 @@ class SelfImproveRunner:
                 {"code": d.code.value, "stage_id": d.stage_id, "details": d.details}
                 for d in diagnostics
             ],
+            # Store "code:stage_id" keys so next cycle can compute verification
+            "diagnostics_keys": diagnostics_keys,
+            # Prediction-verification (AHE falsifiable contract)
+            "predicted_fixes": predicted_fixes,
+            "predicted_regressions": predicted_regressions,
+            "verified_fixes": verified_fixes,
+            "missed_predictions": missed_predictions,
+            "unexpected_regressions": unexpected_regressions,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

@@ -3,7 +3,7 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
-from armature.synthesis.improve import SelfImproveRunner, SpecRefiner, ImprovementReport
+from armature.synthesis.improve import SelfImproveRunner, SpecRefiner, ImprovementReport, RefinerResult
 from armature.state.traces import TraceStore, TraceRecord
 from armature.state.diagnostics import DiagnosticCode
 
@@ -389,8 +389,7 @@ async def test_spec_refiner_returns_harness_spec_on_valid_yaml():
         result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
 
     assert result is not None
-    spec, raw = result
-    assert spec.name == "test-wf"
+    assert result.spec.name == "test-wf"
 
 
 async def test_spec_refiner_strips_invalid_changes():
@@ -403,6 +402,228 @@ async def test_spec_refiner_strips_invalid_changes():
         result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
 
     assert result is None
+
+
+# ── RefinerResult — predictions ───────────────────────────────────────────────
+
+_REVISED_SPEC_YAML_WITH_PREDICTIONS = (
+    _REVISED_SPEC_YAML
+    + '\n---PREDICTIONS---\n{"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}'
+)
+
+
+def test_spec_refiner_parse_extracts_predictions_from_separator():
+    result = SpecRefiner._parse(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
+    assert result is not None
+    assert result.predicted_fixes == ["output_invalid:analyst"]
+    assert result.predicted_regressions == []
+
+
+def test_spec_refiner_parse_empty_predictions_when_no_separator():
+    result = SpecRefiner._parse(_REVISED_SPEC_YAML)
+    assert result is not None
+    assert result.predicted_fixes == []
+    assert result.predicted_regressions == []
+
+
+async def test_refiner_result_has_spec_and_yaml_text():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
+        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+    assert result is not None
+    assert isinstance(result, RefinerResult)
+    assert result.spec.name == "test-wf"
+    assert "Include specific evidence" in result.yaml_text
+
+
+# ── _verify_predictions (unit) ────────────────────────────────────────────────
+
+def test_verify_predictions_verified_fix_when_signature_resolved():
+    verified, missed, unexpected = SelfImproveRunner._verify_predictions(
+        prev_diag_keys={"output_invalid:analyst"},
+        predicted_fixes=["output_invalid:analyst"],
+        predicted_regressions=[],
+        curr_diag_keys=set(),
+    )
+    assert "output_invalid:analyst" in verified
+    assert missed == []
+    assert unexpected == []
+
+
+def test_verify_predictions_missed_when_signature_persists():
+    verified, missed, unexpected = SelfImproveRunner._verify_predictions(
+        prev_diag_keys={"output_invalid:analyst"},
+        predicted_fixes=["output_invalid:analyst"],
+        predicted_regressions=[],
+        curr_diag_keys={"output_invalid:analyst"},
+    )
+    assert verified == []
+    assert "output_invalid:analyst" in missed
+    assert unexpected == []
+
+
+def test_verify_predictions_unexpected_regression_when_new_signature_appears():
+    verified, missed, unexpected = SelfImproveRunner._verify_predictions(
+        prev_diag_keys=set(),
+        predicted_fixes=[],
+        predicted_regressions=[],
+        curr_diag_keys={"stage_failed:worker"},
+    )
+    assert "stage_failed:worker" in unexpected
+    assert verified == []
+    assert missed == []
+
+
+def test_verify_predictions_no_unexpected_regression_when_predicted():
+    verified, missed, unexpected = SelfImproveRunner._verify_predictions(
+        prev_diag_keys=set(),
+        predicted_fixes=[],
+        predicted_regressions=["stage_failed:worker"],
+        curr_diag_keys={"stage_failed:worker"},
+    )
+    assert unexpected == []
+
+
+def test_verify_predictions_all_empty_when_no_predictions_and_no_change():
+    verified, missed, unexpected = SelfImproveRunner._verify_predictions(
+        prev_diag_keys=set(),
+        predicted_fixes=[],
+        predicted_regressions=[],
+        curr_diag_keys=set(),
+    )
+    assert verified == []
+    assert missed == []
+    assert unexpected == []
+
+
+# ── ImprovementReport prediction fields ───────────────────────────────────────
+
+async def test_report_predicted_fixes_populated_from_refiner(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
+        report = await runner.analyze()
+    assert report.predicted_fixes == ["output_invalid:analyst"]
+    assert report.predicted_regressions == []
+
+
+async def test_first_cycle_verification_fields_are_empty(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(quorum_score=0.92)])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    report = await runner.analyze()
+    assert report.verified_fixes == []
+    assert report.missed_predictions == []
+    assert report.unexpected_regressions == []
+
+
+async def test_second_cycle_computes_verified_fixes(tmp_path):
+    """Predicted fix that disappears in cycle 2 → verified_fixes."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    log_file = tmp_path / "improve.log.jsonl"
+
+    # Cycle 1: bad DB — output_invalid fires and is predicted to be fixed
+    db1 = tmp_path / "traces_bad.db"
+    store1 = TraceStore(db1)
+    await seed_store(store1, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner1 = SelfImproveRunner(
+        spec_file, db1, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+    )
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
+        await runner1.analyze()
+
+    # Cycle 2: clean DB — only good traces; same log_path so cycle 1 predictions are read
+    db2 = tmp_path / "traces_good.db"
+    store2 = TraceStore(db2)
+    await seed_store(store2, [
+        make_trace(run_id="g1", quorum_score=0.95, output_valid=True),
+        make_trace(run_id="g2", quorum_score=0.95, output_valid=True),
+        make_trace(run_id="g3", quorum_score=0.95, output_valid=True),
+    ])
+    runner2 = SelfImproveRunner(
+        spec_file, db2, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+    )
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report2 = await runner2.analyze()
+
+    assert "output_invalid:analyst" in report2.verified_fixes
+
+
+async def test_second_cycle_computes_missed_predictions(tmp_path):
+    """Predicted fix that still fires in cycle 2 → missed_predictions."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+    )
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
+        await runner.analyze()  # cycle 1 — logs predicted_fixes
+
+    # Cycle 2: same bad traces, output_invalid:analyst still present
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report2 = await runner.analyze()
+
+    assert "output_invalid:analyst" in report2.missed_predictions
+
+
+# ── log includes prediction and verification fields ────────────────────────────
+
+async def test_log_entry_includes_predicted_fixes_field(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(quorum_score=0.92)])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    await runner.analyze()
+    entry = json.loads(log_file.read_text().strip())
+    assert "predicted_fixes" in entry
+    assert "predicted_regressions" in entry
+
+
+async def test_log_entry_includes_verification_fields(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(quorum_score=0.92)])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    await runner.analyze()
+    entry = json.loads(log_file.read_text().strip())
+    assert "verified_fixes" in entry
+    assert "missed_predictions" in entry
+    assert "unexpected_regressions" in entry
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
