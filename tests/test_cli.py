@@ -211,3 +211,144 @@ def test_run_echo_workflow_stage_events_in_output():
     assert "→ echo" in result.output
     assert "✓ echo" in result.output
     assert "Done in" in result.output
+
+
+# ---------------------------------------------------------------------------
+# export-traces command
+# ---------------------------------------------------------------------------
+
+def test_export_traces_missing_db_exits_1(tmp_path):
+    result = runner.invoke(app, [
+        "export-traces",
+        "--workflow", "my-wf",
+        "--output", str(tmp_path / "out.jsonl"),
+        "--traces", str(tmp_path / "nonexistent.db"),
+    ])
+    assert result.exit_code == 1
+
+
+def test_export_traces_produces_jsonl(tmp_path):
+    import asyncio
+    import aiosqlite as _aio
+    import json as _json
+
+    db = tmp_path / "traces.db"
+
+    async def _seed():
+        async with _aio.connect(db) as conn:
+            await conn.execute(
+                "CREATE TABLE traces ("
+                "id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, "
+                "stage_id TEXT, role_type TEXT, model TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, latency_ms REAL, "
+                "success INTEGER, output_valid INTEGER, quorum_score REAL, "
+                "timestamp TEXT, inputs_json TEXT, outputs_json TEXT, "
+                "error_type TEXT, escalation_count INTEGER, spec_version TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO traces VALUES (1,'r1','cli-wf','s1','researcher','m',"
+                "10,20,500.0,1,1,0.91,'2026-05-15T00:00:00+00:00',?,?,NULL,0,'')",
+                (_json.dumps({"topic": "AI"}), _json.dumps({"brief": "AI is advancing."})),
+            )
+            await conn.commit()
+
+    asyncio.run(_seed())
+
+    out = tmp_path / "train.jsonl"
+    result = runner.invoke(app, [
+        "export-traces",
+        "--workflow", "cli-wf",
+        "--output", str(out),
+        "--traces", str(db),
+        "--min-score", "0.85",
+    ])
+    assert result.exit_code == 0
+    assert out.exists()
+    record = _json.loads(out.read_text().strip())
+    assert "messages" in record
+
+
+def test_export_traces_dpo_format(tmp_path):
+    import asyncio
+    import aiosqlite as _aio
+    import json as _json
+
+    db = tmp_path / "traces.db"
+
+    async def _seed():
+        async with _aio.connect(db) as conn:
+            await conn.execute(
+                "CREATE TABLE traces ("
+                "id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, "
+                "stage_id TEXT, role_type TEXT, model TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, latency_ms REAL, "
+                "success INTEGER, output_valid INTEGER, quorum_score REAL, "
+                "timestamp TEXT, inputs_json TEXT, outputs_json TEXT, "
+                "error_type TEXT, escalation_count INTEGER, spec_version TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO traces VALUES (1,'good','dpo-wf','s1','judge','m',"
+                "10,20,500.0,1,1,0.92,'2026-05-15T00:00:00+00:00',?,?,NULL,0,'')",
+                (_json.dumps({"q": "x"}), _json.dumps({"content": "Great."})),
+            )
+            await conn.execute(
+                "INSERT INTO traces VALUES (2,'bad','dpo-wf','s1','judge','m',"
+                "10,20,500.0,1,0,0.10,'2026-05-15T00:00:01+00:00',?,?,NULL,0,'')",
+                (_json.dumps({"q": "x"}), _json.dumps({"content": "Poor."})),
+            )
+            await conn.commit()
+
+    asyncio.run(_seed())
+
+    out = tmp_path / "dpo.jsonl"
+    result = runner.invoke(app, [
+        "export-traces",
+        "--workflow", "dpo-wf",
+        "--output", str(out),
+        "--traces", str(db),
+        "--format", "dpo",
+    ])
+    assert result.exit_code == 0
+    record = _json.loads(out.read_text().strip())
+    assert "chosen" in record
+    assert "rejected" in record
+    assert "Great." in record["chosen"]
+    assert "Poor." in record["rejected"]
+
+
+def test_export_traces_summary_printed(tmp_path):
+    import asyncio
+    import aiosqlite as _aio
+    import json as _json
+
+    db = tmp_path / "traces.db"
+
+    async def _seed():
+        async with _aio.connect(db) as conn:
+            await conn.execute(
+                "CREATE TABLE traces ("
+                "id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, "
+                "stage_id TEXT, role_type TEXT, model TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, latency_ms REAL, "
+                "success INTEGER, output_valid INTEGER, quorum_score REAL, "
+                "timestamp TEXT, inputs_json TEXT, outputs_json TEXT, "
+                "error_type TEXT, escalation_count INTEGER, spec_version TEXT)"
+            )
+            await conn.execute(
+                "INSERT INTO traces VALUES (1,'r1','print-wf','s1','worker','m',"
+                "10,20,500.0,1,1,0.90,'2026-05-15T00:00:00+00:00','{}','{}',NULL,0,'')"
+            )
+            await conn.commit()
+
+    asyncio.run(_seed())
+
+    out = tmp_path / "out.jsonl"
+    result = runner.invoke(app, [
+        "export-traces",
+        "--workflow", "print-wf",
+        "--output", str(out),
+        "--traces", str(db),
+    ])
+    assert result.exit_code == 0
+    assert "Exported 1 record" in result.output
+    assert "chat" in result.output

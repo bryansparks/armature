@@ -235,5 +235,66 @@ def report(
     typer.echo(ReportBuilder(data).build())
 
 
+@app.command(name="export-traces")
+def export_traces(
+    workflow: str = typer.Option(..., "--workflow", "-w", help="Workflow name to export traces for"),
+    output: Path = typer.Option(..., "--output", "-o", help="Output JSONL file path"),
+    traces_db: Path = typer.Option(
+        None, "--traces", help="Path to traces.db (default: ~/.armature/traces.db)"
+    ),
+    format: str = typer.Option("chat", "--format", "-f", help="Format: chat | alpaca | sharegpt | dpo"),
+    min_score: float = typer.Option(0.85, "--min-score", help="Minimum quorum score for chosen traces"),
+    rejected_max_score: float = typer.Option(0.30, "--rejected-max-score", help="Max quorum score for DPO rejected traces"),
+    role_types: str = typer.Option(None, "--role-types", help="Comma-separated role types to include (e.g. judge,researcher)"),
+    system_prompt: str = typer.Option(None, "--system-prompt", help="Override the system/instruction field in all records"),
+    limit: int = typer.Option(1000, "--limit", help="Maximum traces to fetch"),
+):
+    """Export high-quality traces as SFT or DPO training data (JSONL).
+
+    Formats:
+      chat      OpenAI ChatML — system/user/assistant messages (default; Qwen compatible)
+      alpaca    Stanford Alpaca — instruction/input/output
+      sharegpt  ShareGPT — human/gpt conversation pairs
+      dpo       DPO/GRPO — chosen/rejected pairs for preference training
+    """
+    from armature.state.traces import TraceStore
+    from armature.state.export import TraceExporter
+
+    db_path = traces_db or Path("~/.armature/traces.db").expanduser()
+    if not db_path.exists():
+        typer.echo(f"Traces database not found: {db_path}", err=True)
+        raise typer.Exit(1)
+
+    role_list = [r.strip() for r in role_types.split(",")] if role_types else None
+    store = TraceStore(db_path)
+    exporter = TraceExporter(store)
+
+    async def _run():
+        if format == "dpo":
+            return await exporter.export_dpo(
+                workflow,
+                output,
+                chosen_min_score=min_score,
+                rejected_max_score=rejected_max_score,
+                system_prompt=system_prompt,
+                limit=limit,
+            )
+        return await exporter.export(
+            workflow,
+            output,
+            format=format,  # type: ignore[arg-type]
+            min_quorum_score=min_score,
+            role_types=role_list,
+            system_prompt=system_prompt,
+            limit=limit,
+        )
+
+    summary = asyncio.run(_run())
+    typer.echo(
+        f"Exported {summary.total_exported} record{'s' if summary.total_exported != 1 else ''} "
+        f"→ {summary.output_path}  [{summary.format} format, min_score={summary.min_quorum_score}]"
+    )
+
+
 if __name__ == "__main__":
     app()
