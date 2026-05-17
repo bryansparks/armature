@@ -608,12 +608,12 @@ def test_model_string_openrouter_adds_prefix():
     assert node._model_string(cfg) == "openrouter/mistralai/mistral-7b"
 
 
-def test_model_string_anthropic_no_prefix():
+def test_model_string_anthropic_adds_prefix():
     stage = make_stage(RoleType.WORKER)
     tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"))
     node = LLMNode(stage=stage, tiers=tiers)
     cfg = tiers.small
-    assert node._model_string(cfg) == "claude-haiku-4-5-20251001"
+    assert node._model_string(cfg) == "anthropic/claude-haiku-4-5-20251001"
 
 
 # ── _resolve_tier_name ────────────────────────────────────────────────────────

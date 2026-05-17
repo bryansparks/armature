@@ -4,6 +4,8 @@ A lightweight, declarative agent execution harness. Define multi-agent workflows
 
 No framework dependency. No prescribed team structure. Just a DAG executor, an LLM adapter, and your workflow spec.
 
+Armature is the execution engine for **Reasoning Automation** — end-to-end business processes where multi-agent deliberation replaces brittle rule-based logic. The harness owns orchestration, retries, safety, telemetry, and human approval gates. You supply the domain logic as YAML workflow specs and Python tool modules. The same engine that runs a code-review pipeline can run a contract risk assessment, a social media creative chain, or a compliance audit — without any changes to Armature itself.
+
 ---
 
 ## What it does
@@ -107,6 +109,114 @@ armature optimize <spec.yml> [--traces path/to/traces.db] [--apply]
 | `run` | Execute a workflow spec |
 | `serve` | Start the HTTP service (requires `armature[service]`) |
 | `optimize` | Run the Meta-Harness optimizer against trace history |
+
+---
+
+## Built-in tools
+
+Armature ships with a tool registry pre-loaded with the following tools. Any stage can invoke them via `tool_call` or by listing them in `role.tools`.
+
+| Tool name | Permission | Description |
+|-----------|-----------|-------------|
+| `file_read` | READ_ONLY | Read a file from disk |
+| `file_write` | WORKSPACE | Write content to a file |
+| `shell` | WORKSPACE | Run a shell command; returns stdout, stderr, exit_code |
+| `http_get` | NETWORK | HTTP GET request; returns status and body |
+| `http_post` | NETWORK | Authenticated HTTP POST with JSON body and custom headers; returns status and body |
+| `tessera.retrieve` | NETWORK | Retrieve relevant document chunks from a Tessera RAG corpus |
+| `quorum.deliberate` | NETWORK | Run structured multi-agent deliberation via Quorum |
+| `alembic.submit` | NETWORK | Submit a high-quality execution trace to Alembic for SLM fine-tuning |
+
+`http_post` is the general-purpose adapter for any external API — image generation, ad platforms, analytics services, webhooks, etc. Pass auth credentials in `headers`:
+
+```yaml
+- id: generate_image
+  tool_call:
+    name: http_post
+    args:
+      url: "https://api.openai.com/v1/images/generations"
+      headers:
+        Authorization: "Bearer {{ env.OPENAI_API_KEY }}"
+        Content-Type: "application/json"
+      body:
+        model: "dall-e-3"
+        prompt: "{{ visual_prompt }}"
+        size: "1024x1024"
+        n: 1
+```
+
+---
+
+## Reasoning Automation
+
+Armature's `tools:` spec section lets any workflow load external Python modules that register additional tools. This is the primary extension point for building **Reasoning Automation** applications — end-to-end processes that connect LLM reasoning to real external systems.
+
+### The pattern
+
+Create a Python package alongside your workflows. Each module exposes a `register(registry)` function:
+
+```python
+# myapp/tools/dalle.py
+import openai
+from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
+
+_client = openai.AsyncOpenAI()
+
+async def generate_image(args: dict) -> dict:
+    response = await _client.images.generate(
+        model="dall-e-3",
+        prompt=args["prompt"],
+        size=args.get("size", "1024x1024"),
+        n=1,
+    )
+    return {"url": response.data[0].url, "revised_prompt": response.data[0].revised_prompt}
+
+def register(registry: ToolRegistry) -> None:
+    registry.register(ToolDescriptor(
+        name="dalle.generate_image",
+        description="Generate an image using DALL-E 3",
+        permission=PermissionLevel.NETWORK,
+        handler=generate_image,
+        parameters={
+            "prompt": {"type": "string"},
+            "size":   {"type": "string", "optional": True},
+        },
+    ))
+```
+
+Declare it in your workflow spec:
+
+```yaml
+tools:
+  - module: myapp.tools.dalle
+  - module: myapp.tools.meta_publisher
+  - module: myapp.tools.analytics
+
+stages:
+  - id: generate_image
+    tool_call:
+      name: dalle.generate_image
+      args:
+        prompt: "{{ visual_director.prompt_a }}"
+```
+
+The tool modules live entirely in your application project. Armature imports them at startup. No changes to Armature are required.
+
+### What you can build
+
+| Use case | Tool modules needed |
+|----------|-------------------|
+| Social ad campaign automation | Image gen (DALL-E 3), platform publishers (Meta, TikTok), analytics collectors |
+| Contract risk review | Document extractor, clause classifier, risk scorer |
+| Vendor assessment | Web search, company lookup, scoring rubric |
+| Compliance documentation | Regulatory corpus retrieval, template filler, diff checker |
+| Code review pipeline | GitHub API, static analysis runner, security scanner |
+
+Each use case is a YAML workflow spec + a small set of Python tool modules. The Armature engine, Steward approval lifecycle, and Tessera knowledge layer are shared infrastructure across all of them.
+
+### Reference implementation
+
+`docs/use-case-ad-campaign.md` — complete architecture, workflow specs, tool modules, and brand corpus for a social ad campaign automation system built on Armature, Steward, and Tessera.
 
 ---
 
@@ -271,6 +381,7 @@ Ready-to-use deliberation patterns in `armature/templates/`:
 ```
 armature/
 ├── nodes/          # Stage executors (LLMNode, ScriptNode, HumanGateNode, SubagentNode)
+├── registry/       # Tool registry, built-in tools (file_read, http_post, tessera.retrieve, ...)
 ├── runtime/        # DAG executor, engine, prompt assembler (with context filtering)
 ├── spec/           # YAML loader, Pydantic models
 ├── hooks/          # Lifecycle hooks, safety rule evaluation
@@ -279,6 +390,10 @@ armature/
 ├── templates/      # Reusable workflow spec templates
 ├── examples/       # Annotated example workflows (see starter_template.yml)
 └── cli.py          # CLI entry point
+
+docs/
+├── use-case-ad-campaign.md   # Reference: social ad campaign automation (Dangerous Pretzel Co.)
+└── ...                       # Architecture notes and planning docs
 ```
 
 See the [User Guide](USER-GUIDE.md) for full developer documentation and examples.

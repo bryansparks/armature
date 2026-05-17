@@ -12,9 +12,13 @@
 
 Armature is a Python-native agent execution harness. It wraps language models in a structured, inspectable while-loop that executes workflows defined as natural-language-enriched YAML specs — deterministically, repeatably, and with built-in quality controls.
 
-Armature is the connective tissue of a compound intelligence stack. It routes work to SLM workers or frontier model orchestrators, enforces typed output schemas, persists execution state and traces, and feeds back into Alembic (fine-tuning), Quorum (deliberative quality validation), and Tessera (RAG-enriched context). Each loop tightens the others: better traces → better SLMs → better runs → better traces.
+Armature is the execution engine for **Reasoning Automation** — a category of systems where multi-agent deliberation owns an end-to-end business process with minimal human touchpoints. Where traditional automation encodes rules, Reasoning Automation encodes intent: the workflow spec describes what needs to happen and who decides; the harness executes it and surfaces the right decisions to the right humans at the right moments.
 
-Armature ships as a Python library first, enabling any Python project to import and run workflows in-process. An optional FastAPI service wrapper enables language-agnostic HTTP triggering for non-Python consumers.
+The platform vision: Armature (execution) + Steward (control plane + human approval lifecycle) + Tessera (domain knowledge) working as a coordinated team. A Steward work item triggers an Armature workflow; Armature calls Tessera for grounding and external APIs for action; results flow back into Steward as completed work with attached findings. The human interacts at defined approval gates — not at every step.
+
+Armature is also the connective tissue of a compound intelligence stack. It routes work to SLM workers or frontier model orchestrators, enforces typed output schemas, persists execution state and traces, and feeds back into Alembic (fine-tuning), Quorum (deliberative quality validation), and Tessera (RAG-enriched context). Each loop tightens the others: better traces → better SLMs → better runs → better traces.
+
+Armature ships as a Python library first, enabling any Python project to import and run workflows in-process. An optional FastAPI service wrapper enables language-agnostic HTTP triggering for non-Python consumers (including Steward).
 
 ---
 

@@ -141,6 +141,131 @@ async def test_http_get_passes_url():
     assert call_url == "http://myhost/path"
 
 
+# ── http_post ──────────────────────────────────────────────────────────────────
+
+async def test_http_post_returns_status_and_body():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = '{"id": "img-123"}'
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        result = await _http_post({"url": "http://api.example.com/generate"})
+
+    assert result["status"] == 200
+    assert result["body"] == '{"id": "img-123"}'
+
+
+async def test_http_post_passes_url():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 201
+    mock_response.text = "{}"
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        await _http_post({"url": "http://myhost/v1/images"})
+
+    call_url = mock_client.post.call_args[0][0]
+    assert call_url == "http://myhost/v1/images"
+
+
+async def test_http_post_sends_json_body():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = "{}"
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        await _http_post({"url": "http://api/run", "body": {"model": "dall-e-3", "prompt": "a pretzel"}})
+
+    _, kwargs = mock_client.post.call_args
+    assert kwargs.get("json") == {"model": "dall-e-3", "prompt": "a pretzel"}
+
+
+async def test_http_post_sends_headers():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = "{}"
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        await _http_post({
+            "url": "http://api/run",
+            "headers": {"Authorization": "Bearer sk-test", "Content-Type": "application/json"},
+        })
+
+    _, kwargs = mock_client.post.call_args
+    assert kwargs.get("headers", {}).get("Authorization") == "Bearer sk-test"
+
+
+async def test_http_post_non_200_returned_as_is():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 422
+    mock_response.text = '{"error": "invalid prompt"}'
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        result = await _http_post({"url": "http://api/run"})
+
+    assert result["status"] == 422
+    assert "invalid prompt" in result["body"]
+
+
+async def test_http_post_no_body_sends_no_json():
+    from armature.registry.builtins import _http_post
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.text = "{}"
+
+    with patch("httpx.AsyncClient") as mock_cls:
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_cls.return_value = mock_client
+
+        await _http_post({"url": "http://api/ping"})
+
+    _, kwargs = mock_client.post.call_args
+    assert kwargs.get("json") is None
+
+
 # ── register_builtins ──────────────────────────────────────────────────────────
 
 def test_register_builtins_registers_expected_tools():
@@ -154,6 +279,7 @@ def test_register_builtins_registers_expected_tools():
     assert "file_write" in names
     assert "shell" in names
     assert "http_get" in names
+    assert "http_post" in names
     assert "quorum.deliberate" in names
     assert "tessera.retrieve" in names
     assert "alembic.submit" in names
@@ -165,4 +291,4 @@ def test_register_builtins_tool_count():
 
     registry = ToolRegistry()
     register_builtins(registry)
-    assert len(registry.descriptors()) == 7
+    assert len(registry.descriptors()) == 8

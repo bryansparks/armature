@@ -53,7 +53,7 @@ def _extract_json_from_response(content: str) -> dict | None:
 
 def _retryable_errors() -> tuple[type[Exception], ...]:
     errors: list[type[Exception]] = []
-    for name in ("RateLimitError", "ServiceUnavailableError", "APIConnectionError", "Timeout"):
+    for name in ("RateLimitError", "ServiceUnavailableError", "APIConnectionError", "Timeout", "APIError"):
         cls = getattr(litellm, name, None)
         if cls is not None:
             errors.append(cls)
@@ -65,7 +65,7 @@ _RETRYABLE_ERRORS = _retryable_errors()
 
 async def _call_with_retry(
     model: str,
-    max_retries: int = 3,
+    max_retries: int = 5,
     **kwargs: Any,
 ) -> Any:
     """Call litellm with retry on transient errors.
@@ -97,7 +97,7 @@ async def _call_with_retry(
         except retryable as exc:
             last_exc = exc
             if attempt < max_retries - 1:
-                delay = (2 ** attempt) + random.uniform(0.0, 0.5)
+                delay = (3 ** attempt) * 5 + random.uniform(0.0, 2.0)
                 await asyncio.sleep(delay)
 
     raise last_exc
@@ -155,6 +155,8 @@ class LLMNode(BaseNode):
             return f"ollama/{model}"
         elif provider == "openrouter":
             return f"openrouter/{model}"
+        elif provider == "anthropic":
+            return f"anthropic/{model}"
         return model
 
     def _tier_extra_kwargs(self, tier_config) -> dict[str, Any]:

@@ -128,9 +128,11 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 ))
 
     # ── Model tier references exist ───────────────────────────────────────
+    # Use model_dump so custom tiers (e.g. 'synthesis') beyond the five
+    # standard names are also recognised as defined.
     defined_tiers = {
-        name for name in ("tiny", "small", "medium", "large", "frontier")
-        if getattr(spec.model_tiers, name) is not None
+        name for name, val in spec.model_tiers.model_dump().items()
+        if val is not None
     }
     for stage in spec.stages:
         if stage.role is not None:
@@ -219,20 +221,31 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                         stage_id=stage.id,
                     ))
 
-        # Check that every input key is either a workflow input or output by an upstream stage.
-        if stage.depends_on:
-            all_upstream_outputs: set[str] = set()
+        # Check that every input key is resolvable at runtime.
+        # Fan-out stages inject partition variables dynamically — skip them entirely.
+        # For all other stages, the Armature context is cumulative: every stage that
+        # has already run in the DAG contributes its output to the shared context,
+        # so any stage ID in the workflow is a valid key in addition to contract inputs
+        # and explicit output fields from upstream signatures.
+        if stage.depends_on and not stage.fan_out:
+            all_upstream_output_keys: set[str] = set()
             for dep_id in stage.depends_on:
                 dep_sig = sig_by_id.get(dep_id)
                 if dep_sig is not None:
-                    all_upstream_outputs.update(dep_sig.output.keys())
+                    all_upstream_output_keys.update(dep_sig.output.keys())
             for key in stage.signature.input:
-                if key not in all_upstream_outputs and key not in workflow_input_keys:
+                valid = (
+                    key in stage_ids               # key is any stage ID (context is cumulative)
+                    or key in all_upstream_output_keys  # key is an output field of a dep stage
+                    or key in workflow_input_keys       # key is declared in contracts.inputs
+                )
+                if not valid:
                     errors.append(SpecError(
                         code="UNDEFINED_SIGNATURE_INPUT",
                         message=(
-                            f"Stage '{stage.id}' signature.input key '{key}' is not output "
-                            f"by any depends_on stage and is not in contracts.inputs"
+                            f"Stage '{stage.id}' signature.input key '{key}' is not a "
+                            f"stage ID, not output by any depends_on stage, "
+                            f"and is not in contracts.inputs"
                         ),
                         stage_id=stage.id,
                     ))

@@ -1,11 +1,12 @@
 # Armature User Guide
 
-This guide covers everything you need to build agentic workflows with Armature: spec structure, stage types, role configuration, context flow, templates, and advanced patterns.
+This guide covers everything you need to build agentic workflows with Armature: installation, spec structure, stage types, role configuration, context flow, templates, self-improvement, and advanced patterns.
 
 ---
 
 ## Table of Contents
 
+0. [Installation & quickstart](#0-installation--quickstart)
 1. [Core concepts](#1-core-concepts)
 2. [Spec structure](#2-spec-structure)
 3. [Model tiers](#3-model-tiers)
@@ -31,6 +32,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
 14. [Templates](#14-templates)
 15. [The optimizer](#15-the-optimizer)
 16. [Running workflows](#16-running-workflows)
+    - [CLI reference](#cli-reference)
 17. [Integrating with a host application](#17-integrating-with-a-host-application)
     - [Declaring tool modules in the spec](#declaring-tool-modules-in-the-spec)
     - [Pattern A — embedded library](#pattern-a--embedded-library)
@@ -40,6 +42,108 @@ This guide covers everything you need to build agentic workflows with Armature: 
     - [Output extraction](#output-extraction)
     - [Async lifecycle](#async-lifecycle)
     - [Error contracts](#error-contracts)
+18. [Self-improvement](#18-self-improvement)
+19. [Trace export for fine-tuning](#19-trace-export-for-fine-tuning)
+
+---
+
+## 0. Installation & quickstart
+
+### Install
+
+```bash
+pip install armature
+```
+
+Armature requires Python 3.11+. The core install includes the CLI, runtime engine, spec loader, and all built-in tools.
+
+**Optional extras:**
+
+| Extra | Adds |
+|-------|------|
+| `pip install 'armature[service]'` | FastAPI HTTP service (`armature serve`) |
+| `pip install 'armature[wizard]'` | Interactive spec wizard (`armature new`) |
+| `pip install 'armature[telemetry]'` | OpenTelemetry tracing export |
+
+**Install from source:**
+
+```bash
+git clone <repo>
+cd armature
+pip install -e .
+```
+
+### Environment variables
+
+Armature uses [litellm](https://github.com/BerriAI/litellm) for LLM calls. Set the API key for the provider(s) you use:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...    # for Anthropic (Claude) models
+export OPENAI_API_KEY=sk-...           # for OpenAI models
+export OPENROUTER_API_KEY=sk-or-...    # for OpenRouter (multi-provider routing)
+```
+
+Ollama and other local providers do not require an API key — set `api_base` in the tier config instead.
+
+### Quickstart: your first workflow
+
+**1. Write a spec (`my_workflow.yml`):**
+
+```yaml
+name: research-summarizer
+version: "1.0"
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  large:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      model_tier: large
+      description: |
+        Research the following topic and produce a structured summary
+        covering key facts, open questions, and practical implications.
+        Topic: {{ topic }}
+    output_mode: text
+    depends_on: []
+
+  - id: editor
+    role:
+      name: Editor
+      type: worker
+      model_tier: small
+      description: |
+        Tighten the researcher's draft into a crisp 3-paragraph summary.
+        Eliminate repetition. Preserve all concrete facts.
+    output_mode: text
+    depends_on: [researcher]
+```
+
+**2. Run it:**
+
+```bash
+armature run my_workflow.yml --input topic="quantum error correction"
+```
+
+**3. Or from Python:**
+
+```python
+import asyncio
+from armature import Harness
+
+harness = Harness.from_spec("my_workflow.yml")
+result = asyncio.run(harness.run({"topic": "quantum error correction"}))
+print(result["editor"]["content"])
+```
+
+That's it. The engine resolves the DAG, calls the models in order, threads context through, and returns a dict of all stage outputs.
 
 ---
 
@@ -142,11 +246,67 @@ stages:
 | `description` | string | no | Human-readable description |
 | `model_tiers` | object | yes | Named model configurations (see §3) |
 | `role_type_defaults` | object | no | Default tier per role type — workers, judges, etc. (see §3) |
+| `contracts` | object | no | Input/output declarations and run-level limits (see below) |
 | `adapters` | object | no | Script/command adapters (see §4.2) |
 | `safety_rules` | list | no | Declarative tool safety rules (see §11) |
 | `memory` | object | no | Cross-run memory capture and injection (see §8) |
 | `tools` | list | no | External tool modules to load into the registry (see §17) |
+| `checkpoint` | bool | no | Persist completed stage results to disk so a run can resume after a crash (default: false) |
 | `stages` | list | yes | The workflow stages (see §4) |
+
+### Contracts
+
+`contracts` declares the workflow's inputs and run-level resource limits:
+
+```yaml
+contracts:
+  inputs:
+    - name: topic
+      type: string
+      description: "The research topic"
+    - name: max_words
+      type: integer
+      description: "Target word count for the summary"
+  max_iterations: 20      # total LLM dispatch loop iterations across the run
+  max_llm_calls: 100      # hard cap on LLM API calls
+  timeout_hours: 4.0      # wall-clock timeout for the entire run
+  output_max_chars: 8000  # truncate each stage's stored output to this length
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `inputs` | `[]` | Named inputs the workflow expects — documents the public API |
+| `outputs` | `[]` | Named outputs the workflow produces — documents the result shape |
+| `max_iterations` | `20` | Maximum total dispatch loop iterations |
+| `max_llm_calls` | `100` | Maximum LLM API calls before the run aborts |
+| `timeout_hours` | `8.0` | Wall-clock run timeout in hours |
+| `output_max_chars` | `null` | Per-stage output truncation limit; individual stages can override with their own `output_max_chars` |
+
+### Checkpoint and resume
+
+Set `checkpoint: true` to persist each completed stage's result to disk. If a run fails mid-way, re-running the same workflow with the same run ID picks up from the last completed stage rather than restarting from scratch:
+
+```yaml
+name: long-running-pipeline
+checkpoint: true
+
+stages:
+  - id: slow_researcher
+    # ...
+  - id: expensive_synthesizer
+    depends_on: [slow_researcher]
+    # ...
+```
+
+```bash
+# If this run crashes after slow_researcher completes...
+armature run pipeline.yml --input topic=X
+
+# ...re-run with --force to override checkpoint and restart from scratch:
+armature run pipeline.yml --input topic=X --force
+```
+
+Without `--force`, a re-run skips stages that already have a persisted result and emits `stage_resumed` events for them.
 
 ---
 
@@ -305,8 +465,79 @@ Rules:
 | `output_mode` | string | `text`, `json`, or `guided_json` (see §6) |
 | `output_schema` | object | JSON Schema — required for `guided_json` |
 | `depends_on` | list | Stage IDs this stage waits for |
-| `on_fail` | object | Retry configuration (see §9) |
-| `condition` | string | Skip this stage if condition evaluates false |
+| `on_fail` | object | Retry configuration (see §10) |
+| `skip_if` | string | Jinja2 expression — skip this stage when it renders truthy (see §4.6) |
+| `timeout_s` | float | Wall-clock timeout for the whole stage including retries. Raises on expiry. |
+| `fail_as_value` | bool | When `true`, stage failure returns `{"_failed": true, "error": "..."}` instead of raising. Downstream stages can check `{{ stage_id._failed }}`. |
+| `evaluate` | list[string] | Declarative quality criteria assessed post-run (e.g. `["response is factual", "no hallucinated citations"]`). Results appear in the run report. |
+| `post_run` | bool | When `true`, this stage runs **after** all normal stages complete, with the full run transcript and diagnostics injected into its context. Used for self-analysis and improvement suggestions. |
+| `output_max_chars` | int | Per-stage output truncation limit — overrides the spec-level `contracts.output_max_chars`. |
+
+**`fail_as_value` example:**
+
+```yaml
+- id: optional_enrichment
+  role:
+    name: Enricher
+    type: researcher
+    description: "Try to fetch supplementary context. If unavailable, return empty."
+  fail_as_value: true
+  depends_on: []
+
+- id: synthesizer
+  role:
+    name: Synthesizer
+    type: judge
+    description: |
+      Synthesize findings.
+      {% if optional_enrichment._failed %}
+      (Note: supplementary context was unavailable — proceed without it.)
+      {% endif %}
+  depends_on: [optional_enrichment]
+```
+
+**`post_run` example:**
+
+```yaml
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      description: "Research the topic."
+    depends_on: []
+
+  - id: synthesizer
+    role:
+      name: Synthesizer
+      type: judge
+      description: "Synthesize research into a recommendation."
+    depends_on: [researcher]
+
+  - id: self_analyst
+    post_run: true
+    role:
+      name: Self-Analyst
+      type: judge
+      description: |
+        Review the completed run transcript and diagnostics.
+        Identify which stages had weak output quality and suggest spec improvements
+        for the next run. Output: {"issues": [...], "suggestions": [...]}.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [issues, suggestions]
+      properties:
+        issues:
+          type: array
+          items: {type: string}
+        suggestions:
+          type: array
+          items: {type: string}
+    depends_on: []
+```
+
+Post-run stages see `_transcript` (full conversation log) and `_diagnostics` (failure signatures from the run) in their context.
 
 ---
 
@@ -596,6 +827,7 @@ Cross-run memory lets stages accumulate knowledge across multiple workflow runs.
 ```yaml
 memory:
   enabled: true
+  fresh: false              # set true to skip loading prior memories for this run
   capture:
     - stage: synthesizer      # stage id whose output to capture
       key: recommendation     # output key to persist
@@ -604,6 +836,8 @@ memory:
       key: quality_score
       max_entries: 10
   inject_as: _memory          # context key injected at run start
+  extract_knowledge: false    # set true to run KnowledgeExtractor post-run
+  inject_knowledge_as: _knowledge  # context key for injected knowledge facts
   # db: /custom/path/mem.db  # override default (~/.armature/memory/<name>.db)
 ```
 
@@ -612,8 +846,11 @@ memory:
 | Field | Type | Description |
 |---|---|---|
 | `enabled` | bool | Set to `false` to disable entirely without removing the config |
+| `fresh` | bool | When `true`, skip loading prior memories at run start — each run begins clean. Useful for workflows where each run is independent and past context would be confusing. |
 | `capture` | list | Stages and output keys to persist |
 | `inject_as` | string | Context key under which memories are injected (default: `_memory`) |
+| `extract_knowledge` | bool | Run a post-run knowledge extractor that synthesizes captured memories into structured long-term facts. Injected as `_knowledge` on subsequent runs. |
+| `inject_knowledge_as` | string | Context key for injected knowledge facts (default: `_knowledge`) |
 | `db` | string | Override the default DB path (`~/.armature/memory/<workflow_name>.db`) |
 
 Each `capture` entry:
@@ -759,8 +996,20 @@ Stages can be configured to retry on failure using `on_fail.loop`.
       stage: extractor      # which stage to retry (usually itself)
       max: 2                # retry up to 2 times (3 total attempts)
       context: retry        # context mode
+      backoff_s: 1.0        # initial wait before retry 1; doubles each attempt
+      backoff_max_s: 30.0   # cap on per-attempt wait (default: 60s)
   depends_on: []
 ```
+
+**Loop fields:**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `stage` | — | Stage ID to retry (usually the stage itself) |
+| `max` | `3` | Maximum number of retries (attempts = max + 1) |
+| `context` | `"retry"` | Context mode on retry |
+| `backoff_s` | `null` | Initial wait before retry 1 in seconds; doubles each subsequent attempt |
+| `backoff_max_s` | `60.0` | Cap on the per-attempt wait time in seconds |
 
 On each retry, the context is augmented with:
 - `_retry_attempt`: current attempt number (1-based)
@@ -1006,6 +1255,156 @@ The optimizer requires at least 5 traces to produce a proposal. Run your workflo
 
 ## 16. Running workflows
 
+### CLI reference
+
+Armature ships with a full CLI. All commands:
+
+```
+armature new        — interactive wizard to create a new spec file
+armature validate   — validate a spec file and report all errors
+armature run        — execute a workflow from a YAML spec
+armature serve      — start the HTTP service
+armature optimize   — analyze traces and propose spec improvements
+armature improve    — self-improvement loop: analyze, diagnose, revise, apply
+armature report     — print a diagnostic report for a completed run
+armature export-traces — export high-quality traces as training data (JSONL)
+```
+
+---
+
+#### `armature new`
+
+Interactive wizard that asks a series of questions and writes a starter spec file. Requires the `wizard` extra.
+
+```bash
+pip install 'armature[wizard]'
+armature new my_workflow.yml
+```
+
+---
+
+#### `armature validate`
+
+Validate a spec file and report all errors. Returns exit code 0 on success, 1 on validation errors.
+
+```bash
+armature validate my_workflow.yml
+```
+
+Use this in CI to catch broken specs before they reach production.
+
+---
+
+#### `armature run`
+
+Run a workflow from a YAML spec file.
+
+```bash
+armature run my_workflow.yml \
+  --input topic="contract risk" \
+  --input doc="$(cat contract.txt)" \
+  --output result.json \
+  --quiet
+```
+
+| Flag | Description |
+|------|-------------|
+| `--input key=value` | Pass input values (repeatable) |
+| `--output path` | Write result JSON to a file instead of stdout |
+| `--dry-run` | Validate spec without executing |
+| `--quiet` / `-q` | Suppress live progress output |
+| `--force` | Ignore checkpoint and rerun all stages from scratch |
+
+---
+
+#### `armature serve`
+
+Start the Armature HTTP service. Requires the `service` extra.
+
+```bash
+pip install 'armature[service]'
+armature serve --port 8080
+```
+
+The service exposes `POST /run` accepting `{"spec": "path/to/spec.yml", "inputs": {...}}`.
+
+---
+
+#### `armature optimize`
+
+Analyze accumulated traces for a workflow and propose targeted spec improvements using an LLM. Requires at least 5 traces.
+
+```bash
+armature optimize my_workflow.yml --traces ~/.armature/traces.db
+armature optimize my_workflow.yml --traces ~/.armature/traces.db --apply
+```
+
+Without `--apply`, the proposed diff is printed for review. With `--apply`, it is patched into the spec file (original backed up as `<spec>.orig`).
+
+---
+
+#### `armature report`
+
+Print a human-readable diagnostic report for a completed run, including stage-by-stage metrics, IHR score, and failure signatures.
+
+```bash
+armature report --run-id abc123
+armature report --run-id abc123 --traces ~/.armature/runs/abc123/traces.db
+```
+
+---
+
+#### `armature improve`
+
+Closed-loop self-improvement: loads traces, computes the Implicit Harness Rating (IHR), diagnoses failure signatures, and calls an LLM to produce a revised spec. If IHR is below the target and enough traces exist, the revised spec is auto-applied.
+
+```bash
+armature improve my_workflow.yml
+armature improve my_workflow.yml --no-apply     # propose but don't write
+armature improve my_workflow.yml --target-ihr 0.85 --min-traces 10
+armature improve my_workflow.yml --model claude-opus-4-7
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--traces path` | `~/.armature/traces.db` | Path to trace database |
+| `--model name` | `claude-sonnet-4-6` | LLM used by the spec refiner |
+| `--target-ihr float` | `0.90` | IHR threshold; improvement triggered when below this |
+| `--min-traces int` | `3` | Minimum traces required before analysis |
+| `--apply / --no-apply` | apply | Auto-apply the proposed spec |
+| `--log path` | `<spec>.improve_log.jsonl` | Path to the improvement audit log |
+
+See §18 for the full self-improvement system.
+
+---
+
+#### `armature export-traces`
+
+Export high-quality traces from the trace database as JSONL training data for SFT or DPO fine-tuning.
+
+```bash
+armature export-traces \
+  --workflow my-workflow \
+  --output training_data.jsonl \
+  --format chat \
+  --min-score 0.85
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workflow` / `-w` | — | Workflow name to export traces for |
+| `--output` / `-o` | — | Output JSONL file path |
+| `--format` / `-f` | `chat` | `chat` (OpenAI ChatML), `alpaca`, `sharegpt`, or `dpo` |
+| `--min-score` | `0.85` | Minimum quorum score for traces to include |
+| `--rejected-max-score` | `0.30` | DPO only: max quorum score for rejected traces |
+| `--role-types` | all | Comma-separated role types to include (e.g. `judge,researcher`) |
+| `--system-prompt` | auto | Override the system field for all records |
+| `--limit` | `1000` | Maximum traces to fetch |
+
+See §19 for the full trace export system.
+
+---
+
 ### Python API
 
 ```python
@@ -1093,6 +1492,41 @@ There are three integration patterns. Pick the one that matches your deployment 
 
 ---
 
+### Built-in tools reference
+
+Armature pre-registers these tools in every harness. They are available to any stage via `tool_call` or `role.tools` without any additional configuration.
+
+| Tool | Permission | Key args | Returns |
+|------|-----------|----------|---------|
+| `file_read` | READ_ONLY | `path` | `{ content }` |
+| `file_write` | WORKSPACE | `path`, `content` | `{ written }` |
+| `shell` | WORKSPACE | `cmd` | `{ stdout, stderr, exit_code }` |
+| `http_get` | NETWORK | `url` | `{ status, body }` |
+| `http_post` | NETWORK | `url`, `body?`, `headers?`, `timeout?` | `{ status, body }` |
+| `tessera.retrieve` | NETWORK | `query`, `top_k?` | `{ chunks }` |
+| `quorum.deliberate` | NETWORK | `topic`, `brief?`, `agents?` | `{ verdict, rationale }` |
+| `alembic.submit` | NETWORK | `trace`, `score?`, `alembic_url?` | `{ submitted }` |
+
+**`http_post`** is the general bridge to any external API. Pass `headers` for authentication:
+
+```yaml
+- id: call_openai
+  tool_call:
+    name: http_post
+    args:
+      url: "https://api.openai.com/v1/images/generations"
+      headers:
+        Authorization: "Bearer {{ env.OPENAI_API_KEY }}"
+      body:
+        model: "dall-e-3"
+        prompt: "{{ image_prompt }}"
+        n: 1
+```
+
+For more complex integrations (multi-step API flows, stateful calls, response parsing), use a custom tool module instead (see below).
+
+---
+
 ### Declaring tool modules in the spec
 
 The `tools:` section lets a spec reference external Python modules by dotted import path. The harness imports each module at startup and calls its `register()` function to add tools to the registry. Tool code lives in your codebase — the spec just says which modules to load.
@@ -1143,6 +1577,29 @@ stages:
 - Missing `register` function → `AttributeError` at harness startup with a clear message
 - Module not found → `ModuleNotFoundError` at harness startup
 - A user module can re-register a builtin name — the last registration wins; this is intentional and lets you replace builtins with project-specific implementations
+
+#### Reasoning Automation example
+
+The ToolModule pattern is how you connect Armature workflows to external systems for end-to-end process automation. A typical project layout:
+
+```
+my-automation-app/
+├── my_app/
+│   └── tools/
+│       ├── dalle.py           # dalle.generate_image → OpenAI API
+│       ├── meta_publisher.py  # meta.publish_ad → Meta Marketing API
+│       └── analytics.py       # analytics.collect_meta → Meta Analytics API
+├── workflows/
+│   ├── intake.yaml            # Brief intake + platform recommendation
+│   ├── concept-gen.yaml       # 3 copy variants + DALL-E images + brand judge
+│   └── monitoring.yaml        # Daily metrics collection + verdict
+└── corpus/
+    └── brand.md               # Brand knowledge loaded into Tessera
+```
+
+Each tool module handles one external integration. The YAML spec wires them together with LLM reasoning stages. Armature executes the whole chain — the tool modules are domain-specific; the harness is reusable infrastructure.
+
+See `docs/use-case-ad-campaign.md` in this repo for a complete reference implementation (Dangerous Pretzel Co. social ad campaign automation).
 
 ---
 
@@ -1321,3 +1778,227 @@ except StageError as e:
 ```
 
 For stages with `on_fail.loop`, the loop exhaustion is the error signal. If you need soft failure (partial results), add a final stage that consolidates whatever context is available rather than relying on exception handling in the host.
+
+---
+
+## 18. Self-improvement
+
+Armature includes a closed-loop self-improvement system that analyzes workflow traces, diagnoses quality problems, and produces a targeted spec revision. Each improvement cycle logs its predictions; the next cycle verifies whether those predictions came true — building an accountability record over time.
+
+### How it works
+
+The `armature improve` command runs one analysis cycle:
+
+1. **Load traces** for the workflow from the trace database (default: `~/.armature/traces.db`)
+2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces:
+   - IHR = `0.40 × output_valid_rate + 0.30 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score`
+3. **Run DiagnosticAnalyzer** to identify failure signatures — which stages are failing and how:
+   - `stage_failed` — the stage raised an exception
+   - `output_invalid` — the stage produced output that didn't match its schema
+   - `low_confidence` — the stage's quorum score was consistently low
+   - `high_escalation` — the stage frequently escalated to a larger model tier
+4. **Verify previous cycle's predictions** — compare the current diagnostic state against what the prior cycle predicted would be fixed
+5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (a frontier LLM) with the current spec + diagnostics + quality metrics
+6. **Apply the revised spec** (unless `--no-apply`)
+7. **Write an audit log entry** (JSONL) with all metrics, diagnostics, predictions, and verification results
+
+### The prediction-verification loop
+
+When `SpecRefiner` proposes a revised spec, it must declare a falsifiable contract:
+- `predicted_fixes` — which failure signatures it expects to resolve
+- `predicted_regressions` — which signatures might temporarily worsen
+
+The next `armature improve` run verifies these against observed changes:
+- `verified_fixes` — predictions that came true (the signature disappeared)
+- `missed_predictions` — predicted fixes that did not materialize
+- `unexpected_regressions` — new failures that weren't predicted
+
+This record accumulates in the JSONL log file alongside each run. Over multiple cycles you get a track record of how accurately your workflow improvements land.
+
+### Usage
+
+```bash
+# Analyze and apply if IHR < 0.90 (default)
+armature improve my_workflow.yml
+
+# Propose only — do not write the spec
+armature improve my_workflow.yml --no-apply
+
+# Stricter threshold, more data required
+armature improve my_workflow.yml --target-ihr 0.95 --min-traces 20
+
+# Use a more capable model for refinement
+armature improve my_workflow.yml --model claude-opus-4-7
+```
+
+The improvement log is written to `<spec_stem>.improve_log.jsonl` by default. Each line is a JSON object:
+
+```json
+{
+  "timestamp": "2026-05-15T10:00:00Z",
+  "workflow_name": "campaign-concept-gen",
+  "n_traces": 47,
+  "ihr_before": 0.71,
+  "needs_improvement": true,
+  "applied": true,
+  "diagnostics": [
+    {"code": "output_invalid", "stage_id": "brand_judge", "details": "4/10 runs failed schema validation"}
+  ],
+  "predicted_fixes": ["output_invalid:brand_judge"],
+  "predicted_regressions": [],
+  "verified_fixes": [],
+  "missed_predictions": [],
+  "unexpected_regressions": []
+}
+```
+
+### Python API
+
+```python
+from armature.synthesis.improve import SelfImproveRunner
+
+runner = SelfImproveRunner(
+    "my_workflow.yml",
+    "~/.armature/traces.db",
+    model="claude-sonnet-4-6",
+    target_ihr=0.90,
+    min_traces=10,
+    auto_apply=True,
+)
+
+report = await runner.analyze()
+
+print(f"IHR: {report.ihr_before:.3f}")
+print(f"Needs improvement: {report.needs_improvement}")
+print(f"Applied: {report.applied}")
+print(f"Verified fixes: {report.verified_fixes}")
+print(f"Unexpected regressions: {report.unexpected_regressions}")
+```
+
+### What SpecRefiner changes
+
+The refiner makes targeted changes only — it does not rewrite stages that are performing well. Its rules:
+
+| Failure signature | What the refiner may do |
+|-------------------|------------------------|
+| `output_invalid` | Relax or correct the stage's `output_schema` required fields |
+| `low_confidence` | Enrich `role.description` with explicit evaluation criteria |
+| `high_escalation` | Increase `on_fail.loop.max` or upgrade `model_tier` |
+| `stage_failed` | Add `timeout_s` or upgrade `model_tier` |
+
+The refiner is explicitly constrained from adding or removing stages, or changing stage IDs.
+
+### Building traces
+
+The improvement system requires trace data. Run your workflow normally — each run automatically records traces:
+
+```bash
+# Run several times to build up data
+armature run my_workflow.yml --input topic="quantum computing"
+armature run my_workflow.yml --input topic="renewable energy"
+armature run my_workflow.yml --input topic="supply chain risk"
+
+# Then improve
+armature improve my_workflow.yml
+```
+
+Traces accumulate in `~/.armature/traces.db` by default.
+
+---
+
+## 19. Trace export for fine-tuning
+
+Every workflow run records execution traces — the inputs, outputs, and quality scores of every LLM stage. High-quality traces (high quorum score, valid output) are valuable training data for fine-tuning smaller language models to perform the same tasks more cheaply.
+
+`armature export-traces` exports these traces as JSONL in the format expected by common fine-tuning frameworks.
+
+### Formats
+
+| Format | Structure | Compatible with |
+|--------|-----------|-----------------|
+| `chat` | `{"messages": [{"role": "system"}, {"role": "user"}, {"role": "assistant"}]}` | OpenAI, Anthropic, Qwen, LLaMA |
+| `alpaca` | `{"instruction": "...", "input": "...", "output": "..."}` | Stanford Alpaca, Axolotl |
+| `sharegpt` | `{"conversations": [{"from": "human"}, {"from": "gpt"}]}` | ShareGPT-format trainers |
+| `dpo` | `{"prompt": "...", "chosen": "...", "rejected": "..."}` | DPO / GRPO preference training |
+
+### SFT export
+
+```bash
+armature export-traces \
+  --workflow campaign-concept-gen \
+  --output training/brand_judge_sft.jsonl \
+  --format chat \
+  --min-score 0.85 \
+  --role-types judge
+```
+
+This exports all traces from the `campaign-concept-gen` workflow where the stage role type is `judge` and the quorum score is ≥ 0.85. Each trace becomes one JSONL record: the stage's inputs become the user turn, and the stage's output becomes the assistant turn.
+
+### DPO export
+
+DPO training requires pairs of (chosen, rejected) responses for the same prompt:
+
+```bash
+armature export-traces \
+  --workflow campaign-concept-gen \
+  --output training/brand_judge_dpo.jsonl \
+  --format dpo \
+  --min-score 0.85 \
+  --rejected-max-score 0.30
+```
+
+For each high-quality trace, the exporter finds a low-quality trace from the same stage and pairs them. The lowest-scoring rejected trace is used when multiple are available.
+
+### System prompt override
+
+By default the system prompt is generated from the stage's role type: `"You are a {role_type} agent. Complete the task described by the user."` Override it to match the system prompt used during your target fine-tuning run:
+
+```bash
+armature export-traces \
+  --workflow my-workflow \
+  --output out.jsonl \
+  --system-prompt "You are an expert brand compliance analyst for food companies."
+```
+
+### Python API
+
+```python
+from pathlib import Path
+from armature.state.traces import TraceStore
+from armature.state.export import TraceExporter
+
+store = TraceStore(Path("~/.armature/traces.db").expanduser())
+exporter = TraceExporter(store)
+
+# SFT
+summary = await exporter.export(
+    "my-workflow",
+    Path("training/sft.jsonl"),
+    format="chat",
+    min_quorum_score=0.85,
+    role_types=["judge"],
+    system_prompt="You are an expert analyst.",
+    limit=500,
+)
+print(f"Exported {summary.total_exported} records")
+
+# DPO
+summary = await exporter.export_dpo(
+    "my-workflow",
+    Path("training/dpo.jsonl"),
+    chosen_min_score=0.85,
+    rejected_max_score=0.30,
+    limit=500,
+)
+```
+
+### Quality filtering
+
+The `min_quorum_score` filter is the primary quality gate. Quorum score is set by multi-agent deliberation stages in your workflow (using the `quorum.deliberate` builtin tool). If your workflow doesn't use quorum scoring, all traces have a `null` quorum score and the filter is effectively disabled — you may want to set a high `min_quorum_score` anyway to filter on other criteria, or post-process the exported JSONL manually.
+
+A practical fine-tuning pipeline:
+1. Run the workflow many times with diverse inputs to build a trace corpus
+2. Export at `--min-score 0.85` for SFT, `--min-score 0.85 --rejected-max-score 0.30` for DPO
+3. Fine-tune a small model (e.g. Qwen 2.5 7B) on the exported data
+4. Point the workflow's `small` tier at your fine-tuned model
+5. Measure cost and quality — the fine-tuned small model often matches the frontier model on specialized tasks at a fraction of the cost

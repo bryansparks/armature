@@ -34,6 +34,22 @@ async def _http_get(args: dict) -> dict:
         return {"status": response.status_code, "body": response.text}
 
 
+async def _http_post(args: dict) -> dict:
+    url = args["url"]
+    body = args.get("body")
+    headers = args.get("headers") or {}
+    timeout = args.get("timeout", 30)
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            json=body if isinstance(body, dict) else None,
+            content=body if isinstance(body, str) else None,
+            headers=headers,
+            timeout=timeout,
+        )
+        return {"status": response.status_code, "body": response.text}
+
+
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="file_read", description="Read a file from disk",
@@ -54,6 +70,16 @@ def register_builtins(registry: ToolRegistry) -> None:
         name="http_get", description="Make an HTTP GET request",
         permission=PermissionLevel.NETWORK, handler=_http_get,
         parameters={"url": {"type": "string"}},
+    ))
+    registry.register(ToolDescriptor(
+        name="http_post", description="Make an authenticated HTTP POST request",
+        permission=PermissionLevel.NETWORK, handler=_http_post,
+        parameters={
+            "url": {"type": "string"},
+            "body": {"type": ["object", "string"], "optional": True},
+            "headers": {"type": "object", "optional": True},
+            "timeout": {"type": "integer", "optional": True},
+        },
     ))
     registry.register(ToolDescriptor(
         name="quorum.deliberate",
