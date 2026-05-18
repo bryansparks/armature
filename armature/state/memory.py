@@ -13,6 +13,7 @@ _CREATE_SQL = """
         stage_id      TEXT NOT NULL,
         capture_key   TEXT NOT NULL,
         value         TEXT NOT NULL,
+        quality       REAL NOT NULL DEFAULT 0.5,
         timestamp     TEXT NOT NULL
     )
 """
@@ -28,6 +29,11 @@ class MemoryStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self._path) as db:
             await db.execute(_CREATE_SQL)
+            # Migrate existing tables that lack the quality column
+            try:
+                await db.execute("ALTER TABLE memories ADD COLUMN quality REAL NOT NULL DEFAULT 0.5")
+            except Exception:
+                pass
             await db.commit()
 
     async def record(
@@ -37,21 +43,22 @@ class MemoryStore:
         capture_key: str,
         value: Any,
         max_entries: int = 5,
+        quality: float = 0.5,
     ) -> None:
         serialized = json.dumps(value, default=str)
         timestamp = datetime.now(timezone.utc).isoformat()
         async with aiosqlite.connect(self._path) as db:
             await db.execute(
-                "INSERT INTO memories (workflow_name, stage_id, capture_key, value, timestamp) "
-                "VALUES (?,?,?,?,?)",
-                (workflow_name, stage_id, capture_key, serialized, timestamp),
+                "INSERT INTO memories (workflow_name, stage_id, capture_key, value, quality, timestamp) "
+                "VALUES (?,?,?,?,?,?)",
+                (workflow_name, stage_id, capture_key, serialized, quality, timestamp),
             )
-            # Keep only the newest max_entries; delete everything beyond that offset.
+            # Keep best max_entries (highest quality, then newest); evict lowest-quality oldest first.
             await db.execute(
                 """DELETE FROM memories WHERE id IN (
                     SELECT id FROM memories
                     WHERE workflow_name=? AND stage_id=? AND capture_key=?
-                    ORDER BY timestamp DESC
+                    ORDER BY quality DESC, timestamp DESC
                     LIMIT -1 OFFSET ?
                 )""",
                 (workflow_name, stage_id, capture_key, max_entries),

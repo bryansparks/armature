@@ -303,6 +303,7 @@ class Harness:
         await self._hooks.run_post_stage(stage.id, result, context)
 
         if self._memory_store is not None and self._memory_config is not None:
+            quality = _extract_quorum_score(stage.role.type.value if stage.role else "worker", result) or 0.5
             for cap in self._memory_config.capture:
                 if cap.stage == stage.id:
                     value = result.get(cap.key) if isinstance(result, dict) else None
@@ -314,6 +315,7 @@ class Harness:
                                 capture_key=cap.key,
                                 value=value,
                                 max_entries=cap.max_entries,
+                                quality=quality,
                             )
                         except Exception:
                             pass  # memory capture must never block execution

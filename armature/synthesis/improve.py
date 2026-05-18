@@ -300,6 +300,7 @@ class SelfImproveRunner:
                 predicted_fixes = result.predicted_fixes
                 predicted_regressions = result.predicted_regressions
                 if self._auto_apply:
+                    self._write_spec_history(self._spec_path.read_text(encoding="utf-8"))
                     self._spec_path.write_text(proposed_yaml, encoding="utf-8")
                     applied = True
 
@@ -395,6 +396,15 @@ class SelfImproveRunner:
             latency_score=latency_score,
             n_traces=n,
         )
+
+    def _write_spec_history(self, yaml_text: str) -> None:
+        history_path = self._spec_path.parent / f"{self._spec_path.stem}.spec_history.jsonl"
+        entry = json.dumps({
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "yaml": yaml_text,
+        })
+        with history_path.open("a", encoding="utf-8") as f:
+            f.write(entry + "\n")
 
     def _write_log(
         self,

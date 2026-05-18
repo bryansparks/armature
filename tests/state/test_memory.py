@@ -69,3 +69,24 @@ async def test_dict_value_round_trips(tmp_path):
     await store.record("wf", "s1", "result", payload)
     memories = await store.load("wf")
     assert memories["s1"]["result"][0] == payload
+
+
+async def test_memory_record_accepts_quality_param(tmp_path):
+    store = MemoryStore(tmp_path / "mem.db")
+    await store.init()
+    await store.record("wf", "s1", "key", "value", quality=0.9)
+    memories = await store.load("wf")
+    assert memories["s1"]["key"] == ["value"]
+
+
+async def test_memory_evicts_low_quality_first(tmp_path):
+    store = MemoryStore(tmp_path / "mem.db")
+    await store.init()
+    await store.record("wf", "s1", "key", "low-quality-old", max_entries=2, quality=0.2)
+    await store.record("wf", "s1", "key", "high-quality", max_entries=2, quality=0.9)
+    await store.record("wf", "s1", "key", "new-entry", max_entries=2, quality=0.5)
+    entries = (await store.load("wf"))["s1"]["key"]
+    assert len(entries) == 2
+    assert "low-quality-old" not in entries
+    assert "high-quality" in entries
+    assert "new-entry" in entries

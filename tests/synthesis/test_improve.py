@@ -626,6 +626,73 @@ async def test_log_entry_includes_verification_fields(tmp_path):
     assert "unexpected_regressions" in entry
 
 
+# ── spec versioning ──────────────────────────────────────────────────────────
+
+async def test_spec_history_written_before_auto_apply(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
+        report = await runner.analyze()
+
+    assert report.applied is True
+    history_file = tmp_path / "wf.spec_history.jsonl"
+    assert history_file.exists()
+    import json
+    entry = json.loads(history_file.read_text().strip())
+    assert entry["yaml"] == _MINIMAL_SPEC_YAML
+    assert "timestamp" in entry
+
+
+async def test_spec_history_not_written_when_no_improvement(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(run_id="r1", quorum_score=0.95)])
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, auto_apply=True)
+    await runner.analyze()
+
+    history_file = tmp_path / "wf.spec_history.jsonl"
+    assert not history_file.exists()
+
+
+async def test_spec_history_appends_across_multiple_apply_cycles(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
+        await runner.analyze()
+        mock_llm.return_value = _make_llm_response(_MINIMAL_SPEC_YAML)
+        await runner.analyze()
+
+    history_file = tmp_path / "wf.spec_history.jsonl"
+    import json
+    lines = [l for l in history_file.read_text().splitlines() if l.strip()]
+    assert len(lines) == 2
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _make_llm_response(content: str):

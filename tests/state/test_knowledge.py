@@ -129,6 +129,47 @@ async def test_knowledge_store_multiple_records_multiple_runs(tmp_path):
     assert len(results) == 3
 
 
+async def test_knowledge_store_search_multi_word_query(tmp_path):
+    """FTS5 search handles multi-word queries as implicit AND."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "knowledge.db")
+    await store.init()
+
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers concise responses", confidence=0.9, source_run_id="r1",
+    ))
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="domain", fact="concise documentation is required", confidence=0.8, source_run_id="r1",
+    ))
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="system", fact="always validate authentication tokens", confidence=0.85, source_run_id="r1",
+    ))
+
+    results = await store.search("wf", "concise responses")
+    assert len(results) >= 1
+    assert any("concise" in r.fact and "responses" in r.fact for r in results)
+
+
+async def test_knowledge_store_search_returns_highest_relevance_first(tmp_path):
+    """FTS5 search ranks records by BM25 relevance, most relevant first."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "knowledge.db")
+    await store.init()
+
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="a", fact="authentication is required for all endpoints", confidence=0.9, source_run_id="r1",
+    ))
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="b", fact="authentication authentication authentication security", confidence=0.7, source_run_id="r1",
+    ))
+
+    results = await store.search("wf", "authentication", top_k=5)
+    assert len(results) == 2
+    assert results[0].entity == "b"  # higher term frequency → higher BM25 rank
+
+
 # ── KnowledgeExtractor ────────────────────────────────────────────────────────
 
 _MEMORIES = {
