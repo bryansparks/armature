@@ -166,3 +166,26 @@ async def test_spec_version_stored_and_retrieved(store):
     ))
     results = await store.query(workflow_name="wf")
     assert results[0].spec_version == "abc123def456"
+
+
+async def test_trace_store_enables_wal_mode(tmp_path):
+    import aiosqlite
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    async with aiosqlite.connect(tmp_path / "traces.db") as db:
+        cursor = await db.execute("PRAGMA journal_mode")
+        row = await cursor.fetchone()
+    assert row[0] == "wal"
+
+
+async def test_multiple_runs_coexist_in_shared_db(tmp_path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    await _populate_run(store, "runX", 2, workflow_name="shared-wf")
+    await _populate_run(store, "runY", 3, workflow_name="shared-wf")
+    x = await store.query_by_run("runX")
+    y = await store.query_by_run("runY")
+    assert len(x) == 2
+    assert len(y) == 3
+    all_traces = await store.query(workflow_name="shared-wf")
+    assert len(all_traces) == 5

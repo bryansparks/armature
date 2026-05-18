@@ -69,6 +69,7 @@ class TraceStore:
     async def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self._path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
             await db.execute(_CREATE_SQL)
             for col_def in [
                 "error_type TEXT",

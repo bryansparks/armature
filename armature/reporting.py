@@ -296,7 +296,7 @@ async def load_report_data(
     from pathlib import Path
     from armature.state.traces import TraceStore
 
-    db = Path(traces_db) if traces_db else Path(f"~/.armature/runs/{run_id}/traces.db").expanduser()
+    db = Path(traces_db) if traces_db else Path("~/.armature/traces.db").expanduser()
     if not db.exists():
         return None
 

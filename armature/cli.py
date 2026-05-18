@@ -209,8 +209,7 @@ def report(
     """Print a human-readable report for a completed workflow run."""
     from armature.reporting import load_report_data, ReportBuilder
 
-    # Resolve per-run traces.db if not explicitly provided
-    resolved_traces = traces or Path(f"~/.armature/runs/{run_id}/traces.db").expanduser()
+    resolved_traces = traces or Path("~/.armature/traces.db").expanduser()
     resolved_session = session_log or Path(f"~/.armature/runs/{run_id}/session.jsonl").expanduser()
 
     async def _load():

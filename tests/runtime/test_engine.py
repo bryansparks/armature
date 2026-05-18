@@ -40,6 +40,18 @@ async def test_harness_initializes_trace_store(tmp_path):
     assert isinstance(harness._traces, TraceStore)
 
 
+async def test_harness_uses_global_traces_db_by_default():
+    spec = make_minimal_spec()
+    harness = Harness(spec=spec)
+    assert harness._traces._path == Path("~/.armature/traces.db").expanduser()
+
+
+async def test_harness_uses_custom_traces_db(tmp_path):
+    spec = make_minimal_spec()
+    harness = Harness(spec=spec, traces_db=tmp_path / "custom.db")
+    assert harness._traces._path == tmp_path / "custom.db"
+
+
 def test_harness_from_file(tmp_path):
     spec_file = tmp_path / "test.yaml"
     spec_file.write_text("""
@@ -208,7 +220,7 @@ async def test_judge_stage_quorum_score_written_to_trace(tmp_path):
         )],
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    harness = Harness(spec=spec, session_dir=tmp_path)
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "traces.db")
 
     async def mock_execute(context):
         return {"confidence": 0.82, "feedback": "good", "_input_tokens": 10, "_output_tokens": 5}
@@ -231,7 +243,7 @@ async def test_worker_stage_quorum_score_not_written(tmp_path):
         )],
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    harness = Harness(spec=spec, session_dir=tmp_path)
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "traces.db")
 
     async def mock_execute(context):
         return {"score": 0.95, "content": "done", "_input_tokens": 5, "_output_tokens": 3}
@@ -254,7 +266,7 @@ async def test_failed_llm_stage_writes_failure_trace(tmp_path):
         )],
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    harness = Harness(spec=spec, session_dir=tmp_path)
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "traces.db")
 
     async def mock_execute(context):
         raise RuntimeError("simulated failure")
@@ -277,7 +289,7 @@ async def test_script_stage_writes_trace(tmp_path):
         stages=[Stage(id="s1", adapter="echo_cmd")],
         adapters={"echo_cmd": Adapter(name="echo_cmd", type="script", cmd="echo hello")},
     )
-    harness = Harness(spec=spec, session_dir=tmp_path)
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "traces.db")
     await harness.run({})
 
     await harness._ensure_traces()
@@ -297,7 +309,7 @@ async def test_spec_version_in_trace(tmp_path):
         )],
         model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
     )
-    harness = Harness(spec=spec, session_dir=tmp_path)
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "traces.db")
 
     async def mock_execute(context):
         return {"content": "ok", "_input_tokens": 5, "_output_tokens": 3, "_escalation_count": 0}

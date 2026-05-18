@@ -40,6 +40,9 @@ def _extract_quorum_score(role_type: str, result: dict) -> float | None:
     return None
 
 
+_GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
+
+
 class Harness:
     def __init__(
         self,
@@ -48,6 +51,7 @@ class Harness:
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         *,
         validate: bool = True,
+        traces_db: Path | str | None = None,
     ):
         if validate:
             from armature.spec.validator import validate_spec
@@ -71,7 +75,8 @@ class Harness:
         self._context = ContextManager()
         self._assembler = PromptAssembler()
         self._session_dir = base_dir
-        self._traces = TraceStore(base_dir / "traces.db")
+        resolved_traces = Path(traces_db).expanduser() if traces_db else _GLOBAL_TRACES_DB.expanduser()
+        self._traces = TraceStore(resolved_traces)
         self._on_event = on_event
         self._transcript: list[dict[str, Any]] = []
 
