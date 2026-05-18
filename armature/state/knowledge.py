@@ -3,7 +3,12 @@ from __future__ import annotations
 import aiosqlite
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from armature.state.embedder import LocalEmbedder
 
 
 class KnowledgeRecord(BaseModel):
@@ -23,7 +28,8 @@ _CREATE_SQL = """
         fact          TEXT NOT NULL,
         confidence    REAL NOT NULL,
         source_run_id TEXT NOT NULL,
-        timestamp     TEXT NOT NULL
+        timestamp     TEXT NOT NULL,
+        embedding     BLOB
     )
 """
 
@@ -45,15 +51,34 @@ class KnowledgeStore:
         async with aiosqlite.connect(self._path) as db:
             await db.execute(_CREATE_SQL)
             await db.execute(_CREATE_FTS_SQL)
+            # Migrate existing tables that lack the embedding column
+            try:
+                await db.execute("ALTER TABLE knowledge ADD COLUMN embedding BLOB")
+            except Exception:
+                pass
             await db.commit()
 
-    async def record(self, record: KnowledgeRecord) -> None:
+    async def record(
+        self,
+        record: KnowledgeRecord,
+        embedder: "LocalEmbedder | None" = None,
+    ) -> None:
+        emb_bytes: bytes | None = None
+        if embedder is not None:
+            try:
+                from armature.state.embedder import vector_to_bytes
+                vec = embedder.embed(record.fact)
+                emb_bytes = vector_to_bytes(vec)
+            except Exception:
+                pass  # embedding failure is non-fatal
+
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(
-                "INSERT INTO knowledge (workflow_name, entity, fact, confidence, source_run_id, timestamp) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO knowledge "
+                "(workflow_name, entity, fact, confidence, source_run_id, timestamp, embedding) "
+                "VALUES (?,?,?,?,?,?,?)",
                 (record.workflow_name, record.entity, record.fact,
-                 record.confidence, record.source_run_id, record.timestamp),
+                 record.confidence, record.source_run_id, record.timestamp, emb_bytes),
             )
             await db.execute(
                 "INSERT INTO knowledge_fts(rowid, fact) VALUES (?, ?)",
@@ -99,6 +124,45 @@ class KnowledgeStore:
                 )
             rows = await cursor.fetchall()
         return [self._row_to_record(r) for r in rows]
+
+    async def semantic_search(
+        self,
+        workflow_name: str,
+        query: str,
+        embedder: "LocalEmbedder",
+        top_k: int = 5,
+    ) -> list[KnowledgeRecord]:
+        """Find facts by cosine similarity to *query* using local embeddings.
+
+        Only records that were stored with an embedder (non-NULL embedding blob)
+        are considered; records without embeddings are silently skipped.
+        """
+        if not self._path.exists():
+            return []
+
+        from armature.state.embedder import LocalEmbedder, bytes_to_vector
+
+        query_vec = embedder.embed(query)
+
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM knowledge WHERE workflow_name=? AND embedding IS NOT NULL",
+                (workflow_name,),
+            )
+            rows = await cursor.fetchall()
+
+        scored: list[tuple[float, KnowledgeRecord]] = []
+        for row in rows:
+            emb_bytes = row["embedding"]
+            if emb_bytes is None:
+                continue
+            vec = bytes_to_vector(emb_bytes)
+            sim = LocalEmbedder.cosine_similarity(query_vec, vec)
+            scored.append((sim, self._row_to_record(row)))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [rec for _, rec in scored[:top_k]]
 
     @staticmethod
     def _row_to_record(r: "aiosqlite.Row") -> KnowledgeRecord:

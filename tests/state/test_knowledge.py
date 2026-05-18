@@ -170,6 +170,130 @@ async def test_knowledge_store_search_returns_highest_relevance_first(tmp_path):
     assert results[0].entity == "b"  # higher term frequency → higher BM25 rank
 
 
+# ── KnowledgeStore semantic search ───────────────────────────────────────────
+
+
+class _FakeEmbedder:
+    """Deterministic fake embedder for testing semantic search without a real model."""
+    _vectors: dict[str, list[float]] = {
+        "dogs are loyal animals":  [1.0, 0.0, 0.0, 0.0],
+        "cats are independent":    [0.0, 1.0, 0.0, 0.0],
+        "birds can fly":           [0.0, 0.0, 1.0, 0.0],
+    }
+    _default = [0.25, 0.25, 0.25, 0.25]
+
+    def embed(self, text: str) -> list[float]:
+        for key, vec in self._vectors.items():
+            if key == text:
+                return vec
+        # Queries: map known synonyms
+        if "canine" in text or "dog" in text:
+            return [0.95, 0.05, 0.0, 0.0]
+        if "feline" in text or "cat" in text:
+            return [0.05, 0.95, 0.0, 0.0]
+        return list(self._default)
+
+
+async def test_knowledge_semantic_search_finds_related_fact(tmp_path):
+    """semantic_search() returns the most cosine-similar fact, not keyword match."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()
+
+    for fact in ("dogs are loyal animals", "cats are independent", "birds can fly"):
+        await store.record(
+            KnowledgeRecord(workflow_name="wf", entity="animals", fact=fact,
+                            confidence=0.9, source_run_id="r1"),
+            embedder=embedder,
+        )
+
+    # "canine" has no keyword overlap with "dogs are loyal animals" but high cosine similarity
+    results = await store.semantic_search("wf", "canine", embedder=embedder, top_k=1)
+    assert len(results) == 1
+    assert "dog" in results[0].fact
+
+
+async def test_knowledge_semantic_search_respects_top_k(tmp_path):
+    """semantic_search() returns at most top_k results."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()
+
+    for fact in ("dogs are loyal animals", "cats are independent", "birds can fly"):
+        await store.record(
+            KnowledgeRecord(workflow_name="wf", entity="animals", fact=fact,
+                            confidence=0.9, source_run_id="r1"),
+            embedder=embedder,
+        )
+
+    results = await store.semantic_search("wf", "dog canine", embedder=embedder, top_k=2)
+    assert len(results) <= 2
+
+
+async def test_knowledge_semantic_search_filters_by_workflow(tmp_path):
+    """semantic_search() only returns records for the requested workflow."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()
+
+    await store.record(
+        KnowledgeRecord(workflow_name="wf_a", entity="a", fact="dogs are loyal animals",
+                        confidence=0.9, source_run_id="r1"),
+        embedder=embedder,
+    )
+    await store.record(
+        KnowledgeRecord(workflow_name="wf_b", entity="b", fact="cats are independent",
+                        confidence=0.9, source_run_id="r1"),
+        embedder=embedder,
+    )
+
+    results = await store.semantic_search("wf_a", "canine", embedder=embedder, top_k=5)
+    assert all(r.workflow_name == "wf_a" for r in results)
+
+
+async def test_knowledge_semantic_search_skips_records_without_embeddings(tmp_path):
+    """Records inserted without embedder are skipped in semantic_search()."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()
+
+    # Insert without embedder (no embedding blob)
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="old", fact="dogs are loyal animals",
+        confidence=0.9, source_run_id="r1",
+    ))
+    # Insert with embedder
+    await store.record(
+        KnowledgeRecord(workflow_name="wf", entity="new", fact="cats are independent",
+                        confidence=0.9, source_run_id="r1"),
+        embedder=embedder,
+    )
+
+    results = await store.semantic_search("wf", "feline", embedder=embedder, top_k=5)
+    # Only the record with an embedding is returned
+    assert len(results) == 1
+    assert results[0].entity == "new"
+
+
+async def test_knowledge_semantic_search_empty_store_returns_empty(tmp_path):
+    """semantic_search() on an empty store returns []."""
+    from armature.state.knowledge import KnowledgeStore
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+
+    results = await store.semantic_search("wf", "canine", embedder=_FakeEmbedder(), top_k=5)
+    assert results == []
+
+
 # ── KnowledgeExtractor ────────────────────────────────────────────────────────
 
 _MEMORIES = {
