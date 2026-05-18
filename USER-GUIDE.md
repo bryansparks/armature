@@ -29,11 +29,16 @@ This guide covers everything you need to build agentic workflows with Armature: 
 11. [Safety rules](#11-safety-rules)
 12. [Fan-out / Fan-in](#12-fan-out--fan-in)
 13. [Human gates in detail](#13-human-gates-in-detail)
-14. [Templates](#14-templates)
-15. [The optimizer](#15-the-optimizer)
-16. [Running workflows](#16-running-workflows)
+14. [Deliberative teams](#14-deliberative-teams)
+    - [The three-round topology](#the-three-round-topology)
+    - [Specifying the objective](#specifying-the-objective)
+    - [The judge role type](#the-type-judge-role)
+    - [Reference implementations](#reference-implementations)
+15. [Templates](#15-templates)
+16. [The optimizer](#16-the-optimizer)
+17. [Running workflows](#17-running-workflows)
     - [CLI reference](#cli-reference)
-17. [Integrating with a host application](#17-integrating-with-a-host-application)
+18. [Integrating with a host application](#18-integrating-with-a-host-application)
     - [Declaring tool modules in the spec](#declaring-tool-modules-in-the-spec)
     - [Pattern A — embedded library](#pattern-a--embedded-library)
     - [Pattern B — HTTP sidecar](#pattern-b--http-sidecar)
@@ -42,8 +47,8 @@ This guide covers everything you need to build agentic workflows with Armature: 
     - [Output extraction](#output-extraction)
     - [Async lifecycle](#async-lifecycle)
     - [Error contracts](#error-contracts)
-18. [Self-improvement](#18-self-improvement)
-19. [Trace export for fine-tuning](#19-trace-export-for-fine-tuning)
+19. [Self-improvement](#19-self-improvement)
+20. [Trace export for fine-tuning](#20-trace-export-for-fine-tuning)
 
 ---
 
@@ -1151,7 +1156,204 @@ Downstream stages can branch on the gate result using the `condition` field (not
 
 ---
 
-## 14. Templates
+## 14. Deliberative teams
+
+A deliberative team is a multi-agent workflow where specialist agents argue, challenge, and synthesize — producing a structured decision with an explicit confidence score and recorded dissents. This is Armature's native pattern for decisions that require more than a single LLM call.
+
+### The three-round topology
+
+Most deliberative workflows follow the same DAG shape regardless of domain:
+
+```
+R1: Specialists ──► R2: Challenger ──► R3: Synthesizer
+ (researcher)         (researcher)        (judge)
+```
+
+- **R1 — Specialists:** Multiple analyst roles, typically chained sequentially so each sees prior analyses in context. Each specialist examines the question from a different domain angle and declares a position.
+- **R2 — Challenger:** Sees all R1 outputs. Its sole job is constructive skepticism — attack unsupported assumptions, surface overlooked risks, prevent groupthink. It does not advocate a position.
+- **R3 — Synthesizer:** A `type: judge` stage with `depends_on` pointing to every upstream stage. It reads the full deliberation transcript (accumulated in context automatically), resolves conflicts between specialists, responds to the Challenger's concerns, and emits a structured JSON decision.
+
+### Specifying the objective
+
+The debate topic is a Jinja2 variable embedded in each role's `description` field. Pass it at run time — there is no special YAML key:
+
+```yaml
+- id: analyst
+  role:
+    name: Analyst
+    type: researcher
+    model_tier: small
+    description: |
+      You are an objective analyst deliberating on the following:
+
+      OBJECTIVE: {{ objective }}
+
+      Analyze the evidence and end with a position:
+      My position: PROCEED | BLOCK | MODIFY
+  output_mode: text
+  depends_on: []
+```
+
+From the CLI:
+```bash
+armature run my_deliberation.yml --input objective="Should we migrate auth to OAuth 2.0?"
+```
+
+From Python:
+```python
+result = await harness.run({
+    "objective": "Should we migrate auth to OAuth 2.0?",
+    "documents": "Current system context...",
+})
+```
+
+The `objective` variable is available in every stage because all context is accumulated forward through the DAG — each stage automatically receives all prior stage outputs plus the initial inputs.
+
+### The `type: judge` role
+
+The Synthesizer is a `type: judge` stage. This does two things:
+
+1. **Model tier:** Judge stages default to the `frontier` tier (see [Role type defaults](#role-type-defaults)). The decision-maker always gets your strongest model unless overridden.
+2. **Quorum score:** The engine auto-extracts a `confidence`, `score`, or `quality_score` field from the judge's output and records it as the `quorum_score` on the trace. This feeds the IHR metric, the self-improvement loop, and the bootstrap few-shot selector.
+
+```yaml
+- id: synthesizer
+  role:
+    name: Synthesizer
+    type: judge              # ← frontier model by default; confidence auto-extracted
+    description: |
+      You are the sole decision authority.
+      OBJECTIVE: {{ objective }}
+      ...
+      You MUST end with a JSON block:
+      ```json
+      { "decision": "...", "reasoning": "...", "confidence": 0.85, ... }
+      ```
+  output_mode: guided_json
+  output_schema:
+    type: object
+    required: [decision, reasoning, confidence]
+    properties:
+      decision:    { type: string }
+      reasoning:   { type: string }
+      confidence:  { type: number, minimum: 0.0, maximum: 1.0 }
+      dissenting_opinions:
+        type: array
+        items: { type: object }
+  depends_on: [analyst, strategist, risk_assessor, challenger]
+```
+
+### Minimal working example
+
+A two-analyst deliberation (no challenger):
+
+```yaml
+name: simple_deliberation
+version: "1.0"
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+stages:
+  - id: proponent
+    role:
+      name: Proponent
+      type: researcher
+      model_tier: small
+      description: |
+        OBJECTIVE: {{ objective }}
+        Make the strongest case FOR this decision. Be evidence-based.
+        End with: My position: PROCEED
+    output_mode: text
+    depends_on: []
+
+  - id: critic
+    role:
+      name: Critic
+      type: researcher
+      model_tier: small
+      description: |
+        OBJECTIVE: {{ objective }}
+        You have read the Proponent's case. Challenge it rigorously.
+        Identify the weakest arguments and strongest counterpoints.
+        End with: My position: BLOCK | MODIFY
+    output_mode: text
+    depends_on: [proponent]
+
+  - id: judge
+    role:
+      name: Judge
+      type: judge              # frontier model, confidence auto-tracked
+      description: |
+        OBJECTIVE: {{ objective }}
+        You have read the full debate. Adjudicate.
+        Weigh the Proponent's case against the Critic's challenges.
+        End with a JSON block: { "decision": "...", "reasoning": "...", "confidence": 0.0 }
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [decision, reasoning, confidence]
+      properties:
+        decision:   { type: string }
+        reasoning:  { type: string }
+        confidence: { type: number, minimum: 0.0, maximum: 1.0 }
+    depends_on: [proponent, critic]
+```
+
+### How context accumulation creates the debate
+
+Armature's context manager passes all prior stage outputs forward automatically. The judge in the example above receives a prompt that includes:
+
+- The initial `objective` input
+- The full `proponent` output (under key `proponent`)
+- The full `critic` output (under key `critic`)
+
+No explicit wiring is needed — `depends_on` controls ordering and the engine handles injection. This is what allows the Critic to reference the Proponent's arguments and the Judge to see the complete exchange.
+
+### Reference implementations
+
+Two complete deliberative specs are included:
+
+| Spec | Pattern | Rounds |
+|------|---------|--------|
+| `examples/03_deliberation_standard.yml` | Analyst + Strategist + Risk Assessor → Challenger → Synthesizer | 3 |
+| `armature/templates/six_thinking_hats.yml` | Six perspective hats → Blue Hat facilitator → Synthesizer | 3 |
+
+Both accept `objective` as a runtime input. See section [15. Templates](#15-templates) for the Six Thinking Hats template in detail.
+
+### Adding a human escalation gate
+
+A common pattern: escalate to a human when the Synthesizer's confidence falls below a threshold. Add a gate stage downstream and inspect the judge's output in your application:
+
+```yaml
+- id: human_review
+  gate: human
+  present: |
+    DECISION: {{ synthesizer.decision }}
+    Confidence: {{ synthesizer.confidence }}
+    Reasoning: {{ synthesizer.reasoning }}
+
+    Do you approve?
+  depends_on: [synthesizer]
+```
+
+Or conditionally skip the gate in code:
+```python
+result = await harness.run({"objective": "..."})
+if result["synthesizer"]["confidence"] >= 0.80:
+    # auto-proceed
+else:
+    # route to human review
+```
+
+---
+
+## 15. Templates
 
 Templates are pre-built, parameterized spec files that implement proven agentic patterns. They live in `armature/templates/` and are loaded like any other spec.
 
@@ -1214,7 +1416,7 @@ print(f"Confidence: {synthesis['confidence']}")
 
 ---
 
-## 15. The optimizer
+## 16. The optimizer
 
 The optimizer reads trace history for a workflow and uses an LLM to propose improvements to prompts or model tier assignments.
 
@@ -1253,7 +1455,7 @@ The optimizer requires at least 5 traces to produce a proposal. Run your workflo
 
 ---
 
-## 16. Running workflows
+## 17. Running workflows
 
 ### CLI reference
 
@@ -1484,7 +1686,7 @@ harness = Harness(spec=spec, session_dir=Path("./my_run_output"))
 
 ---
 
-## 17. Integrating with a host application
+## 18. Integrating with a host application
 
 An Armature workflow is typically one component inside a larger application — a FastAPI service, a background job, a CLI tool — that handles user sessions, persistence, auth, and other concerns. This section describes how to wire the two together.
 
@@ -1781,7 +1983,7 @@ For stages with `on_fail.loop`, the loop exhaustion is the error signal. If you 
 
 ---
 
-## 18. Self-improvement
+## 19. Self-improvement
 
 Armature includes a closed-loop self-improvement system that analyzes workflow traces, diagnoses quality problems, and produces a targeted spec revision. Each improvement cycle logs its predictions; the next cycle verifies whether those predictions came true — building an accountability record over time.
 
@@ -1906,7 +2108,7 @@ Traces accumulate in `~/.armature/traces.db` by default.
 
 ---
 
-## 19. Trace export for fine-tuning
+## 20. Trace export for fine-tuning
 
 Every workflow run records execution traces — the inputs, outputs, and quality scores of every LLM stage. High-quality traces (high quorum score, valid output) are valuable training data for fine-tuning smaller language models to perform the same tasks more cheaply.
 

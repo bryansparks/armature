@@ -551,16 +551,18 @@ rules</a></li>
 Fan-in</a></li>
 <li><a href="#human-gates-in-detail" id="toc-human-gates-in-detail">13.
 Human gates in detail</a></li>
-<li><a href="#templates" id="toc-templates">14. Templates</a></li>
-<li><a href="#the-optimizer" id="toc-the-optimizer">15. The
+<li><a href="#deliberative-teams" id="toc-deliberative-teams">14.
+Deliberative teams</a></li>
+<li><a href="#templates" id="toc-templates">15. Templates</a></li>
+<li><a href="#the-optimizer" id="toc-the-optimizer">16. The
 optimizer</a></li>
-<li><a href="#running-workflows" id="toc-running-workflows">16. Running
+<li><a href="#running-workflows" id="toc-running-workflows">17. Running
 workflows</a></li>
-<li><a href="#integrating-with-a-host-application" id="toc-integrating-with-a-host-application">17. Integrating with a host
+<li><a href="#integrating-with-a-host-application" id="toc-integrating-with-a-host-application">18. Integrating with a host
 application</a></li>
-<li><a href="#self-improvement" id="toc-self-improvement">18.
+<li><a href="#self-improvement" id="toc-self-improvement">19.
 Self-improvement</a></li>
-<li><a href="#trace-export-for-fine-tuning" id="toc-trace-export-for-fine-tuning">19. Trace export for
+<li><a href="#trace-export-for-fine-tuning" id="toc-trace-export-for-fine-tuning">20. Trace export for
 fine-tuning</a></li>
 </ul></li>
 </ul>
@@ -606,13 +608,23 @@ specs</a></li>
 <li><a href="#11-safety-rules">Safety rules</a></li>
 <li><a href="#12-fan-out--fan-in">Fan-out / Fan-in</a></li>
 <li><a href="#13-human-gates-in-detail">Human gates in detail</a></li>
-<li><a href="#14-templates">Templates</a></li>
-<li><a href="#15-the-optimizer">The optimizer</a></li>
-<li><a href="#16-running-workflows">Running workflows</a>
+<li><a href="#14-deliberative-teams">Deliberative teams</a>
+<ul>
+<li><a href="#the-three-round-topology">The three-round
+topology</a></li>
+<li><a href="#specifying-the-objective">Specifying the
+objective</a></li>
+<li><a href="#the-type-judge-role">The judge role type</a></li>
+<li><a href="#reference-implementations">Reference
+implementations</a></li>
+</ul></li>
+<li><a href="#15-templates">Templates</a></li>
+<li><a href="#16-the-optimizer">The optimizer</a></li>
+<li><a href="#17-running-workflows">Running workflows</a>
 <ul>
 <li><a href="#cli-reference">CLI reference</a></li>
 </ul></li>
-<li><a href="#17-integrating-with-a-host-application">Integrating with a
+<li><a href="#18-integrating-with-a-host-application">Integrating with a
 host application</a>
 <ul>
 <li><a href="#declaring-tool-modules-in-the-spec">Declaring tool modules
@@ -626,8 +638,8 @@ library</a></li>
 <li><a href="#async-lifecycle">Async lifecycle</a></li>
 <li><a href="#error-contracts">Error contracts</a></li>
 </ul></li>
-<li><a href="#18-self-improvement">Self-improvement</a></li>
-<li><a href="#19-trace-export-for-fine-tuning">Trace export for
+<li><a href="#19-self-improvement">Self-improvement</a></li>
+<li><a href="#20-trace-export-for-fine-tuning">Trace export for
 fine-tuning</a></li>
 </ol>
 <hr />
@@ -2196,7 +2208,225 @@ prompts:</p>
 based on <code>gate_id.approved</code> in your application code for
 now).</p>
 <hr />
-<h2 id="templates">14. Templates</h2>
+<h2 id="deliberative-teams">14. Deliberative teams</h2>
+<p>A deliberative team is a multi-agent workflow where specialist agents
+argue, challenge, and synthesize — producing a structured decision with
+an explicit confidence score and recorded dissents. This is Armature’s
+native pattern for decisions that require more than a single LLM
+call.</p>
+<h3 id="the-three-round-topology">The three-round topology</h3>
+<p>Most deliberative workflows follow the same DAG shape regardless of
+domain:</p>
+<pre><code>R1: Specialists ──► R2: Challenger ──► R3: Synthesizer
+ (researcher)         (researcher)        (judge)</code></pre>
+<ul>
+<li><strong>R1 — Specialists:</strong> Multiple analyst roles, typically
+chained sequentially so each sees prior analyses in context. Each
+specialist examines the question from a different domain angle and
+declares a position.</li>
+<li><strong>R2 — Challenger:</strong> Sees all R1 outputs. Its sole job
+is constructive skepticism — attack unsupported assumptions, surface
+overlooked risks, prevent groupthink. It does not advocate a
+position.</li>
+<li><strong>R3 — Synthesizer:</strong> A <code>type: judge</code> stage
+with <code>depends_on</code> pointing to every upstream stage. It reads
+the full deliberation transcript (accumulated in context automatically),
+resolves conflicts between specialists, responds to the Challenger’s
+concerns, and emits a structured JSON decision.</li>
+</ul>
+<h3 id="specifying-the-objective">Specifying the objective</h3>
+<p>The debate topic is a Jinja2 variable embedded in each role’s
+<code>description</code> field. Pass it at run time — there is no
+special YAML key:</p>
+<div class="sourceCode" id="cb44"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> analyst</span></span>
+<span id="cb44-2"><a href="#cb44-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb44-3"><a href="#cb44-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Analyst</span></span>
+<span id="cb44-4"><a href="#cb44-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">type</span><span class="kw">:</span><span class="at"> researcher</span></span>
+<span id="cb44-5"><a href="#cb44-5" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">model_tier</span><span class="kw">:</span><span class="at"> small</span></span>
+<span id="cb44-6"><a href="#cb44-6" aria-hidden="true" tabindex="-1"></a><span class="fu">    description</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb44-7"><a href="#cb44-7" aria-hidden="true" tabindex="-1"></a>      You are an objective analyst deliberating on the following:</span>
+<span id="cb44-8"><a href="#cb44-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb44-9"><a href="#cb44-9" aria-hidden="true" tabindex="-1"></a>      OBJECTIVE: {{ objective }}</span>
+<span id="cb44-10"><a href="#cb44-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb44-11"><a href="#cb44-11" aria-hidden="true" tabindex="-1"></a>      Analyze the evidence and end with a position:</span>
+<span id="cb44-12"><a href="#cb44-12" aria-hidden="true" tabindex="-1"></a>      My position: PROCEED | BLOCK | MODIFY</span>
+<span id="cb44-13"><a href="#cb44-13" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">output_mode</span><span class="kw">:</span><span class="at"> text</span></span>
+<span id="cb44-14"><a href="#cb44-14" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[]</span></span></code></pre></div>
+<p>From the CLI:</p>
+<div class="sourceCode" id="cb45"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_deliberation.yml <span class="at">--input</span> objective=<span class="st">&quot;Should we migrate auth to OAuth 2.0?&quot;</span></span></code></pre></div>
+<p>From Python:</p>
+<div class="sourceCode" id="cb46"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
+<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;objective&quot;</span>: <span class="st">&quot;Should we migrate auth to OAuth 2.0?&quot;</span>,</span>
+<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;Current system context...&quot;</span>,</span>
+<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a>})</span></code></pre></div>
+<p>The <code>objective</code> variable is available in every stage
+because all context is accumulated forward through the DAG — each stage
+automatically receives all prior stage outputs plus the initial
+inputs.</p>
+<h3 id="the-type-judge-role">The <code>type: judge</code> role</h3>
+<p>The Synthesizer is a <code>type: judge</code> stage. This does two
+things:</p>
+<ol type="1">
+<li><strong>Model tier:</strong> Judge stages default to the
+<code>frontier</code> tier (see <a href="#role-type-defaults">Role type
+defaults</a>). The decision-maker always gets your strongest model
+unless overridden.</li>
+<li><strong>Quorum score:</strong> The engine auto-extracts a
+<code>confidence</code>, <code>score</code>, or
+<code>quality_score</code> field from the judge’s output and records it
+as the <code>quorum_score</code> on the trace. This feeds the IHR
+metric, the self-improvement loop, and the bootstrap few-shot
+selector.</li>
+</ol>
+<div class="sourceCode" id="cb47"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> synthesizer</span></span>
+<span id="cb47-2"><a href="#cb47-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb47-3"><a href="#cb47-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Synthesizer</span></span>
+<span id="cb47-4"><a href="#cb47-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">type</span><span class="kw">:</span><span class="at"> judge</span><span class="co">              # ← frontier model by default; confidence auto-extracted</span></span>
+<span id="cb47-5"><a href="#cb47-5" aria-hidden="true" tabindex="-1"></a><span class="fu">    description</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb47-6"><a href="#cb47-6" aria-hidden="true" tabindex="-1"></a>      You are the sole decision authority.</span>
+<span id="cb47-7"><a href="#cb47-7" aria-hidden="true" tabindex="-1"></a>      OBJECTIVE: {{ objective }}</span>
+<span id="cb47-8"><a href="#cb47-8" aria-hidden="true" tabindex="-1"></a>      ...</span>
+<span id="cb47-9"><a href="#cb47-9" aria-hidden="true" tabindex="-1"></a>      You MUST end with a JSON block:</span>
+<span id="cb47-10"><a href="#cb47-10" aria-hidden="true" tabindex="-1"></a>      ```json</span>
+<span id="cb47-11"><a href="#cb47-11" aria-hidden="true" tabindex="-1"></a>      { &quot;decision&quot;: &quot;...&quot;, &quot;reasoning&quot;: &quot;...&quot;, &quot;confidence&quot;: 0.85, ... }</span>
+<span id="cb47-12"><a href="#cb47-12" aria-hidden="true" tabindex="-1"></a>      ```</span>
+<span id="cb47-13"><a href="#cb47-13" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">output_mode</span><span class="kw">:</span><span class="at"> guided_json</span></span>
+<span id="cb47-14"><a href="#cb47-14" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">output_schema</span><span class="kw">:</span></span>
+<span id="cb47-15"><a href="#cb47-15" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">type</span><span class="kw">:</span><span class="at"> object</span></span>
+<span id="cb47-16"><a href="#cb47-16" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">required</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">decision</span><span class="kw">,</span><span class="at"> reasoning</span><span class="kw">,</span><span class="at"> confidence</span><span class="kw">]</span></span>
+<span id="cb47-17"><a href="#cb47-17" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">properties</span><span class="kw">:</span></span>
+<span id="cb47-18"><a href="#cb47-18" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">decision</span><span class="kw">:</span><span class="at">    </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> string </span><span class="kw">}</span></span>
+<span id="cb47-19"><a href="#cb47-19" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">reasoning</span><span class="kw">:</span><span class="at">   </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> string </span><span class="kw">}</span></span>
+<span id="cb47-20"><a href="#cb47-20" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">confidence</span><span class="kw">:</span><span class="at">  </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> number</span><span class="kw">,</span><span class="at"> </span><span class="fu">minimum</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.0</span><span class="kw">,</span><span class="at"> </span><span class="fu">maximum</span><span class="kw">:</span><span class="at"> </span><span class="fl">1.0</span><span class="at"> </span><span class="kw">}</span></span>
+<span id="cb47-21"><a href="#cb47-21" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">dissenting_opinions</span><span class="kw">:</span></span>
+<span id="cb47-22"><a href="#cb47-22" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">type</span><span class="kw">:</span><span class="at"> array</span></span>
+<span id="cb47-23"><a href="#cb47-23" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">items</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> object </span><span class="kw">}</span></span>
+<span id="cb47-24"><a href="#cb47-24" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">analyst</span><span class="kw">,</span><span class="at"> strategist</span><span class="kw">,</span><span class="at"> risk_assessor</span><span class="kw">,</span><span class="at"> challenger</span><span class="kw">]</span></span></code></pre></div>
+<h3 id="minimal-working-example">Minimal working example</h3>
+<p>A two-analyst deliberation (no challenger):</p>
+<div class="sourceCode" id="cb48"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a><span class="fu">name</span><span class="kw">:</span><span class="at"> simple_deliberation</span></span>
+<span id="cb48-2"><a href="#cb48-2" aria-hidden="true" tabindex="-1"></a><span class="fu">version</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;1.0&quot;</span></span>
+<span id="cb48-3"><a href="#cb48-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-4"><a href="#cb48-4" aria-hidden="true" tabindex="-1"></a><span class="fu">model_tiers</span><span class="kw">:</span></span>
+<span id="cb48-5"><a href="#cb48-5" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">small</span><span class="kw">:</span></span>
+<span id="cb48-6"><a href="#cb48-6" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">provider</span><span class="kw">:</span><span class="at"> anthropic</span></span>
+<span id="cb48-7"><a href="#cb48-7" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">model</span><span class="kw">:</span><span class="at"> claude-haiku-4-5-20251001</span></span>
+<span id="cb48-8"><a href="#cb48-8" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">frontier</span><span class="kw">:</span></span>
+<span id="cb48-9"><a href="#cb48-9" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">provider</span><span class="kw">:</span><span class="at"> anthropic</span></span>
+<span id="cb48-10"><a href="#cb48-10" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">model</span><span class="kw">:</span><span class="at"> claude-sonnet-4-6</span></span>
+<span id="cb48-11"><a href="#cb48-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-12"><a href="#cb48-12" aria-hidden="true" tabindex="-1"></a><span class="fu">stages</span><span class="kw">:</span></span>
+<span id="cb48-13"><a href="#cb48-13" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> proponent</span></span>
+<span id="cb48-14"><a href="#cb48-14" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb48-15"><a href="#cb48-15" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Proponent</span></span>
+<span id="cb48-16"><a href="#cb48-16" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> researcher</span></span>
+<span id="cb48-17"><a href="#cb48-17" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">model_tier</span><span class="kw">:</span><span class="at"> small</span></span>
+<span id="cb48-18"><a href="#cb48-18" aria-hidden="true" tabindex="-1"></a><span class="fu">      description</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb48-19"><a href="#cb48-19" aria-hidden="true" tabindex="-1"></a>        OBJECTIVE: {{ objective }}</span>
+<span id="cb48-20"><a href="#cb48-20" aria-hidden="true" tabindex="-1"></a>        Make the strongest case FOR this decision. Be evidence-based.</span>
+<span id="cb48-21"><a href="#cb48-21" aria-hidden="true" tabindex="-1"></a>        End with: My position: PROCEED</span>
+<span id="cb48-22"><a href="#cb48-22" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">output_mode</span><span class="kw">:</span><span class="at"> text</span></span>
+<span id="cb48-23"><a href="#cb48-23" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[]</span></span>
+<span id="cb48-24"><a href="#cb48-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-25"><a href="#cb48-25" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> critic</span></span>
+<span id="cb48-26"><a href="#cb48-26" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb48-27"><a href="#cb48-27" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Critic</span></span>
+<span id="cb48-28"><a href="#cb48-28" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> researcher</span></span>
+<span id="cb48-29"><a href="#cb48-29" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">model_tier</span><span class="kw">:</span><span class="at"> small</span></span>
+<span id="cb48-30"><a href="#cb48-30" aria-hidden="true" tabindex="-1"></a><span class="fu">      description</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb48-31"><a href="#cb48-31" aria-hidden="true" tabindex="-1"></a>        OBJECTIVE: {{ objective }}</span>
+<span id="cb48-32"><a href="#cb48-32" aria-hidden="true" tabindex="-1"></a>        You have read the Proponent&#39;s case. Challenge it rigorously.</span>
+<span id="cb48-33"><a href="#cb48-33" aria-hidden="true" tabindex="-1"></a>        Identify the weakest arguments and strongest counterpoints.</span>
+<span id="cb48-34"><a href="#cb48-34" aria-hidden="true" tabindex="-1"></a>        End with: My position: BLOCK | MODIFY</span>
+<span id="cb48-35"><a href="#cb48-35" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">output_mode</span><span class="kw">:</span><span class="at"> text</span></span>
+<span id="cb48-36"><a href="#cb48-36" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">proponent</span><span class="kw">]</span></span>
+<span id="cb48-37"><a href="#cb48-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb48-38"><a href="#cb48-38" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> judge</span></span>
+<span id="cb48-39"><a href="#cb48-39" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb48-40"><a href="#cb48-40" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Judge</span></span>
+<span id="cb48-41"><a href="#cb48-41" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> judge</span><span class="co">              # frontier model, confidence auto-tracked</span></span>
+<span id="cb48-42"><a href="#cb48-42" aria-hidden="true" tabindex="-1"></a><span class="fu">      description</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb48-43"><a href="#cb48-43" aria-hidden="true" tabindex="-1"></a>        OBJECTIVE: {{ objective }}</span>
+<span id="cb48-44"><a href="#cb48-44" aria-hidden="true" tabindex="-1"></a>        You have read the full debate. Adjudicate.</span>
+<span id="cb48-45"><a href="#cb48-45" aria-hidden="true" tabindex="-1"></a>        Weigh the Proponent&#39;s case against the Critic&#39;s challenges.</span>
+<span id="cb48-46"><a href="#cb48-46" aria-hidden="true" tabindex="-1"></a>        End with a JSON block: { &quot;decision&quot;: &quot;...&quot;, &quot;reasoning&quot;: &quot;...&quot;, &quot;confidence&quot;: 0.0 }</span>
+<span id="cb48-47"><a href="#cb48-47" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">output_mode</span><span class="kw">:</span><span class="at"> guided_json</span></span>
+<span id="cb48-48"><a href="#cb48-48" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">output_schema</span><span class="kw">:</span></span>
+<span id="cb48-49"><a href="#cb48-49" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> object</span></span>
+<span id="cb48-50"><a href="#cb48-50" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">required</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">decision</span><span class="kw">,</span><span class="at"> reasoning</span><span class="kw">,</span><span class="at"> confidence</span><span class="kw">]</span></span>
+<span id="cb48-51"><a href="#cb48-51" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">properties</span><span class="kw">:</span></span>
+<span id="cb48-52"><a href="#cb48-52" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">decision</span><span class="kw">:</span><span class="at">   </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> string </span><span class="kw">}</span></span>
+<span id="cb48-53"><a href="#cb48-53" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">reasoning</span><span class="kw">:</span><span class="at">  </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> string </span><span class="kw">}</span></span>
+<span id="cb48-54"><a href="#cb48-54" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">confidence</span><span class="kw">:</span><span class="at"> </span><span class="kw">{</span><span class="at"> </span><span class="fu">type</span><span class="kw">:</span><span class="at"> number</span><span class="kw">,</span><span class="at"> </span><span class="fu">minimum</span><span class="kw">:</span><span class="at"> </span><span class="fl">0.0</span><span class="kw">,</span><span class="at"> </span><span class="fu">maximum</span><span class="kw">:</span><span class="at"> </span><span class="fl">1.0</span><span class="at"> </span><span class="kw">}</span></span>
+<span id="cb48-55"><a href="#cb48-55" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">proponent</span><span class="kw">,</span><span class="at"> critic</span><span class="kw">]</span></span></code></pre></div>
+<h3 id="how-context-accumulation-creates-the-debate">How context
+accumulation creates the debate</h3>
+<p>Armature’s context manager passes all prior stage outputs forward
+automatically. The judge in the example above receives a prompt that
+includes:</p>
+<ul>
+<li>The initial <code>objective</code> input</li>
+<li>The full <code>proponent</code> output (under key
+<code>proponent</code>)</li>
+<li>The full <code>critic</code> output (under key
+<code>critic</code>)</li>
+</ul>
+<p>No explicit wiring is needed — <code>depends_on</code> controls
+ordering and the engine handles injection. This is what allows the
+Critic to reference the Proponent’s arguments and the Judge to see the
+complete exchange.</p>
+<h3 id="reference-implementations">Reference implementations</h3>
+<p>Two complete deliberative specs are included:</p>
+<table>
+<colgroup>
+<col style="width: 26%" />
+<col style="width: 39%" />
+<col style="width: 34%" />
+</colgroup>
+<thead>
+<tr>
+<th>Spec</th>
+<th>Pattern</th>
+<th>Rounds</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>examples/03_deliberation_standard.yml</code></td>
+<td>Analyst + Strategist + Risk Assessor → Challenger → Synthesizer</td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>armature/templates/six_thinking_hats.yml</code></td>
+<td>Six perspective hats → Blue Hat facilitator → Synthesizer</td>
+<td>3</td>
+</tr>
+</tbody>
+</table>
+<p>Both accept <code>objective</code> as a runtime input. See section <a href="#15-templates">15. Templates</a> for the Six Thinking Hats
+template in detail.</p>
+<h3 id="adding-a-human-escalation-gate">Adding a human escalation
+gate</h3>
+<p>A common pattern: escalate to a human when the Synthesizer’s
+confidence falls below a threshold. Add a gate stage downstream and
+inspect the judge’s output in your application:</p>
+<div class="sourceCode" id="cb49"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> human_review</span></span>
+<span id="cb49-2"><a href="#cb49-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">gate</span><span class="kw">:</span><span class="at"> human</span></span>
+<span id="cb49-3"><a href="#cb49-3" aria-hidden="true" tabindex="-1"></a><span class="fu">  present</span><span class="kw">: </span><span class="ch">|</span></span>
+<span id="cb49-4"><a href="#cb49-4" aria-hidden="true" tabindex="-1"></a>    DECISION: {{ synthesizer.decision }}</span>
+<span id="cb49-5"><a href="#cb49-5" aria-hidden="true" tabindex="-1"></a>    Confidence: {{ synthesizer.confidence }}</span>
+<span id="cb49-6"><a href="#cb49-6" aria-hidden="true" tabindex="-1"></a>    Reasoning: {{ synthesizer.reasoning }}</span>
+<span id="cb49-7"><a href="#cb49-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb49-8"><a href="#cb49-8" aria-hidden="true" tabindex="-1"></a>    Do you approve?</span>
+<span id="cb49-9"><a href="#cb49-9" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">synthesizer</span><span class="kw">]</span></span></code></pre></div>
+<p>Or conditionally skip the gate in code:</p>
+<div class="sourceCode" id="cb50"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({<span class="st">&quot;objective&quot;</span>: <span class="st">&quot;...&quot;</span>})</span>
+<span id="cb50-2"><a href="#cb50-2" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> result[<span class="st">&quot;synthesizer&quot;</span>][<span class="st">&quot;confidence&quot;</span>] <span class="op">&gt;=</span> <span class="fl">0.80</span>:</span>
+<span id="cb50-3"><a href="#cb50-3" aria-hidden="true" tabindex="-1"></a>    <span class="co"># auto-proceed</span></span>
+<span id="cb50-4"><a href="#cb50-4" aria-hidden="true" tabindex="-1"></a><span class="cf">else</span>:</span>
+<span id="cb50-5"><a href="#cb50-5" aria-hidden="true" tabindex="-1"></a>    <span class="co"># route to human review</span></span></code></pre></div>
+<hr />
+<h2 id="templates">15. Templates</h2>
 <p>Templates are pre-built, parameterized spec files that implement
 proven agentic patterns. They live in <code>armature/templates/</code>
 and are loaded like any other spec.</p>
@@ -2259,25 +2489,25 @@ priority list for the Synthesizer.</p>
 deliberation and produces structured JSON:
 <code>{decision, reasoning, confidence, key_evidence, dissenting_opinions, risk_factors, open_questions, green_hat_considered}</code>.</p>
 <p><strong>Usage:</strong></p>
-<div class="sourceCode" id="cb44"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(</span>
-<span id="cb44-2"><a href="#cb44-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;armature/templates/six_thinking_hats.yml&quot;</span>,</span>
-<span id="cb44-3"><a href="#cb44-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">vars</span><span class="op">=</span>{</span>
-<span id="cb44-4"><a href="#cb44-4" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;objective&quot;</span>: <span class="st">&quot;Should we adopt this new vendor contract?&quot;</span>,</span>
-<span id="cb44-5"><a href="#cb44-5" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Optional overrides:</span></span>
-<span id="cb44-6"><a href="#cb44-6" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;provider&quot;</span>: <span class="st">&quot;anthropic&quot;</span>,</span>
-<span id="cb44-7"><a href="#cb44-7" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;specialist_model&quot;</span>: <span class="st">&quot;claude-haiku-4-5-20251001&quot;</span>,  <span class="co"># R1 + R2</span></span>
-<span id="cb44-8"><a href="#cb44-8" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;synthesizer_model&quot;</span>: <span class="st">&quot;claude-sonnet-4-6&quot;</span>,         <span class="co"># R3</span></span>
-<span id="cb44-9"><a href="#cb44-9" aria-hidden="true" tabindex="-1"></a>    }</span>
-<span id="cb44-10"><a href="#cb44-10" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb44-11"><a href="#cb44-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb44-12"><a href="#cb44-12" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
-<span id="cb44-13"><a href="#cb44-13" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;Contract text and supporting materials...&quot;</span>,</span>
-<span id="cb44-14"><a href="#cb44-14" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;background&quot;</span>: <span class="st">&quot;Additional context...&quot;</span>,</span>
-<span id="cb44-15"><a href="#cb44-15" aria-hidden="true" tabindex="-1"></a>})</span>
-<span id="cb44-16"><a href="#cb44-16" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb44-17"><a href="#cb44-17" aria-hidden="true" tabindex="-1"></a>synthesis <span class="op">=</span> result[<span class="st">&quot;synthesizer&quot;</span>]</span>
-<span id="cb44-18"><a href="#cb44-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(synthesis[<span class="st">&quot;decision&quot;</span>])</span>
-<span id="cb44-19"><a href="#cb44-19" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Confidence: </span><span class="sc">{</span>synthesis[<span class="st">&#39;confidence&#39;</span>]<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb52"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(</span>
+<span id="cb52-2"><a href="#cb52-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;armature/templates/six_thinking_hats.yml&quot;</span>,</span>
+<span id="cb52-3"><a href="#cb52-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">vars</span><span class="op">=</span>{</span>
+<span id="cb52-4"><a href="#cb52-4" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;objective&quot;</span>: <span class="st">&quot;Should we adopt this new vendor contract?&quot;</span>,</span>
+<span id="cb52-5"><a href="#cb52-5" aria-hidden="true" tabindex="-1"></a>        <span class="co"># Optional overrides:</span></span>
+<span id="cb52-6"><a href="#cb52-6" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;provider&quot;</span>: <span class="st">&quot;anthropic&quot;</span>,</span>
+<span id="cb52-7"><a href="#cb52-7" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;specialist_model&quot;</span>: <span class="st">&quot;claude-haiku-4-5-20251001&quot;</span>,  <span class="co"># R1 + R2</span></span>
+<span id="cb52-8"><a href="#cb52-8" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;synthesizer_model&quot;</span>: <span class="st">&quot;claude-sonnet-4-6&quot;</span>,         <span class="co"># R3</span></span>
+<span id="cb52-9"><a href="#cb52-9" aria-hidden="true" tabindex="-1"></a>    }</span>
+<span id="cb52-10"><a href="#cb52-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb52-11"><a href="#cb52-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb52-12"><a href="#cb52-12" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
+<span id="cb52-13"><a href="#cb52-13" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;Contract text and supporting materials...&quot;</span>,</span>
+<span id="cb52-14"><a href="#cb52-14" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;background&quot;</span>: <span class="st">&quot;Additional context...&quot;</span>,</span>
+<span id="cb52-15"><a href="#cb52-15" aria-hidden="true" tabindex="-1"></a>})</span>
+<span id="cb52-16"><a href="#cb52-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb52-17"><a href="#cb52-17" aria-hidden="true" tabindex="-1"></a>synthesis <span class="op">=</span> result[<span class="st">&quot;synthesizer&quot;</span>]</span>
+<span id="cb52-18"><a href="#cb52-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(synthesis[<span class="st">&quot;decision&quot;</span>])</span>
+<span id="cb52-19"><a href="#cb52-19" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Confidence: </span><span class="sc">{</span>synthesis[<span class="st">&#39;confidence&#39;</span>]<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
 <p><strong>Adding domain specialists:</strong> To add a domain-specific
 analyst alongside the hats (e.g., a legal analyst for contract
 decisions), add a stage with <code>depends_on: [green_hat]</code> and
@@ -2285,10 +2515,10 @@ add it to <code>blue_hat</code> and <code>synthesizer</code>’s
 <code>depends_on</code> lists. Start from the template and extend
 it.</p>
 <hr />
-<h2 id="the-optimizer">15. The optimizer</h2>
+<h2 id="the-optimizer">16. The optimizer</h2>
 <p>The optimizer reads trace history for a workflow and uses an LLM to
 propose improvements to prompts or model tier assignments.</p>
-<div class="sourceCode" id="cb45"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span></code></pre></div>
+<div class="sourceCode" id="cb53"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span></code></pre></div>
 <p>Every LLM stage run is recorded in the trace database: model,
 input/output tokens, latency, whether the output parsed correctly, and a
 snapshot of inputs/outputs. The optimizer analyzes this history and
@@ -2296,27 +2526,27 @@ generates a proposed unified diff.</p>
 <p>The proposed diff is always printed for review. Add
 <code>--apply</code> to patch the spec file in place — the original is
 backed up as <code>&lt;spec&gt;.orig</code> before patching.</p>
-<div class="sourceCode" id="cb46"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Review only (default)</span></span>
-<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span>
-<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Review and apply if accepted</span></span>
-<span id="cb46-5"><a href="#cb46-5" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db <span class="at">--apply</span></span></code></pre></div>
+<div class="sourceCode" id="cb54"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Review only (default)</span></span>
+<span id="cb54-2"><a href="#cb54-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span>
+<span id="cb54-3"><a href="#cb54-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb54-4"><a href="#cb54-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Review and apply if accepted</span></span>
+<span id="cb54-5"><a href="#cb54-5" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db <span class="at">--apply</span></span></code></pre></div>
 <p>You can also run the optimizer in a loop from Python, with optional
 auto-apply:</p>
-<div class="sourceCode" id="cb47"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.optimizer.runner <span class="im">import</span> OptimizerRunner</span>
-<span id="cb47-2"><a href="#cb47-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb47-3"><a href="#cb47-3" aria-hidden="true" tabindex="-1"></a>runner <span class="op">=</span> OptimizerRunner(</span>
-<span id="cb47-4"><a href="#cb47-4" aria-hidden="true" tabindex="-1"></a>    target_spec_path<span class="op">=</span><span class="st">&quot;my_workflow.yml&quot;</span>,</span>
-<span id="cb47-5"><a href="#cb47-5" aria-hidden="true" tabindex="-1"></a>    trace_db_path<span class="op">=</span><span class="st">&quot;~/.armature/traces.db&quot;</span>,</span>
-<span id="cb47-6"><a href="#cb47-6" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb47-7"><a href="#cb47-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb47-8"><a href="#cb47-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Run 5 optimization iterations, auto-applying accepted proposals</span></span>
-<span id="cb47-9"><a href="#cb47-9" aria-hidden="true" tabindex="-1"></a>loop_result <span class="op">=</span> <span class="cf">await</span> runner.run_loop(n_iterations<span class="op">=</span><span class="dv">5</span>, auto_apply<span class="op">=</span><span class="va">True</span>)</span>
-<span id="cb47-10"><a href="#cb47-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Accepted: </span><span class="sc">{</span>loop_result<span class="sc">.</span>accepted_count<span class="sc">}</span><span class="ss">, Rejected: </span><span class="sc">{</span>loop_result<span class="sc">.</span>rejected_count<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb55"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.optimizer.runner <span class="im">import</span> OptimizerRunner</span>
+<span id="cb55-2"><a href="#cb55-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb55-3"><a href="#cb55-3" aria-hidden="true" tabindex="-1"></a>runner <span class="op">=</span> OptimizerRunner(</span>
+<span id="cb55-4"><a href="#cb55-4" aria-hidden="true" tabindex="-1"></a>    target_spec_path<span class="op">=</span><span class="st">&quot;my_workflow.yml&quot;</span>,</span>
+<span id="cb55-5"><a href="#cb55-5" aria-hidden="true" tabindex="-1"></a>    trace_db_path<span class="op">=</span><span class="st">&quot;~/.armature/traces.db&quot;</span>,</span>
+<span id="cb55-6"><a href="#cb55-6" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb55-7"><a href="#cb55-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb55-8"><a href="#cb55-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Run 5 optimization iterations, auto-applying accepted proposals</span></span>
+<span id="cb55-9"><a href="#cb55-9" aria-hidden="true" tabindex="-1"></a>loop_result <span class="op">=</span> <span class="cf">await</span> runner.run_loop(n_iterations<span class="op">=</span><span class="dv">5</span>, auto_apply<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb55-10"><a href="#cb55-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Accepted: </span><span class="sc">{</span>loop_result<span class="sc">.</span>accepted_count<span class="sc">}</span><span class="ss">, Rejected: </span><span class="sc">{</span>loop_result<span class="sc">.</span>rejected_count<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
 <p>The optimizer requires at least 5 traces to produce a proposal. Run
 your workflow a few times before optimizing.</p>
 <hr />
-<h2 id="running-workflows">16. Running workflows</h2>
+<h2 id="running-workflows">17. Running workflows</h2>
 <h3 id="cli-reference">CLI reference</h3>
 <p>Armature ships with a full CLI. All commands:</p>
 <pre><code>armature new        — interactive wizard to create a new spec file
@@ -2331,23 +2561,23 @@ armature export-traces — export high-quality traces as training data (JSONL)</
 <h4 id="armature-new"><code>armature new</code></h4>
 <p>Interactive wizard that asks a series of questions and writes a
 starter spec file. Requires the <code>wizard</code> extra.</p>
-<div class="sourceCode" id="cb49"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="st">&#39;armature[wizard]&#39;</span></span>
-<span id="cb49-2"><a href="#cb49-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> new my_workflow.yml</span></code></pre></div>
+<div class="sourceCode" id="cb57"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="st">&#39;armature[wizard]&#39;</span></span>
+<span id="cb57-2"><a href="#cb57-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> new my_workflow.yml</span></code></pre></div>
 <hr />
 <h4 id="armature-validate"><code>armature validate</code></h4>
 <p>Validate a spec file and report all errors. Returns exit code 0 on
 success, 1 on validation errors.</p>
-<div class="sourceCode" id="cb50"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> validate my_workflow.yml</span></code></pre></div>
+<div class="sourceCode" id="cb58"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> validate my_workflow.yml</span></code></pre></div>
 <p>Use this in CI to catch broken specs before they reach
 production.</p>
 <hr />
 <h4 id="armature-run"><code>armature run</code></h4>
 <p>Run a workflow from a YAML spec file.</p>
-<div class="sourceCode" id="cb51"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="dt">\</span></span>
-<span id="cb51-2"><a href="#cb51-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--input</span> topic=<span class="st">&quot;contract risk&quot;</span> <span class="dt">\</span></span>
-<span id="cb51-3"><a href="#cb51-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--input</span> doc=<span class="st">&quot;</span><span class="va">$(</span><span class="fu">cat</span> contract.txt<span class="va">)</span><span class="st">&quot;</span> <span class="dt">\</span></span>
-<span id="cb51-4"><a href="#cb51-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> result.json <span class="dt">\</span></span>
-<span id="cb51-5"><a href="#cb51-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--quiet</span></span></code></pre></div>
+<div class="sourceCode" id="cb59"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb59-1"><a href="#cb59-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="dt">\</span></span>
+<span id="cb59-2"><a href="#cb59-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--input</span> topic=<span class="st">&quot;contract risk&quot;</span> <span class="dt">\</span></span>
+<span id="cb59-3"><a href="#cb59-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--input</span> doc=<span class="st">&quot;</span><span class="va">$(</span><span class="fu">cat</span> contract.txt<span class="va">)</span><span class="st">&quot;</span> <span class="dt">\</span></span>
+<span id="cb59-4"><a href="#cb59-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> result.json <span class="dt">\</span></span>
+<span id="cb59-5"><a href="#cb59-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--quiet</span></span></code></pre></div>
 <table>
 <thead>
 <tr>
@@ -2382,16 +2612,16 @@ production.</p>
 <h4 id="armature-serve"><code>armature serve</code></h4>
 <p>Start the Armature HTTP service. Requires the <code>service</code>
 extra.</p>
-<div class="sourceCode" id="cb52"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="st">&#39;armature[service]&#39;</span></span>
-<span id="cb52-2"><a href="#cb52-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
+<div class="sourceCode" id="cb60"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a><span class="ex">pip</span> install <span class="st">&#39;armature[service]&#39;</span></span>
+<span id="cb60-2"><a href="#cb60-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
 <p>The service exposes <code>POST /run</code> accepting
 <code>{&quot;spec&quot;: &quot;path/to/spec.yml&quot;, &quot;inputs&quot;: {...}}</code>.</p>
 <hr />
 <h4 id="armature-optimize"><code>armature optimize</code></h4>
 <p>Analyze accumulated traces for a workflow and propose targeted spec
 improvements using an LLM. Requires at least 5 traces.</p>
-<div class="sourceCode" id="cb53"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span>
-<span id="cb53-2"><a href="#cb53-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db <span class="at">--apply</span></span></code></pre></div>
+<div class="sourceCode" id="cb61"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb61-1"><a href="#cb61-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db</span>
+<span id="cb61-2"><a href="#cb61-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> optimize my_workflow.yml <span class="at">--traces</span> ~/.armature/traces.db <span class="at">--apply</span></span></code></pre></div>
 <p>Without <code>--apply</code>, the proposed diff is printed for
 review. With <code>--apply</code>, it is patched into the spec file
 (original backed up as <code>&lt;spec&gt;.orig</code>).</p>
@@ -2399,18 +2629,18 @@ review. With <code>--apply</code>, it is patched into the spec file
 <h4 id="armature-report"><code>armature report</code></h4>
 <p>Print a human-readable diagnostic report for a completed run,
 including stage-by-stage metrics, IHR score, and failure signatures.</p>
-<div class="sourceCode" id="cb54"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> report <span class="at">--run-id</span> abc123</span>
-<span id="cb54-2"><a href="#cb54-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> report <span class="at">--run-id</span> abc123 <span class="at">--traces</span> ~/.armature/runs/abc123/traces.db</span></code></pre></div>
+<div class="sourceCode" id="cb62"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> report <span class="at">--run-id</span> abc123</span>
+<span id="cb62-2"><a href="#cb62-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> report <span class="at">--run-id</span> abc123 <span class="at">--traces</span> ~/.armature/runs/abc123/traces.db</span></code></pre></div>
 <hr />
 <h4 id="armature-improve"><code>armature improve</code></h4>
 <p>Closed-loop self-improvement: loads traces, computes the Implicit
 Harness Rating (IHR), diagnoses failure signatures, and calls an LLM to
 produce a revised spec. If IHR is below the target and enough traces
 exist, the revised spec is auto-applied.</p>
-<div class="sourceCode" id="cb55"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span>
-<span id="cb55-2"><a href="#cb55-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--no-apply</span>     <span class="co"># propose but don&#39;t write</span></span>
-<span id="cb55-3"><a href="#cb55-3" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--target-ihr</span> 0.85 <span class="at">--min-traces</span> 10</span>
-<span id="cb55-4"><a href="#cb55-4" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--model</span> claude-opus-4-7</span></code></pre></div>
+<div class="sourceCode" id="cb63"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb63-1"><a href="#cb63-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span>
+<span id="cb63-2"><a href="#cb63-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--no-apply</span>     <span class="co"># propose but don&#39;t write</span></span>
+<span id="cb63-3"><a href="#cb63-3" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--target-ihr</span> 0.85 <span class="at">--min-traces</span> 10</span>
+<span id="cb63-4"><a href="#cb63-4" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--model</span> claude-opus-4-7</span></code></pre></div>
 <table>
 <colgroup>
 <col style="width: 21%" />
@@ -2462,11 +2692,11 @@ exist, the revised spec is auto-applied.</p>
 <h4 id="armature-export-traces"><code>armature export-traces</code></h4>
 <p>Export high-quality traces from the trace database as JSONL training
 data for SFT or DPO fine-tuning.</p>
-<div class="sourceCode" id="cb56"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb56-1"><a href="#cb56-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
-<span id="cb56-2"><a href="#cb56-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> my-workflow <span class="dt">\</span></span>
-<span id="cb56-3"><a href="#cb56-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training_data.jsonl <span class="dt">\</span></span>
-<span id="cb56-4"><a href="#cb56-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> chat <span class="dt">\</span></span>
-<span id="cb56-5"><a href="#cb56-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85</span></code></pre></div>
+<div class="sourceCode" id="cb64"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
+<span id="cb64-2"><a href="#cb64-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> my-workflow <span class="dt">\</span></span>
+<span id="cb64-3"><a href="#cb64-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training_data.jsonl <span class="dt">\</span></span>
+<span id="cb64-4"><a href="#cb64-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> chat <span class="dt">\</span></span>
+<span id="cb64-5"><a href="#cb64-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85</span></code></pre></div>
 <table>
 <colgroup>
 <col style="width: 21%" />
@@ -2528,45 +2758,45 @@ data for SFT or DPO fine-tuning.</p>
 <p>See §19 for the full trace export system.</p>
 <hr />
 <h3 id="python-api">Python API</h3>
-<div class="sourceCode" id="cb57"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> asyncio</span>
-<span id="cb57-2"><a href="#cb57-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature <span class="im">import</span> Harness</span>
-<span id="cb57-3"><a href="#cb57-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb57-4"><a href="#cb57-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Load from a spec file</span></span>
-<span id="cb57-5"><a href="#cb57-5" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;my_workflow.yml&quot;</span>)</span>
-<span id="cb57-6"><a href="#cb57-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb57-7"><a href="#cb57-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Or with Jinja2 vars</span></span>
-<span id="cb57-8"><a href="#cb57-8" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(</span>
-<span id="cb57-9"><a href="#cb57-9" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;armature/templates/six_thinking_hats.yml&quot;</span>,</span>
-<span id="cb57-10"><a href="#cb57-10" aria-hidden="true" tabindex="-1"></a>    <span class="bu">vars</span><span class="op">=</span>{<span class="st">&quot;objective&quot;</span>: <span class="st">&quot;...&quot;</span>}</span>
-<span id="cb57-11"><a href="#cb57-11" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb57-12"><a href="#cb57-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb57-13"><a href="#cb57-13" aria-hidden="true" tabindex="-1"></a><span class="co"># Run with inputs</span></span>
-<span id="cb57-14"><a href="#cb57-14" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
-<span id="cb57-15"><a href="#cb57-15" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;...&quot;</span>,</span>
-<span id="cb57-16"><a href="#cb57-16" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;topic&quot;</span>: <span class="st">&quot;...&quot;</span>,</span>
-<span id="cb57-17"><a href="#cb57-17" aria-hidden="true" tabindex="-1"></a>})</span>
-<span id="cb57-18"><a href="#cb57-18" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb57-19"><a href="#cb57-19" aria-hidden="true" tabindex="-1"></a><span class="co"># Access stage results</span></span>
-<span id="cb57-20"><a href="#cb57-20" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(result[<span class="st">&quot;my_stage_id&quot;</span>])</span></code></pre></div>
+<div class="sourceCode" id="cb65"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb65-1"><a href="#cb65-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> asyncio</span>
+<span id="cb65-2"><a href="#cb65-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature <span class="im">import</span> Harness</span>
+<span id="cb65-3"><a href="#cb65-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb65-4"><a href="#cb65-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Load from a spec file</span></span>
+<span id="cb65-5"><a href="#cb65-5" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;my_workflow.yml&quot;</span>)</span>
+<span id="cb65-6"><a href="#cb65-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb65-7"><a href="#cb65-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Or with Jinja2 vars</span></span>
+<span id="cb65-8"><a href="#cb65-8" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(</span>
+<span id="cb65-9"><a href="#cb65-9" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;armature/templates/six_thinking_hats.yml&quot;</span>,</span>
+<span id="cb65-10"><a href="#cb65-10" aria-hidden="true" tabindex="-1"></a>    <span class="bu">vars</span><span class="op">=</span>{<span class="st">&quot;objective&quot;</span>: <span class="st">&quot;...&quot;</span>}</span>
+<span id="cb65-11"><a href="#cb65-11" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb65-12"><a href="#cb65-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb65-13"><a href="#cb65-13" aria-hidden="true" tabindex="-1"></a><span class="co"># Run with inputs</span></span>
+<span id="cb65-14"><a href="#cb65-14" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
+<span id="cb65-15"><a href="#cb65-15" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;...&quot;</span>,</span>
+<span id="cb65-16"><a href="#cb65-16" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;topic&quot;</span>: <span class="st">&quot;...&quot;</span>,</span>
+<span id="cb65-17"><a href="#cb65-17" aria-hidden="true" tabindex="-1"></a>})</span>
+<span id="cb65-18"><a href="#cb65-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb65-19"><a href="#cb65-19" aria-hidden="true" tabindex="-1"></a><span class="co"># Access stage results</span></span>
+<span id="cb65-20"><a href="#cb65-20" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(result[<span class="st">&quot;my_stage_id&quot;</span>])</span></code></pre></div>
 <h3 id="event-callbacks">Event callbacks</h3>
 <p>Subscribe to stage lifecycle events during a run:</p>
-<div class="sourceCode" id="cb58"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> on_event(event_type: <span class="bu">str</span>, data: <span class="bu">dict</span>):</span>
-<span id="cb58-2"><a href="#cb58-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> event_type <span class="op">==</span> <span class="st">&quot;stage_start&quot;</span>:</span>
-<span id="cb58-3"><a href="#cb58-3" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;Starting: </span><span class="sc">{</span>data[<span class="st">&#39;stage&#39;</span>]<span class="sc">}</span><span class="ss"> (</span><span class="sc">{</span>data[<span class="st">&#39;kind&#39;</span>]<span class="sc">}</span><span class="ss">)&quot;</span>)</span>
-<span id="cb58-4"><a href="#cb58-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> event_type <span class="op">==</span> <span class="st">&quot;stage_complete&quot;</span>:</span>
-<span id="cb58-5"><a href="#cb58-5" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;Done: </span><span class="sc">{</span>data[<span class="st">&#39;stage&#39;</span>]<span class="sc">}</span><span class="ss"> in </span><span class="sc">{</span>data[<span class="st">&#39;elapsed_s&#39;</span>]<span class="sc">}</span><span class="ss">s&quot;</span>)</span>
-<span id="cb58-6"><a href="#cb58-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb58-7"><a href="#cb58-7" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness(spec<span class="op">=</span>spec, on_event<span class="op">=</span>on_event)</span></code></pre></div>
+<div class="sourceCode" id="cb66"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb66-1"><a href="#cb66-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> on_event(event_type: <span class="bu">str</span>, data: <span class="bu">dict</span>):</span>
+<span id="cb66-2"><a href="#cb66-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> event_type <span class="op">==</span> <span class="st">&quot;stage_start&quot;</span>:</span>
+<span id="cb66-3"><a href="#cb66-3" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;Starting: </span><span class="sc">{</span>data[<span class="st">&#39;stage&#39;</span>]<span class="sc">}</span><span class="ss"> (</span><span class="sc">{</span>data[<span class="st">&#39;kind&#39;</span>]<span class="sc">}</span><span class="ss">)&quot;</span>)</span>
+<span id="cb66-4"><a href="#cb66-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> event_type <span class="op">==</span> <span class="st">&quot;stage_complete&quot;</span>:</span>
+<span id="cb66-5"><a href="#cb66-5" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f&quot;Done: </span><span class="sc">{</span>data[<span class="st">&#39;stage&#39;</span>]<span class="sc">}</span><span class="ss"> in </span><span class="sc">{</span>data[<span class="st">&#39;elapsed_s&#39;</span>]<span class="sc">}</span><span class="ss">s&quot;</span>)</span>
+<span id="cb66-6"><a href="#cb66-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb66-7"><a href="#cb66-7" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness(spec<span class="op">=</span>spec, on_event<span class="op">=</span>on_event)</span></code></pre></div>
 <h3 id="transcript">Transcript</h3>
 <p>After a run, <code>harness.transcript</code> contains the full
 conversation log for all LLM stages:</p>
-<div class="sourceCode" id="cb59"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb59-1"><a href="#cb59-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
-<span id="cb59-2"><a href="#cb59-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb59-3"><a href="#cb59-3" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> entry <span class="kw">in</span> harness.transcript:</span>
-<span id="cb59-4"><a href="#cb59-4" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(entry[<span class="st">&quot;stage_id&quot;</span>], entry[<span class="st">&quot;role_name&quot;</span>], entry[<span class="st">&quot;model&quot;</span>])</span>
-<span id="cb59-5"><a href="#cb59-5" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(entry[<span class="st">&quot;response&quot;</span>][:<span class="dv">200</span>])</span></code></pre></div>
+<div class="sourceCode" id="cb67"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb67-1"><a href="#cb67-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
+<span id="cb67-2"><a href="#cb67-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb67-3"><a href="#cb67-3" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> entry <span class="kw">in</span> harness.transcript:</span>
+<span id="cb67-4"><a href="#cb67-4" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(entry[<span class="st">&quot;stage_id&quot;</span>], entry[<span class="st">&quot;role_name&quot;</span>], entry[<span class="st">&quot;model&quot;</span>])</span>
+<span id="cb67-5"><a href="#cb67-5" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(entry[<span class="st">&quot;response&quot;</span>][:<span class="dv">200</span>])</span></code></pre></div>
 <h3 id="http-service">HTTP service</h3>
-<div class="sourceCode" id="cb60"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
+<div class="sourceCode" id="cb68"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb68-1"><a href="#cb68-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
 <p>The service exposes a REST API for running workflows over HTTP.
 Requires <code>pip install &#39;armature[service]&#39;</code>.</p>
 <h3 id="artifacts-and-session-logs">Artifacts and session logs</h3>
@@ -2576,10 +2806,10 @@ Requires <code>pip install &#39;armature[service]&#39;</code>.</p>
 ├── traces.db         # SQLite trace store (tokens, latency, outputs)
 └── artifacts/        # any artifacts written by script stages</code></pre>
 <p>Override the session directory:</p>
-<div class="sourceCode" id="cb62"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pathlib <span class="im">import</span> Path</span>
-<span id="cb62-2"><a href="#cb62-2" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness(spec<span class="op">=</span>spec, session_dir<span class="op">=</span>Path(<span class="st">&quot;./my_run_output&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb70"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb70-1"><a href="#cb70-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pathlib <span class="im">import</span> Path</span>
+<span id="cb70-2"><a href="#cb70-2" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness(spec<span class="op">=</span>spec, session_dir<span class="op">=</span>Path(<span class="st">&quot;./my_run_output&quot;</span>))</span></code></pre></div>
 <hr />
-<h2 id="integrating-with-a-host-application">17. Integrating with a host
+<h2 id="integrating-with-a-host-application">18. Integrating with a host
 application</h2>
 <p>An Armature workflow is typically one component inside a larger
 application — a FastAPI service, a background job, a CLI tool — that
@@ -2662,17 +2892,17 @@ available to any stage via <code>tool_call</code> or
 </table>
 <p><strong><code>http_post</code></strong> is the general bridge to any
 external API. Pass <code>headers</code> for authentication:</p>
-<div class="sourceCode" id="cb63"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb63-1"><a href="#cb63-1" aria-hidden="true" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> call_openai</span></span>
-<span id="cb63-2"><a href="#cb63-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">tool_call</span><span class="kw">:</span></span>
-<span id="cb63-3"><a href="#cb63-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">name</span><span class="kw">:</span><span class="at"> http_post</span></span>
-<span id="cb63-4"><a href="#cb63-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">args</span><span class="kw">:</span></span>
-<span id="cb63-5"><a href="#cb63-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">url</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;https://api.openai.com/v1/images/generations&quot;</span></span>
-<span id="cb63-6"><a href="#cb63-6" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">headers</span><span class="kw">:</span></span>
-<span id="cb63-7"><a href="#cb63-7" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">Authorization</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Bearer {{ env.OPENAI_API_KEY }}&quot;</span></span>
-<span id="cb63-8"><a href="#cb63-8" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">body</span><span class="kw">:</span></span>
-<span id="cb63-9"><a href="#cb63-9" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">model</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;dall-e-3&quot;</span></span>
-<span id="cb63-10"><a href="#cb63-10" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">prompt</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;{{ image_prompt }}&quot;</span></span>
-<span id="cb63-11"><a href="#cb63-11" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">n</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span></code></pre></div>
+<div class="sourceCode" id="cb71"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> call_openai</span></span>
+<span id="cb71-2"><a href="#cb71-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="fu">tool_call</span><span class="kw">:</span></span>
+<span id="cb71-3"><a href="#cb71-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">name</span><span class="kw">:</span><span class="at"> http_post</span></span>
+<span id="cb71-4"><a href="#cb71-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">args</span><span class="kw">:</span></span>
+<span id="cb71-5"><a href="#cb71-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">url</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;https://api.openai.com/v1/images/generations&quot;</span></span>
+<span id="cb71-6"><a href="#cb71-6" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">headers</span><span class="kw">:</span></span>
+<span id="cb71-7"><a href="#cb71-7" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">Authorization</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Bearer {{ env.OPENAI_API_KEY }}&quot;</span></span>
+<span id="cb71-8"><a href="#cb71-8" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">body</span><span class="kw">:</span></span>
+<span id="cb71-9"><a href="#cb71-9" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">model</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;dall-e-3&quot;</span></span>
+<span id="cb71-10"><a href="#cb71-10" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">prompt</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;{{ image_prompt }}&quot;</span></span>
+<span id="cb71-11"><a href="#cb71-11" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">n</span><span class="kw">:</span><span class="at"> </span><span class="dv">1</span></span></code></pre></div>
 <p>For more complex integrations (multi-step API flows, stateful calls,
 response parsing), use a custom tool module instead (see below).</p>
 <hr />
@@ -2683,37 +2913,37 @@ modules by dotted import path. The harness imports each module at
 startup and calls its <code>register()</code> function to add tools to
 the registry. Tool code lives in your codebase — the spec just says
 which modules to load.</p>
-<div class="sourceCode" id="cb64"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a><span class="fu">tools</span><span class="kw">:</span></span>
-<span id="cb64-2"><a href="#cb64-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">module</span><span class="kw">:</span><span class="at"> myapp.tools.search_tools</span></span>
-<span id="cb64-3"><a href="#cb64-3" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">module</span><span class="kw">:</span><span class="at"> myapp.tools.database_tools</span></span></code></pre></div>
+<div class="sourceCode" id="cb72"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb72-1"><a href="#cb72-1" aria-hidden="true" tabindex="-1"></a><span class="fu">tools</span><span class="kw">:</span></span>
+<span id="cb72-2"><a href="#cb72-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">module</span><span class="kw">:</span><span class="at"> myapp.tools.search_tools</span></span>
+<span id="cb72-3"><a href="#cb72-3" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">module</span><span class="kw">:</span><span class="at"> myapp.tools.database_tools</span></span></code></pre></div>
 <p>Each referenced module must expose a single function:</p>
-<div class="sourceCode" id="cb65"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb65-1"><a href="#cb65-1" aria-hidden="true" tabindex="-1"></a><span class="co"># myapp/tools/search_tools.py</span></span>
-<span id="cb65-2"><a href="#cb65-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.registry.registry <span class="im">import</span> ToolRegistry, ToolDescriptor</span>
-<span id="cb65-3"><a href="#cb65-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.permissions.permissions <span class="im">import</span> PermissionLevel</span>
-<span id="cb65-4"><a href="#cb65-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb65-5"><a href="#cb65-5" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> _search(args: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
-<span id="cb65-6"><a href="#cb65-6" aria-hidden="true" tabindex="-1"></a>    query <span class="op">=</span> args[<span class="st">&quot;query&quot;</span>]</span>
-<span id="cb65-7"><a href="#cb65-7" aria-hidden="true" tabindex="-1"></a>    <span class="co"># ... your search logic ...</span></span>
-<span id="cb65-8"><a href="#cb65-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {<span class="st">&quot;results&quot;</span>: [...]}</span>
-<span id="cb65-9"><a href="#cb65-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb65-10"><a href="#cb65-10" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> register(registry: ToolRegistry) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
-<span id="cb65-11"><a href="#cb65-11" aria-hidden="true" tabindex="-1"></a>    registry.register(ToolDescriptor(</span>
-<span id="cb65-12"><a href="#cb65-12" aria-hidden="true" tabindex="-1"></a>        name<span class="op">=</span><span class="st">&quot;search&quot;</span>,</span>
-<span id="cb65-13"><a href="#cb65-13" aria-hidden="true" tabindex="-1"></a>        description<span class="op">=</span><span class="st">&quot;Search the knowledge base&quot;</span>,</span>
-<span id="cb65-14"><a href="#cb65-14" aria-hidden="true" tabindex="-1"></a>        permission<span class="op">=</span>PermissionLevel.NETWORK,</span>
-<span id="cb65-15"><a href="#cb65-15" aria-hidden="true" tabindex="-1"></a>        handler<span class="op">=</span>_search,</span>
-<span id="cb65-16"><a href="#cb65-16" aria-hidden="true" tabindex="-1"></a>        parameters<span class="op">=</span>{<span class="st">&quot;query&quot;</span>: {<span class="st">&quot;type&quot;</span>: <span class="st">&quot;string&quot;</span>, <span class="st">&quot;description&quot;</span>: <span class="st">&quot;Search query&quot;</span>}},</span>
-<span id="cb65-17"><a href="#cb65-17" aria-hidden="true" tabindex="-1"></a>    ))</span></code></pre></div>
+<div class="sourceCode" id="cb73"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a><span class="co"># myapp/tools/search_tools.py</span></span>
+<span id="cb73-2"><a href="#cb73-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.registry.registry <span class="im">import</span> ToolRegistry, ToolDescriptor</span>
+<span id="cb73-3"><a href="#cb73-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.permissions.permissions <span class="im">import</span> PermissionLevel</span>
+<span id="cb73-4"><a href="#cb73-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-5"><a href="#cb73-5" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> _search(args: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
+<span id="cb73-6"><a href="#cb73-6" aria-hidden="true" tabindex="-1"></a>    query <span class="op">=</span> args[<span class="st">&quot;query&quot;</span>]</span>
+<span id="cb73-7"><a href="#cb73-7" aria-hidden="true" tabindex="-1"></a>    <span class="co"># ... your search logic ...</span></span>
+<span id="cb73-8"><a href="#cb73-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {<span class="st">&quot;results&quot;</span>: [...]}</span>
+<span id="cb73-9"><a href="#cb73-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb73-10"><a href="#cb73-10" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> register(registry: ToolRegistry) <span class="op">-&gt;</span> <span class="va">None</span>:</span>
+<span id="cb73-11"><a href="#cb73-11" aria-hidden="true" tabindex="-1"></a>    registry.register(ToolDescriptor(</span>
+<span id="cb73-12"><a href="#cb73-12" aria-hidden="true" tabindex="-1"></a>        name<span class="op">=</span><span class="st">&quot;search&quot;</span>,</span>
+<span id="cb73-13"><a href="#cb73-13" aria-hidden="true" tabindex="-1"></a>        description<span class="op">=</span><span class="st">&quot;Search the knowledge base&quot;</span>,</span>
+<span id="cb73-14"><a href="#cb73-14" aria-hidden="true" tabindex="-1"></a>        permission<span class="op">=</span>PermissionLevel.NETWORK,</span>
+<span id="cb73-15"><a href="#cb73-15" aria-hidden="true" tabindex="-1"></a>        handler<span class="op">=</span>_search,</span>
+<span id="cb73-16"><a href="#cb73-16" aria-hidden="true" tabindex="-1"></a>        parameters<span class="op">=</span>{<span class="st">&quot;query&quot;</span>: {<span class="st">&quot;type&quot;</span>: <span class="st">&quot;string&quot;</span>, <span class="st">&quot;description&quot;</span>: <span class="st">&quot;Search query&quot;</span>}},</span>
+<span id="cb73-17"><a href="#cb73-17" aria-hidden="true" tabindex="-1"></a>    ))</span></code></pre></div>
 <p>Once registered, tools are available to any LLM stage whose role
 lists them:</p>
-<div class="sourceCode" id="cb66"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb66-1"><a href="#cb66-1" aria-hidden="true" tabindex="-1"></a><span class="fu">stages</span><span class="kw">:</span></span>
-<span id="cb66-2"><a href="#cb66-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> researcher</span></span>
-<span id="cb66-3"><a href="#cb66-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span></span>
-<span id="cb66-4"><a href="#cb66-4" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Researcher</span></span>
-<span id="cb66-5"><a href="#cb66-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> researcher</span></span>
-<span id="cb66-6"><a href="#cb66-6" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">description</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Research the given topic using available tools.&quot;</span></span>
-<span id="cb66-7"><a href="#cb66-7" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">tools</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">search</span><span class="kw">,</span><span class="at"> database.lookup</span><span class="kw">]</span></span>
-<span id="cb66-8"><a href="#cb66-8" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[]</span></span></code></pre></div>
+<div class="sourceCode" id="cb74"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a><span class="fu">stages</span><span class="kw">:</span></span>
+<span id="cb74-2"><a href="#cb74-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> researcher</span></span>
+<span id="cb74-3"><a href="#cb74-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span></span>
+<span id="cb74-4"><a href="#cb74-4" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">name</span><span class="kw">:</span><span class="at"> Researcher</span></span>
+<span id="cb74-5"><a href="#cb74-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">type</span><span class="kw">:</span><span class="at"> researcher</span></span>
+<span id="cb74-6"><a href="#cb74-6" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">description</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Research the given topic using available tools.&quot;</span></span>
+<span id="cb74-7"><a href="#cb74-7" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">tools</span><span class="kw">:</span><span class="at"> </span><span class="kw">[</span><span class="at">search</span><span class="kw">,</span><span class="at"> database.lookup</span><span class="kw">]</span></span>
+<span id="cb74-8"><a href="#cb74-8" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">depends_on</span><span class="kw">:</span><span class="at"> </span><span class="kw">[]</span></span></code></pre></div>
 <p><strong>Rules:</strong> - The module must be importable from wherever
 the harness runs (i.e. on <code>PYTHONPATH</code> or installed in the
 environment) - Missing <code>register</code> function →
@@ -2752,25 +2982,25 @@ the same process as the host.</p>
 <p><strong>Best for:</strong> Python applications where the agentic team
 is a core feature, not a separate service. Single process, easiest
 debugging, no network round-trips.</p>
-<div class="sourceCode" id="cb68"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb68-1"><a href="#cb68-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> asyncio</span>
-<span id="cb68-2"><a href="#cb68-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature <span class="im">import</span> Harness</span>
-<span id="cb68-3"><a href="#cb68-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb68-4"><a href="#cb68-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Load once at startup (or per-tenant if specs vary)</span></span>
-<span id="cb68-5"><a href="#cb68-5" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;workflows/research_pipeline.yml&quot;</span>)</span>
-<span id="cb68-6"><a href="#cb68-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb68-7"><a href="#cb68-7" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> handle_research_request(topic: <span class="bu">str</span>, documents: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
-<span id="cb68-8"><a href="#cb68-8" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
-<span id="cb68-9"><a href="#cb68-9" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;topic&quot;</span>: topic,</span>
-<span id="cb68-10"><a href="#cb68-10" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;documents&quot;</span>: documents,</span>
-<span id="cb68-11"><a href="#cb68-11" aria-hidden="true" tabindex="-1"></a>    })</span>
-<span id="cb68-12"><a href="#cb68-12" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Extract just the keys your app cares about</span></span>
-<span id="cb68-13"><a href="#cb68-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {</span>
-<span id="cb68-14"><a href="#cb68-14" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;summary&quot;</span>: result[<span class="st">&quot;synthesizer&quot;</span>],</span>
-<span id="cb68-15"><a href="#cb68-15" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;citations&quot;</span>: result.get(<span class="st">&quot;analyst&quot;</span>, {}).get(<span class="st">&quot;citations&quot;</span>, []),</span>
-<span id="cb68-16"><a href="#cb68-16" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div>
+<div class="sourceCode" id="cb76"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> asyncio</span>
+<span id="cb76-2"><a href="#cb76-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature <span class="im">import</span> Harness</span>
+<span id="cb76-3"><a href="#cb76-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb76-4"><a href="#cb76-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Load once at startup (or per-tenant if specs vary)</span></span>
+<span id="cb76-5"><a href="#cb76-5" aria-hidden="true" tabindex="-1"></a>harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;workflows/research_pipeline.yml&quot;</span>)</span>
+<span id="cb76-6"><a href="#cb76-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb76-7"><a href="#cb76-7" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> handle_research_request(topic: <span class="bu">str</span>, documents: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
+<span id="cb76-8"><a href="#cb76-8" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
+<span id="cb76-9"><a href="#cb76-9" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;topic&quot;</span>: topic,</span>
+<span id="cb76-10"><a href="#cb76-10" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;documents&quot;</span>: documents,</span>
+<span id="cb76-11"><a href="#cb76-11" aria-hidden="true" tabindex="-1"></a>    })</span>
+<span id="cb76-12"><a href="#cb76-12" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Extract just the keys your app cares about</span></span>
+<span id="cb76-13"><a href="#cb76-13" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {</span>
+<span id="cb76-14"><a href="#cb76-14" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;summary&quot;</span>: result[<span class="st">&quot;synthesizer&quot;</span>],</span>
+<span id="cb76-15"><a href="#cb76-15" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;citations&quot;</span>: result.get(<span class="st">&quot;analyst&quot;</span>, {}).get(<span class="st">&quot;citations&quot;</span>, []),</span>
+<span id="cb76-16"><a href="#cb76-16" aria-hidden="true" tabindex="-1"></a>    }</span></code></pre></div>
 <p>For sync callers (Django views, Flask routes):</p>
-<div class="sourceCode" id="cb69"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb69-1"><a href="#cb69-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> handle_sync(topic: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
-<span id="cb69-2"><a href="#cb69-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> asyncio.run(handle_research_request(topic, documents<span class="op">=</span><span class="st">&quot;&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb77"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb77-1"><a href="#cb77-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> handle_sync(topic: <span class="bu">str</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
+<span id="cb77-2"><a href="#cb77-2" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> asyncio.run(handle_research_request(topic, documents<span class="op">=</span><span class="st">&quot;&quot;</span>))</span></code></pre></div>
 <p><strong>Tradeoff:</strong> Armature’s dependencies (LiteLLM,
 ruamel.yaml, etc.) become your app’s dependencies. Workflow failures
 raise exceptions in your process.</p>
@@ -2778,18 +3008,18 @@ raise exceptions in your process.</p>
 <h3 id="pattern-b-http-sidecar">Pattern B — HTTP sidecar</h3>
 <p>Run Armature as a separate service and call it over HTTP. Your host
 application is language-agnostic.</p>
-<div class="sourceCode" id="cb70"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb70-1"><a href="#cb70-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Start the sidecar (requires pip install &#39;armature[service]&#39;)</span></span>
-<span id="cb70-2"><a href="#cb70-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
-<div class="sourceCode" id="cb71"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb71-1"><a href="#cb71-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> httpx</span>
-<span id="cb71-2"><a href="#cb71-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb71-3"><a href="#cb71-3" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> call_workflow(inputs: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
-<span id="cb71-4"><a href="#cb71-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="cf">with</span> httpx.AsyncClient(timeout<span class="op">=</span><span class="dv">120</span>) <span class="im">as</span> client:</span>
-<span id="cb71-5"><a href="#cb71-5" aria-hidden="true" tabindex="-1"></a>        resp <span class="op">=</span> <span class="cf">await</span> client.post(</span>
-<span id="cb71-6"><a href="#cb71-6" aria-hidden="true" tabindex="-1"></a>            <span class="st">&quot;http://localhost:8080/run&quot;</span>,</span>
-<span id="cb71-7"><a href="#cb71-7" aria-hidden="true" tabindex="-1"></a>            json<span class="op">=</span>{<span class="st">&quot;spec&quot;</span>: <span class="st">&quot;workflows/research_pipeline.yml&quot;</span>, <span class="st">&quot;inputs&quot;</span>: inputs},</span>
-<span id="cb71-8"><a href="#cb71-8" aria-hidden="true" tabindex="-1"></a>        )</span>
-<span id="cb71-9"><a href="#cb71-9" aria-hidden="true" tabindex="-1"></a>        resp.raise_for_status()</span>
-<span id="cb71-10"><a href="#cb71-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> resp.json()[<span class="st">&quot;result&quot;</span>]</span></code></pre></div>
+<div class="sourceCode" id="cb78"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Start the sidecar (requires pip install &#39;armature[service]&#39;)</span></span>
+<span id="cb78-2"><a href="#cb78-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> serve <span class="at">--port</span> 8080</span></code></pre></div>
+<div class="sourceCode" id="cb79"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb79-1"><a href="#cb79-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> httpx</span>
+<span id="cb79-2"><a href="#cb79-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb79-3"><a href="#cb79-3" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> call_workflow(inputs: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
+<span id="cb79-4"><a href="#cb79-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">async</span> <span class="cf">with</span> httpx.AsyncClient(timeout<span class="op">=</span><span class="dv">120</span>) <span class="im">as</span> client:</span>
+<span id="cb79-5"><a href="#cb79-5" aria-hidden="true" tabindex="-1"></a>        resp <span class="op">=</span> <span class="cf">await</span> client.post(</span>
+<span id="cb79-6"><a href="#cb79-6" aria-hidden="true" tabindex="-1"></a>            <span class="st">&quot;http://localhost:8080/run&quot;</span>,</span>
+<span id="cb79-7"><a href="#cb79-7" aria-hidden="true" tabindex="-1"></a>            json<span class="op">=</span>{<span class="st">&quot;spec&quot;</span>: <span class="st">&quot;workflows/research_pipeline.yml&quot;</span>, <span class="st">&quot;inputs&quot;</span>: inputs},</span>
+<span id="cb79-8"><a href="#cb79-8" aria-hidden="true" tabindex="-1"></a>        )</span>
+<span id="cb79-9"><a href="#cb79-9" aria-hidden="true" tabindex="-1"></a>        resp.raise_for_status()</span>
+<span id="cb79-10"><a href="#cb79-10" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> resp.json()[<span class="st">&quot;result&quot;</span>]</span></code></pre></div>
 <p><strong>Tradeoff:</strong> Independent scaling and failure isolation,
 but adds a network hop and requires the sidecar to be running.
 Long-running workflows may require async polling rather than a
@@ -2798,14 +3028,14 @@ synchronous HTTP response.</p>
 <h3 id="pattern-c-subprocess">Pattern C — subprocess</h3>
 <p>Shell out to the CLI. Works from any language; useful for scripting
 and one-shot integrations.</p>
-<div class="sourceCode" id="cb72"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb72-1"><a href="#cb72-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> subprocess, json</span>
-<span id="cb72-2"><a href="#cb72-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb72-3"><a href="#cb72-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> run_workflow(spec_path: <span class="bu">str</span>, inputs: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
-<span id="cb72-4"><a href="#cb72-4" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> [<span class="st">&quot;armature&quot;</span>, <span class="st">&quot;run&quot;</span>, spec_path]</span>
-<span id="cb72-5"><a href="#cb72-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k, v <span class="kw">in</span> inputs.items():</span>
-<span id="cb72-6"><a href="#cb72-6" aria-hidden="true" tabindex="-1"></a>        args <span class="op">+=</span> [<span class="st">&quot;--input&quot;</span>, <span class="ss">f&quot;</span><span class="sc">{</span>k<span class="sc">}</span><span class="ss">=</span><span class="sc">{</span>v<span class="sc">}</span><span class="ss">&quot;</span>]</span>
-<span id="cb72-7"><a href="#cb72-7" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> subprocess.check_output(args)</span>
-<span id="cb72-8"><a href="#cb72-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> json.loads(out)</span></code></pre></div>
+<div class="sourceCode" id="cb80"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> subprocess, json</span>
+<span id="cb80-2"><a href="#cb80-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb80-3"><a href="#cb80-3" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> run_workflow(spec_path: <span class="bu">str</span>, inputs: <span class="bu">dict</span>) <span class="op">-&gt;</span> <span class="bu">dict</span>:</span>
+<span id="cb80-4"><a href="#cb80-4" aria-hidden="true" tabindex="-1"></a>    args <span class="op">=</span> [<span class="st">&quot;armature&quot;</span>, <span class="st">&quot;run&quot;</span>, spec_path]</span>
+<span id="cb80-5"><a href="#cb80-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> k, v <span class="kw">in</span> inputs.items():</span>
+<span id="cb80-6"><a href="#cb80-6" aria-hidden="true" tabindex="-1"></a>        args <span class="op">+=</span> [<span class="st">&quot;--input&quot;</span>, <span class="ss">f&quot;</span><span class="sc">{</span>k<span class="sc">}</span><span class="ss">=</span><span class="sc">{</span>v<span class="sc">}</span><span class="ss">&quot;</span>]</span>
+<span id="cb80-7"><a href="#cb80-7" aria-hidden="true" tabindex="-1"></a>    out <span class="op">=</span> subprocess.check_output(args)</span>
+<span id="cb80-8"><a href="#cb80-8" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> json.loads(out)</span></code></pre></div>
 <p><strong>Tradeoff:</strong> Simplest integration, zero shared
 dependencies. Poor fit for structured inputs with nested data
 (everything serializes to strings), and a new Python interpreter starts
@@ -2817,21 +3047,21 @@ per call. Not suitable for latency-sensitive paths.</p>
 <code>--input</code>) accepts. The first stage’s
 <code>signature.input</code> is the natural contract boundary — it
 declares exactly which keys the workflow expects.</p>
-<div class="sourceCode" id="cb73"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb73-1"><a href="#cb73-1" aria-hidden="true" tabindex="-1"></a><span class="fu">stages</span><span class="kw">:</span></span>
-<span id="cb73-2"><a href="#cb73-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> analyst</span></span>
-<span id="cb73-3"><a href="#cb73-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span><span class="at"> ...</span></span>
-<span id="cb73-4"><a href="#cb73-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">signature</span><span class="kw">:</span></span>
-<span id="cb73-5"><a href="#cb73-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">input</span><span class="kw">:</span></span>
-<span id="cb73-6"><a href="#cb73-6" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">topic</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;The research topic&quot;</span></span>
-<span id="cb73-7"><a href="#cb73-7" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">documents</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Source documents to analyze&quot;</span></span></code></pre></div>
+<div class="sourceCode" id="cb81"><pre class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb81-1"><a href="#cb81-1" aria-hidden="true" tabindex="-1"></a><span class="fu">stages</span><span class="kw">:</span></span>
+<span id="cb81-2"><a href="#cb81-2" aria-hidden="true" tabindex="-1"></a><span class="at">  </span><span class="kw">-</span><span class="at"> </span><span class="fu">id</span><span class="kw">:</span><span class="at"> analyst</span></span>
+<span id="cb81-3"><a href="#cb81-3" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">role</span><span class="kw">:</span><span class="at"> ...</span></span>
+<span id="cb81-4"><a href="#cb81-4" aria-hidden="true" tabindex="-1"></a><span class="at">    </span><span class="fu">signature</span><span class="kw">:</span></span>
+<span id="cb81-5"><a href="#cb81-5" aria-hidden="true" tabindex="-1"></a><span class="at">      </span><span class="fu">input</span><span class="kw">:</span></span>
+<span id="cb81-6"><a href="#cb81-6" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">topic</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;The research topic&quot;</span></span>
+<span id="cb81-7"><a href="#cb81-7" aria-hidden="true" tabindex="-1"></a><span class="at">        </span><span class="fu">documents</span><span class="kw">:</span><span class="at"> </span><span class="st">&quot;Source documents to analyze&quot;</span></span></code></pre></div>
 <p>This both documents the interface and filters irrelevant context from
 the stage’s prompt. Your host application should treat
 <code>signature.input</code> keys as the workflow’s public API:</p>
-<div class="sourceCode" id="cb74"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb74-1"><a href="#cb74-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Explicit mapping from app domain → workflow contract</span></span>
-<span id="cb74-2"><a href="#cb74-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
-<span id="cb74-3"><a href="#cb74-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;topic&quot;</span>: request.query,          <span class="co"># app field → workflow key</span></span>
-<span id="cb74-4"><a href="#cb74-4" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>.join(docs),    <span class="co"># app list → workflow string</span></span>
-<span id="cb74-5"><a href="#cb74-5" aria-hidden="true" tabindex="-1"></a>})</span></code></pre></div>
+<div class="sourceCode" id="cb82"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb82-1"><a href="#cb82-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Explicit mapping from app domain → workflow contract</span></span>
+<span id="cb82-2"><a href="#cb82-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run({</span>
+<span id="cb82-3"><a href="#cb82-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;topic&quot;</span>: request.query,          <span class="co"># app field → workflow key</span></span>
+<span id="cb82-4"><a href="#cb82-4" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;documents&quot;</span>: <span class="st">&quot;</span><span class="ch">\n</span><span class="st">&quot;</span>.join(docs),    <span class="co"># app list → workflow string</span></span>
+<span id="cb82-5"><a href="#cb82-5" aria-hidden="true" tabindex="-1"></a>})</span></code></pre></div>
 <p>For typed inputs, convert to strings before passing; use
 <code>guided_json</code> output stages and <code>signature.input</code>
 on the consuming stage if the downstream workflow needs structured
@@ -2842,12 +3072,12 @@ data.</p>
 stage’s output is present under its <code>id</code>. Your host
 application should extract only the keys it needs rather than forwarding
 the entire dict.</p>
-<div class="sourceCode" id="cb75"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb75-1"><a href="#cb75-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
-<span id="cb75-2"><a href="#cb75-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb75-3"><a href="#cb75-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Typed extraction — the workflow contract</span></span>
-<span id="cb75-4"><a href="#cb75-4" aria-hidden="true" tabindex="-1"></a>summary: <span class="bu">str</span>    <span class="op">=</span> result[<span class="st">&quot;synthesizer&quot;</span>]          <span class="co"># text stage output</span></span>
-<span id="cb75-5"><a href="#cb75-5" aria-hidden="true" tabindex="-1"></a>analysis: <span class="bu">dict</span>  <span class="op">=</span> result[<span class="st">&quot;analyst&quot;</span>]              <span class="co"># guided_json stage output</span></span>
-<span id="cb75-6"><a href="#cb75-6" aria-hidden="true" tabindex="-1"></a>score: <span class="bu">float</span>    <span class="op">=</span> result[<span class="st">&quot;evaluator&quot;</span>][<span class="st">&quot;score&quot;</span>]   <span class="co"># nested field</span></span></code></pre></div>
+<div class="sourceCode" id="cb83"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb83-1"><a href="#cb83-1" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
+<span id="cb83-2"><a href="#cb83-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb83-3"><a href="#cb83-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Typed extraction — the workflow contract</span></span>
+<span id="cb83-4"><a href="#cb83-4" aria-hidden="true" tabindex="-1"></a>summary: <span class="bu">str</span>    <span class="op">=</span> result[<span class="st">&quot;synthesizer&quot;</span>]          <span class="co"># text stage output</span></span>
+<span id="cb83-5"><a href="#cb83-5" aria-hidden="true" tabindex="-1"></a>analysis: <span class="bu">dict</span>  <span class="op">=</span> result[<span class="st">&quot;analyst&quot;</span>]              <span class="co"># guided_json stage output</span></span>
+<span id="cb83-6"><a href="#cb83-6" aria-hidden="true" tabindex="-1"></a>score: <span class="bu">float</span>    <span class="op">=</span> result[<span class="st">&quot;evaluator&quot;</span>][<span class="st">&quot;score&quot;</span>]   <span class="co"># nested field</span></span></code></pre></div>
 <p>When using <code>guided_json</code> or <code>text</code> output
 modes, outputs are already parsed Python objects (dict or str).
 <code>raw</code> mode returns the LLM’s response string unparsed.</p>
@@ -2860,44 +3090,44 @@ of the workflow.</p>
 <p>The embedded pattern is fully <code>async</code>. Common host
 patterns:</p>
 <p><strong>FastAPI</strong> (async natively):</p>
-<div class="sourceCode" id="cb76"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb76-1"><a href="#cb76-1" aria-hidden="true" tabindex="-1"></a><span class="at">@app.post</span>(<span class="st">&quot;/research&quot;</span>)</span>
-<span id="cb76-2"><a href="#cb76-2" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> research(req: ResearchRequest):</span>
-<span id="cb76-3"><a href="#cb76-3" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run({<span class="st">&quot;topic&quot;</span>: req.topic, <span class="st">&quot;documents&quot;</span>: req.documents})</span>
-<span id="cb76-4"><a href="#cb76-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {<span class="st">&quot;summary&quot;</span>: result[<span class="st">&quot;synthesizer&quot;</span>]}</span></code></pre></div>
+<div class="sourceCode" id="cb84"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb84-1"><a href="#cb84-1" aria-hidden="true" tabindex="-1"></a><span class="at">@app.post</span>(<span class="st">&quot;/research&quot;</span>)</span>
+<span id="cb84-2"><a href="#cb84-2" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> research(req: ResearchRequest):</span>
+<span id="cb84-3"><a href="#cb84-3" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run({<span class="st">&quot;topic&quot;</span>: req.topic, <span class="st">&quot;documents&quot;</span>: req.documents})</span>
+<span id="cb84-4"><a href="#cb84-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> {<span class="st">&quot;summary&quot;</span>: result[<span class="st">&quot;synthesizer&quot;</span>]}</span></code></pre></div>
 <p><strong>Background task</strong> (Celery / ARQ /
 asyncio.create_task):</p>
-<div class="sourceCode" id="cb77"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb77-1"><a href="#cb77-1" aria-hidden="true" tabindex="-1"></a><span class="co"># asyncio task within a running loop</span></span>
-<span id="cb77-2"><a href="#cb77-2" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> background_research(job_id: <span class="bu">str</span>, inputs: <span class="bu">dict</span>):</span>
-<span id="cb77-3"><a href="#cb77-3" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
-<span id="cb77-4"><a href="#cb77-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">await</span> db.store_result(job_id, result[<span class="st">&quot;synthesizer&quot;</span>])</span></code></pre></div>
+<div class="sourceCode" id="cb85"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb85-1"><a href="#cb85-1" aria-hidden="true" tabindex="-1"></a><span class="co"># asyncio task within a running loop</span></span>
+<span id="cb85-2"><a href="#cb85-2" aria-hidden="true" tabindex="-1"></a><span class="cf">async</span> <span class="kw">def</span> background_research(job_id: <span class="bu">str</span>, inputs: <span class="bu">dict</span>):</span>
+<span id="cb85-3"><a href="#cb85-3" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
+<span id="cb85-4"><a href="#cb85-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">await</span> db.store_result(job_id, result[<span class="st">&quot;synthesizer&quot;</span>])</span></code></pre></div>
 <p><strong>Persistent harness</strong> — load the spec once at app
 startup, reuse the <code>Harness</code> object across requests.
 <code>harness.run()</code> is safe to call concurrently; each call
 maintains its own context and transcript internally.</p>
-<div class="sourceCode" id="cb78"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb78-1"><a href="#cb78-1" aria-hidden="true" tabindex="-1"></a><span class="co"># At startup</span></span>
-<span id="cb78-2"><a href="#cb78-2" aria-hidden="true" tabindex="-1"></a>_harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;workflows/research.yml&quot;</span>)</span>
-<span id="cb78-3"><a href="#cb78-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb78-4"><a href="#cb78-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Per request — concurrent calls are safe</span></span>
-<span id="cb78-5"><a href="#cb78-5" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> _harness.run(request_inputs)</span></code></pre></div>
+<div class="sourceCode" id="cb86"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb86-1"><a href="#cb86-1" aria-hidden="true" tabindex="-1"></a><span class="co"># At startup</span></span>
+<span id="cb86-2"><a href="#cb86-2" aria-hidden="true" tabindex="-1"></a>_harness <span class="op">=</span> Harness.from_spec(<span class="st">&quot;workflows/research.yml&quot;</span>)</span>
+<span id="cb86-3"><a href="#cb86-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb86-4"><a href="#cb86-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Per request — concurrent calls are safe</span></span>
+<span id="cb86-5"><a href="#cb86-5" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> <span class="cf">await</span> _harness.run(request_inputs)</span></code></pre></div>
 <hr />
 <h3 id="error-contracts">Error contracts</h3>
 <p>When a stage exhausts its retry budget
 (<code>on_fail.loop.max</code>), the engine raises an exception that
 propagates out of <code>harness.run()</code>. Wrap calls in try/except
 to handle this at the host boundary:</p>
-<div class="sourceCode" id="cb79"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb79-1"><a href="#cb79-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.runtime.engine <span class="im">import</span> StageError  <span class="co"># raised on unrecoverable failure</span></span>
-<span id="cb79-2"><a href="#cb79-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb79-3"><a href="#cb79-3" aria-hidden="true" tabindex="-1"></a><span class="cf">try</span>:</span>
-<span id="cb79-4"><a href="#cb79-4" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
-<span id="cb79-5"><a href="#cb79-5" aria-hidden="true" tabindex="-1"></a><span class="cf">except</span> StageError <span class="im">as</span> e:</span>
-<span id="cb79-6"><a href="#cb79-6" aria-hidden="true" tabindex="-1"></a>    logger.error(<span class="st">&quot;Workflow stage failed: </span><span class="sc">%s</span><span class="st"> — </span><span class="sc">%s</span><span class="st">&quot;</span>, e.stage_id, e)</span>
-<span id="cb79-7"><a href="#cb79-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">raise</span> HTTPException(status_code<span class="op">=</span><span class="dv">502</span>, detail<span class="op">=</span><span class="st">&quot;Workflow unavailable&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb87"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb87-1"><a href="#cb87-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.runtime.engine <span class="im">import</span> StageError  <span class="co"># raised on unrecoverable failure</span></span>
+<span id="cb87-2"><a href="#cb87-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb87-3"><a href="#cb87-3" aria-hidden="true" tabindex="-1"></a><span class="cf">try</span>:</span>
+<span id="cb87-4"><a href="#cb87-4" aria-hidden="true" tabindex="-1"></a>    result <span class="op">=</span> <span class="cf">await</span> harness.run(inputs)</span>
+<span id="cb87-5"><a href="#cb87-5" aria-hidden="true" tabindex="-1"></a><span class="cf">except</span> StageError <span class="im">as</span> e:</span>
+<span id="cb87-6"><a href="#cb87-6" aria-hidden="true" tabindex="-1"></a>    logger.error(<span class="st">&quot;Workflow stage failed: </span><span class="sc">%s</span><span class="st"> — </span><span class="sc">%s</span><span class="st">&quot;</span>, e.stage_id, e)</span>
+<span id="cb87-7"><a href="#cb87-7" aria-hidden="true" tabindex="-1"></a>    <span class="cf">raise</span> HTTPException(status_code<span class="op">=</span><span class="dv">502</span>, detail<span class="op">=</span><span class="st">&quot;Workflow unavailable&quot;</span>)</span></code></pre></div>
 <p>For stages with <code>on_fail.loop</code>, the loop exhaustion is the
 error signal. If you need soft failure (partial results), add a final
 stage that consolidates whatever context is available rather than
 relying on exception handling in the host.</p>
 <hr />
-<h2 id="self-improvement">18. Self-improvement</h2>
+<h2 id="self-improvement">19. Self-improvement</h2>
 <p>Armature includes a closed-loop self-improvement system that analyzes
 workflow traces, diagnoses quality problems, and produces a targeted
 spec revision. Each improvement cycle logs its predictions; the next
@@ -2954,55 +3184,55 @@ predicted</p>
 Over multiple cycles you get a track record of how accurately your
 workflow improvements land.</p>
 <h3 id="usage">Usage</h3>
-<div class="sourceCode" id="cb80"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb80-1"><a href="#cb80-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Analyze and apply if IHR &lt; 0.90 (default)</span></span>
-<span id="cb80-2"><a href="#cb80-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span>
-<span id="cb80-3"><a href="#cb80-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb80-4"><a href="#cb80-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Propose only — do not write the spec</span></span>
-<span id="cb80-5"><a href="#cb80-5" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--no-apply</span></span>
-<span id="cb80-6"><a href="#cb80-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb80-7"><a href="#cb80-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Stricter threshold, more data required</span></span>
-<span id="cb80-8"><a href="#cb80-8" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--target-ihr</span> 0.95 <span class="at">--min-traces</span> 20</span>
-<span id="cb80-9"><a href="#cb80-9" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb80-10"><a href="#cb80-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Use a more capable model for refinement</span></span>
-<span id="cb80-11"><a href="#cb80-11" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--model</span> claude-opus-4-7</span></code></pre></div>
+<div class="sourceCode" id="cb88"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb88-1"><a href="#cb88-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Analyze and apply if IHR &lt; 0.90 (default)</span></span>
+<span id="cb88-2"><a href="#cb88-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span>
+<span id="cb88-3"><a href="#cb88-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb88-4"><a href="#cb88-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Propose only — do not write the spec</span></span>
+<span id="cb88-5"><a href="#cb88-5" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--no-apply</span></span>
+<span id="cb88-6"><a href="#cb88-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb88-7"><a href="#cb88-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Stricter threshold, more data required</span></span>
+<span id="cb88-8"><a href="#cb88-8" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--target-ihr</span> 0.95 <span class="at">--min-traces</span> 20</span>
+<span id="cb88-9"><a href="#cb88-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb88-10"><a href="#cb88-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Use a more capable model for refinement</span></span>
+<span id="cb88-11"><a href="#cb88-11" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml <span class="at">--model</span> claude-opus-4-7</span></code></pre></div>
 <p>The improvement log is written to
 <code>&lt;spec_stem&gt;.improve_log.jsonl</code> by default. Each line
 is a JSON object:</p>
-<div class="sourceCode" id="cb81"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb81-1"><a href="#cb81-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
-<span id="cb81-2"><a href="#cb81-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;timestamp&quot;</span><span class="fu">:</span> <span class="st">&quot;2026-05-15T10:00:00Z&quot;</span><span class="fu">,</span></span>
-<span id="cb81-3"><a href="#cb81-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;workflow_name&quot;</span><span class="fu">:</span> <span class="st">&quot;campaign-concept-gen&quot;</span><span class="fu">,</span></span>
-<span id="cb81-4"><a href="#cb81-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;n_traces&quot;</span><span class="fu">:</span> <span class="dv">47</span><span class="fu">,</span></span>
-<span id="cb81-5"><a href="#cb81-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;ihr_before&quot;</span><span class="fu">:</span> <span class="fl">0.71</span><span class="fu">,</span></span>
-<span id="cb81-6"><a href="#cb81-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;needs_improvement&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span></span>
-<span id="cb81-7"><a href="#cb81-7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;applied&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span></span>
-<span id="cb81-8"><a href="#cb81-8" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;diagnostics&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
-<span id="cb81-9"><a href="#cb81-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">&quot;code&quot;</span><span class="fu">:</span> <span class="st">&quot;output_invalid&quot;</span><span class="fu">,</span> <span class="dt">&quot;stage_id&quot;</span><span class="fu">:</span> <span class="st">&quot;brand_judge&quot;</span><span class="fu">,</span> <span class="dt">&quot;details&quot;</span><span class="fu">:</span> <span class="st">&quot;4/10 runs failed schema validation&quot;</span><span class="fu">}</span></span>
-<span id="cb81-10"><a href="#cb81-10" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span><span class="fu">,</span></span>
-<span id="cb81-11"><a href="#cb81-11" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;predicted_fixes&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;output_invalid:brand_judge&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
-<span id="cb81-12"><a href="#cb81-12" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;predicted_regressions&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
-<span id="cb81-13"><a href="#cb81-13" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;verified_fixes&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
-<span id="cb81-14"><a href="#cb81-14" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;missed_predictions&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
-<span id="cb81-15"><a href="#cb81-15" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;unexpected_regressions&quot;</span><span class="fu">:</span> <span class="ot">[]</span></span>
-<span id="cb81-16"><a href="#cb81-16" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<div class="sourceCode" id="cb89"><pre class="sourceCode json"><code class="sourceCode json"><span id="cb89-1"><a href="#cb89-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb89-2"><a href="#cb89-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;timestamp&quot;</span><span class="fu">:</span> <span class="st">&quot;2026-05-15T10:00:00Z&quot;</span><span class="fu">,</span></span>
+<span id="cb89-3"><a href="#cb89-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;workflow_name&quot;</span><span class="fu">:</span> <span class="st">&quot;campaign-concept-gen&quot;</span><span class="fu">,</span></span>
+<span id="cb89-4"><a href="#cb89-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;n_traces&quot;</span><span class="fu">:</span> <span class="dv">47</span><span class="fu">,</span></span>
+<span id="cb89-5"><a href="#cb89-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;ihr_before&quot;</span><span class="fu">:</span> <span class="fl">0.71</span><span class="fu">,</span></span>
+<span id="cb89-6"><a href="#cb89-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;needs_improvement&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span></span>
+<span id="cb89-7"><a href="#cb89-7" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;applied&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">,</span></span>
+<span id="cb89-8"><a href="#cb89-8" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;diagnostics&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb89-9"><a href="#cb89-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">&quot;code&quot;</span><span class="fu">:</span> <span class="st">&quot;output_invalid&quot;</span><span class="fu">,</span> <span class="dt">&quot;stage_id&quot;</span><span class="fu">:</span> <span class="st">&quot;brand_judge&quot;</span><span class="fu">,</span> <span class="dt">&quot;details&quot;</span><span class="fu">:</span> <span class="st">&quot;4/10 runs failed schema validation&quot;</span><span class="fu">}</span></span>
+<span id="cb89-10"><a href="#cb89-10" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb89-11"><a href="#cb89-11" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;predicted_fixes&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;output_invalid:brand_judge&quot;</span><span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb89-12"><a href="#cb89-12" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;predicted_regressions&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
+<span id="cb89-13"><a href="#cb89-13" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;verified_fixes&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
+<span id="cb89-14"><a href="#cb89-14" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;missed_predictions&quot;</span><span class="fu">:</span> <span class="ot">[]</span><span class="fu">,</span></span>
+<span id="cb89-15"><a href="#cb89-15" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;unexpected_regressions&quot;</span><span class="fu">:</span> <span class="ot">[]</span></span>
+<span id="cb89-16"><a href="#cb89-16" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
 <h3 id="python-api-1">Python API</h3>
-<div class="sourceCode" id="cb82"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb82-1"><a href="#cb82-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.synthesis.improve <span class="im">import</span> SelfImproveRunner</span>
-<span id="cb82-2"><a href="#cb82-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb82-3"><a href="#cb82-3" aria-hidden="true" tabindex="-1"></a>runner <span class="op">=</span> SelfImproveRunner(</span>
-<span id="cb82-4"><a href="#cb82-4" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my_workflow.yml&quot;</span>,</span>
-<span id="cb82-5"><a href="#cb82-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;~/.armature/traces.db&quot;</span>,</span>
-<span id="cb82-6"><a href="#cb82-6" aria-hidden="true" tabindex="-1"></a>    model<span class="op">=</span><span class="st">&quot;claude-sonnet-4-6&quot;</span>,</span>
-<span id="cb82-7"><a href="#cb82-7" aria-hidden="true" tabindex="-1"></a>    target_ihr<span class="op">=</span><span class="fl">0.90</span>,</span>
-<span id="cb82-8"><a href="#cb82-8" aria-hidden="true" tabindex="-1"></a>    min_traces<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb82-9"><a href="#cb82-9" aria-hidden="true" tabindex="-1"></a>    auto_apply<span class="op">=</span><span class="va">True</span>,</span>
-<span id="cb82-10"><a href="#cb82-10" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb82-11"><a href="#cb82-11" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb82-12"><a href="#cb82-12" aria-hidden="true" tabindex="-1"></a>report <span class="op">=</span> <span class="cf">await</span> runner.analyze()</span>
-<span id="cb82-13"><a href="#cb82-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb82-14"><a href="#cb82-14" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;IHR: </span><span class="sc">{</span>report<span class="sc">.</span>ihr_before<span class="sc">:.3f}</span><span class="ss">&quot;</span>)</span>
-<span id="cb82-15"><a href="#cb82-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Needs improvement: </span><span class="sc">{</span>report<span class="sc">.</span>needs_improvement<span class="sc">}</span><span class="ss">&quot;</span>)</span>
-<span id="cb82-16"><a href="#cb82-16" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Applied: </span><span class="sc">{</span>report<span class="sc">.</span>applied<span class="sc">}</span><span class="ss">&quot;</span>)</span>
-<span id="cb82-17"><a href="#cb82-17" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Verified fixes: </span><span class="sc">{</span>report<span class="sc">.</span>verified_fixes<span class="sc">}</span><span class="ss">&quot;</span>)</span>
-<span id="cb82-18"><a href="#cb82-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Unexpected regressions: </span><span class="sc">{</span>report<span class="sc">.</span>unexpected_regressions<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
+<div class="sourceCode" id="cb90"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb90-1"><a href="#cb90-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.synthesis.improve <span class="im">import</span> SelfImproveRunner</span>
+<span id="cb90-2"><a href="#cb90-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb90-3"><a href="#cb90-3" aria-hidden="true" tabindex="-1"></a>runner <span class="op">=</span> SelfImproveRunner(</span>
+<span id="cb90-4"><a href="#cb90-4" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my_workflow.yml&quot;</span>,</span>
+<span id="cb90-5"><a href="#cb90-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;~/.armature/traces.db&quot;</span>,</span>
+<span id="cb90-6"><a href="#cb90-6" aria-hidden="true" tabindex="-1"></a>    model<span class="op">=</span><span class="st">&quot;claude-sonnet-4-6&quot;</span>,</span>
+<span id="cb90-7"><a href="#cb90-7" aria-hidden="true" tabindex="-1"></a>    target_ihr<span class="op">=</span><span class="fl">0.90</span>,</span>
+<span id="cb90-8"><a href="#cb90-8" aria-hidden="true" tabindex="-1"></a>    min_traces<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb90-9"><a href="#cb90-9" aria-hidden="true" tabindex="-1"></a>    auto_apply<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb90-10"><a href="#cb90-10" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb90-11"><a href="#cb90-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb90-12"><a href="#cb90-12" aria-hidden="true" tabindex="-1"></a>report <span class="op">=</span> <span class="cf">await</span> runner.analyze()</span>
+<span id="cb90-13"><a href="#cb90-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb90-14"><a href="#cb90-14" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;IHR: </span><span class="sc">{</span>report<span class="sc">.</span>ihr_before<span class="sc">:.3f}</span><span class="ss">&quot;</span>)</span>
+<span id="cb90-15"><a href="#cb90-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Needs improvement: </span><span class="sc">{</span>report<span class="sc">.</span>needs_improvement<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb90-16"><a href="#cb90-16" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Applied: </span><span class="sc">{</span>report<span class="sc">.</span>applied<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb90-17"><a href="#cb90-17" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Verified fixes: </span><span class="sc">{</span>report<span class="sc">.</span>verified_fixes<span class="sc">}</span><span class="ss">&quot;</span>)</span>
+<span id="cb90-18"><a href="#cb90-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Unexpected regressions: </span><span class="sc">{</span>report<span class="sc">.</span>unexpected_regressions<span class="sc">}</span><span class="ss">&quot;</span>)</span></code></pre></div>
 <h3 id="what-specrefiner-changes">What SpecRefiner changes</h3>
 <p>The refiner makes targeted changes only — it does not rewrite stages
 that are performing well. Its rules:</p>
@@ -3044,17 +3274,17 @@ or changing stage IDs.</p>
 <h3 id="building-traces">Building traces</h3>
 <p>The improvement system requires trace data. Run your workflow
 normally — each run automatically records traces:</p>
-<div class="sourceCode" id="cb83"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb83-1"><a href="#cb83-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Run several times to build up data</span></span>
-<span id="cb83-2"><a href="#cb83-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;quantum computing&quot;</span></span>
-<span id="cb83-3"><a href="#cb83-3" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;renewable energy&quot;</span></span>
-<span id="cb83-4"><a href="#cb83-4" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;supply chain risk&quot;</span></span>
-<span id="cb83-5"><a href="#cb83-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb83-6"><a href="#cb83-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Then improve</span></span>
-<span id="cb83-7"><a href="#cb83-7" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span></code></pre></div>
+<div class="sourceCode" id="cb91"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb91-1"><a href="#cb91-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Run several times to build up data</span></span>
+<span id="cb91-2"><a href="#cb91-2" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;quantum computing&quot;</span></span>
+<span id="cb91-3"><a href="#cb91-3" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;renewable energy&quot;</span></span>
+<span id="cb91-4"><a href="#cb91-4" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> run my_workflow.yml <span class="at">--input</span> topic=<span class="st">&quot;supply chain risk&quot;</span></span>
+<span id="cb91-5"><a href="#cb91-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb91-6"><a href="#cb91-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Then improve</span></span>
+<span id="cb91-7"><a href="#cb91-7" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> improve my_workflow.yml</span></code></pre></div>
 <p>Traces accumulate in <code>~/.armature/traces.db</code> by
 default.</p>
 <hr />
-<h2 id="trace-export-for-fine-tuning">19. Trace export for
+<h2 id="trace-export-for-fine-tuning">20. Trace export for
 fine-tuning</h2>
 <p>Every workflow run records execution traces — the inputs, outputs,
 and quality scores of every LLM stage. High-quality traces (high quorum
@@ -3100,12 +3330,12 @@ the format expected by common fine-tuning frameworks.</p>
 </tbody>
 </table>
 <h3 id="sft-export">SFT export</h3>
-<div class="sourceCode" id="cb84"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb84-1"><a href="#cb84-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
-<span id="cb84-2"><a href="#cb84-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> campaign-concept-gen <span class="dt">\</span></span>
-<span id="cb84-3"><a href="#cb84-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training/brand_judge_sft.jsonl <span class="dt">\</span></span>
-<span id="cb84-4"><a href="#cb84-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> chat <span class="dt">\</span></span>
-<span id="cb84-5"><a href="#cb84-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85 <span class="dt">\</span></span>
-<span id="cb84-6"><a href="#cb84-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">--role-types</span> judge</span></code></pre></div>
+<div class="sourceCode" id="cb92"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb92-1"><a href="#cb92-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
+<span id="cb92-2"><a href="#cb92-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> campaign-concept-gen <span class="dt">\</span></span>
+<span id="cb92-3"><a href="#cb92-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training/brand_judge_sft.jsonl <span class="dt">\</span></span>
+<span id="cb92-4"><a href="#cb92-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> chat <span class="dt">\</span></span>
+<span id="cb92-5"><a href="#cb92-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85 <span class="dt">\</span></span>
+<span id="cb92-6"><a href="#cb92-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">--role-types</span> judge</span></code></pre></div>
 <p>This exports all traces from the <code>campaign-concept-gen</code>
 workflow where the stage role type is <code>judge</code> and the quorum
 score is ≥ 0.85. Each trace becomes one JSONL record: the stage’s inputs
@@ -3114,12 +3344,12 @@ turn.</p>
 <h3 id="dpo-export">DPO export</h3>
 <p>DPO training requires pairs of (chosen, rejected) responses for the
 same prompt:</p>
-<div class="sourceCode" id="cb85"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb85-1"><a href="#cb85-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
-<span id="cb85-2"><a href="#cb85-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> campaign-concept-gen <span class="dt">\</span></span>
-<span id="cb85-3"><a href="#cb85-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training/brand_judge_dpo.jsonl <span class="dt">\</span></span>
-<span id="cb85-4"><a href="#cb85-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> dpo <span class="dt">\</span></span>
-<span id="cb85-5"><a href="#cb85-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85 <span class="dt">\</span></span>
-<span id="cb85-6"><a href="#cb85-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">--rejected-max-score</span> 0.30</span></code></pre></div>
+<div class="sourceCode" id="cb93"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb93-1"><a href="#cb93-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
+<span id="cb93-2"><a href="#cb93-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> campaign-concept-gen <span class="dt">\</span></span>
+<span id="cb93-3"><a href="#cb93-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> training/brand_judge_dpo.jsonl <span class="dt">\</span></span>
+<span id="cb93-4"><a href="#cb93-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--format</span> dpo <span class="dt">\</span></span>
+<span id="cb93-5"><a href="#cb93-5" aria-hidden="true" tabindex="-1"></a>  <span class="at">--min-score</span> 0.85 <span class="dt">\</span></span>
+<span id="cb93-6"><a href="#cb93-6" aria-hidden="true" tabindex="-1"></a>  <span class="at">--rejected-max-score</span> 0.30</span></code></pre></div>
 <p>For each high-quality trace, the exporter finds a low-quality trace
 from the same stage and pairs them. The lowest-scoring rejected trace is
 used when multiple are available.</p>
@@ -3128,38 +3358,38 @@ used when multiple are available.</p>
 <code>&quot;You are a {role_type} agent. Complete the task described by the user.&quot;</code>
 Override it to match the system prompt used during your target
 fine-tuning run:</p>
-<div class="sourceCode" id="cb86"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb86-1"><a href="#cb86-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
-<span id="cb86-2"><a href="#cb86-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> my-workflow <span class="dt">\</span></span>
-<span id="cb86-3"><a href="#cb86-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> out.jsonl <span class="dt">\</span></span>
-<span id="cb86-4"><a href="#cb86-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--system-prompt</span> <span class="st">&quot;You are an expert brand compliance analyst for food companies.&quot;</span></span></code></pre></div>
+<div class="sourceCode" id="cb94"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb94-1"><a href="#cb94-1" aria-hidden="true" tabindex="-1"></a><span class="ex">armature</span> export-traces <span class="dt">\</span></span>
+<span id="cb94-2"><a href="#cb94-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">--workflow</span> my-workflow <span class="dt">\</span></span>
+<span id="cb94-3"><a href="#cb94-3" aria-hidden="true" tabindex="-1"></a>  <span class="at">--output</span> out.jsonl <span class="dt">\</span></span>
+<span id="cb94-4"><a href="#cb94-4" aria-hidden="true" tabindex="-1"></a>  <span class="at">--system-prompt</span> <span class="st">&quot;You are an expert brand compliance analyst for food companies.&quot;</span></span></code></pre></div>
 <h3 id="python-api-2">Python API</h3>
-<div class="sourceCode" id="cb87"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb87-1"><a href="#cb87-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pathlib <span class="im">import</span> Path</span>
-<span id="cb87-2"><a href="#cb87-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.state.traces <span class="im">import</span> TraceStore</span>
-<span id="cb87-3"><a href="#cb87-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.state.export <span class="im">import</span> TraceExporter</span>
-<span id="cb87-4"><a href="#cb87-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb87-5"><a href="#cb87-5" aria-hidden="true" tabindex="-1"></a>store <span class="op">=</span> TraceStore(Path(<span class="st">&quot;~/.armature/traces.db&quot;</span>).expanduser())</span>
-<span id="cb87-6"><a href="#cb87-6" aria-hidden="true" tabindex="-1"></a>exporter <span class="op">=</span> TraceExporter(store)</span>
-<span id="cb87-7"><a href="#cb87-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb87-8"><a href="#cb87-8" aria-hidden="true" tabindex="-1"></a><span class="co"># SFT</span></span>
-<span id="cb87-9"><a href="#cb87-9" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> <span class="cf">await</span> exporter.export(</span>
-<span id="cb87-10"><a href="#cb87-10" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my-workflow&quot;</span>,</span>
-<span id="cb87-11"><a href="#cb87-11" aria-hidden="true" tabindex="-1"></a>    Path(<span class="st">&quot;training/sft.jsonl&quot;</span>),</span>
-<span id="cb87-12"><a href="#cb87-12" aria-hidden="true" tabindex="-1"></a>    <span class="bu">format</span><span class="op">=</span><span class="st">&quot;chat&quot;</span>,</span>
-<span id="cb87-13"><a href="#cb87-13" aria-hidden="true" tabindex="-1"></a>    min_quorum_score<span class="op">=</span><span class="fl">0.85</span>,</span>
-<span id="cb87-14"><a href="#cb87-14" aria-hidden="true" tabindex="-1"></a>    role_types<span class="op">=</span>[<span class="st">&quot;judge&quot;</span>],</span>
-<span id="cb87-15"><a href="#cb87-15" aria-hidden="true" tabindex="-1"></a>    system_prompt<span class="op">=</span><span class="st">&quot;You are an expert analyst.&quot;</span>,</span>
-<span id="cb87-16"><a href="#cb87-16" aria-hidden="true" tabindex="-1"></a>    limit<span class="op">=</span><span class="dv">500</span>,</span>
-<span id="cb87-17"><a href="#cb87-17" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb87-18"><a href="#cb87-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Exported </span><span class="sc">{</span>summary<span class="sc">.</span>total_exported<span class="sc">}</span><span class="ss"> records&quot;</span>)</span>
-<span id="cb87-19"><a href="#cb87-19" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb87-20"><a href="#cb87-20" aria-hidden="true" tabindex="-1"></a><span class="co"># DPO</span></span>
-<span id="cb87-21"><a href="#cb87-21" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> <span class="cf">await</span> exporter.export_dpo(</span>
-<span id="cb87-22"><a href="#cb87-22" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my-workflow&quot;</span>,</span>
-<span id="cb87-23"><a href="#cb87-23" aria-hidden="true" tabindex="-1"></a>    Path(<span class="st">&quot;training/dpo.jsonl&quot;</span>),</span>
-<span id="cb87-24"><a href="#cb87-24" aria-hidden="true" tabindex="-1"></a>    chosen_min_score<span class="op">=</span><span class="fl">0.85</span>,</span>
-<span id="cb87-25"><a href="#cb87-25" aria-hidden="true" tabindex="-1"></a>    rejected_max_score<span class="op">=</span><span class="fl">0.30</span>,</span>
-<span id="cb87-26"><a href="#cb87-26" aria-hidden="true" tabindex="-1"></a>    limit<span class="op">=</span><span class="dv">500</span>,</span>
-<span id="cb87-27"><a href="#cb87-27" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<div class="sourceCode" id="cb95"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb95-1"><a href="#cb95-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pathlib <span class="im">import</span> Path</span>
+<span id="cb95-2"><a href="#cb95-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.state.traces <span class="im">import</span> TraceStore</span>
+<span id="cb95-3"><a href="#cb95-3" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> armature.state.export <span class="im">import</span> TraceExporter</span>
+<span id="cb95-4"><a href="#cb95-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb95-5"><a href="#cb95-5" aria-hidden="true" tabindex="-1"></a>store <span class="op">=</span> TraceStore(Path(<span class="st">&quot;~/.armature/traces.db&quot;</span>).expanduser())</span>
+<span id="cb95-6"><a href="#cb95-6" aria-hidden="true" tabindex="-1"></a>exporter <span class="op">=</span> TraceExporter(store)</span>
+<span id="cb95-7"><a href="#cb95-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb95-8"><a href="#cb95-8" aria-hidden="true" tabindex="-1"></a><span class="co"># SFT</span></span>
+<span id="cb95-9"><a href="#cb95-9" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> <span class="cf">await</span> exporter.export(</span>
+<span id="cb95-10"><a href="#cb95-10" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my-workflow&quot;</span>,</span>
+<span id="cb95-11"><a href="#cb95-11" aria-hidden="true" tabindex="-1"></a>    Path(<span class="st">&quot;training/sft.jsonl&quot;</span>),</span>
+<span id="cb95-12"><a href="#cb95-12" aria-hidden="true" tabindex="-1"></a>    <span class="bu">format</span><span class="op">=</span><span class="st">&quot;chat&quot;</span>,</span>
+<span id="cb95-13"><a href="#cb95-13" aria-hidden="true" tabindex="-1"></a>    min_quorum_score<span class="op">=</span><span class="fl">0.85</span>,</span>
+<span id="cb95-14"><a href="#cb95-14" aria-hidden="true" tabindex="-1"></a>    role_types<span class="op">=</span>[<span class="st">&quot;judge&quot;</span>],</span>
+<span id="cb95-15"><a href="#cb95-15" aria-hidden="true" tabindex="-1"></a>    system_prompt<span class="op">=</span><span class="st">&quot;You are an expert analyst.&quot;</span>,</span>
+<span id="cb95-16"><a href="#cb95-16" aria-hidden="true" tabindex="-1"></a>    limit<span class="op">=</span><span class="dv">500</span>,</span>
+<span id="cb95-17"><a href="#cb95-17" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb95-18"><a href="#cb95-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f&quot;Exported </span><span class="sc">{</span>summary<span class="sc">.</span>total_exported<span class="sc">}</span><span class="ss"> records&quot;</span>)</span>
+<span id="cb95-19"><a href="#cb95-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb95-20"><a href="#cb95-20" aria-hidden="true" tabindex="-1"></a><span class="co"># DPO</span></span>
+<span id="cb95-21"><a href="#cb95-21" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> <span class="cf">await</span> exporter.export_dpo(</span>
+<span id="cb95-22"><a href="#cb95-22" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;my-workflow&quot;</span>,</span>
+<span id="cb95-23"><a href="#cb95-23" aria-hidden="true" tabindex="-1"></a>    Path(<span class="st">&quot;training/dpo.jsonl&quot;</span>),</span>
+<span id="cb95-24"><a href="#cb95-24" aria-hidden="true" tabindex="-1"></a>    chosen_min_score<span class="op">=</span><span class="fl">0.85</span>,</span>
+<span id="cb95-25"><a href="#cb95-25" aria-hidden="true" tabindex="-1"></a>    rejected_max_score<span class="op">=</span><span class="fl">0.30</span>,</span>
+<span id="cb95-26"><a href="#cb95-26" aria-hidden="true" tabindex="-1"></a>    limit<span class="op">=</span><span class="dv">500</span>,</span>
+<span id="cb95-27"><a href="#cb95-27" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
 <h3 id="quality-filtering">Quality filtering</h3>
 <p>The <code>min_quorum_score</code> filter is the primary quality gate.
 Quorum score is set by multi-agent deliberation stages in your workflow
