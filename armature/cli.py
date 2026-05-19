@@ -360,5 +360,87 @@ def improve(
         typer.echo(f"Log: {report.log_path}")
 
 
+@app.command()
+def doctor(
+    spec: Path = typer.Option(None, "--spec", help="Optional spec file to validate"),
+):
+    """Check environment health: packages, env vars, and optional spec validity."""
+    import importlib
+    import os
+
+    all_ok = True
+
+    # ── Package checks ───────────────────────────────────────────────────────
+    required_packages = ["litellm", "pydantic", "jinja2", "ruamel.yaml", "aiosqlite", "typer"]
+    optional_packages = {
+        "sentence_transformers": "embeddings",
+        "fastapi": "service",
+        "questionary": "wizard",
+        "opentelemetry": "telemetry",
+    }
+
+    typer.echo("Packages:")
+    for pkg in required_packages:
+        mod = pkg.replace("-", "_").replace(".", "_")
+        try:
+            importlib.import_module(mod)
+            typer.echo(f"  ✓ {pkg}")
+        except ImportError:
+            typer.echo(f"  ✗ {pkg} (MISSING — required)", err=True)
+            all_ok = False
+
+    for mod, group in optional_packages.items():
+        try:
+            importlib.import_module(mod)
+            typer.echo(f"  ✓ {mod} (optional: {group})")
+        except ImportError:
+            typer.echo(f"  - {mod} (optional: {group} — not installed)")
+
+    # ── Env var checks ───────────────────────────────────────────────────────
+    typer.echo("\nEnv vars:")
+    api_keys = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"]
+    any_key = any(os.environ.get(k) for k in api_keys)
+    for key in api_keys:
+        val = os.environ.get(key)
+        status = "✓" if val else "-"
+        typer.echo(f"  {status} {key}")
+    if not any_key:
+        typer.echo("  ! No LLM API key set — LLM stages will fail", err=True)
+
+    # ── DB directory ─────────────────────────────────────────────────────────
+    typer.echo("\nData paths:")
+    db_dir = Path("~/.armature").expanduser()
+    if db_dir.exists():
+        typer.echo(f"  ✓ {db_dir}")
+    else:
+        typer.echo(f"  - {db_dir} (will be created on first run)")
+
+    # ── Spec validation (optional) ───────────────────────────────────────────
+    if spec is not None:
+        typer.echo(f"\nSpec: {spec}")
+        if not spec.exists():
+            typer.echo(f"  ✗ File not found: {spec}", err=True)
+            all_ok = False
+        else:
+            from armature.spec.loader import load_spec
+            from armature.spec.validator import validate_spec
+            try:
+                loaded = load_spec(spec)
+            except Exception as exc:
+                typer.echo(f"  ✗ Parse error: {exc}", err=True)
+                all_ok = False
+            else:
+                errors = validate_spec(loaded, strict=False)
+                if errors:
+                    for e in errors:
+                        typer.echo(f"  ✗ [{e.code}]: {e.message}", err=True)
+                    all_ok = False
+                else:
+                    typer.echo(f"  ✓ '{loaded.name}' is valid ({len(loaded.stages)} stages)")
+
+    if not all_ok:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()

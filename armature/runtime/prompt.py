@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 from armature.spec.models import Role, RoleType
 
 if TYPE_CHECKING:
-    from armature.spec.models import Signature
+    from armature.spec.models import Signature, SkillDef
 
 _ROLE_PREAMBLES = {
     RoleType.WORKER: "You are a focused task executor. Produce structured output that matches the required schema exactly.",
@@ -40,6 +40,7 @@ class PromptAssembler:
         signature: "Signature | None" = None,
         output_schema: dict[str, Any] | None = None,
         examples: list[dict] | None = None,
+        skills: "list[SkillDef]" = [],
     ) -> str:
         import json as _json
 
@@ -66,6 +67,15 @@ class PromptAssembler:
         if tools:
             tool_lines = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
             sections.append(f"## Available Tools\n{tool_lines}")
+
+        if skills:
+            skill_parts = []
+            for skill in skills:
+                body = skill.content
+                if body is None and skill.path:
+                    body = Path(skill.path).read_text(encoding="utf-8").strip()
+                skill_parts.append(f"### {skill.description}\n{body}")
+            sections.append("## Skills\n" + "\n\n".join(skill_parts))
 
         if examples:
             ex_parts = []

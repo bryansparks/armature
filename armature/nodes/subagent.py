@@ -35,6 +35,14 @@ class SubagentNode(BaseNode):
         self._stage = stage
         self._session_dir = session_dir
 
+    def _resolve_child_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        if not self._stage.isolated:
+            return context
+        sig = self._stage.signature
+        if sig is None or not sig.input:
+            return {}
+        return {k: context[k] for k in sig.input if k in context}
+
     async def _run_child(self, context: dict[str, Any], child_index: int) -> dict[str, Any]:
         from armature.runtime.engine import Harness
 
@@ -47,11 +55,12 @@ class SubagentNode(BaseNode):
             child_dir = self._session_dir / f"child_{child_index}"
             child_dir.mkdir(parents=True, exist_ok=True)
 
+        child_context = self._resolve_child_context(context)
         child = Harness(
-            spec=load_spec(spec_path, vars=context),
+            spec=load_spec(spec_path, vars=child_context),
             session_dir=child_dir,
         )
-        return await child.run(context)
+        return await child.run(child_context)
 
     def _build_contexts(self, context: dict[str, Any], n: int) -> list[dict[str, Any]]:
         key = self._stage.partition_key

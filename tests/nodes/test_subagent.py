@@ -139,3 +139,64 @@ async def test_fan_out_one_wraps_in_fan_in(tmp_path):
     assert len(result_fanout["results"]) == 1
     # no fan_out returns raw result dict
     assert "respond" in result_single
+
+
+# ── Phase 1-f: Sub-agent context isolation ────────────────────────────────────
+
+def test_isolated_field_defaults_to_false():
+    stage = Stage(id="s", subagent_spec="x.yaml")
+    assert stage.isolated is False
+
+
+def test_isolated_field_can_be_set_true():
+    from armature.spec.models import Signature
+    stage = Stage(
+        id="s",
+        subagent_spec="x.yaml",
+        isolated=True,
+        signature=Signature(input={"greeting": "str"}),
+    )
+    assert stage.isolated is True
+
+
+async def test_isolated_subagent_strips_context_to_signature_input_keys(tmp_path):
+    from armature.spec.models import Signature
+    stage = Stage(
+        id="child",
+        subagent_spec=str(FIXTURES / "isolated-child.yaml"),
+        isolated=True,
+        signature=Signature(input={"greeting": "str"}),
+    )
+    node = SubagentNode(stage=stage, session_dir=tmp_path)
+    result = await node.execute({"greeting": "hello", "secret": "s3cret"})
+    output = result["reveal"]["stdout"]
+    assert "hello" in output
+    assert "s3cret" not in output
+
+
+async def test_non_isolated_subagent_passes_all_context(tmp_path):
+    from armature.spec.models import Signature
+    stage = Stage(
+        id="child",
+        subagent_spec=str(FIXTURES / "isolated-child.yaml"),
+        isolated=False,
+        signature=Signature(input={"greeting": "str"}),
+    )
+    node = SubagentNode(stage=stage, session_dir=tmp_path)
+    result = await node.execute({"greeting": "hello", "secret": "s3cret"})
+    output = result["reveal"]["stdout"]
+    assert "hello" in output
+    assert "s3cret" in output
+
+
+async def test_isolated_subagent_with_no_signature_passes_empty_context(tmp_path):
+    stage = Stage(
+        id="child",
+        subagent_spec=str(FIXTURES / "isolated-child.yaml"),
+        isolated=True,
+    )
+    node = SubagentNode(stage=stage, session_dir=tmp_path)
+    result = await node.execute({"greeting": "hello", "secret": "s3cret"})
+    output = result["reveal"]["stdout"]
+    assert "hello" not in output
+    assert "s3cret" not in output

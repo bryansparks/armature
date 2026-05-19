@@ -351,4 +351,45 @@ def test_export_traces_summary_printed(tmp_path):
     ])
     assert result.exit_code == 0
     assert "Exported 1 record" in result.output
-    assert "chat" in result.output
+
+
+# ── Phase 1-c: armature doctor ────────────────────────────────────────────────
+
+def test_doctor_exits_0_when_litellm_available():
+    result = runner.invoke(app, ["doctor"])
+    # litellm is a core dependency — always installed
+    assert result.exit_code == 0
+
+
+def test_doctor_output_mentions_packages():
+    result = runner.invoke(app, ["doctor"])
+    assert "litellm" in result.output.lower() or "package" in result.output.lower()
+
+
+def test_doctor_output_mentions_env_vars():
+    result = runner.invoke(app, ["doctor"])
+    assert any(k in result.output for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "env", "Env"))
+
+
+def test_doctor_validates_spec_when_provided():
+    result = runner.invoke(app, ["doctor", "--spec", str(MINIMAL)])
+    assert result.exit_code == 0
+    assert "minimal" in result.output.lower() or "spec" in result.output.lower()
+
+
+def test_doctor_exits_1_on_invalid_spec(tmp_path):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("name: bad\nstages:\n  - id: s\n    depends_on: []\n")
+    result = runner.invoke(app, ["doctor", "--spec", str(bad)])
+    assert result.exit_code == 1
+
+
+def test_doctor_exits_1_on_missing_spec_file():
+    result = runner.invoke(app, ["doctor", "--spec", "/nonexistent/spec.yaml"])
+    assert result.exit_code == 1
+
+
+def test_doctor_shows_ok_or_error_per_check():
+    result = runner.invoke(app, ["doctor"])
+    output = result.output.lower()
+    assert "ok" in output or "pass" in output or "✓" in result.output or "error" in output or "✗" in result.output

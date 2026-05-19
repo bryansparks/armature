@@ -166,3 +166,68 @@ def test_output_schema_contains_json():
     assert '"findings"' in prompt
     assert '"confidence"' in prompt
     assert '"required"' in prompt
+
+
+# ── Phase 1-b: Skills system ─────────────────────────────────────────────────
+
+def test_skilldef_model_exists():
+    from armature.spec.models import SkillDef
+    skill = SkillDef(id="search", description="Search the web", content="Use a search engine.")
+    assert skill.id == "search"
+    assert skill.content == "Use a search engine."
+
+
+def test_skilldef_path_or_content_required():
+    """SkillDef must have either path or content, not neither."""
+    from armature.spec.models import SkillDef
+    import pydantic
+    with pytest.raises((pydantic.ValidationError, ValueError)):
+        SkillDef(id="bad", description="no source")
+
+
+def test_harness_spec_has_skill_library():
+    from armature.spec.models import HarnessSpec
+    spec = HarnessSpec(
+        name="wf",
+        stages=[],
+        skill_library={"search": {"id": "search", "description": "desc", "content": "do it"}},
+    )
+    assert "search" in spec.skill_library
+
+
+def test_build_with_skills_injects_skill_content():
+    from armature.spec.models import SkillDef
+    assembler = PromptAssembler()
+    role = Role(name="w", type=RoleType.WORKER, description="work", skills=["search"])
+    skill = SkillDef(id="search", description="Search the web", content="Use DuckDuckGo to find facts.")
+    prompt = assembler.build(role=role, tools=[], context={}, skills=[skill])
+    assert "Use DuckDuckGo to find facts." in prompt
+
+
+def test_build_with_skills_uses_skill_description_header():
+    from armature.spec.models import SkillDef
+    assembler = PromptAssembler()
+    role = Role(name="w", type=RoleType.WORKER, description="work", skills=["search"])
+    skill = SkillDef(id="search", description="Search the web", content="Use DuckDuckGo.")
+    prompt = assembler.build(role=role, tools=[], context={}, skills=[skill])
+    assert "Search the web" in prompt
+
+
+def test_build_with_no_skills_omits_skills_section():
+    assembler = PromptAssembler()
+    role = Role(name="w", type=RoleType.WORKER, description="work")
+    prompt = assembler.build(role=role, tools=[], context={}, skills=[])
+    assert "## Skills" not in prompt
+
+
+def test_build_with_multiple_skills_injects_all():
+    from armature.spec.models import SkillDef
+    assembler = PromptAssembler()
+    role = Role(name="w", type=RoleType.WORKER, description="work", skills=["a", "b"])
+    skills = [
+        SkillDef(id="a", description="Skill A", content="Do alpha tasks."),
+        SkillDef(id="b", description="Skill B", content="Do beta tasks."),
+    ]
+    prompt = assembler.build(role=role, tools=[], context={}, skills=skills)
+    assert "Do alpha tasks." in prompt
+    assert "Do beta tasks." in prompt

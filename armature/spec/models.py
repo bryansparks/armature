@@ -153,6 +153,7 @@ class Stage(BaseModel):
     fail_as_value: bool = False                   # on failure, return {"_failed": True, ...} instead of raising
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
     subagent_spec: str | None = None              # Path to child workflow spec file
+    isolated: bool = False             # when True, strips parent context to signature.input keys only
     fan_out: int | None = None          # max parallelism; if set, stage fans out over partition_source
     fan_in: Literal["list", "merge", "first"] = "list"
     partition_key: str | None = None    # context variable name for each partition item
@@ -194,6 +195,17 @@ class ToolCallConfig(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)  # args; string values are Jinja2-rendered against context
 
 
+class SkillDef(BaseModel):
+    id: str
+    description: str
+    content: str | None = None   # inline skill text
+    path: str | None = None      # path to a file containing the skill text
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.content is None and self.path is None:
+            raise ValueError(f"SkillDef '{self.id}' must have either 'content' or 'path'")
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -211,3 +223,4 @@ class HarnessSpec(BaseModel):
     safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
     memory: MemoryConfig | None = None
     tools: list[ToolModule] = Field(default_factory=list)
+    skill_library: dict[str, SkillDef] = Field(default_factory=dict)

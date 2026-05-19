@@ -1,0 +1,13 @@
+name: isolated-child
+version: "1.0"
+description: Child workflow for context isolation tests
+
+adapters:
+  reveal:
+    name: reveal
+    type: script
+    cmd: "echo 'greeting={{ greeting }} secret={{ secret }}'"
+
+stages:
+  - id: reveal
+    adapter: reveal
