@@ -217,6 +217,20 @@ class MCPServerConfig(BaseModel):
     timeout_s: float = 30.0
 
 
+class SandboxMode(str, Enum):
+    NONE = "none"
+    DOCKER = "docker"
+
+
+class SandboxConfig(BaseModel):
+    mode: SandboxMode = SandboxMode.NONE
+    image: str = "python:3.11-slim"
+    timeout_s: float = 300.0
+    allow_network: bool = False
+    workspace: str = "/workspace"
+    env: dict[str, str] = Field(default_factory=dict)
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -236,3 +250,4 @@ class HarnessSpec(BaseModel):
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)

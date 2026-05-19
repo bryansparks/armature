@@ -6,6 +6,9 @@ from armature.runtime.engine import Harness
 
 app = typer.Typer(name="armature", help="ELF ecosystem agent harness runner", no_args_is_help=True)
 
+channels_app = typer.Typer(name="channels", help="Manage messaging channel connectors")
+app.add_typer(channels_app, name="channels")
+
 
 @app.command()
 def new(
@@ -443,6 +446,35 @@ def doctor(
 
     if not all_ok:
         raise typer.Exit(1)
+
+
+@channels_app.command("start")
+def channels_start(
+    spec_file: Path = typer.Argument(..., help="Path to channel spec YAML"),
+):
+    """Start channel connectors from a spec file."""
+    if not spec_file.exists():
+        typer.echo(f"Channel spec not found: {spec_file}", err=True)
+        raise typer.Exit(1)
+
+    from ruamel.yaml import YAML
+    from armature.channels.models import ChannelSpec
+    import pydantic
+
+    yaml_parser = YAML()
+    try:
+        with open(spec_file) as fh:
+            data = dict(yaml_parser.load(fh))
+        spec = ChannelSpec.model_validate(data)
+    except pydantic.ValidationError as exc:
+        typer.echo(f"Invalid channel spec: {exc}", err=True)
+        raise typer.Exit(1)
+    except Exception as exc:
+        typer.echo(f"Failed to load spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Channel spec '{spec.name}' loaded — {len(spec.channels)} channel(s).")
+    typer.echo("(Live channel server not yet implemented — spec validated successfully.)")
 
 
 if __name__ == "__main__":
