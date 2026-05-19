@@ -379,6 +379,7 @@ def doctor(
         "opentelemetry": "telemetry",
         "langfuse": "langfuse",
         "langsmith": "langsmith",
+        "mcp": "mcp",
     }
 
     typer.echo("Packages:")

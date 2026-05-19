@@ -48,6 +48,9 @@ langfuse = [
 langsmith = [
     "langsmith>=0.2",
 ]
+mcp = [
+    "mcp>=1.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

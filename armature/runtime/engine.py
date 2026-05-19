@@ -119,6 +119,7 @@ class Harness:
             self._checkpoint = None
         self._checkpoint_prior: dict[str, Any] = {}
         self._llm_call_count: int = 0
+        self._mcp_sessions: list[Any] = []
 
     def _load_tool_modules(self) -> None:
         import importlib
@@ -130,6 +131,14 @@ class Harness:
                     "`register(registry: ToolRegistry) -> None` function"
                 )
             mod.register(self._registry)
+
+    async def _attach_mcp_servers(self) -> None:
+        if not self._spec.mcp_servers:
+            return
+        from armature.mcp.client import MCPRegistrar
+        self._mcp_sessions = await MCPRegistrar.register_all(
+            self._spec.mcp_servers, self._registry
+        )
 
     def _attach_observability_adapters(self) -> None:
         from armature.telemetry.langfuse import LangFuseAdapter
@@ -603,6 +612,8 @@ class Harness:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
+        await self._attach_mcp_servers()
+
         context = dict(inputs or {})
         context["run_id"] = self._run_id
         self._validate_inputs(context)

@@ -206,6 +206,17 @@ class SkillDef(BaseModel):
             raise ValueError(f"SkillDef '{self.id}' must have either 'content' or 'path'")
 
 
+class MCPServerConfig(BaseModel):
+    name: str
+    transport: Literal["stdio", "http", "sse"]
+    command: str | None = None          # stdio only
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None              # http/sse only
+    headers: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, str] = Field(default_factory=dict)
+    timeout_s: float = 30.0
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -224,3 +235,4 @@ class HarnessSpec(BaseModel):
     memory: MemoryConfig | None = None
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
