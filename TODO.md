@@ -4,21 +4,21 @@
 
 See full design: `docs/plan-deerflow-features.md`
 
-### Phase 1 — Quick wins
-- [ ] **f) Sub-agent context isolation** — `isolated: true` flag on subagent stages; strips parent context to `signature.input` only (~50 lines, spec + engine)
-- [ ] **b) Skills system** — wire up `role.skills: []` field; add `skill_library:` to spec; PromptAssembler injects skill content per-stage (~100 lines)
-- [ ] **c) `armature doctor`** — new CLI health check command; verifies packages, env vars, DB paths, spec validity; exits 1 on failure for CI use (~200 lines)
+### Phase 1 — Quick wins ✅
+- [x] **f) Sub-agent context isolation** — `isolated: true` flag on subagent stages; strips parent context to `signature.input` only
+- [x] **b) Skills system** — `SkillDef` model + `skill_library:` to spec; PromptAssembler injects skill content per-stage
+- [x] **c) `armature doctor`** — CLI health check; verifies packages, env vars, DB paths, optional spec; exits 1 on failure
 
-### Phase 2 — Observability
-- [ ] **d) LangFuse adapter** — auto-activates from env vars; registers PRE/POST_STAGE hooks; creates traces + spans with tokens, latency, quorum_score (~150 lines)
-- [ ] **d) LangSmith adapter** — parallel implementation to LangFuse (~100 lines)
+### Phase 2 — Observability ✅
+- [x] **d) LangFuse adapter** — auto-activates from LANGFUSE_PUBLIC/SECRET_KEY; PRE/POST_STAGE hooks → traces + spans
+- [x] **d) LangSmith adapter** — auto-activates from LANGSMITH_API_KEY; PRE/POST_STAGE hooks → runs
 
-### Phase 3 — Ecosystem integration
-- [ ] **a) MCP server support** — `mcp_servers:` spec section; auto-registers discovered tools as `{server_name}.{tool_name}` in ToolRegistry; supports stdio + http + sse transports (~400 lines)
+### Phase 3 — Ecosystem integration ✅
+- [x] **a) MCP server support** — `mcp_servers:` spec section; auto-registers `{server_name}.{tool_name}` in ToolRegistry; stdio + http + sse transports
 
-### Phase 4 — Infrastructure
-- [ ] **e) Sandbox isolation** — `sandbox:` spec section with `mode: docker`; wraps `shell`/`file_write`/`file_read` tools transparently; ephemeral containers per call, shared workspace bind mount (~300 lines)
-- [ ] **g) Messaging channel connectors** — `armature channels start channel.yaml`; Telegram + Slack; pattern-based routing to workflow specs; embedded or HTTP mode (~600 lines)
+### Phase 4 — Infrastructure ✅
+- [x] **e) Sandbox isolation** — `sandbox: mode: docker`; wraps shell/file_write/file_read transparently; bind-mount workspace
+- [x] **g) Messaging channel connectors** — `armature channels start`; ChannelSpec + MessageRouter; Telegram/Slack pattern routing
 
 ---
 
