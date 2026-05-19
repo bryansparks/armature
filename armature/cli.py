@@ -377,6 +377,8 @@ def doctor(
         "fastapi": "service",
         "questionary": "wizard",
         "opentelemetry": "telemetry",
+        "langfuse": "langfuse",
+        "langsmith": "langsmith",
     }
 
     typer.echo("Packages:")

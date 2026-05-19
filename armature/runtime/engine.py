@@ -72,6 +72,7 @@ class Harness:
         if self._spec.safety_rules:
             from armature.hooks.lifecycle import SafetyHookBuilder
             SafetyHookBuilder.register(self._hooks, self._spec.safety_rules)
+        self._attach_observability_adapters()
         self._context = ContextManager()
         self._assembler = PromptAssembler()
         self._session_dir = base_dir
@@ -129,6 +130,25 @@ class Harness:
                     "`register(registry: ToolRegistry) -> None` function"
                 )
             mod.register(self._registry)
+
+    def _attach_observability_adapters(self) -> None:
+        from armature.telemetry.langfuse import LangFuseAdapter
+        from armature.telemetry.langsmith import LangSmithAdapter
+
+        if LangFuseAdapter.is_configured() and LangFuseAdapter.is_available():
+            LangFuseAdapter().attach(
+                self._hooks,
+                run_id=self._run_id,
+                workflow_name=self._spec.name,
+                spec_version=self._spec_version,
+            )
+
+        if LangSmithAdapter.is_configured() and LangSmithAdapter.is_available():
+            LangSmithAdapter().attach(
+                self._hooks,
+                run_id=self._run_id,
+                workflow_name=self._spec.name,
+            )
 
     @property
     def transcript(self) -> list[dict[str, Any]]:

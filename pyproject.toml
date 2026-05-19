@@ -42,6 +42,12 @@ telemetry = [
     "opentelemetry-sdk>=1.24",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24",
 ]
+langfuse = [
+    "langfuse>=3.0",
+]
+langsmith = [
+    "langsmith>=0.2",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
