@@ -27,18 +27,24 @@ This guide covers everything you need to build agentic workflows with Armature: 
 9. [Jinja2 variables in specs](#9-jinja2-variables-in-specs)
 10. [Retry and recovery](#10-retry-and-recovery)
 11. [Safety rules](#11-safety-rules)
-12. [Fan-out / Fan-in](#12-fan-out--fan-in)
-13. [Human gates in detail](#13-human-gates-in-detail)
-14. [Deliberative teams](#14-deliberative-teams)
+12. [Lifecycle hooks](#12-lifecycle-hooks)
+    - [Hook phases](#hook-phases)
+    - [Registering hooks](#registering-hooks)
+    - [Hook decisions](#hook-decisions)
+    - [Permission levels](#permission-levels)
+    - [What guardrails cover — and what they don't](#what-armature-guardrails-cover--and-what-they-dont)
+13. [Fan-out / Fan-in](#13-fan-out--fan-in)
+14. [Human gates in detail](#14-human-gates-in-detail)
+15. [Deliberative teams](#15-deliberative-teams)
     - [The three-round topology](#the-three-round-topology)
     - [Specifying the objective](#specifying-the-objective)
     - [The judge role type](#the-type-judge-role)
     - [Reference implementations](#reference-implementations)
-15. [Templates](#15-templates)
-16. [The optimizer](#16-the-optimizer)
-17. [Running workflows](#17-running-workflows)
+16. [Templates](#16-templates)
+17. [The optimizer](#17-the-optimizer)
+18. [Running workflows](#18-running-workflows)
     - [CLI reference](#cli-reference)
-18. [Integrating with a host application](#18-integrating-with-a-host-application)
+19. [Integrating with a host application](#19-integrating-with-a-host-application)
     - [Declaring tool modules in the spec](#declaring-tool-modules-in-the-spec)
     - [Pattern A — embedded library](#pattern-a--embedded-library)
     - [Pattern B — HTTP sidecar](#pattern-b--http-sidecar)
@@ -47,8 +53,8 @@ This guide covers everything you need to build agentic workflows with Armature: 
     - [Output extraction](#output-extraction)
     - [Async lifecycle](#async-lifecycle)
     - [Error contracts](#error-contracts)
-19. [Self-improvement](#19-self-improvement)
-20. [Trace export for fine-tuning](#20-trace-export-for-fine-tuning)
+20. [Self-improvement](#20-self-improvement)
+21. [Trace export for fine-tuning](#21-trace-export-for-fine-tuning)
 
 ---
 
@@ -652,7 +658,7 @@ Subagent stages support parallel fan-out — spawn N copies of the child workflo
   depends_on: [loader]
 ```
 
-See §11 for full fan-out/fan-in documentation.
+See §13 for full fan-out/fan-in documentation.
 
 ---
 
@@ -1080,7 +1086,116 @@ safety_rules:
 
 ---
 
-## 12. Fan-out / Fan-in
+## 12. Lifecycle hooks
+
+Lifecycle hooks let you attach custom logic at four points in the execution pipeline. They are Armature's extensible guardrail layer — safety rules (§11) handle the declarative case; hooks handle everything that requires custom code.
+
+### Hook phases
+
+| Phase | When | Return value |
+|---|---|---|
+| `PRE_TOOL` | Before any tool call executes | `HookDecision.ALLOW` or `HookDecision.BLOCK` |
+| `POST_TOOL` | After any tool call completes | None (observation only) |
+| `PRE_STAGE` | Before a stage begins executing | `HookDecision.ALLOW` or `HookDecision.BLOCK` |
+| `POST_STAGE` | After a stage completes | None (observation only) |
+
+### Registering hooks
+
+Hooks are registered on the `Harness` object after construction, before calling `run()`:
+
+```python
+from armature import Harness
+from armature.hooks.lifecycle import HookPhase, HookDecision
+
+harness = Harness.from_spec("my_workflow.yml")
+
+async def my_pre_tool_hook(phase, tool_name, args, ctx):
+    if tool_name == "shell" and "sudo" in args.get("cmd", ""):
+        return HookDecision.BLOCK
+    return HookDecision.ALLOW
+
+async def my_post_stage_hook(phase, stage_id, result, ctx):
+    metrics.record(stage=stage_id, tokens=result.get("_output_tokens", 0))
+
+harness._hooks.register(HookPhase.PRE_TOOL, my_pre_tool_hook)
+harness._hooks.register(HookPhase.POST_STAGE, my_post_stage_hook)
+
+result = await harness.run(inputs)
+```
+
+Multiple hooks for the same phase run in registration order. The first `BLOCK` short-circuits the rest.
+
+### Hook decisions
+
+`PRE_TOOL` and `PRE_STAGE` hooks return a `HookDecision`. `POST_TOOL` and `POST_STAGE` hooks return nothing.
+
+| Decision | Effect |
+|---|---|
+| `HookDecision.ALLOW` | Execution proceeds normally |
+| `HookDecision.BLOCK` | The tool call or stage is cancelled; a `ToolBlocked` exception is raised |
+
+### Common patterns
+
+**Audit logging** — record every tool invocation for compliance:
+```python
+async def audit_hook(phase, tool_name, args, ctx):
+    audit_log.write({"tool": tool_name, "args": args, "run_id": ctx.get("run_id")})
+    return HookDecision.ALLOW
+
+harness._hooks.register(HookPhase.PRE_TOOL, audit_hook)
+```
+
+**Custom policy enforcement** — block on any condition expressible in Python, beyond what declarative safety rules support:
+```python
+async def policy_hook(phase, tool_name, args, ctx):
+    if not is_allowed_domain(args.get("url", "")):
+        return HookDecision.BLOCK
+    return HookDecision.ALLOW
+
+harness._hooks.register(HookPhase.PRE_TOOL, policy_hook)
+```
+
+**Progress reporting** — push stage events to a queue or WebSocket (this is how the async HTTP service endpoints work internally):
+```python
+async def progress_hook(phase, stage_id, result, ctx):
+    await event_queue.put({"type": "stage_complete", "stage_id": stage_id})
+
+harness._hooks.register(HookPhase.POST_STAGE, progress_hook)
+```
+
+**Token budget enforcement** — abort a run if cumulative token consumption exceeds a threshold:
+```python
+async def budget_hook(phase, stage_id, result, ctx):
+    tokens = result.get("_output_tokens", 0) + result.get("_input_tokens", 0)
+    budget.consume(tokens)
+    if budget.exceeded():
+        raise RuntimeError("Token budget exceeded")
+
+harness._hooks.register(HookPhase.POST_STAGE, budget_hook)
+```
+
+### Permission levels
+
+Every built-in tool and every custom tool registered via `ToolDescriptor` declares a permission level. The level documents the tool's access scope and can be inspected by hooks and safety rules:
+
+| Level | Meaning |
+|---|---|
+| `READ_ONLY` | Reads files or data; no writes, no network |
+| `WORKSPACE` | Reads and writes the local session directory |
+| `NETWORK` | Makes outbound HTTP calls |
+| `EXECUTE` | Runs arbitrary shell commands |
+
+Permission levels are declared at registration time — they are metadata, not runtime enforcement. Your hooks and safety rules use them to implement policy.
+
+### What Armature guardrails cover — and what they don't
+
+Armature enforces guardrails at **tool-call boundaries and stage boundaries** — the points where work is delegated to an external system or where an agent's output is committed to context. Between safety rules (declarative), lifecycle hooks (programmable), and permission levels (metadata), every potentially risky action passes through an inspectable, blockable checkpoint.
+
+What Armature does **not** do: guardrails on the **token stream** — inspecting or filtering individual tokens as they arrive from the LLM mid-generation. That is the right model for real-time content moderation in user-facing chat systems. It is not the right model for batch workflows: Armature's execution model completes a stage and stores its output as a whole artifact before that output influences anything downstream. A stage's full output is inspectable via a `POST_STAGE` hook before any subsequent stage sees it — which is a stronger safety boundary than per-token filtering for the workloads Armature is designed for.
+
+---
+
+## 13. Fan-out / Fan-in
 
 Fan-out spawns multiple parallel copies of a subagent workflow and merges the results. This is useful for parallel analysis, ensemble evaluation, or processing a partitioned dataset.
 
@@ -1123,7 +1238,7 @@ If `partition_key` is not set, all children receive identical context.
 
 ---
 
-## 13. Human gates in detail
+## 14. Human gates in detail
 
 Human gates block execution until a person approves or provides feedback. They are appropriate at decision checkpoints, before irreversible actions, or for quality review.
 
@@ -1156,7 +1271,7 @@ Downstream stages can branch on the gate result using the `condition` field (not
 
 ---
 
-## 14. Deliberative teams
+## 15. Deliberative teams
 
 A deliberative team is a multi-agent workflow where specialist agents argue, challenge, and synthesize — producing a structured decision with an explicit confidence score and recorded dissents. This is Armature's native pattern for decisions that require more than a single LLM call.
 
@@ -1353,7 +1468,7 @@ else:
 
 ---
 
-## 15. Templates
+## 16. Templates
 
 Templates are pre-built, parameterized spec files that implement proven agentic patterns. They live in `armature/templates/` and are loaded like any other spec.
 
@@ -1416,7 +1531,7 @@ print(f"Confidence: {synthesis['confidence']}")
 
 ---
 
-## 16. The optimizer
+## 17. The optimizer
 
 The optimizer reads trace history for a workflow and uses an LLM to propose improvements to prompts or model tier assignments.
 
@@ -1455,7 +1570,7 @@ The optimizer requires at least 5 traces to produce a proposal. Run your workflo
 
 ---
 
-## 17. Running workflows
+## 18. Running workflows
 
 ### CLI reference
 
@@ -1576,7 +1691,7 @@ armature improve my_workflow.yml --model claude-opus-4-7
 | `--apply / --no-apply` | apply | Auto-apply the proposed spec |
 | `--log path` | `<spec>.improve_log.jsonl` | Path to the improvement audit log |
 
-See §18 for the full self-improvement system.
+See §20 for the full self-improvement system.
 
 ---
 
@@ -1603,7 +1718,7 @@ armature export-traces \
 | `--system-prompt` | auto | Override the system field for all records |
 | `--limit` | `1000` | Maximum traces to fetch |
 
-See §19 for the full trace export system.
+See §21 for the full trace export system.
 
 ---
 
@@ -1686,7 +1801,7 @@ harness = Harness(spec=spec, session_dir=Path("./my_run_output"))
 
 ---
 
-## 18. Integrating with a host application
+## 19. Integrating with a host application
 
 An Armature workflow is typically one component inside a larger application — a FastAPI service, a background job, a CLI tool — that handles user sessions, persistence, auth, and other concerns. This section describes how to wire the two together.
 
@@ -1983,7 +2098,7 @@ For stages with `on_fail.loop`, the loop exhaustion is the error signal. If you 
 
 ---
 
-## 19. Self-improvement
+## 20. Self-improvement
 
 Armature includes a closed-loop self-improvement system that analyzes workflow traces, diagnoses quality problems, and produces a targeted spec revision. Each improvement cycle logs its predictions; the next cycle verifies whether those predictions came true — building an accountability record over time.
 
@@ -2108,7 +2223,7 @@ Traces accumulate in `~/.armature/traces.db` by default.
 
 ---
 
-## 20. Trace export for fine-tuning
+## 21. Trace export for fine-tuning
 
 Every workflow run records execution traces — the inputs, outputs, and quality scores of every LLM stage. High-quality traces (high quorum score, valid output) are valuable training data for fine-tuning smaller language models to perform the same tasks more cheaply.
 
