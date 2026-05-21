@@ -364,6 +364,34 @@ def improve(
 
 
 @app.command()
+def export(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    target: str = typer.Option("hermes", "--target", "-t", help="Export target platform (hermes)"),
+    output: Path = typer.Option(Path("."), "--output", "-o", help="Output directory for the bundle"),
+):
+    """Export a HarnessSpec to an external agent platform format."""
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    if target != "hermes":
+        typer.echo(f"Unknown target '{target}'. Supported: hermes", err=True)
+        raise typer.Exit(1)
+
+    from armature.spec.loader import load_spec
+    from armature.emitters.hermes import HermesEmitter
+
+    try:
+        loaded = load_spec(spec)
+    except Exception as exc:
+        typer.echo(f"Failed to parse spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    bundle_dir = HermesEmitter().emit(loaded, output)
+    typer.echo(f"Hermes-agent bundle written to: {bundle_dir}")
+
+
+@app.command()
 def doctor(
     spec: Path = typer.Option(None, "--spec", help="Optional spec file to validate"),
 ):

@@ -269,6 +269,7 @@ class Harness:
                             assembler=self._assembler,
                             registry=self._registry,
                             transcript=self._transcript,
+                            skill_library=self._spec.skill_library,
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()

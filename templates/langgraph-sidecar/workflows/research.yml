@@ -1,0 +1,80 @@
+# ============================================================
+# Armature Research Workflow -- used as LangGraph sidecar
+# ============================================================
+# Called by the bot's research_node via POST /run/async.
+# Input: { query: str, session_id: str }
+# Output: { gather, assess, synthesize } keys in result dict
+# ============================================================
+
+name: research
+version: "1.0"
+description: >
+  Multi-stage research workflow. Called as an async sidecar from LangGraph
+  when a user query requires deep research rather than a quick LLM response.
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  large:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+role_type_defaults:
+  worker: small
+  researcher: large
+  judge: large
+  orchestrator: small
+
+stages:
+  - id: gather
+    role:
+      name: Research Gatherer
+      type: researcher
+      description: |
+        Gather comprehensive information about the following research query.
+        Provide detailed findings covering key facts, recent developments,
+        important context, and any relevant nuances.
+
+        Query: {{ query }}
+
+        Structure your response with clear sections. Be thorough -- a judge
+        will later synthesize your findings into a final answer.
+    output_mode: text
+    depends_on: []
+
+  - id: assess
+    role:
+      name: Research Assessor
+      type: judge
+      description: |
+        You are assessing the quality and completeness of research gathered
+        for this query: {{ query }}
+
+        The research findings are:
+        {{ gather.content }}
+
+        Evaluate:
+        1. Are the key facts accurate and complete?
+        2. What important angles might be missing?
+        3. Rate the overall quality (1-5).
+
+        Output a brief assessment that will guide the synthesizer.
+    output_mode: text
+    depends_on: [gather]
+
+  - id: synthesize
+    role:
+      name: Research Synthesizer
+      type: judge
+      description: |
+        Synthesize the research and assessment into a final, authoritative answer.
+
+        Original query: {{ query }}
+        Research: {{ gather.content }}
+        Assessment: {{ assess.content }}
+
+        Write a clear, well-structured answer that directly addresses the query.
+        Incorporate any gaps noted in the assessment.
+    output_mode: text
+    depends_on: [assess]

@@ -1,0 +1,39 @@
+# LangGraph + Armature Sidecar Template
+# Run: docker compose up
+# Then: curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" \
+#         -d '{"session_id": "abc", "message": "Research quantum computing advances in 2025"}'
+
+services:
+  bot:
+    build: ./bot
+    ports:
+      - "8000:8000"
+    environment:
+      ARMATURE_URL: "http://armature:8100"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    depends_on:
+      armature:
+        condition: service_healthy
+
+  armature:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./workflows:/workflows
+      - armature-data:/root/.armature
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    command: >
+      sh -c "pip install 'armature[service]>=0.1.0' -q &&
+             armature service --host 0.0.0.0 --port 8100"
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  armature-data:

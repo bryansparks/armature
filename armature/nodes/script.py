@@ -1,4 +1,6 @@
 from __future__ import annotations
+import json
+import os
 import subprocess
 from jinja2 import Environment, BaseLoader
 from typing import Any
@@ -24,7 +26,8 @@ class ScriptNode(BaseNode):
                 "Use a HumanGateNode before this stage or register a pre-tool hook."
             )
 
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=self._adapter.timeout)
+        env = {**os.environ, "ARMATURE_CONTEXT": json.dumps(context, default=str)}
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=self._adapter.timeout, env=env)
         return {
             "stdout": result.stdout,
             "stderr": result.stderr,

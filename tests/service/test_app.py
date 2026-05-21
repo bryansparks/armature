@@ -147,3 +147,143 @@ async def test_run_result_echo_stdout_contains_message(app, tmp_path):
     assert response.status_code == 200
     echo_stdout = response.json()["result"]["echo"]["stdout"]
     assert "unique-payload-abc" in echo_stdout
+
+
+# ── /run/async ────────────────────────────────────────────────────────────────
+
+async def test_run_async_returns_202_with_job_id(app, tmp_path):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "async-test"},
+            "session_dir": str(tmp_path),
+        })
+    assert response.status_code == 202
+    body = response.json()
+    assert "job_id" in body
+    assert body["status"] == "pending"
+
+
+async def test_run_async_returns_404_for_missing_spec(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/run/async", json={
+            "spec_path": "/nonexistent/spec.yaml",
+            "inputs": {},
+        })
+    assert response.status_code == 404
+
+
+# ── GET /run/{job_id} ─────────────────────────────────────────────────────────
+
+async def test_get_job_returns_404_for_unknown_job(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/run/nonexistent-job-id")
+    assert response.status_code == 404
+
+
+async def test_get_job_eventually_completes(app, tmp_path):
+    import asyncio
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        post = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "poll-test"},
+            "session_dir": str(tmp_path),
+        })
+        job_id = post.json()["job_id"]
+        resp = None
+        for _ in range(30):
+            resp = await client.get(f"/run/{job_id}")
+            if resp.json()["status"] in ("complete", "failed"):
+                break
+            await asyncio.sleep(0.1)
+    assert resp is not None
+    assert resp.json()["status"] == "complete"
+    assert resp.json()["result"] is not None
+
+
+async def test_get_job_result_contains_stage_outputs(app, tmp_path):
+    import asyncio
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        post = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "stage-outputs-test"},
+            "session_dir": str(tmp_path),
+        })
+        job_id = post.json()["job_id"]
+        resp = None
+        for _ in range(30):
+            resp = await client.get(f"/run/{job_id}")
+            if resp.json()["status"] in ("complete", "failed"):
+                break
+            await asyncio.sleep(0.1)
+    result = resp.json()["result"]
+    assert "echo" in result
+    assert "verify" in result
+
+
+async def test_get_job_response_includes_run_id_when_complete(app, tmp_path):
+    import asyncio
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        post = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "run-id-async"},
+            "session_dir": str(tmp_path),
+        })
+        job_id = post.json()["job_id"]
+        resp = None
+        for _ in range(30):
+            resp = await client.get(f"/run/{job_id}")
+            if resp.json()["status"] in ("complete", "failed"):
+                break
+            await asyncio.sleep(0.1)
+    body = resp.json()
+    assert body["run_id"] is not None
+
+
+# ── GET /run/{job_id}/events ──────────────────────────────────────────────────
+
+async def test_get_job_events_returns_404_for_unknown_job(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/run/nonexistent/events")
+    assert response.status_code == 404
+
+
+async def test_get_job_events_streams_run_complete(app, tmp_path):
+    import json as _json
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", timeout=10.0
+    ) as client:
+        post = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "events-test"},
+            "session_dir": str(tmp_path),
+        })
+        job_id = post.json()["job_id"]
+        events = []
+        async with client.stream("GET", f"/run/{job_id}/events") as resp:
+            assert resp.status_code == 200
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    events.append(_json.loads(line[5:].strip()))
+    event_types = [e.get("type") for e in events]
+    assert "run_complete" in event_types
+
+
+async def test_get_job_events_includes_stage_start_events(app, tmp_path):
+    import json as _json
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", timeout=10.0
+    ) as client:
+        post = await client.post("/run/async", json={
+            "spec_path": str(FIXTURES / "echo-workflow.yaml"),
+            "inputs": {"message": "stage-events-test"},
+            "session_dir": str(tmp_path),
+        })
+        job_id = post.json()["job_id"]
+        events = []
+        async with client.stream("GET", f"/run/{job_id}/events") as resp:
+            async for line in resp.aiter_lines():
+                if line.startswith("data:"):
+                    events.append(_json.loads(line[5:].strip()))
+    event_types = [e.get("type") for e in events]
+    assert "stage_start" in event_types

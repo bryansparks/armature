@@ -6,7 +6,7 @@ import random
 from typing import Any
 import litellm
 from armature.nodes.base import BaseNode
-from armature.spec.models import Stage, ModelTiers, RoleType, RoleTypeDefaults
+from armature.spec.models import Stage, ModelTiers, RoleType, RoleTypeDefaults, SkillDef
 from armature.runtime.prompt import PromptAssembler
 
 
@@ -120,6 +120,7 @@ class LLMNode(BaseNode):
         registry=None,
         transcript: list[dict] | None = None,
         workflow_name: str = "",
+        skill_library: dict[str, SkillDef] | None = None,
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -130,8 +131,19 @@ class LLMNode(BaseNode):
         self._registry = registry
         self._transcript = transcript
         self._workflow_name = workflow_name
+        self._skill_library = skill_library or {}
         self._bootstrap_store = None
         self._max_tool_iterations = 10
+
+    def _resolve_skills(self) -> list[SkillDef]:
+        """Return SkillDef objects for each skill ID listed in role.skills."""
+        if not self._skill_library or not self._stage.role:
+            return []
+        return [
+            self._skill_library[sid]
+            for sid in (self._stage.role.skills or [])
+            if sid in self._skill_library
+        ]
 
     def _active_tier_order(self) -> list[str]:
         """Tiers actually configured in the spec, in canonical escalation order."""
@@ -272,6 +284,7 @@ class LLMNode(BaseNode):
             signature=self._stage.signature,
             output_schema=output_schema,
             examples=examples,
+            skills=self._resolve_skills(),
         )
 
         # Apply the same signature.input filter to the user message that PromptAssembler

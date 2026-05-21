@@ -747,3 +747,55 @@ def test_supports_tool_calling_anthropic_defaults_true():
     tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-haiku-4-5-20251001"))
     node = LLMNode(stage=stage, tiers=tiers)
     assert node._supports_tool_calling(tiers.small) is True
+
+
+# ── skill_library wiring ──────────────────────────────────────────────────────
+
+from armature.spec.models import SkillDef
+from armature.runtime.prompt import PromptAssembler
+
+
+def _make_stage_with_skills(skill_ids: list[str]) -> Stage:
+    return Stage(
+        id="skilled",
+        role=Role(name="r", type=RoleType.WORKER, description="worker", model_tier="small", skills=skill_ids),
+    )
+
+
+def test_llm_node_resolves_skill_ids_into_prompt():
+    skill_lib = {"security": SkillDef(id="security", description="Security expertise", content="Check for injection attacks")}
+    stage = _make_stage_with_skills(["security"])
+    node = LLMNode(stage=stage, tiers=make_tiers(), skill_library=skill_lib)
+    prompt = node._assembler.build(
+        role=stage.role,
+        tools=[],
+        context={},
+        skills=node._resolve_skills(),
+    )
+    assert "Check for injection attacks" in prompt
+
+
+def test_llm_node_resolve_skills_returns_empty_for_no_skill_library():
+    stage = _make_stage_with_skills(["missing"])
+    node = LLMNode(stage=stage, tiers=make_tiers(), skill_library=None)
+    assert node._resolve_skills() == []
+
+
+def test_llm_node_resolve_skills_silently_skips_unknown_ids():
+    skill_lib = {"real": SkillDef(id="real", description="Real skill", content="content")}
+    stage = _make_stage_with_skills(["real", "nonexistent"])
+    node = LLMNode(stage=stage, tiers=make_tiers(), skill_library=skill_lib)
+    resolved = node._resolve_skills()
+    assert len(resolved) == 1
+    assert resolved[0].id == "real"
+
+
+def test_llm_node_resolve_skills_returns_all_matching_ids():
+    skill_lib = {
+        "sec": SkillDef(id="sec", description="Security", content="sec content"),
+        "perf": SkillDef(id="perf", description="Performance", content="perf content"),
+    }
+    stage = _make_stage_with_skills(["sec", "perf"])
+    node = LLMNode(stage=stage, tiers=make_tiers(), skill_library=skill_lib)
+    resolved = node._resolve_skills()
+    assert len(resolved) == 2

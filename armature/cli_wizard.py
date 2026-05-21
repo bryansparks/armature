@@ -57,6 +57,9 @@ def _console():
         return None
 
 
+_TOTAL_STEPS = 6
+
+
 def _header(text: str) -> None:
     c = _console()
     if c:
@@ -71,6 +74,108 @@ def _info(text: str) -> None:
         c.print(f"[dim]{text}[/dim]")
     else:
         print(text)
+
+
+def _section_panel(title: str, step: int, description: str = "") -> None:
+    """Bordered panel header with step counter and progress bar."""
+    c = _console()
+    if c:
+        from rich.panel import Panel
+        filled = max(0, int((step - 1) / _TOTAL_STEPS * 20))
+        empty = 20 - filled
+        bar = ("[cyan]" + "█" * filled + "[/cyan]" if filled else "") + (
+            "[dim]" + "░" * empty + "[/dim]" if empty else ""
+        )
+        pct = int((step - 1) / _TOTAL_STEPS * 100)
+        body = f"[dim]Step {step} of {_TOTAL_STEPS}[/dim]  {bar}  [dim]{pct}%[/dim]"
+        if description:
+            body += f"\n[dim italic]{description}[/dim italic]"
+        c.print()
+        c.print(Panel(body, title=f"[bold cyan]{title}[/bold cyan]", border_style="cyan", padding=(0, 1)))
+    else:
+        print(f"\n── Step {step}/{_TOTAL_STEPS}: {title} ──")
+        if description:
+            print(f"   {description}")
+
+
+def _section_done(items: list[tuple[str, str]]) -> None:
+    """Compact ✓ summary table printed after each section completes."""
+    c = _console()
+    if not items:
+        return
+    if c:
+        from rich.table import Table
+        t = Table(show_header=False, box=None, padding=(0, 1), show_edge=False)
+        t.add_column(style="green", no_wrap=True, min_width=3)
+        t.add_column(style="white")
+        for key, value in items:
+            display = str(value) if value else "[dim](none)[/dim]"
+            t.add_row(f"✓ {key}", display)
+        c.print(t)
+        c.print()
+    else:
+        for key, value in items:
+            print(f"  ✓ {key}: {value}")
+        print()
+
+
+def _stage_card(stage_id: str, stage_type_label: str, extra: str = "") -> None:
+    """Mini card displayed after each stage is added."""
+    c = _console()
+    if c:
+        from rich.panel import Panel
+        from rich.text import Text
+        body = Text()
+        body.append(f"  {stage_type_label}", style="dim")
+        if extra:
+            body.append(f"  ·  {extra}", style="dim cyan")
+        c.print(Panel(body, title=f"[green]✓ {stage_id}[/green]",
+                      border_style="green", padding=(0, 1), expand=False))
+    else:
+        suffix = f"  ({extra})" if extra else ""
+        print(f"  ✓ Added stage '{stage_id}' — {stage_type_label}{suffix}")
+
+
+def _wizard_welcome() -> None:
+    """Full-width welcome banner for armature new."""
+    c = _console()
+    if c:
+        from rich.panel import Panel
+        from rich.text import Text
+        from rich.align import Align
+        text = Text()
+        text.append("  armature ", style="bold white")
+        text.append("new", style="bold cyan")
+        text.append("  ·  Workflow Spec Builder\n\n", style="bold white")
+        text.append("  Walk through the prompts to generate a ready-to-run YAML spec.\n", style="dim")
+        text.append("  Every answer can be edited in the generated file afterwards.\n", style="dim")
+        c.print()
+        c.print(Panel(Align(text, align="left"), border_style="cyan", padding=(0, 1)))
+        c.print()
+    else:
+        print("\n=== Armature Workflow Wizard ===\n")
+        print("Walk through the prompts to generate a workflow YAML spec.\n")
+
+
+def _wizard_complete(output_path: "Path") -> None:
+    """Completion banner after the spec is saved."""
+    c = _console()
+    if c:
+        from rich.panel import Panel
+        from rich.text import Text
+        text = Text()
+        text.append("\n  Spec saved successfully!\n\n", style="bold green")
+        text.append("  File:     ", style="dim")
+        text.append(str(output_path), style="bold white")
+        text.append("\n  Run with: ", style="dim")
+        text.append(f"armature run {output_path}", style="bold cyan")
+        text.append("\n", style="")
+        c.print()
+        c.print(Panel(text, border_style="green", padding=(0, 1)))
+        c.print()
+    else:
+        print(f"\nSaved: {output_path}")
+        print(f"Run it with: armature run {output_path}")
 
 
 def _preview(yaml_text: str) -> None:
@@ -97,18 +202,25 @@ def _slug(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _collect_metadata(q) -> dict:
-    _header("Workflow Metadata")
+    _section_panel("Workflow Metadata", step=1, description="Name, version, and purpose of this workflow.")
     name = _ask(q, "Workflow name:", validate=lambda v: bool(v.strip()) or "Required")
     description = _ask(q, "Short description (optional):", default="")
     version = _ask(q, "Version string:", default="1.0")
-    return {"name": name.strip(), "description": description.strip(), "version": version.strip()}
+    result = {"name": name.strip(), "description": description.strip(), "version": version.strip()}
+    _section_done([
+        ("Name", result["name"]),
+        ("Version", result["version"]),
+        ("Description", result["description"] or "(none)"),
+    ])
+    return result
 
 
 def _collect_tiers(q) -> list[dict]:
     """Returns list of {tier, provider, model, api_base, api_key_env, temperature, max_tokens}."""
-    _header("Model Tiers")
-    _info("Define named model slots (tiny/small/medium/large/frontier).")
-    _info("You only need the tiers your workflow will actually use.")
+    _section_panel(
+        "Model Tiers", step=2,
+        description="Define named model slots (tiny/small/medium/large/frontier). Only add what you need.",
+    )
 
     tiers = []
     while True:
@@ -130,8 +242,13 @@ def _collect_tiers(q) -> list[dict]:
         model = _ask(q, f"  Model name:", default=default_model)
 
         api_base = ""
-        if provider in ("ollama", "other"):
-            api_base = _ask(q, "  API base URL:", default="http://localhost:11434" if provider == "ollama" else "")
+        _API_BASE_DEFAULTS = {
+            "ollama": "http://localhost:11434",
+            "azure": "https://<your-resource>.openai.azure.com/",
+            "bedrock": "https://bedrock-runtime.<region>.amazonaws.com/",
+        }
+        if provider in ("ollama", "azure", "bedrock", "other"):
+            api_base = _ask(q, "  API base URL:", default=_API_BASE_DEFAULTS.get(provider, ""))
 
         api_key_env = ""
         if q.confirm(f"  Use a custom env var for the API key?", default=False).ask():
@@ -154,15 +271,18 @@ def _collect_tiers(q) -> list[dict]:
             "temperature": temperature,
             "max_tokens": max_tokens,
         })
-        print(f"  ✓ Added '{tier}' tier ({provider}/{model})")
+        _stage_card(tier, f"{provider} / {model}")
 
+    _section_done([(t["tier"], f"{t['provider']} / {t['model']}") for t in tiers])
     return tiers
 
 
 def _collect_role_defaults(q, tiers: list[dict]) -> dict:
-    _header("Role Type Defaults")
-    _info("Map each role type to a tier. Stages that omit model_tier inherit this.")
-    _info("Built-in: worker=small, orchestrator=frontier, judge=frontier, researcher=large")
+    _section_panel(
+        "Role Type Defaults", step=3,
+        description="Map each role type to a tier. Stages that omit model_tier inherit this.",
+    )
+    _info("  Built-in: worker=small  orchestrator=frontier  judge=frontier  researcher=large")
 
     available_tiers = [t["tier"] for t in tiers]
     if q.confirm("Customize role type defaults?", default=False).ask():
@@ -173,15 +293,18 @@ def _collect_role_defaults(q, tiers: list[dict]) -> dict:
                 choices=available_tiers,
                 default=available_tiers[0],
             ).ask()
+        _section_done([(role, tier) for role, tier in defaults.items()])
         return defaults
+    _section_done([("Role defaults", "Using built-in defaults")])
     return {}
 
 
 def _collect_stages(q, tiers: list[dict]) -> tuple[list[dict], list[dict]]:
     """Returns (stages, adapters)."""
-    _header("Stages")
-    _info("Build the workflow DAG. Add stages one at a time.")
-    _info("Each stage can depend on any previously defined stage.")
+    _section_panel(
+        "Stages", step=4,
+        description="Build the workflow DAG — add stages one at a time.",
+    )
 
     stages = []
     adapters = []
@@ -288,13 +411,14 @@ def _collect_stages(q, tiers: list[dict]) -> tuple[list[dict], list[dict]]:
                     stage["partition_key"] = pk
 
         stages.append(stage)
-        print(f"  ✓ Added stage '{stage_id}'")
+        extra = stage.get("adapter", "") or stage.get("subagent_spec", "")
+        _stage_card(stage_id, stage_type.split(" (")[0], extra=extra)
 
     return stages, adapters
 
 
 def _collect_safety_rules(q, adapters: list[dict]) -> list[dict]:
-    _header("Safety Rules")
+    _section_panel("Safety Rules", step=5, description="Declarative allow/block rules evaluated before every adapter call.")
     if not adapters:
         _info("No script adapters defined — skipping safety rules.")
         return []
@@ -323,13 +447,13 @@ def _collect_safety_rules(q, adapters: list[dict]) -> list[dict]:
             "action": action,
             "message": message,
         })
-        print(f"  ✓ Added {action} rule for '{tool}'")
+        _stage_card(tool, action, extra=f"{field} {op} '{value}'")
 
     return rules
 
 
 def _collect_memory(q, stages: list[dict]) -> dict | None:
-    _header("Cross-Run Memory")
+    _section_panel("Cross-Run Memory", step=6, description="Capture stage outputs across runs and inject them at startup.")
     if not q.confirm(
         "Enable cross-run memory? (captures stage outputs across runs)", default=False
     ).ask():
@@ -349,7 +473,7 @@ def _collect_memory(q, stages: list[dict]) -> dict | None:
         key = _ask(q, f"  Output key to capture from '{stage_id}':", default="content")
         max_entries = _ask(q, "  Max entries to keep:", default="5")
         captures.append({"stage": stage_id, "key": key, "max_entries": int(max_entries)})
-        print(f"  ✓ Will capture '{stage_id}.{key}' (max {max_entries})")
+        _stage_card(stage_id, "capture", extra=f"{key}  ·  max {max_entries}")
 
     inject_as = _ask(q, "  Inject memories into context as:", default="_memory")
     return {"enabled": True, "capture": captures, "inject_as": inject_as}
@@ -571,12 +695,7 @@ def run_wizard(output_path: Path | None = None) -> None:
     q = _q()
     c = _console()
 
-    if c:
-        c.print("\n[bold green]Armature Workflow Wizard[/bold green]")
-        c.print("[dim]Answer the prompts to generate a workflow YAML spec.[/dim]")
-        c.print("[dim]All inputs can be edited in the generated file.[/dim]\n")
-    else:
-        print("\n=== Armature Workflow Wizard ===\n")
+    _wizard_welcome()
 
     # ── Load defaults ──────────────────────────────────────────────────────
     saved_defaults = cfg_mod.load()
@@ -606,14 +725,14 @@ def run_wizard(output_path: Path | None = None) -> None:
         if not use_defaults or not tiers:
             tiers = _collect_tiers(q)
         else:
-            _header("Model Tiers")
-            _info("Using saved defaults (skipped).")
+            _section_panel("Model Tiers", step=2, description="Using saved defaults.")
+            _info("  Skipped — loaded from ~/.armature/config.yml")
 
         if not use_defaults or not role_defaults:
             role_defaults = _collect_role_defaults(q, tiers)
         else:
-            _header("Role Type Defaults")
-            _info("Using saved defaults (skipped).")
+            _section_panel("Role Type Defaults", step=3, description="Using saved defaults.")
+            _info("  Skipped — loaded from ~/.armature/config.yml")
 
         stages, adapters = _collect_stages(q, tiers)
         safety_rules = _collect_safety_rules(q, adapters)
@@ -636,17 +755,12 @@ def run_wizard(output_path: Path | None = None) -> None:
     if q.confirm(f"Write to '{output_path}'?", default=True).ask():
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(yaml_text, encoding="utf-8")
-        if c:
-            c.print(f"\n[bold green]✓ Saved:[/bold green] {output_path}")
-            c.print(f"[dim]Run it with:[/dim]  armature run {output_path}")
-        else:
-            print(f"\nSaved: {output_path}")
-            print(f"Run it with: armature run {output_path}")
+        _wizard_complete(output_path)
     else:
-        print("\nSpec not saved. Copy the preview above if you need it.")
+        _info("\nSpec not saved. Copy the preview above if you need it.")
 
     # ── Offer to save tier choices as new defaults ─────────────────────────
-    _header("Save Defaults")
+    _header("Save Defaults")  # not a numbered step, intentionally uses _header
     should_save = q.confirm(
         "Save these model tiers as your defaults for future workflows?",
         default=not bool(saved_defaults),  # default yes when no config exists yet
