@@ -7,3 +7,15 @@ dist/
 .coverage
 htmlcov/
 .env
+
+# Internal architecture and scratch files (not for public repo)
+HARNESS-STATE-v3.md
+VISION.md
+taking_stock.txt
+.playwright-mcp/
+armature-*.png
+docs/superpowers/
+docs/plan-*.md
+docs/deferred-research.md
+docs/ARMATURE-AGENTCORE.md
+docs/plan-gaps-agentcore.md
