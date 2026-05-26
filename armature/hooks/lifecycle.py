@@ -9,6 +9,7 @@ _safety_log = logging.getLogger("armature.safety")
 
 if TYPE_CHECKING:
     from armature.spec.models import ToolSafetyRule
+    from armature.registry.registry import ToolRegistry
 
 
 class HookPhase(str, Enum):
@@ -22,6 +23,7 @@ class HookDecision(str, Enum):
     ALLOW = "allow"
     BLOCK = "block"
     MODIFY = "modify"
+    REQUIRE_APPROVAL = "require_approval"
 
 
 class ToolBlocked(Exception):
@@ -87,18 +89,40 @@ def _evaluate_condition(condition, args: dict) -> bool:
 
 class SafetyHookBuilder:
     @staticmethod
-    def register(registry: HookRegistry, rules: "list[ToolSafetyRule]") -> None:
-        if not rules:
+    def register(
+        registry: HookRegistry,
+        rules: "list[ToolSafetyRule]",
+        tool_registry: "ToolRegistry | None" = None,
+        strict_mode: bool = False,
+    ) -> None:
+        if not rules and not strict_mode:
             return
 
         async def safety_hook(phase: HookPhase, tool_name: str, args: dict, ctx: dict) -> HookDecision:
+            tool_desc = tool_registry.get(tool_name) if tool_registry else None
+            enhanced_args = {
+                **args,
+                "_tool_reversibility": tool_desc.reversibility.value if tool_desc else "unknown",
+            }
+
             for rule in rules:
                 if rule.tool != "*" and rule.tool != tool_name:
                     continue
-                if not _evaluate_condition(rule.condition, args):
+                if not _evaluate_condition(rule.condition, enhanced_args):
                     continue
 
+                if rule.action == "allow":
+                    return HookDecision.ALLOW
                 if rule.action == "block":
+                    raise ToolBlocked(tool_name, args.get("cmd", ""), rule.message)
+                if rule.action == "require_approval":
+                    answer = input(
+                        f"[armature] Tool '{tool_name}' requires approval: {rule.message}\n"
+                        f"  args={args}\n"
+                        "  Allow? [y/N]: "
+                    ).strip().lower()
+                    if answer == "y":
+                        return HookDecision.ALLOW
                     raise ToolBlocked(tool_name, args.get("cmd", ""), rule.message)
                 if rule.action == "warn":
                     warnings.warn(
@@ -107,7 +131,7 @@ class SafetyHookBuilder:
                     )
                 elif rule.action == "log":
                     _safety_log.info("tool=%s rule=%s msg=%s", tool_name, rule.tool, rule.message)
-                # all non-block actions fall through to ALLOW
-            return HookDecision.ALLOW
+
+            return HookDecision.BLOCK if strict_mode else HookDecision.ALLOW
 
         registry.register(HookPhase.PRE_TOOL, safety_hook)

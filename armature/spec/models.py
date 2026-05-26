@@ -125,7 +125,7 @@ class SafetyCondition(BaseModel):
 class ToolSafetyRule(BaseModel):
     tool: str
     condition: SafetyCondition
-    action: Literal["block", "warn", "log"]
+    action: Literal["block", "warn", "log", "require_approval", "allow"]
     message: str = ""
 
 
@@ -246,6 +246,7 @@ class HarnessSpec(BaseModel):
     file_state: FileState = Field(default_factory=FileState)
     trace: TraceConfig = Field(default_factory=TraceConfig)
     safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
+    safety_mode: Literal["permissive", "strict"] = "permissive"
     memory: MemoryConfig | None = None
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)

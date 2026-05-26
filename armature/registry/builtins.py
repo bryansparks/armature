@@ -2,6 +2,7 @@ import subprocess
 import httpx
 from pathlib import Path
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
+from armature.permissions.permissions import Reversibility
 from armature.skills import quorum as _quorum_skill
 from armature.skills import tessera as _tessera_skill
 from armature.skills import alembic as _alembic_skill
@@ -53,27 +54,32 @@ async def _http_post(args: dict) -> dict:
 def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="file_read", description="Read a file from disk",
-        permission=PermissionLevel.READ_ONLY, handler=_file_read,
+        permission=PermissionLevel.READ_ONLY, reversibility=Reversibility.FULL,
+        handler=_file_read,
         parameters={"path": {"type": "string", "description": "Absolute file path"}},
     ))
     registry.register(ToolDescriptor(
         name="file_write", description="Write content to a file",
-        permission=PermissionLevel.WORKSPACE, handler=_file_write,
+        permission=PermissionLevel.WORKSPACE, reversibility=Reversibility.PARTIAL,
+        handler=_file_write,
         parameters={"path": {"type": "string"}, "content": {"type": "string"}},
     ))
     registry.register(ToolDescriptor(
         name="shell", description="Run a shell command",
-        permission=PermissionLevel.WORKSPACE, handler=_shell_run,
+        permission=PermissionLevel.WORKSPACE, reversibility=Reversibility.NONE,
+        handler=_shell_run,
         parameters={"cmd": {"type": "string", "description": "Shell command to execute"}},
     ))
     registry.register(ToolDescriptor(
         name="http_get", description="Make an HTTP GET request",
-        permission=PermissionLevel.NETWORK, handler=_http_get,
+        permission=PermissionLevel.NETWORK, reversibility=Reversibility.FULL,
+        handler=_http_get,
         parameters={"url": {"type": "string"}},
     ))
     registry.register(ToolDescriptor(
         name="http_post", description="Make an authenticated HTTP POST request",
-        permission=PermissionLevel.NETWORK, handler=_http_post,
+        permission=PermissionLevel.NETWORK, reversibility=Reversibility.NONE,
+        handler=_http_post,
         parameters={
             "url": {"type": "string"},
             "body": {"type": ["object", "string"], "optional": True},
@@ -84,7 +90,7 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="quorum.deliberate",
         description="Run structured multi-agent deliberation on a topic via Quorum",
-        permission=PermissionLevel.NETWORK,
+        permission=PermissionLevel.NETWORK, reversibility=Reversibility.FULL,
         handler=_quorum_skill.deliberate,
         parameters={
             "topic": {"type": "string"},
@@ -95,7 +101,7 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="tessera.retrieve",
         description="Retrieve relevant document chunks from Tessera RAG",
-        permission=PermissionLevel.NETWORK,
+        permission=PermissionLevel.NETWORK, reversibility=Reversibility.FULL,
         handler=_tessera_skill.retrieve,
         parameters={
             "query": {"type": "string"},
@@ -105,7 +111,7 @@ def register_builtins(registry: ToolRegistry) -> None:
     registry.register(ToolDescriptor(
         name="alembic.submit",
         description="Submit a high-quality execution trace to Alembic for SLM fine-tuning",
-        permission=PermissionLevel.NETWORK,
+        permission=PermissionLevel.NETWORK, reversibility=Reversibility.NONE,
         handler=_alembic_skill.submit_trace,
         parameters={
             "trace": {"type": "object", "description": "TraceRecord as dict"},

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Callable, Any
 from pydantic import BaseModel
-from armature.permissions.permissions import PermissionLevel, requires_approval
+from armature.permissions.permissions import PermissionLevel, Reversibility, requires_approval
 
 
 class ToolDescriptor(BaseModel):
@@ -10,6 +10,7 @@ class ToolDescriptor(BaseModel):
     permission: PermissionLevel
     handler: Callable
     parameters: dict[str, Any] = {}
+    reversibility: Reversibility = Reversibility.FULL
 
     model_config = {"arbitrary_types_allowed": True}
 

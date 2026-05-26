@@ -292,3 +292,86 @@ def test_register_builtins_tool_count():
     registry = ToolRegistry()
     register_builtins(registry)
     assert len(registry.descriptors()) == 8
+
+
+# ── Reversibility metadata ─────────────────────────────────────────────────────
+
+def test_file_read_reversibility_full():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("file_read").reversibility == Reversibility.FULL
+
+
+def test_file_write_reversibility_partial():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("file_write").reversibility == Reversibility.PARTIAL
+
+
+def test_shell_reversibility_none():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("shell").reversibility == Reversibility.NONE
+
+
+def test_http_get_reversibility_full():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("http_get").reversibility == Reversibility.FULL
+
+
+def test_http_post_reversibility_none():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("http_post").reversibility == Reversibility.NONE
+
+
+def test_quorum_deliberate_reversibility_full():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("quorum.deliberate").reversibility == Reversibility.FULL
+
+
+def test_tessera_retrieve_reversibility_full():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("tessera.retrieve").reversibility == Reversibility.FULL
+
+
+def test_alembic_submit_reversibility_none():
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+    from armature.permissions.permissions import Reversibility
+    registry = ToolRegistry()
+    register_builtins(registry)
+    assert registry.get("alembic.submit").reversibility == Reversibility.NONE
+
+
+def test_tool_descriptor_default_reversibility_is_full():
+    from armature.registry.registry import ToolDescriptor
+    from armature.permissions.permissions import PermissionLevel, Reversibility
+
+    async def _noop(args): return {}
+    desc = ToolDescriptor(name="x", description="x", permission=PermissionLevel.READ_ONLY, handler=_noop)
+    assert desc.reversibility == Reversibility.FULL

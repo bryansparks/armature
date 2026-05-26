@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import hashlib
+import json
 import uuid
 import time
 from pathlib import Path
@@ -68,10 +69,17 @@ class Harness:
         self._registry = ToolRegistry()
         register_builtins(self._registry)
         self._load_tool_modules()
+        self._policy_version = hashlib.sha256(
+            str([r.model_dump() for r in self._spec.safety_rules]).encode()
+        ).hexdigest()[:12]
         self._hooks = HookRegistry()
-        if self._spec.safety_rules:
-            from armature.hooks.lifecycle import SafetyHookBuilder
-            SafetyHookBuilder.register(self._hooks, self._spec.safety_rules)
+        from armature.hooks.lifecycle import SafetyHookBuilder
+        SafetyHookBuilder.register(
+            self._hooks,
+            self._spec.safety_rules,
+            tool_registry=self._registry,
+            strict_mode=(self._spec.safety_mode == "strict"),
+        )
         self._attach_observability_adapters()
         self._context = ContextManager()
         self._assembler = PromptAssembler()
@@ -250,6 +258,10 @@ class Harness:
                             success=result.get("exit_code", 0) == 0,
                             output_valid=True,
                             spec_version=self._spec_version,
+                            inputs_hash=hashlib.sha256(
+                                json.dumps(context, sort_keys=True, default=str).encode()
+                            ).hexdigest()[:32],
+                            policy_version=self._policy_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
                         ))
@@ -290,6 +302,10 @@ class Harness:
                             quorum_score=_extract_quorum_score(stage.role.type.value, result),
                             escalation_count=result.pop("_escalation_count", 0),
                             spec_version=self._spec_version,
+                            inputs_hash=hashlib.sha256(
+                                json.dumps(context, sort_keys=True, default=str).encode()
+                            ).hexdigest()[:32],
+                            policy_version=self._policy_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
                         ))
@@ -320,6 +336,10 @@ class Harness:
                                 output_valid=False,
                                 error_type=type(exc).__name__,
                                 spec_version=self._spec_version,
+                                inputs_hash=hashlib.sha256(
+                                    json.dumps(context, sort_keys=True, default=str).encode()
+                                ).hexdigest()[:32],
+                                policy_version=self._policy_version,
                                 inputs={k: str(v)[:200] for k, v in context.items()},
                             ))
                         except Exception:

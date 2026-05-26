@@ -260,6 +260,7 @@ stages:
 | `contracts` | object | no | Input/output declarations and run-level limits (see below) |
 | `adapters` | object | no | Script/command adapters (see §4.2) |
 | `safety_rules` | list | no | Declarative tool safety rules (see §11) |
+| `safety_mode` | string | no | `"permissive"` (default) or `"strict"` — controls default when no rule matches (see §11) |
 | `memory` | object | no | Cross-run memory capture and injection (see §8) |
 | `tools` | list | no | External tool modules to load into the registry (see §17) |
 | `checkpoint` | bool | no | Persist completed stage results to disk so a run can resume after a crash (default: false) |
@@ -1044,7 +1045,7 @@ description: |
 
 ## 11. Safety rules
 
-Safety rules declaratively block, warn, or log when a tool is called with specific argument values. They are evaluated before any script/adapter stage runs.
+Safety rules declaratively control what happens when a tool is called with specific argument values. They are evaluated before any script/adapter stage runs.
 
 ```yaml
 safety_rules:
@@ -1061,9 +1062,36 @@ safety_rules:
       field: endpoint
       op: matches_regex
       value: ".*/admin/.*"
-    action: warn
-    message: "Admin endpoint access — verify this is intentional."
+    action: require_approval
+    message: "Admin endpoint access — confirm with operator."
+
+  - tool: file_read
+    condition:
+      field: path
+      op: truthy
+      value: ""
+    action: allow
+    message: ""
+
+  - tool: "*"
+    condition:
+      field: _tool_reversibility
+      op: equals
+      value: "none"
+    action: block
+    message: "Irreversible tool calls are disabled in this workflow."
 ```
+
+### Top-level safety mode
+
+Add `safety_mode` at the top level of your spec to choose the default policy when no rule matches:
+
+```yaml
+safety_mode: strict   # deny any tool call not matched by an explicit "allow" rule
+# safety_mode: permissive  # (default) allow any tool call not matched by a rule
+```
+
+In **strict mode** you must explicitly whitelist every tool you want to use with `action: allow` rules. In **permissive mode** (the default) unmatched tool calls proceed normally.
 
 ### Condition operators
 
@@ -1076,13 +1104,52 @@ safety_rules:
 | `matches_regex` | Field value matches the regex pattern |
 | `truthy` | Field value is truthy (non-empty, non-zero, non-null) |
 
+### Pseudo-fields
+
+In addition to actual tool arguments, conditions can match against metadata injected by Armature:
+
+| Field | Values | Description |
+|---|---|---|
+| `_tool_reversibility` | `full`, `partial`, `none` | Reversibility class of the called tool |
+
+Built-in tool reversibility values:
+
+| Tool | Reversibility |
+|---|---|
+| `file_read` | `full` |
+| `http_get` | `full` |
+| `quorum.deliberate` | `full` |
+| `tessera.retrieve` | `full` |
+| `file_write` | `partial` |
+| `shell` | `none` |
+| `http_post` | `none` |
+| `alembic.submit` | `none` |
+
+Custom tools default to `full` unless you set `reversibility` when constructing their `ToolDescriptor`.
+
 ### Actions
 
 | Action | Behavior |
 |---|---|
 | `block` | Raise `ToolBlocked` — halts the stage, no retry |
-| `warn` | Log a warning, continue execution |
+| `warn` | Log a Python warning, continue execution |
 | `log` | Log at info level, continue execution |
+| `require_approval` | Print context to stdout, prompt for `y/N`; allow on `y`, raise `ToolBlocked` on `n` |
+| `allow` | Immediately allow the call — useful for whitelisting in strict mode |
+
+Rule evaluation is first-match: the first matching rule wins and subsequent rules are not checked.
+An `allow` match returns immediately without inspecting later rules.
+
+### Top-level spec fields summary
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `safety_rules` | list | `[]` | Declarative tool safety rules |
+| `safety_mode` | `"permissive"` \| `"strict"` | `"permissive"` | Default when no rule matches |
+
+> **Attribution:** The `require_approval` action, `safety_mode: strict`, tool reversibility
+> classification, and trace argument hashing are concepts borrowed from Microsoft's
+> [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit).
 
 ---
 

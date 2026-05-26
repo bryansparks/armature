@@ -9,6 +9,12 @@ class PermissionLevel(str, Enum):
     DESTRUCTIVE = "destructive"
 
 
+class Reversibility(str, Enum):
+    FULL = "full"       # reads, creates with known rollback path
+    PARTIAL = "partial" # overwrites, modifications
+    NONE = "none"       # deletes, external sends, payments
+
+
 _READONLY_PREFIXES = (
     "ls", "cat", "grep", "find", "head", "tail", "wc", "echo",
     "pwd", "which", "env", "printenv",

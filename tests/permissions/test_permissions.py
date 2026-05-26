@@ -3,6 +3,35 @@ from armature.permissions.permissions import (
 )
 
 
+# ── Reversibility enum ─────────────────────────────────────────────────────────
+
+def test_reversibility_full_value():
+    from armature.permissions.permissions import Reversibility
+    assert Reversibility.FULL.value == "full"
+
+
+def test_reversibility_partial_value():
+    from armature.permissions.permissions import Reversibility
+    assert Reversibility.PARTIAL.value == "partial"
+
+
+def test_reversibility_none_value():
+    from armature.permissions.permissions import Reversibility
+    assert Reversibility.NONE.value == "none"
+
+
+def test_reversibility_is_str_enum():
+    from armature.permissions.permissions import Reversibility
+    assert isinstance(Reversibility.FULL, str)
+    assert isinstance(Reversibility.PARTIAL, str)
+    assert isinstance(Reversibility.NONE, str)
+
+
+def test_reversibility_has_three_members():
+    from armature.permissions.permissions import Reversibility
+    assert len(list(Reversibility)) == 3
+
+
 def test_classify_ls_as_readonly():
     assert classify_shell_command("ls -la /tmp") == PermissionLevel.READ_ONLY
 

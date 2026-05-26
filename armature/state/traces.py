@@ -25,6 +25,8 @@ class TraceRecord(BaseModel):
     error_type: str | None = None
     escalation_count: int = 0
     spec_version: str = ""
+    inputs_hash: str = ""
+    policy_version: str = ""
 
 
 class IhrResult(BaseModel):
@@ -75,6 +77,8 @@ class TraceStore:
                 "error_type TEXT",
                 "escalation_count INTEGER DEFAULT 0",
                 "spec_version TEXT DEFAULT ''",
+                "inputs_hash TEXT DEFAULT ''",
+                "policy_version TEXT DEFAULT ''",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -90,8 +94,9 @@ class TraceStore:
                    (run_id, workflow_name, stage_id, role_type, model,
                     input_tokens, output_tokens, latency_ms, success, output_valid,
                     quorum_score, timestamp, inputs_json, outputs_json,
-                    error_type, escalation_count, spec_version)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    error_type, escalation_count, spec_version,
+                    inputs_hash, policy_version)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -100,6 +105,7 @@ class TraceStore:
                     trace.quorum_score, trace.timestamp,
                     json.dumps(trace.inputs), json.dumps(trace.outputs),
                     trace.error_type, trace.escalation_count, trace.spec_version,
+                    trace.inputs_hash, trace.policy_version,
                 ),
             )
             await db.commit()
@@ -139,24 +145,27 @@ class TraceStore:
 
     @staticmethod
     def _row_to_trace(r: "aiosqlite.Row") -> TraceRecord:
+        d = dict(r)
         return TraceRecord(
-            run_id=r["run_id"],
-            workflow_name=r["workflow_name"],
-            stage_id=r["stage_id"],
-            role_type=r["role_type"],
-            model=r["model"],
-            input_tokens=r["input_tokens"] or 0,
-            output_tokens=r["output_tokens"] or 0,
-            latency_ms=r["latency_ms"] or 0.0,
-            success=bool(r["success"]),
-            output_valid=bool(r["output_valid"]),
-            quorum_score=r["quorum_score"],
-            timestamp=r["timestamp"],
-            inputs=json.loads(r["inputs_json"] or "{}"),
-            outputs=json.loads(r["outputs_json"] or "{}"),
-            error_type=r["error_type"] or None,
-            escalation_count=r["escalation_count"] or 0,
-            spec_version=r["spec_version"] or "",
+            run_id=d["run_id"],
+            workflow_name=d["workflow_name"],
+            stage_id=d["stage_id"],
+            role_type=d["role_type"],
+            model=d["model"],
+            input_tokens=d.get("input_tokens") or 0,
+            output_tokens=d.get("output_tokens") or 0,
+            latency_ms=d.get("latency_ms") or 0.0,
+            success=bool(d.get("success", 1)),
+            output_valid=bool(d.get("output_valid", 1)),
+            quorum_score=d.get("quorum_score"),
+            timestamp=d["timestamp"],
+            inputs=json.loads(d.get("inputs_json") or "{}"),
+            outputs=json.loads(d.get("outputs_json") or "{}"),
+            error_type=d.get("error_type") or None,
+            escalation_count=d.get("escalation_count") or 0,
+            spec_version=d.get("spec_version") or "",
+            inputs_hash=d.get("inputs_hash") or "",
+            policy_version=d.get("policy_version") or "",
         )
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:

@@ -201,3 +201,157 @@ async def test_safety_hook_no_match_allows():
     SafetyHookBuilder.register(registry, rules)
     decision = await registry.run_pre_tool("shell", {"cmd": "echo hello"}, {})
     assert decision == HookDecision.ALLOW
+
+
+# ── Phase C: require_approval, allow, strict mode, _tool_reversibility ─────────
+
+def test_hook_decision_has_require_approval():
+    assert HookDecision.REQUIRE_APPROVAL.value == "require_approval"
+
+
+async def test_safety_rule_action_allow():
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="file_read",
+            condition=SafetyCondition(field="path", op="truthy", value=""),
+            action="allow",
+            message="",
+        )
+    ]
+    SafetyHookBuilder.register(registry, rules)
+    decision = await registry.run_pre_tool("file_read", {"path": "/tmp/x"}, {})
+    assert decision == HookDecision.ALLOW
+
+
+async def test_safety_rule_action_require_approval_approved(monkeypatch):
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="shell",
+            condition=SafetyCondition(field="cmd", op="truthy", value=""),
+            action="require_approval",
+            message="Shell call requires human sign-off",
+        )
+    ]
+    SafetyHookBuilder.register(registry, rules)
+    decision = await registry.run_pre_tool("shell", {"cmd": "echo hi"}, {})
+    assert decision == HookDecision.ALLOW
+
+
+async def test_safety_rule_action_require_approval_denied(monkeypatch):
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="shell",
+            condition=SafetyCondition(field="cmd", op="truthy", value=""),
+            action="require_approval",
+            message="Denied by operator",
+        )
+    ]
+    SafetyHookBuilder.register(registry, rules)
+    with pytest.raises(ToolBlocked):
+        await registry.run_pre_tool("shell", {"cmd": "echo hi"}, {})
+
+
+async def test_strict_mode_blocks_when_no_rule_matches():
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="file_read",
+            condition=SafetyCondition(field="path", op="truthy", value=""),
+            action="allow",
+            message="",
+        )
+    ]
+    from armature.registry.registry import ToolRegistry
+    SafetyHookBuilder.register(registry, rules, tool_registry=ToolRegistry(), strict_mode=True)
+    # shell has no matching rule, strict mode should block it
+    decision = await registry.run_pre_tool("shell", {"cmd": "echo hi"}, {})
+    assert decision == HookDecision.BLOCK
+
+
+async def test_strict_mode_allows_when_allow_rule_matches():
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="shell",
+            condition=SafetyCondition(field="cmd", op="truthy", value=""),
+            action="allow",
+            message="",
+        )
+    ]
+    from armature.registry.registry import ToolRegistry
+    SafetyHookBuilder.register(registry, rules, tool_registry=ToolRegistry(), strict_mode=True)
+    decision = await registry.run_pre_tool("shell", {"cmd": "echo hi"}, {})
+    assert decision == HookDecision.ALLOW
+
+
+async def test_reversibility_condition_blocks_none_tools():
+    """Safety rule using _tool_reversibility field blocks NONE tools."""
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+
+    tool_registry = ToolRegistry()
+    register_builtins(tool_registry)
+
+    hook_registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="*",
+            condition=SafetyCondition(field="_tool_reversibility", op="equals", value="none"),
+            action="block",
+            message="Irreversible tool blocked",
+        )
+    ]
+    SafetyHookBuilder.register(hook_registry, rules, tool_registry=tool_registry)
+    with pytest.raises(ToolBlocked):
+        await hook_registry.run_pre_tool("shell", {"cmd": "rm -rf /"}, {})
+
+
+async def test_reversibility_condition_allows_full_tools():
+    """Safety rule using _tool_reversibility field allows FULL tools."""
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    from armature.registry.registry import ToolRegistry
+    from armature.registry.builtins import register_builtins
+
+    tool_registry = ToolRegistry()
+    register_builtins(tool_registry)
+
+    hook_registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="*",
+            condition=SafetyCondition(field="_tool_reversibility", op="equals", value="none"),
+            action="block",
+            message="Irreversible tool blocked",
+        )
+    ]
+    SafetyHookBuilder.register(hook_registry, rules, tool_registry=tool_registry)
+    decision = await hook_registry.run_pre_tool("file_read", {"path": "/tmp/x"}, {})
+    assert decision == HookDecision.ALLOW
+
+
+async def test_permissive_mode_no_match_still_allows():
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+    from armature.registry.registry import ToolRegistry
+    registry = HookRegistry()
+    rules = [
+        ToolSafetyRule(
+            tool="shell",
+            condition=SafetyCondition(field="cmd", op="contains", value="NEVER"),
+            action="block",
+            message="blocked",
+        )
+    ]
+    SafetyHookBuilder.register(registry, rules, tool_registry=ToolRegistry(), strict_mode=False)
+    decision = await registry.run_pre_tool("http_get", {"url": "http://example.com"}, {})
+    assert decision == HookDecision.ALLOW

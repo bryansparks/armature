@@ -189,3 +189,115 @@ async def test_multiple_runs_coexist_in_shared_db(tmp_path):
     assert len(y) == 3
     all_traces = await store.query(workflow_name="shared-wf")
     assert len(all_traces) == 5
+
+
+# ── Phase B: inputs_hash and policy_version trace fields ──────────────────────
+
+async def test_trace_record_has_inputs_hash_field():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+    )
+    assert hasattr(trace, "inputs_hash")
+
+
+async def test_trace_record_has_policy_version_field():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+    )
+    assert hasattr(trace, "policy_version")
+
+
+async def test_inputs_hash_default_is_empty_string():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+    )
+    assert trace.inputs_hash == ""
+
+
+async def test_policy_version_default_is_empty_string():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+    )
+    assert trace.policy_version == ""
+
+
+async def test_inputs_hash_can_be_set():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        inputs_hash="abc123",
+    )
+    assert trace.inputs_hash == "abc123"
+
+
+async def test_policy_version_can_be_set():
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        policy_version="deadbeef1234",
+    )
+    assert trace.policy_version == "deadbeef1234"
+
+
+async def test_inputs_hash_persisted_and_retrieved(tmp_path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        inputs_hash="sha256abc123",
+    )
+    await store.record(trace)
+    results = await store.query(workflow_name="wf")
+    assert results[0].inputs_hash == "sha256abc123"
+
+
+async def test_policy_version_persisted_and_retrieved(tmp_path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        policy_version="v1policy",
+    )
+    await store.record(trace)
+    results = await store.query(workflow_name="wf")
+    assert results[0].policy_version == "v1policy"
+
+
+async def test_existing_db_upgraded_with_new_columns(tmp_path):
+    """Simulate a DB created without the new columns, then upgraded via init()."""
+    import aiosqlite
+    db_path = tmp_path / "old.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            CREATE TABLE traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL, workflow_name TEXT NOT NULL,
+                stage_id TEXT NOT NULL, role_type TEXT NOT NULL, model TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                latency_ms REAL DEFAULT 0.0, success INTEGER NOT NULL DEFAULT 1,
+                output_valid INTEGER NOT NULL DEFAULT 1, quorum_score REAL,
+                timestamp TEXT NOT NULL, inputs_json TEXT DEFAULT '{}',
+                outputs_json TEXT DEFAULT '{}', error_type TEXT,
+                escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT ''
+            )
+        """)
+        await db.commit()
+
+    store = TraceStore(db_path)
+    await store.init()  # should add inputs_hash and policy_version columns
+
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        inputs_hash="newhash", policy_version="newver",
+    )
+    await store.record(trace)
+    results = await store.query(workflow_name="wf")
+    assert results[0].inputs_hash == "newhash"
+    assert results[0].policy_version == "newver"
