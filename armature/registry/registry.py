@@ -11,6 +11,7 @@ class ToolDescriptor(BaseModel):
     handler: Callable
     parameters: dict[str, Any] = {}
     reversibility: Reversibility = Reversibility.FULL
+    postcondition: "Callable[[dict, Any], bool] | None" = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -40,4 +41,8 @@ class ToolRegistry:
                 f"Tool '{name}' requires explicit approval (permission: {desc.permission}). "
                 "Register a pre-tool hook to gate DESTRUCTIVE tools."
             )
-        return await desc.handler(args)
+        result = await desc.handler(args)
+        if desc.postcondition is not None and not desc.postcondition(args, result):
+            from armature.hooks.lifecycle import PostconditionFailed
+            raise PostconditionFailed(name, result)
+        return result

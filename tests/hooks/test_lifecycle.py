@@ -355,3 +355,24 @@ async def test_permissive_mode_no_match_still_allows():
     SafetyHookBuilder.register(registry, rules, tool_registry=ToolRegistry(), strict_mode=False)
     decision = await registry.run_pre_tool("http_get", {"url": "http://example.com"}, {})
     assert decision == HookDecision.ALLOW
+
+
+# ── Phase D: PostconditionFailed exception (RED) ─────────────────────────────
+
+def test_postcondition_failed_sets_tool_name():
+    from armature.hooks.lifecycle import PostconditionFailed
+    exc = PostconditionFailed("file_write", {"result": "ok"})
+    assert exc.tool_name == "file_write"
+
+
+def test_postcondition_failed_sets_result():
+    from armature.hooks.lifecycle import PostconditionFailed
+    result = {"status": "error"}
+    exc = PostconditionFailed("http_post", result)
+    assert exc.result == result
+
+
+def test_postcondition_failed_message_contains_tool_name():
+    from armature.hooks.lifecycle import PostconditionFailed
+    exc = PostconditionFailed("shell", "output")
+    assert "shell" in str(exc)

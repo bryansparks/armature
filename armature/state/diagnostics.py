@@ -12,6 +12,7 @@ class DiagnosticCode(str, Enum):
     OUTPUT_INVALID = "output_invalid"
     LOW_CONFIDENCE = "low_confidence"
     HIGH_ESCALATION = "high_escalation"
+    POSTCONDITION_FAILED = "postcondition_failed"
 
 
 class DiagnosticResult(BaseModel):
@@ -54,5 +55,11 @@ class DiagnosticAnalyzer:
                     code=DiagnosticCode.HIGH_ESCALATION,
                     stage_id=t.stage_id,
                     details=f"escalation_count={t.escalation_count}",
+                ))
+            if t.error_type == "PostconditionFailed":
+                results.append(DiagnosticResult(
+                    code=DiagnosticCode.POSTCONDITION_FAILED,
+                    stage_id=t.stage_id,
+                    details="tool postcondition failed",
                 ))
         return results

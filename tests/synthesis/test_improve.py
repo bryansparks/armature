@@ -703,3 +703,252 @@ def _make_llm_response(content: str):
     resp = MagicMock()
     resp.choices = [choice]
     return resp
+
+
+# ── Phase C: Drift Score (RED) ────────────────────────────────────────────────
+
+
+async def test_drift_score_field_defaults_to_zero():
+    report = ImprovementReport(
+        workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
+        n_traces=1, ihr_before=0.8, needs_improvement=False,
+        applied=False, diagnostics=[],
+    )
+    assert report.drift_score == 0.0
+
+
+async def test_load_all_verified_fixes_empty_log(tmp_path):
+    from armature.synthesis.improve import _load_all_verified_fixes
+    log = tmp_path / "nolog.jsonl"
+    result = _load_all_verified_fixes(log)
+    assert result == set()
+
+
+async def test_load_all_verified_fixes_reads_all_entries(tmp_path):
+    from armature.synthesis.improve import _load_all_verified_fixes
+    log = tmp_path / "improve.log.jsonl"
+    log.write_text(
+        json.dumps({"verified_fixes": ["output_invalid:analyst", "stage_failed:writer"]}) + "\n" +
+        json.dumps({"verified_fixes": ["low_confidence:judge"]}) + "\n"
+    )
+    result = _load_all_verified_fixes(log)
+    assert result == {"output_invalid:analyst", "stage_failed:writer", "low_confidence:judge"}
+
+
+async def test_load_all_verified_fixes_tolerates_missing_field(tmp_path):
+    from armature.synthesis.improve import _load_all_verified_fixes
+    log = tmp_path / "improve.log.jsonl"
+    log.write_text(
+        json.dumps({"verified_fixes": ["output_invalid:analyst"]}) + "\n" +
+        json.dumps({"other_field": "value"}) + "\n"
+    )
+    result = _load_all_verified_fixes(log)
+    assert result == {"output_invalid:analyst"}
+
+
+async def test_drift_score_zero_when_no_regressions(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    # log has one verified_fix that is NOT currently failing
+    log_file.write_text(json.dumps({"verified_fixes": ["stage_failed:other_stage"]}) + "\n")
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(run_id="r1", quorum_score=0.92)])  # healthy
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    report = await runner.analyze()
+    assert report.drift_score == 0.0
+
+
+async def test_drift_score_nonzero_when_previously_fixed_issue_regresses(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    # Prior cycle "fixed" output_invalid:analyst — but it is currently failing again
+    log_file.write_text(json.dumps({"verified_fixes": ["output_invalid:analyst"]}) + "\n")
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", output_valid=False),
+        make_trace(run_id="r2", output_valid=False),
+        make_trace(run_id="r3", output_valid=False),
+    ])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    with patch("armature.synthesis.improve.SpecRefiner.refine", _NO_REFINE):
+        report = await runner.analyze()
+    assert report.drift_score > 0.0
+
+
+async def test_drift_score_logged_to_jsonl(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(run_id="r1", quorum_score=0.92)])
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    await runner.analyze()
+    entry = json.loads(log_file.read_text().strip())
+    assert "drift_score" in entry
+
+
+# ── Phase F: Component Governance (RED) ─────────────────────────────────────
+
+
+async def test_classify_changes_routes_description_to_auto(tmp_path):
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    old_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Old description.
+"""
+    new_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: New description with more detail.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert "description" in str(auto) or len(auto) > 0
+    assert len(review) == 0
+
+
+async def test_classify_changes_routes_stage_addition_to_review(tmp_path):
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    old_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic.
+"""
+    new_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic.
+  - id: writer
+    role:
+      name: Writer
+      type: worker
+      description: Write the report.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert len(review) > 0
+
+
+async def test_requires_review_flag_on_improvement_report():
+    report = ImprovementReport(
+        workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
+        n_traces=1, ihr_before=0.8, needs_improvement=False,
+        applied=False, diagnostics=[],
+    )
+    assert report.requires_review is False
+    assert report.pending_path is None
+
+
+async def test_pending_yaml_written_when_review_required(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+    # A spec that adds a stage — this should trigger review_required
+    _REVISED_WITH_NEW_STAGE = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic.
+  - id: writer
+    role:
+      name: Writer
+      type: worker
+      description: Write the findings.
+"""
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_WITH_NEW_STAGE)
+        report = await runner.analyze()
+
+    assert report.requires_review is True
+    assert report.applied is False
+    pending = tmp_path / "wf.pending.yaml"
+    assert pending.exists()
+
+
+async def test_spec_not_overwritten_when_review_required(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+    _REVISED_WITH_NEW_STAGE = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic.
+  - id: writer
+    role:
+      name: Writer
+      type: worker
+      description: Write the findings.
+"""
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_WITH_NEW_STAGE)
+        await runner.analyze()
+
+    # Original spec must be unchanged
+    assert spec_file.read_text() == _MINIMAL_SPEC_YAML

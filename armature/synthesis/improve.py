@@ -202,6 +202,77 @@ class ImprovementReport:
     verified_fixes: list[str] = field(default_factory=list)
     missed_predictions: list[str] = field(default_factory=list)
     unexpected_regressions: list[str] = field(default_factory=list)
+    drift_score: float = 0.0
+    # Governance fields — set when proposed change requires human review
+    requires_review: bool = False
+    pending_path: Path | None = None
+
+
+_AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
+
+_REVIEW_REQUIRED_FIELDS = {"stages_added", "stages_removed", "output_schema", "safety_rules"}
+
+
+def _classify_changes(
+    old_spec: "HarnessSpec", new_spec: "HarnessSpec"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Classify spec changes into auto-apply vs review-required categories.
+
+    Returns (auto_changes, review_changes) where each is a dict of {description: detail}.
+    Auto-apply: role description, on_fail tweaks, model_tier, timeout_s changes.
+    Review-required: adding/removing stages, output_schema changes, safety_rules modifications.
+    """
+    auto: dict[str, Any] = {}
+    review: dict[str, Any] = {}
+
+    old_ids = {s.id for s in old_spec.stages}
+    new_ids = {s.id for s in new_spec.stages}
+
+    added = new_ids - old_ids
+    removed = old_ids - new_ids
+
+    if added:
+        review["stages_added"] = sorted(added)
+    if removed:
+        review["stages_removed"] = sorted(removed)
+
+    old_rules = [r.model_dump() for r in old_spec.safety_rules]
+    new_rules = [r.model_dump() for r in new_spec.safety_rules]
+    if old_rules != new_rules:
+        review["safety_rules"] = "modified"
+
+    old_stages = {s.id: s for s in old_spec.stages}
+    new_stages = {s.id: s for s in new_spec.stages}
+    for sid in old_ids & new_ids:
+        old_s = old_stages[sid]
+        new_s = new_stages[sid]
+        if old_s.role and new_s.role and old_s.role.description != new_s.role.description:
+            auto[f"description:{sid}"] = "changed"
+        if old_s.output_schema != new_s.output_schema:
+            review[f"output_schema:{sid}"] = "modified"
+        if old_s.timeout_s != new_s.timeout_s:
+            auto[f"timeout_s:{sid}"] = "changed"
+        if old_s.on_fail != new_s.on_fail:
+            auto[f"on_fail:{sid}"] = "changed"
+
+    return auto, review
+
+
+def _load_all_verified_fixes(log_path: Path) -> set[str]:
+    """Read all JSONL log entries and collect every verified_fix ever recorded."""
+    if not log_path.exists():
+        return set()
+    result: set[str] = set()
+    for line in log_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            result.update(entry.get("verified_fixes") or [])
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return result
 
 
 # ── SelfImproveRunner ─────────────────────────────────────────────────────────
@@ -265,6 +336,8 @@ class SelfImproveRunner:
         diagnostics: list[DiagnosticResult] = []
         needs_improvement = False
         applied = False
+        requires_review = False
+        _pending_path: Path | None = None
         proposed_spec: HarnessSpec | None = None
         proposed_yaml: str | None = None
         predicted_fixes: list[str] = []
@@ -278,6 +351,12 @@ class SelfImproveRunner:
 
         # Compute verification against previous cycle's predictions
         curr_diag_keys = self._diag_keys(diagnostics)
+
+        # Drift score: fraction of current failures that were previously "fixed"
+        ever_verified = _load_all_verified_fixes(self._log_path)
+        regressed = curr_diag_keys & ever_verified
+        drift_score = len(regressed) / max(len(curr_diag_keys), 1) if curr_diag_keys else 0.0
+
         verified_fixes, missed_predictions, unexpected_regressions = self._verify_predictions(
             prev_diag_keys=set(prev_entry.get("diagnostics_keys", [])) if prev_entry else set(),
             predicted_fixes=prev_entry.get("predicted_fixes", []) if prev_entry else [],
@@ -300,9 +379,18 @@ class SelfImproveRunner:
                 predicted_fixes = result.predicted_fixes
                 predicted_regressions = result.predicted_regressions
                 if self._auto_apply:
-                    self._write_spec_history(self._spec_path.read_text(encoding="utf-8"))
-                    self._spec_path.write_text(proposed_yaml, encoding="utf-8")
-                    applied = True
+                    _, review_changes = _classify_changes(spec, result.spec)
+                    if review_changes:
+                        pending_path = self._spec_path.with_suffix("").with_name(
+                            self._spec_path.stem + ".pending.yaml"
+                        )
+                        pending_path.write_text(proposed_yaml, encoding="utf-8")
+                        requires_review = True
+                        _pending_path = pending_path
+                    else:
+                        self._write_spec_history(self._spec_path.read_text(encoding="utf-8"))
+                        self._spec_path.write_text(proposed_yaml, encoding="utf-8")
+                        applied = True
 
         self._write_log(
             workflow_name=spec.name,
@@ -317,6 +405,7 @@ class SelfImproveRunner:
             verified_fixes=verified_fixes,
             missed_predictions=missed_predictions,
             unexpected_regressions=unexpected_regressions,
+            drift_score=drift_score,
         )
 
         return ImprovementReport(
@@ -335,6 +424,9 @@ class SelfImproveRunner:
             verified_fixes=verified_fixes,
             missed_predictions=missed_predictions,
             unexpected_regressions=unexpected_regressions,
+            drift_score=drift_score,
+            requires_review=requires_review,
+            pending_path=_pending_path,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -421,6 +513,7 @@ class SelfImproveRunner:
         verified_fixes: list[str],
         missed_predictions: list[str],
         unexpected_regressions: list[str],
+        drift_score: float = 0.0,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -443,6 +536,7 @@ class SelfImproveRunner:
             "verified_fixes": verified_fixes,
             "missed_predictions": missed_predictions,
             "unexpected_regressions": unexpected_regressions,
+            "drift_score": drift_score,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

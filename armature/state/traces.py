@@ -27,6 +27,7 @@ class TraceRecord(BaseModel):
     spec_version: str = ""
     inputs_hash: str = ""
     policy_version: str = ""
+    inputs_provenance: dict[str, str] = Field(default_factory=dict)
 
 
 class IhrResult(BaseModel):
@@ -79,6 +80,7 @@ class TraceStore:
                 "spec_version TEXT DEFAULT ''",
                 "inputs_hash TEXT DEFAULT ''",
                 "policy_version TEXT DEFAULT ''",
+                "inputs_provenance_json TEXT DEFAULT '{}'",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -95,8 +97,8 @@ class TraceStore:
                     input_tokens, output_tokens, latency_ms, success, output_valid,
                     quorum_score, timestamp, inputs_json, outputs_json,
                     error_type, escalation_count, spec_version,
-                    inputs_hash, policy_version)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    inputs_hash, policy_version, inputs_provenance_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -106,6 +108,7 @@ class TraceStore:
                     json.dumps(trace.inputs), json.dumps(trace.outputs),
                     trace.error_type, trace.escalation_count, trace.spec_version,
                     trace.inputs_hash, trace.policy_version,
+                    json.dumps(trace.inputs_provenance),
                 ),
             )
             await db.commit()
@@ -166,6 +169,7 @@ class TraceStore:
             spec_version=d.get("spec_version") or "",
             inputs_hash=d.get("inputs_hash") or "",
             policy_version=d.get("policy_version") or "",
+            inputs_provenance=json.loads(d.get("inputs_provenance_json") or "{}"),
         )
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:

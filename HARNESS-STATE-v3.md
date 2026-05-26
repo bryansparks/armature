@@ -3,7 +3,7 @@
 **Audience:** Engineering leadership  
 **Date:** 2026-05-26  
 **Author:** Bryan Sparks  
-**Status:** Active development — All phases complete (1,116 tests passing)
+**Status:** Active development — All phases complete (1,198 tests passing)
 
 ---
 
@@ -27,7 +27,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes six academic papers published between February and May 2026, plus one industry governance framework released in 2025, all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes seven academic papers published between February and May 2026, plus one industry governance framework released in 2025, all converging on the same insight: **the harness is more important than the model.**
 
 ### Paper 1: Natural-Language Agent Harnesses (NLAH)
 **Tsinghua University, March 2026** — arXiv:2603.25723
@@ -130,6 +130,28 @@ AGT's full architecture includes an identity/trust-mesh layer and privilege-ring
 - `ToolSafetyRule.action` expanded to `"block" | "warn" | "log" | "require_approval" | "allow"`
 - `HarnessSpec.safety_mode: "permissive" | "strict"` top-level field
 - `SafetyHookBuilder.register()` accepts `tool_registry` and `strict_mode`; handles all five actions; returns `BLOCK` on no-match when strict; short-circuits on `allow` before inspecting further rules
+
+### Paper 7: From Model Scaling to System Scaling
+**May 2026** — arXiv:2605.26112
+
+The systems paper that shifts the optimization target from model quality to harness architecture. The paper formalizes a six-component framework P_H = Φ(ℛ, ℳ, 𝒞, 𝒮, 𝒪, 𝒢) — Roles, Memory, Context, Skills, Observability, and Governance — and identifies three failure modes that the prior papers left unaddressed:
+
+- **"Stale-but-confident" (ℳ):** The harness injects memory entries that have grown stale, giving the LLM outdated facts with no indication of their age.
+- **"Exposure without access" (𝒞):** The harness passes context values to stages without recording where those values came from — making it impossible to audit the chain of information transfer after the fact.
+- **"Confident-but-unchecked" (𝒮):** Tool calls that succeed without exception are assumed to have had their intended effect — but no mechanism verifies the actual side effect.
+
+The paper also argues that system-level regression — a previously-fixed failure returning in a later improvement cycle — is more damaging than novel failure, because it erodes trust in the improvement loop itself. It proposes a drift score to surface this directly.
+
+Finally, the paper addresses governance: not all spec changes should be auto-applied. Structural changes (adding stages, modifying safety rules) require human review, while tactical changes (adjusting timeouts, softening descriptions) can be applied immediately. A well-governed harness writes proposed structural changes to a staging file, not to the live spec.
+
+**Armature contributions from this paper:**
+- `MemoryStore.staleness_threshold_days` — age threshold (default 30 days) beyond which a memory entry is flagged as stale; stale entries are returned in a `set[tuple[str, str]]` alongside the memory dict
+- `_stale_memory_keys` context injection — when stale keys are present at run start, a warning list is injected into context so the LLM prompt surface the fact explicitly
+- `TraceRecord.inputs_provenance` — `dict[str, str]` mapping every context key to its origin label: `"user_input"`, `"stage:{stage_id}"`, `"memory"`, or `"stale_memory"`; persisted to SQLite alongside each trace
+- `ImprovementReport.drift_score` — `len(current_failures ∩ ever_verified) / max(len(current_failures), 1)`; `_load_all_verified_fixes()` scans the full JSONL history (not just the last cycle) to build the cumulative set of ever-verified fixes
+- `ToolDescriptor.postcondition` — optional `Callable[[dict, Any], bool]`; called after every tool dispatch; `PostconditionFailed` exception raised on `False`; caught by the engine and recorded as `error_type="PostconditionFailed"`; `POSTCONDITION_FAILED` added to `DiagnosticCode`
+- `fan_in: "consensus"` — new fan-in strategy for subagent stages; parallel results are forwarded to `_consensus_judge()`, an async litellm call that synthesizes conflicting outputs into a single best answer
+- `_classify_changes(old_spec, new_spec)` — classifies every proposed spec change as auto-apply (descriptions, timeouts, retry limits) or review-required (stage additions/removals, `output_schema` changes, `safety_rules` modifications); review-required changes are written to `{spec}.pending.yaml` instead of overwriting the live spec; `ImprovementReport.requires_review` and `pending_path` fields surface this to callers
 
 ---
 
@@ -366,7 +388,7 @@ This is the strategic differentiator. Each loop makes the others more effective.
 
 ## Current Implementation State
 
-All planned phases are complete. 1,116 tests, passing.
+All planned phases are complete. 1,198 tests, passing.
 
 ### What's Built
 
@@ -414,6 +436,13 @@ All planned phases are complete. 1,116 tests, passing.
 | `SelfImproveRunner` | ✅ Done | Outer self-improvement loop; auto-applies revised spec; `armature improve` |
 | Improvement audit log | ✅ Done | JSONL log of every analysis cycle (IHR, diagnostics, applied flag) |
 | Prediction-verification loop | ✅ Done | `RefinerResult` carries `predicted_fixes`/`predicted_regressions`; each cycle verifies prior predictions against observed diagnostic shift |
+| Memory staleness detection | ✅ Done | `MemoryStore.staleness_threshold_days` (default 30 days); stale entries surface as `set[tuple]`; `_stale_memory_keys` injected into run context |
+| Context provenance tracking | ✅ Done | `TraceRecord.inputs_provenance: dict[str, str]`; every context key labelled `"user_input"`, `"stage:{id}"`, `"memory"`, or `"stale_memory"`; persisted to SQLite |
+| Drift score | ✅ Done | `ImprovementReport.drift_score`; `_load_all_verified_fixes()` reads full JSONL history; `score = len(regressed) / max(len(current), 1)` |
+| Post-condition verification | ✅ Done | `ToolDescriptor.postcondition: Callable`; `PostconditionFailed` exception; `POSTCONDITION_FAILED` diagnostic code; engine checks after every tool dispatch |
+| `fan_in: "consensus"` | ✅ Done | Parallel subagent results forwarded to `_consensus_judge()` (litellm); synthesizes conflicting outputs into single best answer |
+| Component governance | ✅ Done | `_classify_changes()` auto-applies safe changes; writes `{spec}.pending.yaml` for structural changes; `ImprovementReport.requires_review` + `pending_path` |
+| Rich dashboard (`armature dashboard`) | ✅ Done | 4-panel Rich terminal dashboard: health strip + sparkline, stage breakdown table, improvement timeline, safety & governance audit; `--watch`, `--format json`, `--last N` |
 
 ### CLI Commands
 
@@ -423,9 +452,13 @@ armature validate <spec>         # validate spec without running
 armature new [output]            # interactive spec creation wizard
 armature serve                   # start HTTP service
 armature optimize <spec>         # meta-harness optimizer (single proposal)
-armature report --run-id <id>    # human-readable run report with failure signatures
+armature report --run-id <id>    # per-run text report with failure signatures
+armature dashboard <spec>        # Rich 4-panel aggregate health dashboard (multi-run)
+armature dashboard <spec> --watch            # auto-refresh every 5 seconds
+armature dashboard <spec> --format json      # machine-readable JSON output
 armature export-traces           # export traces as SFT/DPO training data
 armature improve <spec>          # analyze traces, propose and apply spec improvements
+armature improve <spec> --apply-pending      # apply a staged pending.yaml revision
 ```
 
 ---
@@ -603,6 +636,13 @@ The pipeline: frontier Opus runs as judge → high-quality traces accumulate →
 | Trace policy version | `policy_version` SHA-256 of `safety_rules` in `TraceRecord` | ✅ |
 | Human approval gate in tool-call path | `require_approval` action on `ToolSafetyRule`; prompts operator for y/N | ✅ |
 | Fail-closed strict mode | `safety_mode: strict` on `HarnessSpec`; `action: allow` for explicit whitelisting | ✅ |
+| **Paper 7 — From Model Scaling to System Scaling** | | |
+| Memory staleness (ℳ failure) | `staleness_threshold_days`; `_stale_memory_keys` context injection | ✅ |
+| Context provenance (𝒞 failure) | `inputs_provenance` on `TraceRecord`; per-key origin labels | ✅ |
+| Drift score (𝒪 accountability) | `drift_score` on `ImprovementReport`; cross-cycle regression metric | ✅ |
+| Post-condition verification (𝒮 failure) | `ToolDescriptor.postcondition`; `PostconditionFailed`; `POSTCONDITION_FAILED` diagnostic | ✅ |
+| Consensus fan-in (𝒮) | `fan_in: "consensus"`; `_consensus_judge()` litellm call | ✅ |
+| Component governance (𝒢) | `_classify_changes()`; auto vs. review classification; `pending.yaml` staging | ✅ |
 
 **All research and industry-framework gaps are closed.** The next capability horizon is model-tier registration automation (auto-registering a LoRA-fine-tuned Qwen checkpoint as a model tier after export) and a visual workflow editor.
 
@@ -664,22 +704,25 @@ OTEL_EXPORTER_OTLP_ENDPOINT=... # optional: send traces to Jaeger/Grafana
 
 ## Summary
 
-Armature is a production-grade agent harness synthesized from six academic papers spanning February–May 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
+Armature is a production-grade agent harness synthesized from seven academic papers spanning February–May 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
 
 The sixth paper, AHE (arXiv:2604.25850), added accountability to the improvement loop: every spec revision now carries a falsifiable contract, and each subsequent run verifies whether the predicted fixes actually materialized. The harness does not just improve — it explains itself as it does, cycle by cycle.
+
+The seventh paper (arXiv:2605.26112) addressed three system-level failure modes the earlier papers left open: stale memory reaching LLMs without warning, context values flowing between stages without provenance, and tool side effects going unverified. It also introduced two architectural additions — a drift score that catches regressions across improvement cycles before they compound, and component governance that separates safe auto-applied changes from structural changes that warrant human review before deployment. The `fan_in: "consensus"` strategy closes the last gap: parallel subagent disagreements are now resolved by a dedicated judge model rather than silently discarded.
 
 The AGT governance layer added five capabilities the academic papers left open: a principled reversibility classification for every tool call, tamper-evident hashing of trace inputs and the governing policy, a human approval gate wired directly into the tool-call path, and a strict fail-closed mode for deployments where the default must be deny rather than allow. These are production governance primitives, not academic proposals — borrowed from an industry team that has been running agentic systems in regulated environments.
 
 The async HTTP service and LangGraph sidecar pattern complete the integration story: Armature is clearly positioned as a **batch-oriented multi-stage work engine**, not a conversational loop. LangGraph owns the conversation; Armature owns the heavy lifting inside each turn. The SSE event stream and latency acknowledgement pattern let chatbot users see progress immediately while multi-stage work runs in the background.
 
-With all six papers and the AGT framework implemented, the harness now has:
-- **Execution**: DAG orchestration, four role types, parallel fan-out, guided JSON output, model-tier auto-escalation
-- **Quality**: IHR metric, RaaS deliberation, output schema validation, declarative evaluation stages
+With all seven papers and the AGT framework implemented, the harness now has:
+- **Execution**: DAG orchestration, four role types, parallel fan-out (including consensus synthesis), guided JSON output, model-tier auto-escalation
+- **Quality**: IHR metric, RaaS deliberation, output schema validation, declarative evaluation stages, post-condition verification
 - **Safety**: fail-closed strict mode, five rule actions including human approval, reversibility-based blocking, `ToolBlocked` non-retryable exception
-- **Observability**: tamper-evident trace records with inputs hash and policy version, OpenTelemetry, run reports with failure signatures
-- **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, prediction-verification accounting, SFT/DPO trace export
+- **Observability**: tamper-evident trace records with inputs hash, policy version, and per-key provenance; OpenTelemetry; run reports with failure signatures; drift score for regression detection
+- **Memory**: cross-run persistence, staleness detection, `_stale_memory_keys` warnings, knowledge extraction
+- **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, prediction-verification accounting, component governance, SFT/DPO trace export
 
-1,116 tests. All research and industry-framework gaps closed.
+1,198 tests. All research and industry-framework gaps closed.
 
 ---
 

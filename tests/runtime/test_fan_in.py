@@ -254,3 +254,53 @@ async def test_per_item_exception_caught_as_fan_out_error(tmp_path):
     bad = next(r for r in results if "_fan_out_error" in r)
     assert good["item"] == "good"
     assert "item failed" in bad["_fan_out_error"]
+
+
+# ── Phase E: fan_in="consensus" (RED) ────────────────────────────────────────
+
+async def test_consensus_fan_in_calls_judge(tmp_path):
+    """fan_in='consensus' should invoke the judge LLM to synthesize parallel results."""
+    from unittest.mock import AsyncMock, patch
+    from armature.nodes.subagent import _fan_in
+
+    results = [{"answer": "42"}, {"answer": "43"}, {"answer": "42"}]
+
+    mock_judge = AsyncMock(return_value={"answer": "42", "consensus": True})
+    with patch("armature.nodes.subagent._consensus_judge", mock_judge):
+        result = _fan_in(results, "consensus")
+
+    # consensus strategy should mark that the judge needs to be called
+    assert result.get("_needs_consensus") is True
+
+
+async def test_consensus_judge_returns_dict(tmp_path):
+    """_consensus_judge must return a dict synthesizing all parallel outputs."""
+    from unittest.mock import AsyncMock, patch
+    from armature.nodes.subagent import _consensus_judge
+    from armature.spec.models import Stage, ModelTiers, ModelTierConfig
+
+    stage = Stage(
+        id="s",
+        subagent_spec="dummy.yaml",
+        fan_out=2,
+        fan_in="consensus",
+        depends_on=[],
+    )
+    results = [{"summary": "A says X"}, {"summary": "B says Y"}]
+
+    mock_response_msg = AsyncMock()
+    mock_response_msg.content = '{"consensus": "X is correct"}'
+    mock_response = AsyncMock()
+    mock_response.choices = [AsyncMock(message=mock_response_msg)]
+
+    with patch("armature.nodes.subagent.litellm_completion", AsyncMock(return_value=mock_response)):
+        result = await _consensus_judge(results, stage)
+
+    assert isinstance(result, dict)
+
+
+async def test_fan_in_consensus_invalid_value_raises(tmp_path):
+    """Unknown fan_in strategy should still return the list-wrapped fallback."""
+    from armature.nodes.subagent import _fan_in
+    result = _fan_in([{"a": 1}], "unknown_strategy")
+    assert result == {"results": [{"a": 1}]}

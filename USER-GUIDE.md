@@ -34,6 +34,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
     - [Permission levels](#permission-levels)
     - [What guardrails cover — and what they don't](#what-armature-guardrails-cover--and-what-they-dont)
 13. [Fan-out / Fan-in](#13-fan-out--fan-in)
+    - [Consensus fan-in](#consensus-fan-in)
 14. [Human gates in detail](#14-human-gates-in-detail)
 15. [Deliberative teams](#15-deliberative-teams)
     - [The three-round topology](#the-three-round-topology)
@@ -54,7 +55,13 @@ This guide covers everything you need to build agentic workflows with Armature: 
     - [Async lifecycle](#async-lifecycle)
     - [Error contracts](#error-contracts)
 20. [Self-improvement](#20-self-improvement)
+    - [Drift score](#drift-score)
+    - [Component governance](#component-governance)
 21. [Trace export for fine-tuning](#21-trace-export-for-fine-tuning)
+22. [Post-condition verification](#22-post-condition-verification)
+23. [Context provenance](#23-context-provenance)
+24. [Memory staleness](#24-memory-staleness)
+25. [Workflow health dashboard](#25-workflow-health-dashboard)
 
 ---
 
@@ -925,6 +932,44 @@ Memory is stored globally per workflow name — it survives session restarts and
 
 To use a shared memory DB across machines or reset the rolling window, use the `db` field to point to a specific path.
 
+### Memory staleness
+
+Memory entries older than a configurable threshold are flagged as stale at load time. Stale entries are still injected into context — the harness does not silently drop them — but a `_stale_memory_keys` warning list is also added to context so that downstream stages (and the LLM) are aware.
+
+```python
+from armature.state.memory import MemoryStore
+
+# Flag entries older than 14 days as stale (default is 30 days)
+store = MemoryStore(db_path, staleness_threshold_days=14)
+memories, stale_keys = await store.load("my_workflow")
+# stale_keys: set of (stage_id, capture_key) tuples
+```
+
+When the engine detects stale keys, it injects a list into context:
+
+```python
+context["_stale_memory_keys"] = ["synthesizer.recommendation", "evaluator.quality_score"]
+```
+
+A stage that uses memory can surface this warning in its prompt:
+
+```yaml
+- id: synthesizer
+  role:
+    description: |
+      Produce a recommendation.
+      {% if _stale_memory_keys %}
+      WARNING: The following memory entries may be outdated: {{ _stale_memory_keys | join(", ") }}
+      Weight them accordingly.
+      {% endif %}
+  signature:
+    input:
+      _memory: Prior run recommendations
+      _stale_memory_keys: Stale memory warnings
+```
+
+See §24 for the full staleness reference.
+
 ---
 
 ## 9. Jinja2 variables in specs
@@ -1287,6 +1332,29 @@ How to merge the list of child results:
 | `list` | (default) Returns `{"results": [result0, result1, ...]}` |
 | `merge` | Shallow-merges all child result dicts; later children overwrite earlier on key conflicts |
 | `first` | Returns only the first child's result |
+| `consensus` | Forwards all results to a judge LLM that synthesizes a single best answer |
+
+### Consensus fan-in
+
+When `fan_in: consensus`, the engine collects all parallel child results and calls a judge LLM (`openai/gpt-4o-mini` by default) to synthesize them into a single coherent output. This is useful when parallel agents may produce contradictory or overlapping results and you want an automated arbitrator rather than a raw merge.
+
+```yaml
+- id: parallel_analysts
+  subagent_spec: workflows/analyst.yml
+  fan_out: 4
+  fan_in: consensus    # LLM synthesizes the 4 analyst outputs
+  partition_key: documents
+  depends_on: [loader]
+```
+
+The consensus judge receives all child results as JSON and is instructed to produce a synthesized dict. If the judge's response is valid JSON, it is returned directly; otherwise it is wrapped as `{"consensus_output": "...", "source_results": [...]}`.
+
+Use `consensus` when:
+- Parallel agents may disagree and you want conflict resolution, not just aggregation
+- The results are semantically related and require synthesis rather than concatenation
+- You want a single structured output rather than a list to pass downstream
+
+Use `list` or `merge` when the parallel results are independent and the downstream stage should see all of them (e.g., a judge stage that deliberately synthesizes them itself).
 
 ### `partition_key`
 
@@ -2272,6 +2340,66 @@ The refiner makes targeted changes only — it does not rewrite stages that are 
 
 The refiner is explicitly constrained from adding or removing stages, or changing stage IDs.
 
+### Drift score
+
+The drift score measures how many previously-verified fixes have regressed in the current cycle. A score of `0.0` means no regressions among ever-fixed failures. A score above `0.5` means more than half of failures that were once successfully fixed have returned.
+
+```json
+{
+  "drift_score": 0.33,
+  "verified_fixes": ["output_invalid:analyst"],
+  "unexpected_regressions": ["output_invalid:summarizer"]
+}
+```
+
+The score is computed against the complete improvement history — not just the previous cycle — so a failure that was fixed three cycles ago and has since returned still counts. When `drift_score > 0.5`, the refiner's prompt includes an explicit regression warning to focus it on stability rather than novelty.
+
+The drift score appears on `ImprovementReport` and in the JSONL audit log:
+
+```python
+report = await runner.analyze()
+print(f"Drift: {report.drift_score:.2f}")
+```
+
+### Component governance
+
+Not all spec changes are equally safe to auto-apply. Changes to stage descriptions, retry limits, and timeouts are low-risk and reversible — the harness applies them immediately. Changes to stage structure (additions, removals), output schemas, or safety rules are harder to reverse and may have cascading effects — these require human review before deployment.
+
+When the refiner proposes a spec revision that includes review-required changes, the harness does **not** overwrite the live spec. Instead it writes a staging file:
+
+```
+my_workflow.pending.yaml   ← proposed revision (not yet live)
+my_workflow.yaml           ← unchanged live spec
+```
+
+`ImprovementReport` reflects this:
+
+```python
+report = await runner.analyze()
+if report.requires_review:
+    print(f"Review required — changes staged at: {report.pending_path}")
+```
+
+The JSONL audit log also records `requires_review: true` and the pending path. When you are ready to apply the staged revision:
+
+```bash
+# Apply the pending revision and delete the staging file
+armature improve my_workflow.yaml --apply-pending
+```
+
+**Classification rules:**
+
+| Change type | Classification |
+|---|---|
+| `role.description` | Auto-apply |
+| `stage.timeout_s` | Auto-apply |
+| `on_fail.loop.*` | Auto-apply |
+| Stage added or removed | Review required |
+| `stage.output_schema` changed | Review required |
+| `safety_rules` modified | Review required |
+
+If a proposed revision contains *only* auto-apply changes, the live spec is updated immediately as before. If it contains *any* review-required change, the entire revision goes to `pending.yaml`.
+
 ### Building traces
 
 The improvement system requires trace data. Run your workflow normally — each run automatically records traces:
@@ -2386,3 +2514,271 @@ A practical fine-tuning pipeline:
 3. Fine-tune a small model (e.g. Qwen 2.5 7B) on the exported data
 4. Point the workflow's `small` tier at your fine-tuned model
 5. Measure cost and quality — the fine-tuned small model often matches the frontier model on specialized tasks at a fraction of the cost
+
+---
+
+## 22. Post-condition verification
+
+Every tool call that completes without an exception is assumed to have succeeded — but no mechanism verifies the actual side effect. Post-condition verification closes this gap: you attach a callable to a `ToolDescriptor` that receives the tool's arguments and return value, and returns `True` (success) or `False` (failure).
+
+### Registering a post-condition
+
+```python
+from armature.registry.registry import ToolDescriptor
+from armature.permissions.permissions import PermissionLevel
+
+async def _write_file(args: dict) -> dict:
+    path = args["path"]
+    content = args["content"]
+    Path(path).write_text(content)
+    return {"written": True, "path": path}
+
+def _verify_file_written(args: dict, result: dict) -> bool:
+    return Path(args["path"]).exists()
+
+registry.register(ToolDescriptor(
+    name="file_write",
+    description="Write content to a file",
+    permission=PermissionLevel.WORKSPACE,
+    handler=_write_file,
+    parameters={
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+    },
+    postcondition=_verify_file_written,
+))
+```
+
+When the engine calls this tool:
+1. `_write_file(args)` is called and returns `{"written": True, "path": "..."}`.
+2. `_verify_file_written(args, result)` is called. If it returns `False`, a `PostconditionFailed` exception is raised.
+3. The engine catches `PostconditionFailed`, marks the trace as `success=False` with `error_type="PostconditionFailed"`, and the `DiagnosticAnalyzer` will surface a `POSTCONDITION_FAILED` failure signature on the next `armature improve` run.
+
+### Exception type
+
+```python
+from armature.hooks.lifecycle import PostconditionFailed
+
+try:
+    result = await registry.dispatch("file_write", args)
+except PostconditionFailed as e:
+    print(f"Tool '{e.tool_name}' succeeded but its side effect was not verified")
+    print(f"Return value: {e.result}")
+```
+
+### When to use
+
+Post-conditions are most valuable for:
+- **File writes** — verify the file now exists (or has the expected size/hash)
+- **HTTP POSTs** — verify the resource was actually created (status code, response body check)
+- **Database writes** — verify the row exists after insert
+- **External API calls** — verify the external state changed as expected
+
+For read-only tools (`file_read`, `http_get`), post-conditions are rarely needed.
+
+### Diagnostic integration
+
+A `PostconditionFailed` trace produces a `POSTCONDITION_FAILED` diagnostic code:
+
+```json
+{
+  "code": "postcondition_failed",
+  "stage_id": "file_writer",
+  "details": "tool postcondition failed"
+}
+```
+
+This is surfaced in `armature report` output and drives `armature improve` refinement targeting the affected stage.
+
+---
+
+## 23. Context provenance
+
+Every context key carries a hidden history: where did this value come from? Was it a user input? A prior stage's output? A memory entry? Context provenance makes this visible in the trace record, enabling post-hoc audits of data flow through a workflow.
+
+### How it works
+
+The engine maintains a provenance dict alongside the context dict. Every key is labelled with its origin:
+
+| Label | Meaning |
+|---|---|
+| `"user_input"` | Passed directly in `harness.run(inputs)` |
+| `"stage:{stage_id}"` | Output from a prior stage |
+| `"memory"` | Loaded from cross-run memory store |
+| `"stale_memory"` | Loaded from memory store but flagged as stale |
+
+### Reading provenance from traces
+
+Provenance is persisted on every `TraceRecord` as `inputs_provenance: dict[str, str]`:
+
+```python
+from armature.state.traces import TraceStore
+from pathlib import Path
+
+store = TraceStore(Path("~/.armature/traces.db").expanduser())
+await store.init()
+
+traces = await store.query(workflow_name="my_workflow")
+for trace in traces:
+    print(f"Stage {trace.stage_id}:")
+    for key, source in trace.inputs_provenance.items():
+        print(f"  {key!r} came from {source!r}")
+```
+
+Example output:
+```
+Stage analyst:
+  'topic' came from 'user_input'
+  'researcher' came from 'stage:researcher'
+  '_memory' came from 'memory'
+```
+
+### Audit use cases
+
+- **Compliance audits:** Prove that a decision stage only saw inputs from approved sources.
+- **Debug data contamination:** Find stages where a memory key unexpectedly overrode a fresher stage output.
+- **Staleness tracing:** Identify which stages received stale memory entries by filtering on `"stale_memory"` labels.
+- **Information flow analysis:** Reconstruct the complete data lineage of any context key at any stage.
+
+---
+
+## 24. Memory staleness
+
+Memory entries accumulate across many runs. An entry captured six months ago may no longer reflect reality. Staleness detection surfaces this automatically.
+
+### Configuration
+
+Set `staleness_threshold_days` when constructing `MemoryStore` directly, or rely on the engine default of 30 days:
+
+```python
+from armature.state.memory import MemoryStore
+from pathlib import Path
+
+store = MemoryStore(
+    db_path=Path("~/.armature/memory/my_workflow.db"),
+    staleness_threshold_days=14.0,  # flag entries older than 2 weeks
+)
+memories, stale_keys = await store.load("my_workflow")
+```
+
+`stale_keys` is a `set[tuple[str, str]]` — each tuple is `(stage_id, capture_key)` for an entry that exceeded the threshold.
+
+### Engine behaviour
+
+When `Harness` loads memory at run start, stale keys are injected into context automatically:
+
+```python
+context["_stale_memory_keys"] = [
+    "synthesizer.recommendation",  # format: "stage_id.capture_key"
+]
+```
+
+This key is always present — it is an empty list `[]` when no stale entries exist. You can always reference it in Jinja2 without a guard:
+
+```yaml
+description: |
+  {% if _stale_memory_keys %}
+  Note: the following memory entries may be outdated:
+  {{ _stale_memory_keys | join(", ") }}
+  Weight prior recommendations accordingly.
+  {% endif %}
+```
+
+### Relationship to context provenance
+
+Stale memory keys are labelled `"stale_memory"` in `TraceRecord.inputs_provenance`. This means you can query the trace store to find exactly which stages in a run received stale context:
+
+```python
+stale_stages = [
+    trace.stage_id
+    for trace in traces
+    if any(v == "stale_memory" for v in trace.inputs_provenance.values())
+]
+```
+
+### Tuning the threshold
+
+| Workflow type | Recommended threshold |
+|---|---|
+| Daily batch jobs | 7–14 days |
+| Weekly strategic analysis | 30–60 days |
+| Ad-hoc one-off runs | Disable memory or set `fresh: true` |
+| Regulatory compliance | 0 days (always treat as stale) |
+
+A threshold of `0.0` flags every memory entry as stale — useful for workflows where any cross-run carryover must be disclosed to the LLM explicitly.
+
+---
+
+## 25. Workflow health dashboard
+
+`armature dashboard` renders a Rich terminal dashboard aggregating data across multiple runs of a workflow. It is the primary observability surface for developers running Armature workflows in production.
+
+### Quick start
+
+```bash
+# Show dashboard for a spec file (reads workflow name from the spec)
+armature dashboard my_workflow.yml
+
+# Or reference by workflow name directly
+armature dashboard --workflow my-workflow-name
+
+# Auto-refresh every 5 seconds (Ctrl-C to quit)
+armature dashboard my_workflow.yml --watch
+
+# Machine-readable JSON output
+armature dashboard my_workflow.yml --format json
+```
+
+### Panels
+
+The dashboard renders four panels:
+
+**Health strip** (top, full width) — IHR gauge, delta arrow vs. prior run, and a Unicode sparkline showing IHR trend across the last 50 runs. Color: green ≥ 0.85, yellow 0.70–0.84, red < 0.70.
+
+**Stage breakdown** (left) — Per-stage table showing failure rate, average latency, quorum score, and escalation rate. Rows colored by health: red for ≥ 20% failure or quorum < 0.50, yellow for borderline, green for healthy. Post-run stages are rendered dim.
+
+**Improvement cycles** (right top) — Improvement log history, newest first. Shows per-cycle IHR, drift score, applied/pending status, and prediction verification counts. High drift (> 0.5) and pending reviews are highlighted.
+
+**Safety & governance** (right bottom) — Policy version stability, rule hit counts by action type, post-condition failure count, and stale memory key count.
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--last N` | `200` | Number of most recent traces to aggregate |
+| `--watch` | off | Auto-refresh every `--interval` seconds |
+| `--interval` | `5.0` | Refresh interval for `--watch` mode |
+| `--format json` | terminal | Output machine-readable JSON instead of Rich panels |
+| `--traces` | `~/.armature/traces.db` | Override traces database path |
+| `--log` | `{spec}.improve_log.jsonl` | Override improvement log path |
+
+### JSON output
+
+When `--format json`, the dashboard emits a structured dict:
+
+```json
+{
+  "workflow_name": "research-pipeline",
+  "total_runs": 47,
+  "current_ihr": 0.82,
+  "health_color": "yellow",
+  "ihr_delta": 0.03,
+  "ihr_trend": [0.70, 0.74, 0.79, 0.82],
+  "stage_stats": {
+    "researcher": {"run_count": 47, "failure_rate": 0.02, "avg_latency_ms": 1200, ...}
+  },
+  "improvement_cycles": [...],
+  "safety": {
+    "warn_hits": 4, "block_hits": 0, "postcondition_failures": 0,
+    "stale_memory_count": 2, "current_policy_version": "a3f7b2d1"
+  }
+}
+```
+
+This is suitable for ingestion into monitoring systems, Grafana dashboards, or CI health checks:
+
+```bash
+# Fail CI if workflow IHR drops below 0.80
+ihr=$(armature dashboard my_workflow.yml --format json | jq '.current_ihr')
+python -c "import sys; sys.exit(0 if $ihr >= 0.80 else 1)"
+```

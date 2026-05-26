@@ -1,10 +1,16 @@
 from __future__ import annotations
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from armature.nodes.base import BaseNode
 from armature.spec.models import Stage
 from armature.spec.loader import load_spec
+
+
+async def litellm_completion(**kwargs) -> Any:
+    import litellm
+    return await litellm.acompletion(**kwargs)
 
 
 def _partition(items: list, n: int) -> list[list[Any]]:
@@ -25,7 +31,40 @@ def _fan_in(results: list[dict[str, Any]], strategy: str) -> dict[str, Any]:
         for r in results:
             merged.update(r)
         return merged
+    if strategy == "consensus":
+        return {"results": results, "_needs_consensus": True}
     return {"results": results}
+
+
+async def _consensus_judge(results: list[dict[str, Any]], stage: Stage) -> dict[str, Any]:
+    """Call a judge LLM to synthesize conflicting parallel subagent outputs."""
+    results_text = json.dumps(results, indent=2, default=str)
+    model = "openai/gpt-4o-mini"
+    if stage.role is not None:
+        pass  # subagent stages don't have a role — use default
+
+    response = await litellm_completion(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a consensus judge. You receive multiple parallel agent outputs "
+                    "and must synthesize them into a single best answer. "
+                    "Return a JSON object with the synthesized result."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Parallel outputs to synthesize:\n{results_text}",
+            },
+        ],
+    )
+    raw = response.choices[0].message.content or "{}"
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {"consensus_output": raw, "source_results": results}
 
 
 class SubagentNode(BaseNode):
@@ -82,4 +121,7 @@ class SubagentNode(BaseNode):
         contexts = self._build_contexts(context, n)
         tasks = [self._run_child(ctx, i) for i, ctx in enumerate(contexts)]
         results = await asyncio.gather(*tasks, return_exceptions=False)
-        return _fan_in(list(results), self._stage.fan_in)
+        merged = _fan_in(list(results), self._stage.fan_in)
+        if merged.get("_needs_consensus"):
+            return await _consensus_judge(list(results), self._stage)
+        return merged

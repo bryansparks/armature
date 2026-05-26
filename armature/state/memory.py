@@ -3,7 +3,7 @@ import json
 import aiosqlite
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 
 _CREATE_SQL = """
@@ -22,8 +22,9 @@ _CREATE_SQL = """
 class MemoryStore:
     """Persist and retrieve cross-run stage outputs for a workflow."""
 
-    def __init__(self, db_path: Path | str):
+    def __init__(self, db_path: Path | str, staleness_threshold_days: float = 30.0):
         self._path = Path(db_path)
+        self._staleness_days = staleness_threshold_days
 
     async def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -65,26 +66,43 @@ class MemoryStore:
             )
             await db.commit()
 
-    async def load(self, workflow_name: str) -> dict[str, dict[str, list]]:
-        """Return memories as {stage_id: {capture_key: [newest, ..., oldest]}}."""
+    async def load(
+        self, workflow_name: str
+    ) -> Tuple[dict[str, dict[str, list]], set[tuple[str, str]]]:
+        """Return (memories, stale_keys).
+
+        memories  — {stage_id: {capture_key: [newest, ..., oldest]}}
+        stale_keys — {(stage_id, capture_key), ...} for entries older than staleness_threshold_days
+        """
         if not self._path.exists():
-            return {}
+            return {}, set()
+        now = datetime.now(timezone.utc)
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT stage_id, capture_key, value FROM memories "
+                "SELECT stage_id, capture_key, value, timestamp FROM memories "
                 "WHERE workflow_name=? ORDER BY timestamp DESC",
                 (workflow_name,),
             )
             rows = await cursor.fetchall()
 
         result: dict[str, dict[str, list]] = {}
+        stale_keys: set[tuple[str, str]] = set()
         for row in rows:
             stage = row["stage_id"]
             key = row["capture_key"]
             val = json.loads(row["value"])
             result.setdefault(stage, {}).setdefault(key, []).append(val)
-        return result
+            try:
+                ts = datetime.fromisoformat(row["timestamp"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                age_days = (now - ts).total_seconds() / 86400
+                if age_days > self._staleness_days:
+                    stale_keys.add((stage, key))
+            except (ValueError, TypeError):
+                pass
+        return result, stale_keys
 
     async def clear(self, workflow_name: str) -> None:
         async with aiosqlite.connect(self._path) as db:

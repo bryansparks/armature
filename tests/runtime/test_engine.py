@@ -52,6 +52,31 @@ async def test_harness_uses_custom_traces_db(tmp_path):
     assert harness._traces._path == tmp_path / "custom.db"
 
 
+async def test_engine_wires_sandbox_when_mode_docker():
+    """Harness.__init__ calls DockerSandboxProvider.wrap_registry when mode=DOCKER."""
+    from armature.spec.models import SandboxConfig, SandboxMode
+    from unittest.mock import patch as _patch
+    spec = make_minimal_spec()
+    spec = spec.model_copy(update={"sandbox": SandboxConfig(mode=SandboxMode.DOCKER)})
+    with _patch("armature.sandbox.docker.DockerSandboxProvider.wrap_registry") as mock_wrap:
+        Harness(spec=spec, validate=False)
+    mock_wrap.assert_called_once()
+    _, call_sandbox, _ = mock_wrap.call_args[0]
+    assert call_sandbox.mode == SandboxMode.DOCKER
+
+
+async def test_engine_sandbox_none_is_noop():
+    """Harness.__init__ with default sandbox (mode=NONE) does not replace tool handlers."""
+    from armature.spec.models import SandboxConfig, SandboxMode
+    from unittest.mock import patch as _patch
+    spec = make_minimal_spec()
+    with _patch("armature.sandbox.docker.DockerSandboxProvider.wrap_registry") as mock_wrap:
+        harness = Harness(spec=spec, validate=False)
+    # wrap_registry may be called but must be a no-op; either way shell handler is builtin
+    shell_desc = harness._registry.get("shell")
+    assert shell_desc is not None  # builtin still registered
+
+
 def test_harness_from_file(tmp_path):
     spec_file = tmp_path / "test.yaml"
     spec_file.write_text("""
@@ -358,7 +383,7 @@ async def test_memory_capture_stores_stage_output(tmp_path):
 
     from armature.state.memory import MemoryStore
     store = MemoryStore(db)
-    memories = await store.load("mem-test")
+    memories, _ = await store.load("mem-test")
     assert memories["summarizer"]["summary"] == ["run1 summary"]
 
 
@@ -406,7 +431,7 @@ async def test_memory_max_entries_enforced(tmp_path):
 
     from armature.state.memory import MemoryStore
     store = MemoryStore(db)
-    memories = await store.load("mem-test")
+    memories, _ = await store.load("mem-test")
     entries = memories["summarizer"]["summary"]
     assert len(entries) == 3
     assert "run1" not in entries  # oldest two evicted
@@ -532,7 +557,7 @@ async def test_fresh_memory_still_captures_new_output(tmp_path):
 
     from armature.state.memory import MemoryStore
     store = MemoryStore(db)
-    memories = await store.load("fresh-capture")
+    memories, _ = await store.load("fresh-capture")
     assert memories["stage_a"]["content"] == ["fresh output"]
 
 

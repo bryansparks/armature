@@ -505,5 +505,71 @@ def channels_start(
     typer.echo("(Live channel server not yet implemented — spec validated successfully.)")
 
 
+@app.command()
+def dashboard(
+    spec: Path = typer.Argument(None, help="Workflow spec YAML (extracts workflow name)"),
+    workflow: str = typer.Option(None, "--workflow", "-w", help="Workflow name (alternative to spec path)"),
+    traces_db: Path = typer.Option(None, "--traces", help="Path to traces.db (default: ~/.armature/traces.db)"),
+    improve_log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL"),
+    last: int = typer.Option(200, "--last", help="Number of most recent traces to aggregate"),
+    watch: bool = typer.Option(False, "--watch", is_flag=True, help="Auto-refresh every --interval seconds"),
+    interval: float = typer.Option(5.0, "--interval", help="Refresh interval in seconds for --watch mode"),
+    format: str = typer.Option("terminal", "--format", "-f", help="Output format: terminal | json"),
+):
+    """Show a Rich multi-panel workflow health dashboard aggregated across runs."""
+    try:
+        from rich.console import Console
+    except ImportError:
+        typer.echo("Rich is required for the dashboard. Install it: pip install rich", err=True)
+        raise typer.Exit(1)
+
+    from armature.report.loader import load_dashboard_data
+    from armature.report.layout import render_terminal, render_terminal_watch, render_json
+
+    # Resolve workflow name
+    wf_name = workflow
+    if wf_name is None and spec is not None:
+        if not spec.exists():
+            typer.echo(f"Spec not found: {spec}", err=True)
+            raise typer.Exit(1)
+        from armature.spec.loader import load_spec
+        try:
+            loaded = load_spec(spec)
+            wf_name = loaded.name
+        except Exception as exc:
+            typer.echo(f"Could not parse spec: {exc}", err=True)
+            raise typer.Exit(1)
+
+    if wf_name is None:
+        typer.echo("Provide a spec path or --workflow <name>.", err=True)
+        raise typer.Exit(1)
+
+    db = traces_db or Path("~/.armature/traces.db").expanduser()
+
+    async def _load():
+        return await load_dashboard_data(
+            wf_name,
+            traces_db=db,
+            improve_log=improve_log,
+            last_n=last,
+        )
+
+    if format == "json":
+        data = asyncio.run(_load())
+        import json as _json
+        typer.echo(_json.dumps(render_json(data), indent=2))
+        return
+
+    console = Console()
+
+    if watch:
+        def _loader():
+            return asyncio.run(_load())
+        render_terminal_watch(_loader, interval=interval, console=console)
+    else:
+        data = asyncio.run(_load())
+        render_terminal(data, console=console)
+
+
 if __name__ == "__main__":
     app()

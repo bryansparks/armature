@@ -121,3 +121,32 @@ def test_diagnostics_across_multiple_stages():
 
 def test_empty_traces_returns_empty():
     assert DiagnosticAnalyzer([]).analyze() == []
+
+
+# ── Phase D: Post-condition Verification (RED) ────────────────────────────────
+
+def test_postcondition_failed_diagnostic_code_exists():
+    assert hasattr(DiagnosticCode, "POSTCONDITION_FAILED")
+    assert DiagnosticCode.POSTCONDITION_FAILED.value == "postcondition_failed"
+
+
+def test_postcondition_failed_trace_produces_diagnostic():
+    traces = [make_trace(success=False, output_valid=False, error_type="PostconditionFailed")]
+    results = DiagnosticAnalyzer(traces).analyze()
+    codes = [r.code for r in results]
+    assert DiagnosticCode.POSTCONDITION_FAILED in codes
+
+
+def test_postcondition_failed_diagnostic_has_correct_stage():
+    traces = [make_trace(stage_id="uploader", success=False, error_type="PostconditionFailed")]
+    results = DiagnosticAnalyzer(traces).analyze()
+    pf_results = [r for r in results if r.code == DiagnosticCode.POSTCONDITION_FAILED]
+    assert len(pf_results) == 1
+    assert pf_results[0].stage_id == "uploader"
+
+
+def test_non_postcondition_error_does_not_produce_postcondition_diagnostic():
+    traces = [make_trace(success=False, error_type="TimeoutError")]
+    results = DiagnosticAnalyzer(traces).analyze()
+    codes = [r.code for r in results]
+    assert DiagnosticCode.POSTCONDITION_FAILED not in codes

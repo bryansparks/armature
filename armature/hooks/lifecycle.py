@@ -34,6 +34,13 @@ class ToolBlocked(Exception):
         self.message = message
 
 
+class PostconditionFailed(Exception):
+    def __init__(self, tool_name: str, result: Any) -> None:
+        super().__init__(f"Postcondition failed for tool '{tool_name}'")
+        self.tool_name = tool_name
+        self.result = result
+
+
 class HookRegistry:
     def __init__(self):
         self._hooks: dict[HookPhase, list[Callable]] = {p: [] for p in HookPhase}

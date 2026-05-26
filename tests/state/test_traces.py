@@ -301,3 +301,75 @@ async def test_existing_db_upgraded_with_new_columns(tmp_path):
     results = await store.query(workflow_name="wf")
     assert results[0].inputs_hash == "newhash"
     assert results[0].policy_version == "newver"
+
+
+# ── Phase B: Context Provenance (RED) ────────────────────────────────────────
+
+async def test_inputs_provenance_field_defaults_to_empty(tmp_path):
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+    )
+    assert trace.inputs_provenance == {}
+
+
+async def test_inputs_provenance_persisted_and_retrieved(tmp_path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    prov = {"query": "user_input", "context": "stage:summarizer"}
+    trace = TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="test-model",
+        inputs_provenance=prov,
+    )
+    await store.record(trace)
+    results = await store.query(workflow_name="wf")
+    assert results[0].inputs_provenance == prov
+
+
+async def test_inputs_provenance_round_trips_nested_values(tmp_path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    prov = {
+        "result": "stage:analyst",
+        "memories": "memory:analyst.summary",
+        "user_query": "user_input",
+    }
+    trace = TraceRecord(
+        run_id="r2", workflow_name="wf", stage_id="s2",
+        role_type="worker", model="test-model",
+        inputs_provenance=prov,
+    )
+    await store.record(trace)
+    results = await store.query(workflow_name="wf")
+    assert results[0].inputs_provenance == prov
+
+
+async def test_old_db_without_provenance_column_returns_empty_dict(tmp_path):
+    import aiosqlite
+    db_path = tmp_path / "old_noprov.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            CREATE TABLE traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL, workflow_name TEXT NOT NULL,
+                stage_id TEXT NOT NULL, role_type TEXT NOT NULL, model TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                latency_ms REAL DEFAULT 0.0, success INTEGER NOT NULL DEFAULT 1,
+                output_valid INTEGER NOT NULL DEFAULT 1, quorum_score REAL,
+                timestamp TEXT NOT NULL, inputs_json TEXT DEFAULT '{}',
+                outputs_json TEXT DEFAULT '{}', error_type TEXT,
+                escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '',
+                inputs_hash TEXT DEFAULT '', policy_version TEXT DEFAULT ''
+            )
+        """)
+        await db.execute(
+            "INSERT INTO traces (run_id, workflow_name, stage_id, role_type, model, timestamp) "
+            "VALUES ('r1','wf','s1','worker','model','2025-01-01T00:00:00+00:00')"
+        )
+        await db.commit()
+
+    store = TraceStore(db_path)
+    await store.init()
+    results = await store.query(workflow_name="wf")
+    assert results[0].inputs_provenance == {}

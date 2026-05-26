@@ -105,6 +105,19 @@ def test_sandbox_config_default_workspace():
     assert SandboxConfig().workspace == "/workspace"
 
 
+def test_sandbox_config_default_host_workspace_is_dot():
+    """SandboxConfig defaults host_workspace to '.' (resolved at engine init)."""
+    from armature.spec.models import SandboxConfig
+    assert SandboxConfig().host_workspace == "."
+
+
+def test_sandbox_config_host_workspace_round_trips():
+    """SandboxConfig stores a custom host_workspace path."""
+    from armature.spec.models import SandboxConfig, SandboxMode
+    cfg = SandboxConfig(mode=SandboxMode.DOCKER, host_workspace="/tmp/project")
+    assert cfg.host_workspace == "/tmp/project"
+
+
 def test_sandbox_config_default_env_is_empty_dict():
     """SandboxConfig defaults env to an empty dict."""
     from armature.spec.models import SandboxConfig

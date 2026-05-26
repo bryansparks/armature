@@ -69,6 +69,12 @@ class Harness:
         self._registry = ToolRegistry()
         register_builtins(self._registry)
         self._load_tool_modules()
+        from armature.sandbox.docker import DockerSandboxProvider
+        DockerSandboxProvider.wrap_registry(
+            self._registry,
+            self._spec.sandbox,
+            Path(self._spec.sandbox.host_workspace).expanduser().resolve(),
+        )
         self._policy_version = hashlib.sha256(
             str([r.model_dump() for r in self._spec.safety_rules]).encode()
         ).hexdigest()[:12]
@@ -185,6 +191,9 @@ class Harness:
             await self._traces.init()
             self._traces_initialized = True
 
+    def _get_provenance(self) -> dict[str, str]:
+        return getattr(self, "_provenance", {})
+
     async def _execute_stage(self, stage: Stage, context: dict[str, Any]) -> Any:
         await self._session.append(SessionEvent(type="stage_start", data={"stage": stage.id}))
 
@@ -248,6 +257,7 @@ class Harness:
                         await self._hooks.run_post_tool(stage.adapter, result, context)
                         await self._ensure_traces()
                         script_latency = (time.monotonic() - t0) * 1000
+                        self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
                         await self._traces.record(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
@@ -264,6 +274,7 @@ class Harness:
                             policy_version=self._policy_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
+                            inputs_provenance=dict(self._get_provenance()),
                         ))
                     elif stage.role:
                         _stage_type = "llm"
@@ -288,6 +299,8 @@ class Harness:
                         latency = (time.monotonic() - t0) * 1000
                         span.set_attribute("latency_ms", latency)
                         output_valid = "_parse_error" not in result
+                        self._get_provenance().update({k: f"stage:{stage.id}" for k in result
+                                                      if not k.startswith("_")})
                         await self._traces.record(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
@@ -308,6 +321,7 @@ class Harness:
                             policy_version=self._policy_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
+                            inputs_provenance=dict(self._get_provenance()),
                         ))
                     else:
                         raise ValueError(
@@ -341,6 +355,7 @@ class Harness:
                                 ).hexdigest()[:32],
                                 policy_version=self._policy_version,
                                 inputs={k: str(v)[:200] for k, v in context.items()},
+                                inputs_provenance=dict(self._get_provenance()),
                             ))
                         except Exception:
                             pass  # telemetry must never block execution
@@ -638,6 +653,7 @@ class Harness:
         context = dict(inputs or {})
         context["run_id"] = self._run_id
         self._validate_inputs(context)
+        self._provenance: dict[str, str] = {k: "user_input" for k in (inputs or {})}
 
         # Load prior checkpoint results so downstream stages can reference them
         if self._checkpoint is not None and not force:
@@ -653,9 +669,16 @@ class Harness:
             mem_cfg = self._memory_config  # type: ignore[union-attr]
             if mem_cfg.fresh:
                 memories: dict = {}
+                stale_keys: set = set()
             else:
-                memories = await self._memory_store.load(self._spec.name)
+                memories, stale_keys = await self._memory_store.load(self._spec.name)
             context[mem_cfg.inject_as] = memories
+            self._provenance[mem_cfg.inject_as] = "memory"
+            if stale_keys:
+                context["_stale_memory_keys"] = [
+                    f"{stage_id}.{capture_key}" for stage_id, capture_key in sorted(stale_keys)
+                ]
+                self._provenance["_stale_memory_keys"] = "stale_memory"
 
             if self._knowledge_store is not None:
                 await self._knowledge_store.init()
@@ -729,7 +752,7 @@ class Harness:
             # Post-run knowledge extraction (non-blocking)
             if self._knowledge_extractor is not None and self._memory_store is not None:
                 try:
-                    updated_memories = await self._memory_store.load(self._spec.name)
+                    updated_memories, _ = await self._memory_store.load(self._spec.name)
                     await self._knowledge_extractor.extract(
                         updated_memories,
                         workflow_name=self._spec.name,
