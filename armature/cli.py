@@ -506,6 +506,13 @@ def channels_start(
 
 
 @app.command()
+def demo() -> None:
+    """Run the live quality witness — test suite + capability overview for new developers."""
+    from armature.demo import run_demo
+    run_demo()
+
+
+@app.command()
 def dashboard(
     spec: Path = typer.Argument(None, help="Workflow spec YAML (extracts workflow name)"),
     workflow: str = typer.Option(None, "--workflow", "-w", help="Workflow name (alternative to spec path)"),
