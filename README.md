@@ -128,9 +128,6 @@ Armature ships with a tool registry pre-loaded with the following tools. Any sta
 | `shell` | WORKSPACE | Run a shell command; returns stdout, stderr, exit_code |
 | `http_get` | NETWORK | HTTP GET request; returns status and body |
 | `http_post` | NETWORK | Authenticated HTTP POST with JSON body and custom headers; returns status and body |
-| `tessera.retrieve` | NETWORK | Retrieve relevant document chunks from a Tessera RAG corpus |
-| `quorum.deliberate` | NETWORK | Run structured multi-agent deliberation via Quorum |
-| `alembic.submit` | NETWORK | Submit a high-quality execution trace to Alembic for SLM fine-tuning |
 
 `http_post` is the general-purpose adapter for any external API — image generation, ad platforms, analytics services, webhooks, etc. Pass auth credentials in `headers`:
 
@@ -217,11 +214,7 @@ The tool modules live entirely in your application project. Armature imports the
 | Compliance documentation | Regulatory corpus retrieval, template filler, diff checker |
 | Code review pipeline | GitHub API, static analysis runner, security scanner |
 
-Each use case is a YAML workflow spec + a small set of Python tool modules. The Armature engine, Steward approval lifecycle, and Tessera knowledge layer are shared infrastructure across all of them.
-
-### Reference implementation
-
-`docs/use-case-ad-campaign.md` — complete architecture, workflow specs, tool modules, and brand corpus for a social ad campaign automation system built on Armature, Steward, and Tessera.
+Each use case is a YAML workflow spec + a small set of Python tool modules. The Armature engine is the shared execution layer across all of them.
 
 ---
 

@@ -9,6 +9,7 @@ htmlcov/
 .env
 
 # Internal architecture and scratch files (not for public repo)
+examples/dangerous-pretzel/
 HARNESS-STATE-v3.md
 VISION.md
 taking_stock.txt
@@ -17,5 +18,6 @@ armature-*.png
 docs/superpowers/
 docs/plan-*.md
 docs/deferred-research.md
+docs/use-case-ad-campaign.md
 docs/ARMATURE-AGENTCORE.md
 docs/plan-gaps-agentcore.md

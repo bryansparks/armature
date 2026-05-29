@@ -280,9 +280,6 @@ def test_register_builtins_registers_expected_tools():
     assert "shell" in names
     assert "http_get" in names
     assert "http_post" in names
-    assert "quorum.deliberate" in names
-    assert "tessera.retrieve" in names
-    assert "alembic.submit" in names
 
 
 def test_register_builtins_tool_count():
@@ -291,7 +288,7 @@ def test_register_builtins_tool_count():
 
     registry = ToolRegistry()
     register_builtins(registry)
-    assert len(registry.descriptors()) == 8
+    assert len(registry.descriptors()) == 5
 
 
 # ── Reversibility metadata ─────────────────────────────────────────────────────
@@ -340,32 +337,6 @@ def test_http_post_reversibility_none():
     register_builtins(registry)
     assert registry.get("http_post").reversibility == Reversibility.NONE
 
-
-def test_quorum_deliberate_reversibility_full():
-    from armature.registry.registry import ToolRegistry
-    from armature.registry.builtins import register_builtins
-    from armature.permissions.permissions import Reversibility
-    registry = ToolRegistry()
-    register_builtins(registry)
-    assert registry.get("quorum.deliberate").reversibility == Reversibility.FULL
-
-
-def test_tessera_retrieve_reversibility_full():
-    from armature.registry.registry import ToolRegistry
-    from armature.registry.builtins import register_builtins
-    from armature.permissions.permissions import Reversibility
-    registry = ToolRegistry()
-    register_builtins(registry)
-    assert registry.get("tessera.retrieve").reversibility == Reversibility.FULL
-
-
-def test_alembic_submit_reversibility_none():
-    from armature.registry.registry import ToolRegistry
-    from armature.registry.builtins import register_builtins
-    from armature.permissions.permissions import Reversibility
-    registry = ToolRegistry()
-    register_builtins(registry)
-    assert registry.get("alembic.submit").reversibility == Reversibility.NONE
 
 
 def test_tool_descriptor_default_reversibility_is_full():

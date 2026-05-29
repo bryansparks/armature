@@ -3,9 +3,6 @@ import httpx
 from pathlib import Path
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
 from armature.permissions.permissions import Reversibility
-from armature.skills import quorum as _quorum_skill
-from armature.skills import tessera as _tessera_skill
-from armature.skills import alembic as _alembic_skill
 
 
 async def _file_read(args: dict) -> dict:
@@ -85,37 +82,5 @@ def register_builtins(registry: ToolRegistry) -> None:
             "body": {"type": ["object", "string"], "optional": True},
             "headers": {"type": "object", "optional": True},
             "timeout": {"type": "integer", "optional": True},
-        },
-    ))
-    registry.register(ToolDescriptor(
-        name="quorum.deliberate",
-        description="Run structured multi-agent deliberation on a topic via Quorum",
-        permission=PermissionLevel.NETWORK, reversibility=Reversibility.FULL,
-        handler=_quorum_skill.deliberate,
-        parameters={
-            "topic": {"type": "string"},
-            "brief": {"type": "string", "optional": True},
-            "agents": {"type": "array", "optional": True},
-        },
-    ))
-    registry.register(ToolDescriptor(
-        name="tessera.retrieve",
-        description="Retrieve relevant document chunks from Tessera RAG",
-        permission=PermissionLevel.NETWORK, reversibility=Reversibility.FULL,
-        handler=_tessera_skill.retrieve,
-        parameters={
-            "query": {"type": "string"},
-            "top_k": {"type": "integer", "optional": True},
-        },
-    ))
-    registry.register(ToolDescriptor(
-        name="alembic.submit",
-        description="Submit a high-quality execution trace to Alembic for SLM fine-tuning",
-        permission=PermissionLevel.NETWORK, reversibility=Reversibility.NONE,
-        handler=_alembic_skill.submit_trace,
-        parameters={
-            "trace": {"type": "object", "description": "TraceRecord as dict"},
-            "score": {"type": "number", "optional": True},
-            "alembic_url": {"type": "string", "optional": True},
         },
     ))

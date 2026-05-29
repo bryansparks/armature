@@ -1163,12 +1163,9 @@ Built-in tool reversibility values:
 |---|---|
 | `file_read` | `full` |
 | `http_get` | `full` |
-| `quorum.deliberate` | `full` |
-| `tessera.retrieve` | `full` |
 | `file_write` | `partial` |
 | `shell` | `none` |
 | `http_post` | `none` |
-| `alembic.submit` | `none` |
 
 Custom tools default to `full` unless you set `reversibility` when constructing their `ToolDescriptor`.
 
@@ -1955,9 +1952,6 @@ Armature pre-registers these tools in every harness. They are available to any s
 | `shell` | WORKSPACE | `cmd` | `{ stdout, stderr, exit_code }` |
 | `http_get` | NETWORK | `url` | `{ status, body }` |
 | `http_post` | NETWORK | `url`, `body?`, `headers?`, `timeout?` | `{ status, body }` |
-| `tessera.retrieve` | NETWORK | `query`, `top_k?` | `{ chunks }` |
-| `quorum.deliberate` | NETWORK | `topic`, `brief?`, `agents?` | `{ verdict, rationale }` |
-| `alembic.submit` | NETWORK | `trace`, `score?`, `alembic_url?` | `{ submitted }` |
 
 **`http_post`** is the general bridge to any external API. Pass `headers` for authentication:
 
@@ -2045,13 +2039,9 @@ my-automation-app/
 │   ├── intake.yaml            # Brief intake + platform recommendation
 │   ├── concept-gen.yaml       # 3 copy variants + DALL-E images + brand judge
 │   └── monitoring.yaml        # Daily metrics collection + verdict
-└── corpus/
-    └── brand.md               # Brand knowledge loaded into Tessera
 ```
 
 Each tool module handles one external integration. The YAML spec wires them together with LLM reasoning stages. Armature executes the whole chain — the tool modules are domain-specific; the harness is reusable infrastructure.
-
-See `docs/use-case-ad-campaign.md` in this repo for a complete reference implementation (Dangerous Pretzel Co. social ad campaign automation).
 
 ---
 
@@ -2506,7 +2496,7 @@ summary = await exporter.export_dpo(
 
 ### Quality filtering
 
-The `min_quorum_score` filter is the primary quality gate. Quorum score is set by multi-agent deliberation stages in your workflow (using the `quorum.deliberate` builtin tool). If your workflow doesn't use quorum scoring, all traces have a `null` quorum score and the filter is effectively disabled — you may want to set a high `min_quorum_score` anyway to filter on other criteria, or post-process the exported JSONL manually.
+The `min_quorum_score` filter is the primary quality gate. Quorum score is auto-extracted from judge stage outputs — any field named `confidence`, `score`, or `quality_score` is recorded as the `quorum_score` on the trace. If your workflow doesn't use judge stages with scored outputs, all traces have a `null` quorum score and the filter is effectively disabled — you may want to post-process the exported JSONL manually.
 
 A practical fine-tuning pipeline:
 1. Run the workflow many times with diverse inputs to build a trace corpus
