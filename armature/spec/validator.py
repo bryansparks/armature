@@ -250,6 +250,25 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                         stage_id=stage.id,
                     ))
 
+    # ── Only-tighten safety rule composition (KYA-inspired) ──────────────────
+    # An allow rule targeting the same tool as a block rule (or wildcard block)
+    # potentially loosens a restriction — flag as a conflict.
+    block_tools = {r.tool for r in spec.safety_rules if r.action == "block"}
+    allow_rules = [r for r in spec.safety_rules if r.action == "allow"]
+    for allow_rule in allow_rules:
+        # A specific allow rule conflicts with any wildcard block
+        # A specific allow rule for tool X conflicts with a specific block for tool X
+        if "*" in block_tools or allow_rule.tool in block_tools:
+            errors.append(SpecError(
+                code="CONFLICTING_SAFETY_RULES",
+                message=(
+                    f"Safety rule with action='allow' for tool '{allow_rule.tool}' "
+                    f"may loosen an existing block rule — "
+                    f"review rule ordering (only-tighten principle)"
+                ),
+                stage_id=None,
+            ))
+
     if strict and errors:
         raise SpecValidationError(errors)
 

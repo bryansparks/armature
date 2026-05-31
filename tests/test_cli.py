@@ -44,6 +44,14 @@ def test_validate_valid_spec_exits_0():
     assert "valid" in result.output.lower() or "✓" in result.output
 
 
+def test_validate_shows_risk_tier():
+    """validate output includes KYA-inspired risk tier and score."""
+    result = runner.invoke(app, ["validate", str(MINIMAL)])
+    assert result.exit_code == 0
+    assert "Risk:" in result.output
+    assert any(tier in result.output.upper() for tier in ("LOW", "MEDIUM", "HIGH", "CRITICAL"))
+
+
 def test_validate_valid_spec_echo_exits_0():
     result = runner.invoke(app, ["validate", str(ECHO)])
     assert result.exit_code == 0
@@ -393,3 +401,98 @@ def test_doctor_shows_ok_or_error_per_check():
     result = runner.invoke(app, ["doctor"])
     output = result.output.lower()
     assert "ok" in output or "pass" in output or "✓" in result.output or "error" in output or "✗" in result.output
+
+
+# ── armature run --auto-improve ───────────────────────────────────────────────
+
+def test_auto_improve_flag_appears_in_run_help():
+    result = runner.invoke(app, ["run", "--help"])
+    assert "--auto-improve" in result.output
+
+
+def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None):
+    from armature.synthesis.improve import ImprovementReport
+    return ImprovementReport(
+        workflow_name="echo-workflow",
+        spec_path=ECHO,
+        n_traces=5,
+        ihr_before=0.65,
+        needs_improvement=needs_improvement,
+        applied=applied,
+        requires_review=requires_review,
+        pending_path=pending_path,
+        diagnostics=[],
+    )
+
+
+def test_auto_improve_calls_self_improve_runner():
+    """--auto-improve causes SelfImproveRunner.analyze() to be called after run."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    report = _make_improve_report(applied=True)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0
+    mock_cls.assert_called_once()
+    mock_instance.analyze.assert_awaited_once()
+
+
+def test_auto_improve_prints_applied_message():
+    """When improvement is applied, output says so."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    report = _make_improve_report(applied=True, needs_improvement=True)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hi", "--auto-improve"])
+
+    assert "applied" in result.output.lower() or "updated" in result.output.lower()
+
+
+def test_auto_improve_prints_healthy_when_no_improvement_needed():
+    """When IHR is fine, output says workflow is healthy."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    report = _make_improve_report(needs_improvement=False, applied=False)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hi", "--auto-improve"])
+
+    assert "healthy" in result.output.lower() or "no improvement" in result.output.lower()
+
+
+def test_auto_improve_prints_pending_review_when_structural_changes():
+    """When requires_review, output directs user to pending file."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from pathlib import Path
+
+    report = _make_improve_report(
+        needs_improvement=True,
+        applied=False,
+        requires_review=True,
+        pending_path=Path("/tmp/echo.pending.yaml"),
+    )
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hi", "--auto-improve"])
+
+    assert "review" in result.output.lower() or "pending" in result.output.lower()
+
+
+def test_auto_improve_not_triggered_without_flag():
+    """Without --auto-improve, SelfImproveRunner is never instantiated."""
+    from unittest.mock import patch
+
+    with patch("armature.synthesis.improve.SelfImproveRunner") as mock_cls:
+        runner.invoke(app, ["run", str(ECHO), "--input", "message=hi"])
+        mock_cls.assert_not_called()

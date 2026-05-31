@@ -2,7 +2,7 @@
 import pytest
 from armature.spec.models import (
     HarnessSpec, Stage, Role, RoleType, Adapter, ModelTiers, ModelTierConfig,
-    ToolCallConfig, LoopConfig, OnFailConfig, Contract,
+    ToolCallConfig, LoopConfig, OnFailConfig, Contract, ToolSafetyRule, SafetyCondition,
 )
 from armature.spec.validator import validate_spec, SpecError, SpecValidationError
 
@@ -476,3 +476,54 @@ def test_harness_validate_false_skips_validation(tmp_path):
     # validate=False suppresses validation; harness is created without error
     harness = Harness(spec=spec, session_dir=tmp_path, validate=False)
     assert harness.name == "wf"
+
+
+# ── Only-tighten safety rule composition (KYA-inspired) ──────────────────────
+
+def _safety_rule(tool: str, action: str, value: str = "rm") -> ToolSafetyRule:
+    return ToolSafetyRule(
+        tool=tool,
+        condition=SafetyCondition(field="cmd", op="contains", value=value),
+        action=action,
+        message="test rule",
+    )
+
+
+def test_conflicting_safety_rules_allow_loosens_block_same_tool():
+    """CONFLICTING_SAFETY_RULES fires when allow and block rules target the same tool."""
+    spec = _valid_spec(safety_rules=[
+        _safety_rule("bash", "block"),
+        _safety_rule("bash", "allow"),
+    ])
+    errors = validate_spec(spec, strict=False)
+    assert "CONFLICTING_SAFETY_RULES" in codes(errors)
+
+
+def test_conflicting_safety_rules_allow_loosens_wildcard_block():
+    """allow for a specific tool conflicts with a wildcard block rule."""
+    spec = _valid_spec(safety_rules=[
+        _safety_rule("*", "block"),
+        _safety_rule("bash", "allow"),
+    ])
+    errors = validate_spec(spec, strict=False)
+    assert "CONFLICTING_SAFETY_RULES" in codes(errors)
+
+
+def test_no_conflict_when_only_block_rules():
+    """Multiple block rules for the same tool are fine — only tightening."""
+    spec = _valid_spec(safety_rules=[
+        _safety_rule("bash", "block", value="rm"),
+        _safety_rule("bash", "block", value="curl"),
+    ])
+    errors = validate_spec(spec, strict=False)
+    assert "CONFLICTING_SAFETY_RULES" not in codes(errors)
+
+
+def test_no_conflict_when_allow_and_block_target_different_tools():
+    """allow for tool A, block for tool B — no conflict."""
+    spec = _valid_spec(safety_rules=[
+        _safety_rule("bash", "block"),
+        _safety_rule("python", "allow"),
+    ])
+    errors = validate_spec(spec, strict=False)
+    assert "CONFLICTING_SAFETY_RULES" not in codes(errors)

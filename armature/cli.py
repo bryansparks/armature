@@ -57,12 +57,15 @@ def _make_on_event(quiet: bool):
         elif event_type == "retry_attempt":
             typer.echo(f"  ⟳ {data['stage']} retry {data['attempt']}/{data['max']}: {data['reason'][:60]}")
         elif event_type == "run_summary":
+            rogue = data.get("rogue_signals", 0)
+            rogue_str = f", {rogue} blocked" if rogue else ""
             typer.echo(
                 f"\nDone in {data['elapsed_s']}s — "
                 f"{data['stages_ran']} ran, "
                 f"{data['stages_skipped']} skipped, "
                 f"{data['stages_resumed']} resumed, "
                 f"{data['stages_failed']} failed"
+                f"{rogue_str}"
             )
 
     return on_event
@@ -89,7 +92,13 @@ def validate(
     errors = validate_spec(loaded, strict=False)
 
     if not errors:
+        from armature.spec.risk import compute_spec_risk
+        risk = compute_spec_risk(loaded)
         typer.echo(f"✓ '{loaded.name}' is valid ({len(loaded.stages)} stages)")
+        typer.echo(f"  Risk: {risk.tier.upper()} [score={risk.score}]")
+        for factor in risk.factors:
+            sign = "+" if factor.delta >= 0 else ""
+            typer.echo(f"    {sign}{factor.delta}  {factor.label}")
         return
 
     typer.echo(f"✗ '{loaded.name}' has {len(errors)} validation error(s):\n", err=True)
@@ -107,6 +116,8 @@ def run(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output"),
     output_file: Path = typer.Option(None, "--output", "-o", help="Write result JSON to file"),
     force: bool = typer.Option(False, "--force", help="Ignore checkpoint and rerun all stages"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Disable LLM response cache"),
+    auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when IHR < 0.75"),
 ):
     """Run a workflow from a YAML spec file."""
     if not spec.exists():
@@ -117,7 +128,7 @@ def run(
 
     from armature.spec.validator import SpecValidationError
     try:
-        harness = Harness.from_spec(spec, vars=parsed_inputs)
+        harness = Harness.from_spec(spec, vars=parsed_inputs, use_cache=not no_cache)
     except SpecValidationError as exc:
         typer.echo(f"Spec validation failed:\n{exc}", err=True)
         raise typer.Exit(1)
@@ -143,6 +154,27 @@ def run(
             typer.echo(f"Result written to {output_file}")
     else:
         typer.echo(result_json)
+
+    if auto_improve:
+        from armature.synthesis.improve import SelfImproveRunner
+
+        if not quiet:
+            typer.echo("\nAuto-improve: analyzing traces...")
+
+        async def _improve():
+            improve_runner = SelfImproveRunner(spec, target_ihr=0.75)
+            return await improve_runner.analyze()
+
+        report = asyncio.run(_improve())
+
+        if not report.needs_improvement:
+            typer.echo("Auto-improve: workflow is healthy — no improvement needed.")
+        elif report.applied:
+            typer.echo(f"Auto-improve: spec updated → {spec}")
+        elif report.requires_review:
+            typer.echo(f"Auto-improve: structural changes require review → {report.pending_path}")
+        else:
+            typer.echo("Auto-improve: refiner could not produce a valid revision.")
 
 
 @app.command()
@@ -235,6 +267,63 @@ def report(
         raise typer.Exit(1)
 
     typer.echo(ReportBuilder(data).build())
+
+
+@app.command()
+def replay(
+    run_id: str = typer.Argument(..., help="Run ID to display"),
+    traces: Path = typer.Option(None, "--traces", help="Path to traces.db (default: ~/.armature/traces.db)"),
+):
+    """Display a recorded run stage-by-stage from the TraceStore."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+    resolved_traces = traces or Path("~/.armature/traces.db").expanduser()
+
+    from armature.state.traces import TraceStore
+
+    async def _load():
+        store = TraceStore(resolved_traces)
+        await store.init()
+        records = await store.query_by_run(run_id)
+        ihr_result = await store.compute_ihr(run_id) if records else None
+        return records, ihr_result
+
+    records, ihr_result = asyncio.run(_load())
+
+    if not records:
+        typer.echo(f"No traces found for run_id='{run_id}' in {resolved_traces}", err=True)
+        raise typer.Exit(1)
+
+    t = Table(show_header=True, header_style="bold", border_style="dim", expand=True)
+    t.add_column("Stage", style="bold")
+    t.add_column("Role")
+    t.add_column("Model", style="dim")
+    t.add_column("Latency", justify="right")
+    t.add_column("Status", justify="center")
+    t.add_column("Quorum", justify="right")
+    t.add_column("Outputs (truncated)", style="dim")
+
+    for r in records:
+        status = "[green]✓[/green]" if r.success else "[red]✗[/red]"
+        quorum = f"{r.quorum_score:.2f}" if r.quorum_score is not None else "—"
+        out_str = json.dumps(r.outputs, default=str)
+        if len(out_str) > 80:
+            out_str = out_str[:77] + "..."
+        t.add_row(r.stage_id, r.role_type, r.model, f"{r.latency_ms:.0f}ms", status, quorum, out_str)
+
+    console.print(f"\n[bold]Replay[/bold]: run [cyan]{run_id}[/cyan]  ({len(records)} stages)\n")
+    console.print(t)
+
+    if ihr_result:
+        console.print(
+            f"\n[bold]IHR[/bold]: [cyan]{ihr_result.ihr:.3f}[/cyan]  "
+            f"(valid={ihr_result.output_valid_rate:.0%}  "
+            f"success={ihr_result.success_rate:.0%}  "
+            f"n={ihr_result.n_traces})\n"
+        )
 
 
 @app.command(name="export-traces")

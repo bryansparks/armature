@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 import re
 import warnings
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Callable, Any
 
@@ -10,6 +11,7 @@ _safety_log = logging.getLogger("armature.safety")
 if TYPE_CHECKING:
     from armature.spec.models import ToolSafetyRule
     from armature.registry.registry import ToolRegistry
+    from armature.state.traces import TraceRecord
 
 
 class HookPhase(str, Enum):
@@ -94,6 +96,15 @@ def _evaluate_condition(condition, args: dict) -> bool:
     return False
 
 
+@dataclass
+class RogueSignalCounter:
+    """Counts tool-block events during a harness run for KYA-style rogue signal tracking."""
+    count: int = 0
+
+    def increment(self) -> None:
+        self.count += 1
+
+
 class SafetyHookBuilder:
     @staticmethod
     def register(
@@ -101,6 +112,7 @@ class SafetyHookBuilder:
         rules: "list[ToolSafetyRule]",
         tool_registry: "ToolRegistry | None" = None,
         strict_mode: bool = False,
+        counter: "RogueSignalCounter | None" = None,
     ) -> None:
         if not rules and not strict_mode:
             return
@@ -121,6 +133,8 @@ class SafetyHookBuilder:
                 if rule.action == "allow":
                     return HookDecision.ALLOW
                 if rule.action == "block":
+                    if counter is not None:
+                        counter.increment()
                     raise ToolBlocked(tool_name, args.get("cmd", ""), rule.message)
                 if rule.action == "require_approval":
                     answer = input(
@@ -130,6 +144,8 @@ class SafetyHookBuilder:
                     ).strip().lower()
                     if answer == "y":
                         return HookDecision.ALLOW
+                    if counter is not None:
+                        counter.increment()
                     raise ToolBlocked(tool_name, args.get("cmd", ""), rule.message)
                 if rule.action == "warn":
                     warnings.warn(
@@ -139,6 +155,78 @@ class SafetyHookBuilder:
                 elif rule.action == "log":
                     _safety_log.info("tool=%s rule=%s msg=%s", tool_name, rule.tool, rule.message)
 
-            return HookDecision.BLOCK if strict_mode else HookDecision.ALLOW
+            if strict_mode:
+                if counter is not None:
+                    counter.increment()
+                return HookDecision.BLOCK
+            return HookDecision.ALLOW
 
         registry.register(HookPhase.PRE_TOOL, safety_hook)
+
+
+# ── Trace-triggered Behaviors ──────────────────────────────────────────────────
+
+
+@dataclass
+class BehaviorRule:
+    """Reactive rule that fires a handler when a trace pattern is matched."""
+    name: str
+    description: str
+    pattern: Callable[["list[TraceRecord]"], bool]
+    handler: Callable[["list[TraceRecord]"], None]
+
+
+class BehaviorRegistry:
+    """Registry of BehaviorRules evaluated against recent traces after each run."""
+
+    def __init__(self) -> None:
+        self._rules: list[BehaviorRule] = []
+
+    def register(self, rule: BehaviorRule) -> None:
+        self._rules.append(rule)
+
+    def evaluate(self, traces: "list[TraceRecord]") -> None:
+        for rule in self._rules:
+            if rule.pattern(traces):
+                rule.handler(traces)
+
+
+# ── IHR feedback built-in behavior ────────────────────────────────────────────
+
+def _compute_simple_ihr(traces: "list[TraceRecord]") -> float:
+    n = len(traces)
+    if n == 0:
+        return 1.0
+    output_valid_rate = sum(1 for t in traces if t.output_valid) / n
+    success_rate = sum(1 for t in traces if t.success) / n
+    avg_latency = sum(t.latency_ms for t in traces) / n
+    latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
+    return 0.40 * output_valid_rate + 0.30 * success_rate + 0.20 * 0.5 + 0.10 * latency_score
+
+
+def _ihr_feedback_pattern(traces: "list[TraceRecord]") -> bool:
+    recent = traces[-10:]
+    if len(recent) < 3:
+        return False
+    return _compute_simple_ihr(recent) < 0.75
+
+
+def _ihr_feedback_handler(traces: "list[TraceRecord]") -> None:
+    import sys
+    print(
+        "\n[armature] IHR hint: quality below 0.75 over recent traces — "
+        "consider running `armature improve <spec>`",
+        file=sys.stderr,
+    )
+
+
+def make_default_behavior_registry() -> BehaviorRegistry:
+    """Return a BehaviorRegistry pre-loaded with the ihr_feedback built-in."""
+    registry = BehaviorRegistry()
+    registry.register(BehaviorRule(
+        name="ihr_feedback",
+        description="Suggest improvement when IHR drops below 0.75",
+        pattern=_ihr_feedback_pattern,
+        handler=_ihr_feedback_handler,
+    ))
+    return registry

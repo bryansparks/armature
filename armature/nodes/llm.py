@@ -3,11 +3,14 @@ import asyncio
 import json
 import os
 import random
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import litellm
 from armature.nodes.base import BaseNode
 from armature.spec.models import Stage, ModelTiers, RoleType, RoleTypeDefaults, SkillDef
 from armature.runtime.prompt import PromptAssembler
+
+if TYPE_CHECKING:
+    from armature.cache.llm_cache import LLMCache
 
 
 async def litellm_completion(**kwargs) -> Any:
@@ -121,6 +124,7 @@ class LLMNode(BaseNode):
         transcript: list[dict] | None = None,
         workflow_name: str = "",
         skill_library: dict[str, SkillDef] | None = None,
+        cache: "LLMCache | None" = None,
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -134,6 +138,7 @@ class LLMNode(BaseNode):
         self._skill_library = skill_library or {}
         self._bootstrap_store = None
         self._max_tool_iterations = 10
+        self._cache = cache
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
@@ -301,7 +306,23 @@ class LLMNode(BaseNode):
         ]
 
         is_json_mode = self._stage.output_mode.value in ("json", "guided_json")
-        return await self._execute_with_escalation(messages, is_json_mode, stage_tools)
+
+        if self._cache is not None:
+            cache_key = self._cache._make_key(
+                self._resolve_model(),
+                messages,
+                {"output_mode": self._stage.output_mode.value},
+            )
+            cached = await self._cache.get(cache_key)
+            if cached is not None:
+                return json.loads(cached)
+
+        result = await self._execute_with_escalation(messages, is_json_mode, stage_tools)
+
+        if self._cache is not None:
+            await self._cache.put(cache_key, json.dumps(result, default=str))
+
+        return result
 
     async def _execute_with_escalation(
         self, messages: list[dict], parse_as_json: bool, stage_tools: list[dict] | None = None

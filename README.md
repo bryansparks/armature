@@ -100,7 +100,9 @@ armature run my_workflow.yml --input text="Your content here..."
 
 ```bash
 armature run <spec>                           # execute a workflow
-armature validate <spec>                      # validate spec without running
+armature run <spec> --no-cache               # run without LLM response cache
+armature run <spec> --auto-improve           # run then auto-apply spec improvements when IHR < 0.75
+armature validate <spec>                      # validate spec + show KYA-inspired risk score (LOW/MEDIUM/HIGH/CRITICAL)
 armature new [output]                         # interactive spec creation wizard
 armature doctor                               # environment health check
 armature serve                                # start HTTP service (requires armature[service])
@@ -108,6 +110,7 @@ armature optimize <spec>                      # single-shot meta-harness optimiz
 armature improve <spec>                       # analyze traces, auto-apply spec improvements
 armature improve <spec> --apply-pending       # promote a staged pending.yaml revision
 armature report --run-id <id>                 # per-run text report with failure signatures
+armature replay <run_id>                      # display a recorded run stage-by-stage
 armature dashboard <spec>                     # Rich 4-panel aggregate health dashboard
 armature dashboard <spec> --watch             # auto-refresh every 5 seconds
 armature dashboard <spec> --format json       # machine-readable JSON output

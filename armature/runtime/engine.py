@@ -16,7 +16,7 @@ from armature.nodes.script import ScriptNode
 from armature.nodes.gate import HumanGateNode
 from armature.registry.registry import ToolRegistry
 from armature.registry.builtins import register_builtins
-from armature.hooks.lifecycle import HookRegistry, HookDecision
+from armature.hooks.lifecycle import HookRegistry, HookDecision, make_default_behavior_registry, RogueSignalCounter
 from armature.state.session import SessionLog, SessionEvent
 from armature.state.artifacts import ArtifactStore
 from armature.state.traces import TraceStore, TraceRecord
@@ -53,6 +53,7 @@ class Harness:
         *,
         validate: bool = True,
         traces_db: Path | str | None = None,
+        use_cache: bool = True,
     ):
         if validate:
             from armature.spec.validator import validate_spec
@@ -79,12 +80,14 @@ class Harness:
             str([r.model_dump() for r in self._spec.safety_rules]).encode()
         ).hexdigest()[:12]
         self._hooks = HookRegistry()
+        self._rogue_counter = RogueSignalCounter()
         from armature.hooks.lifecycle import SafetyHookBuilder
         SafetyHookBuilder.register(
             self._hooks,
             self._spec.safety_rules,
             tool_registry=self._registry,
             strict_mode=(self._spec.safety_mode == "strict"),
+            counter=self._rogue_counter,
         )
         self._attach_observability_adapters()
         self._context = ContextManager()
@@ -94,6 +97,12 @@ class Harness:
         self._traces = TraceStore(resolved_traces)
         self._on_event = on_event
         self._transcript: list[dict[str, Any]] = []
+        if use_cache:
+            from armature.cache.llm_cache import LLMCache
+            self._llm_cache: "LLMCache | None" = LLMCache(resolved_traces.parent / "llm_cache.sqlite")
+        else:
+            self._llm_cache = None
+        self._behaviors = make_default_behavior_registry()
 
         mem_cfg = self._spec.memory
         if mem_cfg and mem_cfg.enabled:
@@ -182,14 +191,19 @@ class Harness:
         return self._spec.name
 
     @classmethod
-    def from_spec(cls, path: Path | str, vars: dict | None = None) -> "Harness":
+    def from_spec(cls, path: Path | str, vars: dict | None = None, use_cache: bool = True) -> "Harness":
         spec = load_spec(path, vars=vars)
-        return cls(spec=spec)
+        return cls(spec=spec, use_cache=use_cache)
 
     async def _ensure_traces(self) -> None:
         if not hasattr(self, "_traces_initialized"):
             await self._traces.init()
             self._traces_initialized = True
+
+    async def _ensure_cache(self) -> None:
+        if self._llm_cache is not None and not hasattr(self, "_cache_initialized"):
+            await self._llm_cache.init()
+            self._cache_initialized = True
 
     def _get_provenance(self) -> dict[str, str]:
         return getattr(self, "_provenance", {})
@@ -285,6 +299,7 @@ class Harness:
                                 f"stage '{stage.id}' cannot execute"
                             )
                         self._llm_call_count += 1
+                        await self._ensure_cache()
                         _llm_node = LLMNode(
                             stage=stage,
                             tiers=self._spec.model_tiers,
@@ -293,6 +308,7 @@ class Harness:
                             registry=self._registry,
                             transcript=self._transcript,
                             skill_library=self._spec.skill_library,
+                            cache=self._llm_cache,
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()
@@ -747,6 +763,7 @@ class Harness:
                     "stages_skipped": n_skipped,
                     "stages_resumed": n_resumed,
                     "stages_failed": n_failed,
+                    "rogue_signals": self._rogue_counter.count,
                 })
 
             # Post-run knowledge extraction (non-blocking)
@@ -781,6 +798,15 @@ class Harness:
                     stage_result = await self._execute_stage_with_recovery(stage, post_ctx)
                     results[stage.id] = stage_result
                     post_ctx[stage.id] = stage_result
+
+            # Evaluate trace-triggered behaviors against recent traces
+            try:
+                recent_traces = await self._traces.query(
+                    workflow_name=self._spec.name, limit=50
+                )
+                self._behaviors.evaluate(recent_traces)
+            except Exception:
+                pass  # behaviors must never block execution
 
             return results
 
