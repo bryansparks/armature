@@ -62,6 +62,13 @@ This guide covers everything you need to build agentic workflows with Armature: 
 23. [Context provenance](#23-context-provenance)
 24. [Memory staleness](#24-memory-staleness)
 25. [Workflow health dashboard](#25-workflow-health-dashboard)
+26. [LLM response caching](#26-llm-response-caching)
+27. [Audit replay](#27-audit-replay)
+28. [Trace-triggered behaviors](#28-trace-triggered-behaviors)
+29. [Auto self-improvement](#29-auto-self-improvement)
+30. [Spec risk scoring](#30-spec-risk-scoring)
+31. [Rogue signal tracking](#31-rogue-signal-tracking)
+32. [Safety rule composition](#32-safety-rule-composition)
 
 ---
 
@@ -1709,13 +1716,15 @@ The optimizer requires at least 5 traces to produce a proposal. Run your workflo
 Armature ships with a full CLI. All commands:
 
 ```
-armature new        — interactive wizard to create a new spec file
-armature validate   — validate a spec file and report all errors
-armature run        — execute a workflow from a YAML spec
-armature serve      — start the HTTP service
-armature optimize   — analyze traces and propose spec improvements
-armature improve    — self-improvement loop: analyze, diagnose, revise, apply
-armature report     — print a diagnostic report for a completed run
+armature new           — interactive wizard to create a new spec file
+armature validate      — validate a spec file, report all errors, and show risk score
+armature run           — execute a workflow from a YAML spec
+armature replay        — display a recorded run stage-by-stage from the TraceStore
+armature serve         — start the HTTP service
+armature optimize      — analyze traces and propose spec improvements
+armature improve       — self-improvement loop: analyze, diagnose, revise, apply
+armature report        — print a diagnostic report for a completed run
+armature dashboard     — Rich 4-panel aggregate health dashboard
 armature export-traces — export high-quality traces as training data (JSONL)
 ```
 
@@ -1763,6 +1772,8 @@ armature run my_workflow.yml \
 | `--dry-run` | Validate spec without executing |
 | `--quiet` / `-q` | Suppress live progress output |
 | `--force` | Ignore checkpoint and rerun all stages from scratch |
+| `--no-cache` | Bypass the LLM response cache; every LLM call goes to the provider |
+| `--auto-improve` | After the run, if IHR < 0.75 automatically apply spec improvements |
 
 ---
 
@@ -1800,6 +1811,34 @@ Print a human-readable diagnostic report for a completed run, including stage-by
 armature report --run-id abc123
 armature report --run-id abc123 --traces ~/.armature/runs/abc123/traces.db
 ```
+
+---
+
+#### `armature replay`
+
+Display a recorded run stage-by-stage from the TraceStore. Useful for post-mortem debugging of any historical run without re-executing.
+
+```bash
+armature replay abc123-def456-...
+```
+
+Output: a Rich-formatted table showing stage id, role, model, latency, success/fail, quorum score, and IHR contribution for every stage in the run, followed by a run summary with the overall IHR and total latency.
+
+See §27 for full details.
+
+---
+
+#### `armature dashboard`
+
+Rich 4-panel aggregate health dashboard. Shows IHR trend, per-stage metrics, improvement cycle history, and safety/governance summary across all runs of a workflow.
+
+```bash
+armature dashboard my_workflow.yml           # snapshot
+armature dashboard my_workflow.yml --watch   # auto-refresh every 5 seconds
+armature dashboard my_workflow.yml --format json  # machine-readable
+```
+
+See §25 for full panel descriptions and all flags.
 
 ---
 
@@ -2772,3 +2811,488 @@ This is suitable for ingestion into monitoring systems, Grafana dashboards, or C
 ihr=$(armature dashboard my_workflow.yml --format json | jq '.current_ihr')
 python -c "import sys; sys.exit(0 if $ihr >= 0.80 else 1)"
 ```
+
+---
+
+## 26. LLM response caching
+
+<!-- AI-AGENT-NOTE: This section describes content-addressed caching of LLM API calls. An agent reading this can reduce cost and latency of repeated runs by understanding cache keying and bypass options. -->
+
+Armature caches LLM responses by content hash. On every LLM call, the harness computes a SHA-256 key over the model name, the full messages array, and any response-format kwargs. If an entry exists in the cache for that key, the stored response is returned immediately — no API call, no cost, instant result. If not, the API call proceeds and the response is written to the cache before being returned.
+
+The cache is stored in `{armature_runs_dir}/llm_cache.sqlite`. It persists across runs.
+
+### When to use it
+
+**Default behavior (cache enabled):** Re-running the same workflow with the same inputs is instant after the first run. Useful for:
+- Development iteration — tweak one stage and re-run; unchanged stages are instant
+- Deterministic audit replay — re-run a historical workflow and get bit-for-bit identical LLM outputs
+- Cost control — catch regressions in a CI pipeline without paying for every LLM call
+
+**Bypass the cache:** Pass `--no-cache` to force fresh API calls for every stage.
+
+```bash
+armature run my_workflow.yml --no-cache
+```
+
+Use `--no-cache` when:
+- You explicitly want fresh model responses (e.g., production runs after a model update)
+- You are testing that a workflow performs well under current model behavior, not cached behavior
+- The inputs have changed enough that cached responses would be misleading
+
+### Cache keying
+
+Two runs produce a cache hit if and only if all of the following are identical:
+- The LLM model name (e.g., `claude-sonnet-4-6`)
+- The full messages array passed to the API (system prompt + assembled context + user turn)
+- Any response-format kwargs (guided JSON schema, if used)
+
+A cache miss occurs if:
+- A different model tier is configured
+- The context dict changed (e.g., a prior stage produced a different output)
+- The system prompt changed (stage role description, skill injections, etc.)
+- The guided JSON schema changed
+
+### Programmatic access
+
+```python
+from armature.cache.llm_cache import LLMCache
+
+cache = LLMCache(db_path=Path("~/.armature/runs/llm_cache.sqlite").expanduser())
+await cache.init()
+
+key = cache._make_key(model="claude-sonnet-4-6", messages=[...], extra_kwargs={})
+cached = await cache.get(key)  # returns raw response JSON or None
+```
+
+### Disabling cache in the harness
+
+```python
+harness = Harness.from_spec("my_workflow.yml", use_cache=False)
+```
+
+---
+
+## 27. Audit replay
+
+<!-- AI-AGENT-NOTE: armature replay reads the TraceStore and renders past runs without re-executing. An agent can use this to inspect historical behavior, compare runs, or debug a failure by replaying the exact sequence of stage outputs. -->
+
+`armature replay <run_id>` reads TraceStore records and renders a stage-by-stage execution table for any historical run. No LLM calls are made; this is a pure read from the trace database.
+
+### Usage
+
+```bash
+armature replay <run_id>
+```
+
+`run_id` is the UUID printed at the start of every `armature run`. You can also retrieve it from the session log (`*.session.jsonl`) or from `armature report --run-id`.
+
+### Output
+
+```
+Run: abc123-def456  (my-research-pipeline)
+────────────────────────────────────────────────────────────────────────
+ Stage           Role        Model                Latency  OK  Quorum
+────────────────────────────────────────────────────────────────────────
+ researcher      researcher  claude-sonnet-4-6    1,241ms  ✓   0.91
+ analyst         worker      claude-haiku-4-5     892ms    ✓   0.87
+ judge           judge       claude-sonnet-4-6    1,103ms  ✓   0.94
+────────────────────────────────────────────────────────────────────────
+ IHR: 0.88   Total latency: 3,236ms   Stages: 3   Failed: 0
+```
+
+Each row also shows the truncated inputs and outputs (200 characters) when `--verbose` is passed.
+
+### Use cases
+
+**Post-mortem debugging:** A run failed in production. Replay shows exactly which stage failed, what its inputs were, and what output it produced — without re-executing the expensive upstream stages.
+
+**Audit trail:** Compliance requires a record of what each LLM stage received and produced. `armature replay` makes that record human-readable.
+
+**Regression investigation:** Compare two replays (before/after a spec change) to see which stages changed behavior.
+
+### Relationship to the TraceStore
+
+`armature replay` reads from the same SQLite TraceStore that `armature dashboard` and `armature report` use. The trace database is at `~/.armature/runs/{run_id}/traces.db` by default. Override with `--traces path`.
+
+Every stage in every run is recorded automatically — no configuration required. Traces are immutable once written.
+
+---
+
+## 28. Trace-triggered behaviors
+
+<!-- AI-AGENT-NOTE: BehaviorRule and BehaviorRegistry allow post-run reactive logic tied to trace history patterns. An agent building workflows should know that the ihr_feedback behavior fires automatically after low-quality runs, and that custom rules can trigger any arbitrary handler (alerting, escalation, auto-export, etc.). -->
+
+The `BehaviorRegistry` lets you register rules that fire after a run completes, based on patterns in the recent trace history. This is how Armature reacts to observed quality trends rather than individual run events.
+
+### BehaviorRule
+
+```python
+from armature.hooks.lifecycle import BehaviorRule, BehaviorRegistry
+
+rule = BehaviorRule(
+    name="my_rule",
+    description="Fire when something happens",
+    pattern=lambda traces: len(traces) > 0 and traces[-1].ihr < 0.5,
+    handler=lambda traces: print("IHR critically low — investigate"),
+)
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `str` | Unique rule identifier |
+| `description` | `str` | Human-readable description |
+| `pattern` | `Callable[[list[TraceRecord]], bool]` | Returns True when the rule should fire |
+| `handler` | `Callable[[list[TraceRecord]], None]` | Called with the trace list when pattern matches |
+
+### BehaviorRegistry
+
+```python
+registry = BehaviorRegistry()
+registry.register(rule)
+
+# Evaluate all registered rules against recent traces
+registry.evaluate(traces)
+```
+
+Rules are evaluated in registration order. All matching rules fire; there is no short-circuit.
+
+### Built-in: `ihr_feedback`
+
+The `ihr_feedback` behavior is registered automatically when the harness initializes its default registry. Pattern: rolling IHR below 0.75 over the last 10 traces (minimum 3 required to avoid false alerts on first run). Handler: prints a Rich-formatted hint suggesting `armature improve <spec>`.
+
+```
+IHR hint: quality below 0.75 — consider running `armature improve my_workflow.yml`
+```
+
+This fires after the run summary, before the CLI exits.
+
+### Custom behaviors
+
+Register additional behaviors by providing a pre-populated `BehaviorRegistry` to the harness:
+
+```python
+from armature.hooks.lifecycle import BehaviorRule, BehaviorRegistry
+
+registry = BehaviorRegistry()
+
+registry.register(BehaviorRule(
+    name="alert_on_failure_spike",
+    description="Page oncall when failure rate exceeds 30% over last 20 traces",
+    pattern=lambda traces: (
+        len(traces) >= 20
+        and sum(1 for t in traces[-20:] if not t.success) / 20 > 0.30
+    ),
+    handler=lambda traces: send_alert("Failure spike detected in workflow"),
+))
+
+harness = Harness.from_spec("my_workflow.yml", behavior_registry=registry)
+```
+
+### What behaviors can do
+
+Handlers receive the full trace list and can:
+- Print warnings or hints to the terminal
+- Write to an external alerting system (PagerDuty, Slack, etc.)
+- Trigger `armature improve` programmatically
+- Export traces for fine-tuning when quality is high
+- Update a dashboard or monitoring metric
+
+Handlers are synchronous and run after the run summary is emitted. They do not affect the run result or IHR score.
+
+---
+
+## 29. Auto self-improvement
+
+<!-- AI-AGENT-NOTE: --auto-improve on `armature run` connects the execution loop to the self-improvement loop automatically. An agent deploying Armature workflows in production should understand when auto-improve fires, what it does, and how to review pending proposals. -->
+
+`--auto-improve` on `armature run` connects the execution loop to the self-improvement loop automatically. If IHR drops below 0.75 after a run, Armature calls `SelfImproveRunner.analyze()` without requiring a separate `armature improve` invocation.
+
+### Usage
+
+```bash
+armature run my_workflow.yml --input topic="AI safety" --auto-improve
+```
+
+### What happens
+
+1. The workflow executes normally.
+2. After the run summary is printed, Armature checks the IHR.
+3. If IHR ≥ 0.75: `Auto-improve: workflow is healthy — no improvement needed.`
+4. If IHR < 0.75: `SelfImproveRunner.analyze()` runs.
+   - **Safe changes** (prompt wording, temperature, retry count): applied directly to the spec file. `Auto-improve: spec updated → my_workflow.yml`
+   - **Structural changes** (adding/removing stages, changing DAG topology): written to `my_workflow.pending.yaml` for human review. `Auto-improve: structural changes require review → my_workflow.pending.yaml`
+   - **No valid revision found**: `Auto-improve: refiner could not produce a valid revision.`
+
+### Applying a pending revision
+
+```bash
+armature improve my_workflow.yml --apply-pending
+```
+
+This promotes `my_workflow.pending.yaml` into `my_workflow.yml` after you have reviewed it.
+
+### What self-improvement changes
+
+Armature's self-improvement refiner targets specific spec components based on the 4-code failure taxonomy:
+
+| Failure code | What the refiner modifies |
+|---|---|
+| `stage_failed` | Retry count, `on_fail` strategy, `depends_on` ordering |
+| `output_invalid` | Guided JSON schema, output mode, judge prompt stringency |
+| `low_confidence` | System prompt clarity, context filtering (`signature.input`) |
+| `high_escalation` | Model tier assignment, temperature settings |
+
+Cross-run memory, safety rules, and DAG topology are classified as structural changes and always require human review before being applied.
+
+### Relationship to `armature improve`
+
+`--auto-improve` calls the same `SelfImproveRunner` that `armature improve` calls. The difference is timing and trigger:
+- `armature improve` is a manual, on-demand command that always runs regardless of IHR
+- `--auto-improve` is automatic and only fires when IHR drops below 0.75
+
+For development workflows where you want to catch regressions immediately, `--auto-improve` is the right choice. For production workflows where you want control over when the spec changes, use `armature improve` on a schedule.
+
+---
+
+## 30. Spec risk scoring
+
+<!-- AI-AGENT-NOTE: `armature validate` now outputs a risk tier (LOW/MEDIUM/HIGH/CRITICAL) derived from a static analysis of the spec. An agent reviewing or generating specs should understand the five risk factors and aim for LOW or MEDIUM tier before deploying to production. -->
+
+`armature validate` computes a static risk score for every spec it validates, surfacing potential governance concerns before a workflow is ever run.
+
+### Risk tiers
+
+| Tier | Score range | Meaning |
+|------|-------------|---------|
+| `LOW` | 0–29 | Well-governed; safe to deploy without additional review |
+| `MEDIUM` | 30–59 | Moderate risk; review safety rules and judge coverage before production |
+| `HIGH` | 60–84 | Significant governance concerns; human review required |
+| `CRITICAL` | 85–100 | Multiple unmitigated risks; do not deploy without remediation |
+
+### Risk factors
+
+Five factors contribute to the score:
+
+| Factor | Delta | Trigger |
+|--------|-------|---------|
+| Tool-call stage | +4 per stage | Each `tool_call` stage that can invoke external systems |
+| No judge | +15 | Workflow has no stage with `type: judge` |
+| Require-approval rule | +8 per rule | Each safety rule with `action: require_approval` (human bottleneck risk) |
+| Fan-out stage | +6 per stage | Each subagent stage with fan-out — amplifies tool-call risk |
+| Strict mode | −10 | `safety_mode: strict` in spec — strong mitigating control |
+
+Scores are clamped to [0, 100].
+
+### Usage
+
+```bash
+armature validate my_workflow.yml
+```
+
+Output (on success):
+
+```
+✓ my_workflow.yml is valid
+Risk: MEDIUM (score 42)
+  • tool_call stages: 3 (+12)
+  • no judge stage: +15
+  • fan-out stages: 1 (+6)
+  • strict mode: -10
+  • require_approval rules: 2 (+16)
+```
+
+Validation errors are printed before the risk score. If validation fails (exit code 1), the risk score is not shown.
+
+### Reducing risk
+
+To lower the risk tier:
+1. **Add a judge stage** — a `type: judge` role that reviews LLM outputs before they flow downstream removes the largest single penalty (+15)
+2. **Enable strict mode** — add `safety_mode: strict` to the spec root for an immediate −10 discount
+3. **Minimize fan-out for tool-heavy workflows** — each fan-out stage multiplies the blast radius of any tool-call error
+
+A `LOW` score does not mean the workflow is safe; it means the spec structure has the right governance primitives in place. The actual safety depends on the tool implementations and the quality of the safety rules.
+
+### Programmatic access
+
+```python
+from armature.spec.risk import compute_spec_risk
+
+result = compute_spec_risk(spec)
+print(result.score)   # int, 0-100
+print(result.tier)    # "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"
+for factor in result.factors:
+    print(f"{factor.label}: {factor.delta:+d}")
+```
+
+---
+
+## 31. Rogue signal tracking
+
+<!-- AI-AGENT-NOTE: The rogue signal counter counts ToolBlocked events during a run. An agent monitoring workflows should watch for non-zero rogue_signals in the run_summary event — it indicates the workflow tried to call tools it wasn't allowed to call, which may indicate prompt injection, spec misconfiguration, or an unexpected model behavior. -->
+
+A **rogue signal** is any tool call that the safety subsystem blocked at runtime. The harness counts these across the entire run and reports the total in the run summary.
+
+### What counts as a rogue signal
+
+- A `tool_call` stage or LLM-initiated tool call that matches a `block` safety rule
+- A tool call blocked by `safety_mode: strict` (fail-closed mode — no matching rule means block)
+- A `require_approval` gate that was refused by the human approver
+
+Each of these increments the `rogue_signals` counter by 1. Warnings and log-only actions do not increment the counter.
+
+### Where it appears
+
+**CLI run output:**
+
+```
+Run complete  IHR: 0.83  stages: 4  time: 3.2s  [2 blocked]
+```
+
+The `[N blocked]` suffix appears only when `rogue_signals > 0`.
+
+**`run_summary` event (SessionLog):**
+
+```json
+{
+  "event": "run_summary",
+  "run_id": "abc123",
+  "ihr": 0.83,
+  "rogue_signals": 2,
+  ...
+}
+```
+
+### Interpreting rogue signals
+
+**Zero blocked:** All tool calls were permitted. Expected behavior.
+
+**1–2 blocked:** Usually a safety rule triggering as designed (e.g., a `block` rule on `shell` preventing risky commands). Verify the rule is firing on the intended input.
+
+**3+ blocked in a single run:** Investigate. Possible causes:
+- The model is trying to call tools repeatedly after being blocked (retry loop)
+- A prompt injection attack is attempting to expand tool permissions
+- The spec has a safety rule that is too broad, blocking legitimate tool use
+- A new model version has changed tool-calling behavior
+
+**Rogue signals with failing stages:** If blocked tool calls are causing stage failures, the workflow may need its safety rules relaxed or its prompts clarified to prevent the model from attempting blocked operations.
+
+### Programmatic access
+
+```python
+from armature.hooks.lifecycle import RogueSignalCounter
+
+counter = RogueSignalCounter()
+# Pass to SafetyHookBuilder.register(counter=counter)
+# After the run:
+print(counter.count)  # int — total blocked calls
+```
+
+---
+
+## 32. Safety rule composition
+
+<!-- AI-AGENT-NOTE: The only-tighten principle prevents an allow rule from undoing a block rule. An agent generating or modifying safety rules must ensure that allow rules only grant permissions not already denied. The CONFLICTING_SAFETY_RULES validation error fires at validate time, before any execution. -->
+
+Safety rules compose under a strict monotonicity constraint: **rules may only tighten constraints, never loosen them.** This is the "only-tighten" principle, adapted from the KYA governance framework.
+
+### The only-tighten principle
+
+A safety rule with `action: allow` is only valid if it does not override or weaken an existing `action: block` rule for the same tool. If you have blocked a tool at the workflow level, no stage-level allow rule can re-enable it.
+
+This prevents a common failure mode in layered safety systems: an inner allow overrides an outer block, quietly creating a permission escalation that the outer rule was designed to prevent.
+
+### Validation
+
+`armature validate` checks for conflicting rules and reports `CONFLICTING_SAFETY_RULES`:
+
+```
+ERROR CONFLICTING_SAFETY_RULES: Safety rule with action='allow' for tool 'shell'
+may loosen an existing block rule — review rule ordering (only-tighten principle)
+```
+
+Exit code 1 is returned; the workflow cannot run until the conflict is resolved.
+
+### Example
+
+**Invalid — allow overrides block:**
+
+```yaml
+safety_rules:
+  - tool: shell
+    action: block
+    description: "Block shell access globally"
+
+  - tool: shell          # ERROR: allow on a blocked tool
+    action: allow
+    conditions:
+      - field: command
+        operator: contains
+        value: "ls"
+```
+
+**Valid — no conflicting rules:**
+
+```yaml
+safety_rules:
+  - tool: shell
+    action: block
+
+  - tool: file_read       # allow on a different tool — no conflict
+    action: allow
+```
+
+**Valid — block with conditions instead of a blanket block + allow:**
+
+```yaml
+safety_rules:
+  - tool: shell
+    action: block
+    conditions:
+      - field: command
+        operator: matches_regex
+        value: "rm\\s+-rf"   # block only destructive removes
+
+  # No allow rule needed — the block is already narrowly scoped
+```
+
+### Wildcard blocks
+
+A wildcard block (`tool: "*"`) triggers the conflict check for any subsequent allow rule targeting any tool:
+
+```yaml
+safety_rules:
+  - tool: "*"
+    action: block          # block all tools
+
+  - tool: file_read        # ERROR: allow after wildcard block
+    action: allow
+```
+
+If you need to allow specific tools after a blanket block, restructure as an explicit allowlist: list only the permitted tools with `action: allow` and set `safety_mode: strict` (which denies everything not explicitly allowed) instead of using a wildcard block rule.
+
+### Relationship to `safety_mode: strict`
+
+`safety_mode: strict` is the recommended alternative to a wildcard block rule. It denies tool calls with no matching rule (fail-closed) without requiring an explicit block entry. Specific tools are then permitted with `action: allow` rules — no conflict arises because strict mode is enforced at the engine level, not via a rule entry.
+
+```yaml
+safety_mode: strict
+
+safety_rules:
+  - tool: file_read
+    action: allow
+  - tool: http_get
+    action: allow
+    conditions:
+      - field: url
+        operator: contains
+        value: "api.internal"
+```
+
+This pattern is the cleanest way to express "allow only these specific tools" without triggering `CONFLICTING_SAFETY_RULES`.
+
+---
+
+*Armature User Guide — built from eight academic papers, one industry governance framework, and one open-source agent architecture project. 1,221 tests. MIT license.*
+
+*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, and observability (§25, §27, §31) for production monitoring. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*

@@ -1,5 +1,9 @@
 # Armature
 
+[![CI](https://github.com/bryansparks/armature/actions/workflows/ci.yml/badge.svg)](https://github.com/bryansparks/armature/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+
 A lightweight, declarative agent execution harness. Define multi-agent workflows as YAML specs. Run them with a single Python call or from the CLI.
 
 No framework dependency. No prescribed team structure. Just a DAG executor, an LLM adapter, and your workflow spec.
@@ -223,7 +227,7 @@ Each use case is a YAML workflow spec + a small set of Python tool modules. The 
 
 ## Research foundation
 
-Armature is built from seven academic papers and one industry governance framework published between February 2025 and May 2026, all converging on a single insight: **the harness matters more than the model.** Every major design decision traces to an experimentally validated finding.
+Armature is built from eight academic papers, one industry governance framework, and one open-source agent architecture project, all published between February 2025 and May 2026. Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
 
 ### The papers
 
@@ -259,11 +263,19 @@ Identifies three system-level failure modes: stale memory reaching LLMs without 
 
 Five governance primitives borrowed directly: reversibility classification for every tool call (`FULL / PARTIAL / NONE`), tamper-evident SHA-256 hashing of trace inputs and the governing policy, a `require_approval` gate wired into the tool-call path, and `safety_mode: strict` (fail-closed — deny on no-match).
 
+**[ActiveGraph]** — yoheinakajima, May 2026 (arXiv:2605.21997)
+
+Graph-memory agent architecture introducing content-addressed caching of LLM responses and event-triggered reactive behaviors. Adopted concepts: SHA-256 cache keying by model + messages + kwargs (`LLMCache`), audit replay from the trace store (`armature replay`), and the `BehaviorRule`/`BehaviorRegistry` hook layer for pattern-triggered post-run behaviors.
+
+**[KYA] Know Your Agents** — Veldt Labs, May 2026 (arXiv:2605.25376)
+
+Governance layer operating at definition-time (static risk scoring), runtime-trust (anomaly counting), and composition (only-tighten). Adopted: five-factor static spec risk score surfaced by `armature validate`, `RogueSignalCounter` wired into safety hooks and the run summary, and `CONFLICTING_SAFETY_RULES` validation enforcing the only-tighten composition principle.
+
 ---
 
 ### What's implemented
 
-| Paper | Concept | Status |
+| Source | Concept | Status |
 |---|---|---|
 | NLAH | 7-component spec, four role types, IHR, fan-out/fan-in | ✅ |
 | Meta-Harness | Single-shot + multi-iteration optimizer, proposal history, prompt bootstrapping | ✅ |
@@ -273,6 +285,8 @@ Five governance primitives borrowed directly: reversibility classification for e
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
+| ActiveGraph | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
+| KYA | Static spec risk score, rogue signal counter, only-tighten safety rule validation | ✅ |
 
 ---
 
@@ -338,7 +352,7 @@ Armature is the **execution layer** — the first component in a larger system d
                                                     └─────────────────────┘
 
   ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,202 tests passing.
+  All four loops are implemented. 1,221 tests passing.
 ```
 
 **The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.

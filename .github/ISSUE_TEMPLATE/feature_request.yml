@@ -1,0 +1,48 @@
+name: Feature Request
+description: Propose a new feature or enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check [ROADMAP.md](../../ROADMAP.md) — your feature may already be planned.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the workflow or use case where you hit this gap.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Armature to do? Sketch the spec syntax, CLI flag, or API change if you have one in mind.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why they fall short.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Spec format / YAML DSL
+        - CLI commands
+        - Safety and governance
+        - Self-improvement loop
+        - Observability (traces, dashboard)
+        - Memory
+        - Tool registry
+        - HTTP service
+        - Documentation
+        - Other
+    validations:
+      required: true

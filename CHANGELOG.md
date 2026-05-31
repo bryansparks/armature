@@ -8,6 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### ActiveGraph-inspired (arXiv:2605.21997)
+
+- **LLM response caching** — `LLMCache` stores responses by SHA-256 content hash (model + messages + kwargs); `--no-cache` flag on `armature run` bypasses the cache for a clean run. Subsequent runs with identical prompts are instant and free.
+- **`armature replay <run_id>`** — reads TraceStore records and renders a stage-by-stage execution table (stage id, role, model, latency, success, quorum score, IHR contribution) with a per-run IHR summary. Enables post-mortem debugging of any historical run without re-executing.
+- **`BehaviorRule` / `BehaviorRegistry`** — trace-triggered reactive hooks. Registered rules receive the recent trace list and fire a handler when their pattern matches. Built-in `ihr_feedback` behavior: after runs where rolling IHR drops below 0.75, the engine prints a Rich-formatted hint suggesting `armature improve`.
+- **`--auto-improve` flag on `armature run`** — after execution, if IHR < 0.75, automatically calls `SelfImproveRunner.analyze()`. Safe changes are applied in-place to the spec; structural proposals that require review go to `{spec}.pending.yaml`.
+
+### KYA-inspired (arXiv:2605.25376, Veldt Labs)
+
+- **Static spec risk score** — `compute_spec_risk(spec)` scores a HarnessSpec on five weighted factors (tool-call stages, no-judge penalty, require_approval rules, fan-out stages, strict mode credit); returns a `SpecRiskResult` with `score` (0–100), `tier` (LOW / MEDIUM / HIGH / CRITICAL), and `factors` list. Displayed automatically by `armature validate`.
+- **Rogue signal counter** — `RogueSignalCounter` dataclass wired into `SafetyHookBuilder.register()`; incremented on every `ToolBlocked` event at runtime. Count appears in the `run_summary` event and in the CLI run output as `"N blocked"`.
+- **Only-tighten safety rule validation** — `validate_spec()` now raises `CONFLICTING_SAFETY_RULES` when an `allow` rule targets a tool (or wildcard) that an existing `block` rule already covers. Enforces KYA's composition principle: safety rules may only tighten constraints, never loosen them.
+
+### Tests
+
+- 1,221 tests passing (up from 1,202 at v0.1.0 release)
+
 ---
 
 ## [0.1.0] — 2026-05-26

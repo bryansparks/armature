@@ -3,7 +3,7 @@
 ## Getting started
 
 ```bash
-git clone https://github.com/elftech/armature
+git clone https://github.com/bryansparks/armature
 cd armature
 pip install -e ".[dev]"
 ```
@@ -11,7 +11,7 @@ pip install -e ".[dev]"
 ## Running the tests
 
 ```bash
-./run_tests.sh          # all 1,200+ tests
+./run_tests.sh          # all 1,221+ tests
 ./run_tests.sh -k auth  # filter by name
 ./run_tests.sh --cov armature --cov-report=term-missing  # with coverage
 ```

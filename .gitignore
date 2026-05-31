@@ -10,9 +10,12 @@ htmlcov/
 
 # Internal architecture and scratch files (not for public repo)
 examples/dangerous-pretzel/
+HARNESS-STATE.md
+HARNESS-STATE-v2.md
 HARNESS-STATE-v3.md
 VISION.md
 taking_stock.txt
+TODO.md
 .playwright-mcp/
 armature-*.png
 docs/superpowers/
@@ -21,3 +24,7 @@ docs/deferred-research.md
 docs/use-case-ad-campaign.md
 docs/ARMATURE-AGENTCORE.md
 docs/plan-gaps-agentcore.md
+
+# Generated HTML docs (regenerate with: bash docs/regen-guide.sh)
+USER-GUIDE.html
+BUILD_FIRST_WORKFLOW.html
