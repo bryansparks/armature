@@ -1,0 +1,59 @@
+/* Armature — dark developer theme */
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-raised: #1c2128;
+  --border: #21262d;
+  --border-light: #30363d;
+  --text: #c9d1d9;
+  --text-secondary: #8b949e;
+  --text-muted: #6e7681;
+  --text-bright: #f0f6fc;
+  --researcher: #4ade80;
+  --worker: #60a5fa;
+  --judge: #c084fc;
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; background: #0d1117; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── DAG animation keyframes ── */
+@keyframes pulse-researcher {
+  0%, 100% { fill: #0d1117; stroke: #2a2d3e; filter: none; }
+  40%, 60%  { fill: rgba(74,222,128,.13); stroke: #4ade80; filter: drop-shadow(0 0 8px rgba(74,222,128,.6)); }
+}
+@keyframes pulse-worker {
+  0%, 100% { fill: #0d1117; stroke: #2a2d3e; filter: none; }
+  40%, 60%  { fill: rgba(96,165,250,.13); stroke: #60a5fa; filter: drop-shadow(0 0 8px rgba(96,165,250,.6)); }
+}
+@keyframes pulse-judge {
+  0%, 100% { fill: #0d1117; stroke: #2a2d3e; filter: none; }
+  40%, 60%  { fill: rgba(192,132,252,.13); stroke: #c084fc; filter: drop-shadow(0 0 8px rgba(192,132,252,.6)); }
+}
+@keyframes edge-flow {
+  0%   { stroke-dashoffset: 20; opacity: .15; }
+  50%  { opacity: .6; }
+  100% { stroke-dashoffset: 0; opacity: .15; }
+}
+
+/* DAG node base + role animations */
+.dag-node { fill: #0d1117; stroke: #2a2d3e; stroke-width: 1.5; transition: stroke .3s, fill .3s; }
+.n-scope   { animation: pulse-researcher 5s ease-in-out infinite; animation-delay: 0s; }
+.n-work-a  { animation: pulse-worker     5s ease-in-out infinite; animation-delay: .7s; }
+.n-work-b  { animation: pulse-worker     5s ease-in-out infinite; animation-delay: .7s; }
+.n-judge   { animation: pulse-judge      5s ease-in-out infinite; animation-delay: 1.5s; }
+.n-output  { animation: pulse-researcher 5s ease-in-out infinite; animation-delay: 2.2s; }
+
+/* DAG edges */
+.dag-edge { stroke: #30363d; stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; animation: edge-flow 5s ease-in-out infinite; }
+.e-0 { animation-delay: .3s; }
+.e-1 { animation-delay: .3s; }
+.e-2 { animation-delay: 1.1s; }
+.e-3 { animation-delay: 1.1s; }
+.e-4 { animation-delay: 1.9s; }
