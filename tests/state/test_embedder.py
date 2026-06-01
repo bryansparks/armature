@@ -2,7 +2,7 @@
 import math
 import pytest
 from unittest.mock import MagicMock
-import numpy as np
+np = pytest.importorskip("numpy", reason="numpy required for embedder tests")
 
 
 def _make_mock_model(dim: int = 8):

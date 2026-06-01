@@ -13,7 +13,7 @@ from armature.report.aggregator import (
     DashboardData, SafetyStats, load_safety_stats
 )
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def _make_empty_dashboard(name: str = "test-wf") -> DashboardData:

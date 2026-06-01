@@ -54,6 +54,7 @@ async def test_subagent_fan_out_end_to_end(tmp_path):
 
 async def test_service_run_via_http(tmp_path):
     """HTTP service runs a workflow and returns a structured result."""
+    pytest.importorskip("fastapi", reason="fastapi not installed; install with pip install armature[service]")
     from httpx import AsyncClient, ASGITransport
     from armature.service.app import app
 

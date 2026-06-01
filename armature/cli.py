@@ -504,7 +504,7 @@ def doctor(
 
     typer.echo("Packages:")
     for pkg in required_packages:
-        mod = pkg.replace("-", "_").replace(".", "_")
+        mod = pkg.replace("-", "_")
         try:
             importlib.import_module(mod)
             typer.echo(f"  ✓ {pkg}")

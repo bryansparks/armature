@@ -2,6 +2,8 @@ import pytest
 from pathlib import Path
 from httpx import AsyncClient, ASGITransport
 
+pytest.importorskip("fastapi", reason="fastapi not installed; install with pip install armature[service]")
+
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
