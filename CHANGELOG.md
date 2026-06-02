@@ -21,9 +21,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Rogue signal counter** — `RogueSignalCounter` dataclass wired into `SafetyHookBuilder.register()`; incremented on every `ToolBlocked` event at runtime. Count appears in the `run_summary` event and in the CLI run output as `"N blocked"`.
 - **Only-tighten safety rule validation** — `validate_spec()` now raises `CONFLICTING_SAFETY_RULES` when an `allow` rule targets a tool (or wildcard) that an existing `block` rule already covers. Enforces KYA's composition principle: safety rules may only tighten constraints, never loosen them.
 
+### Long-horizon focus
+
+- **`mission:` field on HarnessSpec** — a single-line or multi-paragraph statement of the workflow's overall goal. Automatically injected into every LLM stage's system prompt as a `[Workflow Mission]` block, followed by a `[Prior stages]` breadcrumb (compact JSON preview of each completed stage's output). Keeps agents anchored to the stated goal across long-running workflows (hours or days) without any per-stage configuration. Non-LLM stages are unaffected.
+
 ### Tests
 
-- 1,221 tests passing (up from 1,202 at v0.1.0 release)
+- 1,230 tests passing (up from 1,202 at v0.1.0 release)
 
 ---
 

@@ -352,7 +352,7 @@ Armature is the **execution layer** — the first component in a larger system d
                                                     └─────────────────────┘
 
   ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,221 tests passing.
+  All four loops are implemented. 1,230 tests passing.
 ```
 
 **The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.
@@ -371,6 +371,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Role type defaults** | Maps role types to tiers automatically (`worker → small`, `judge → frontier`, etc.); stages can omit `model_tier` and inherit from this mapping |
 | **Native tool calling** | Stages declare `role.tools` to scope which registry tools they can call; the engine runs a ReAct dispatch loop — tool calls returned by the model are executed and results fed back until a final response is produced |
 | **Direct tool call** | A `tool_call` stage invokes a registered tool without an LLM — deterministic, zero-latency, no JSON hallucination. Args are Jinja2-rendered against context. |
+| **Mission context** | A `mission:` field on the spec is automatically injected into every LLM stage's system prompt, anchoring agents to the stated goal across long-running workflows and including a compact prior-stage breadcrumb |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
 | **IHR** | Implicit Harness Rating — composite quality score (output validity, success rate, quorum score, latency) computed per run from the trace store |

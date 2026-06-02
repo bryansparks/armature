@@ -69,6 +69,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
 30. [Spec risk scoring](#30-spec-risk-scoring)
 31. [Rogue signal tracking](#31-rogue-signal-tracking)
 32. [Safety rule composition](#32-safety-rule-composition)
+33. [Mission context for long-horizon workflows](#33-mission-context-for-long-horizon-workflows)
 
 ---
 
@@ -3293,6 +3294,95 @@ This pattern is the cleanest way to express "allow only these specific tools" wi
 
 ---
 
-*Armature User Guide — built from eight academic papers, one industry governance framework, and one open-source agent architecture project. 1,221 tests. MIT license.*
+---
 
-*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, and observability (§25, §27, §31) for production monitoring. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
+## 33. Mission context for long-horizon workflows
+
+**Problem.** In a workflow that runs for hours or days — dozens of stages, hundreds of LLM calls — individual agents drift. A researcher three stages deep into a competitive analysis starts optimizing for thoroughness rather than the original deliverable. A worker on iteration 40 of a document-processing loop stops connecting its output to the business goal stated at the top of the run. This is agent focus drift: the inability of individual stages to stay anchored to the stated objective as execution lengthens.
+
+**Solution.** Declare a `mission:` at the workflow level. Armature injects it into every LLM stage's system prompt automatically — as the very first block, before role instructions and context — along with a compact breadcrumb of what prior stages have produced.
+
+### Declaring a mission
+
+```yaml
+name: competitive-analysis
+mission: |
+  Produce a defensible market positioning report for Acme Corp's Q3 board review.
+  Ground every finding in publicly available data. Flag any claim that cannot be
+  sourced. The final deliverable is a structured JSON document consumable by the
+  reporting pipeline.
+
+stages:
+  - id: gather_competitors
+    role:
+      name: researcher
+      type: researcher
+      description: Find the top 10 competitors and their key differentiators.
+    depends_on: []
+
+  - id: analyze_strengths
+    role:
+      name: analyst
+      type: worker
+      description: Synthesize competitor strengths and weaknesses.
+    depends_on: [gather_competitors]
+
+  - id: position
+    role:
+      name: strategist
+      type: judge
+      description: Score positioning options against the mission criteria.
+    depends_on: [analyze_strengths]
+```
+
+### What each LLM stage receives
+
+Every LLM stage's system prompt opens with:
+
+```
+[Workflow Mission]
+Produce a defensible market positioning report for Acme Corp's Q3 board review.
+Ground every finding in publicly available data. Flag any claim that cannot be
+sourced. The final deliverable is a structured JSON document consumable by the
+reporting pipeline.
+
+[Prior stages]
+• gather_competitors → {"competitors": ["CompA", "CompB"], "count": 7, ...
+• analyze_strengths → {"top_strengths": ["pricing", "support"], "gap": ...
+
+## Your Role
+...
+```
+
+The `[Prior stages]` breadcrumb is built dynamically — each stage sees only the outputs of stages that completed before it (first 200 characters of JSON per stage). Stage 1 sees no breadcrumb. Stage 10 sees nine entries.
+
+### Properties
+
+| Property | Behaviour |
+|---|---|
+| **Scope** | Applies to all LLM stages in the workflow |
+| **Non-LLM stages** | Script, direct tool call, gate, and subagent stages are unaffected |
+| **Ordering** | Mission block is the first thing in the system prompt — before role preambles, skills, and context |
+| **Default** | `mission: ""` — omitting it is a no-op; no block is injected |
+| **Prior stage breadcrumb** | Built per-call from the accumulated context; only completed stages appear; truncated at 200 chars per stage |
+
+### When to use it
+
+Use `mission:` whenever:
+
+- The workflow runs for more than a handful of stages
+- Stages have different roles (researcher → worker → judge) and need to share a common north star
+- The end deliverable has specific constraints (format, sourcing rules, audience) that must survive the full pipeline
+- You are running the same workflow repeatedly over days and want all future runs to stay aligned
+
+For short, single-purpose workflows (two or three tightly coupled stages), the overhead is minimal but also unnecessary.
+
+### Relationship to Steward (the meta-coordinator)
+
+`mission:` addresses *within-workflow* focus — keeping all stages in a single spec run anchored to the stated goal. For *cross-workflow* orchestration (a plan that spans multiple Armature workflow executions over days), the Steward layer handles plan persistence, context compression at handoff, and re-planning triggers. These are complementary: Steward sets the high-level mission for each Armature run; Armature's `mission:` field propagates that goal into every LLM call within the run.
+
+---
+
+*Armature User Guide — built from eight academic papers, one industry governance framework, and one open-source agent architecture project. 1,230 tests. MIT license.*
+
+*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, and mission context (§33) to maintain focus across long-horizon runs. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
