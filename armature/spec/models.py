@@ -236,6 +236,7 @@ class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
     description: str = ""
+    mission: str = ""
     checkpoint: bool = False             # persist completed stage results for resume across runs
     contracts: Contract = Field(default_factory=Contract)
     roles: dict[str, Role] = Field(default_factory=dict)

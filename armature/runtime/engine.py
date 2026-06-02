@@ -44,6 +44,26 @@ def _extract_quorum_score(role_type: str, result: dict) -> float | None:
 _GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
 
 
+def _build_mission_block(
+    mission: str,
+    context: dict,
+    spec_stage_ids: set[str],
+    max_preview_chars: int = 200,
+) -> str:
+    """Build the mission + prior-stage breadcrumb block for LLM system prompts."""
+    parts = []
+    if mission:
+        parts.append(f"[Workflow Mission]\n{mission.strip()}")
+    prior = []
+    for sid in spec_stage_ids:
+        if sid in context:
+            preview = json.dumps(context[sid], default=str)[:max_preview_chars]
+            prior.append(f"• {sid} → {preview}")
+    if prior:
+        parts.append("[Prior stages]\n" + "\n".join(prior))
+    return "\n\n".join(parts)
+
+
 class Harness:
     def __init__(
         self,
@@ -300,6 +320,11 @@ class Harness:
                             )
                         self._llm_call_count += 1
                         await self._ensure_cache()
+                        mission_ctx = _build_mission_block(
+                            self._spec.mission,
+                            context,
+                            {s.id for s in self._spec.stages},
+                        )
                         _llm_node = LLMNode(
                             stage=stage,
                             tiers=self._spec.model_tiers,
@@ -309,6 +334,7 @@ class Harness:
                             transcript=self._transcript,
                             skill_library=self._spec.skill_library,
                             cache=self._llm_cache,
+                            mission_context=mission_ctx,
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()

@@ -41,10 +41,14 @@ class PromptAssembler:
         output_schema: dict[str, Any] | None = None,
         examples: list[dict] | None = None,
         skills: "list[SkillDef]" = [],
+        mission_block: str = "",
     ) -> str:
         import json as _json
 
         sections = []
+
+        if mission_block:
+            sections.append(mission_block)
 
         if self._static_prefix:
             sections.append(self._static_prefix)

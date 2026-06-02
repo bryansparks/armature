@@ -125,6 +125,7 @@ class LLMNode(BaseNode):
         workflow_name: str = "",
         skill_library: dict[str, SkillDef] | None = None,
         cache: "LLMCache | None" = None,
+        mission_context: str = "",
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -139,6 +140,7 @@ class LLMNode(BaseNode):
         self._bootstrap_store = None
         self._max_tool_iterations = 10
         self._cache = cache
+        self._mission_context = mission_context
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
@@ -290,6 +292,7 @@ class LLMNode(BaseNode):
             output_schema=output_schema,
             examples=examples,
             skills=self._resolve_skills(),
+            mission_block=self._mission_context,
         )
 
         # Apply the same signature.input filter to the user message that PromptAssembler
