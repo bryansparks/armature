@@ -13,6 +13,7 @@ class DiagnosticCode(str, Enum):
     LOW_CONFIDENCE = "low_confidence"
     HIGH_ESCALATION = "high_escalation"
     POSTCONDITION_FAILED = "postcondition_failed"
+    LOW_SKILL_ACTIVATION = "low_skill_activation"
 
 
 class DiagnosticResult(BaseModel):
@@ -61,5 +62,11 @@ class DiagnosticAnalyzer:
                     code=DiagnosticCode.POSTCONDITION_FAILED,
                     stage_id=t.stage_id,
                     details="tool postcondition failed",
+                ))
+            if t.tools_declared and not t.tools_called:
+                results.append(DiagnosticResult(
+                    code=DiagnosticCode.LOW_SKILL_ACTIVATION,
+                    stage_id=t.stage_id,
+                    details=f"declared={t.tools_declared}, called=[]",
                 ))
         return results

@@ -96,7 +96,19 @@ def _attach_job_hooks(harness: Harness, job_id: str) -> None:
         return HookDecision.ALLOW
 
     async def post_stage_hook(phase, stage_id, result, ctx) -> None:
+        spec_stage = next((s for s in harness._spec.stages if s.id == stage_id), None)
+        if spec_stage and spec_stage.response_stage:
+            content = result.get("content", "") if isinstance(result, dict) else ""
+            await _jobs.emit_stage_event(job_id, {
+                "type": "response_stage_complete",
+                "stage_id": stage_id,
+                "content": content,
+            })
         await _jobs.emit_stage_event(job_id, {"type": "stage_complete", "stage_id": stage_id})
+
+    async def on_token(chunk: str) -> None:
+        await _jobs.emit_stage_event(job_id, {"type": "token", "content": chunk})
 
     harness._hooks.register(HookPhase.PRE_STAGE, pre_stage_hook)
     harness._hooks.register(HookPhase.POST_STAGE, post_stage_hook)
+    harness._on_token = on_token

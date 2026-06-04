@@ -61,6 +61,7 @@ Rules:
 - If a stage has OUTPUT_INVALID: relax or correct the output_schema required fields.
 - If a stage has HIGH_ESCALATION: increase on_fail.loop.max or upgrade model_tier.
 - If a stage has STAGE_FAILED: add a timeout_s or upgrade model_tier.
+- If a stage has LOW_SKILL_ACTIVATION: strengthen role.description to explicitly instruct tool use; list tools by name and when to invoke them.
 
 Output format — two sections, in order:
 1. The complete revised YAML (no markdown fences, no explanation).
@@ -71,7 +72,7 @@ Output format — two sections, in order:
 
    predicted_fixes: list of "code:stage_id" strings you expect to resolve
    predicted_regressions: list of "code:stage_id" strings that might temporarily worsen
-   Valid codes: stage_failed, output_invalid, low_confidence, high_escalation
+   Valid codes: stage_failed, output_invalid, low_confidence, high_escalation, low_skill_activation
    Example: {"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}
    Use [] for empty lists. These predictions will be verified in the next cycle.
 """
@@ -87,7 +88,11 @@ class RefinerResult:
 
 
 class SpecRefiner:
-    """Calls a frontier LLM to produce a targeted revision of an existing spec."""
+    """Calls a medium-tier LLM to produce a targeted revision of an existing spec.
+
+    Per arXiv:2605.30621v1, medium-tier models achieve equivalent spec-evolution
+    quality to frontier models (≤3.1pp difference) at substantially lower cost.
+    """
 
     def __init__(self, model: str) -> None:
         self._model = model
@@ -478,7 +483,14 @@ class SelfImproveRunner:
         avg_quorum = sum(qs) / len(qs) if qs else 0.5
         avg_latency = sum(t.latency_ms for t in traces) / n
         latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
-        ihr = 0.40 * output_valid_rate + 0.30 * success_rate + 0.20 * avg_quorum + 0.10 * latency_score
+        hfr = sum(1 for t in traces if t.escalation_count == 0) / n
+        ihr = (
+            0.35 * output_valid_rate
+            + 0.25 * success_rate
+            + 0.20 * avg_quorum
+            + 0.10 * latency_score
+            + 0.10 * hfr
+        )
         return IhrResult(
             run_id="rolling",
             ihr=ihr,
@@ -486,6 +498,7 @@ class SelfImproveRunner:
             success_rate=success_rate,
             avg_quorum_score=avg_quorum,
             latency_score=latency_score,
+            hfr=hfr,
             n_traces=n,
         )
 

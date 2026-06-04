@@ -98,10 +98,12 @@ async def test_compute_ihr_partial_failures(store):
     result = await store.compute_ihr("r3")
     avg_latency = 2000.0
     latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
-    expected = (0.40 * 0.5    # output_valid_rate: 1/2
-              + 0.30 * 0.5    # success_rate: 1/2
+    hfr = 1.0  # both traces have escalation_count=0
+    expected = (0.35 * 0.5    # output_valid_rate: 1/2
+              + 0.25 * 0.5    # success_rate: 1/2
               + 0.20 * 0.6    # avg_quorum: (0.8+0.4)/2
-              + 0.10 * latency_score)
+              + 0.10 * latency_score
+              + 0.10 * hfr)   # hfr: arXiv:2605.30621v1
     assert result.ihr == pytest.approx(expected, abs=1e-6)
     assert result.n_traces == 2
 
@@ -343,6 +345,21 @@ async def test_inputs_provenance_round_trips_nested_values(tmp_path):
     await store.record(trace)
     results = await store.query(workflow_name="wf")
     assert results[0].inputs_provenance == prov
+
+
+async def test_get_run_outputs_returns_stage_keyed_dict(store):
+    await store.record(TraceRecord(
+        run_id="run-out", workflow_name="wf", stage_id="stage_a", role_type="worker",
+        model="m", outputs={"summary": "all good", "count": "3"},
+    ))
+    await store.record(TraceRecord(
+        run_id="run-out", workflow_name="wf", stage_id="stage_b", role_type="worker",
+        model="m", outputs={"recommendation": "ship it"},
+    ))
+    result = await store.get_run_outputs("run-out")
+    assert set(result.keys()) == {"stage_a", "stage_b"}
+    assert result["stage_a"]["summary"] == "all good"
+    assert result["stage_b"]["recommendation"] == "ship it"
 
 
 async def test_old_db_without_provenance_column_returns_empty_dict(tmp_path):

@@ -235,21 +235,64 @@ def optimize(
 
 @app.command()
 def report(
-    run_id: str = typer.Option(..., "--run-id", help="Run ID to report on"),
-    traces: Path = typer.Option(None, "--traces", help="Path to traces.db (default: ~/.armature/runs/{run_id}/traces.db)"),
+    run_id: str = typer.Option(None, "--run-id", help="Run ID to report on"),
+    workflow: str = typer.Option(None, "--workflow", help="Workflow name — resolves to the most recent run for that workflow"),
+    output_file: Path = typer.Option(None, "--output-file", help="Write report to file (.md or .html); suppresses terminal output"),
+    traces: Path = typer.Option(None, "--traces", help="Path to traces.db (default: ~/.armature/traces.db)"),
     evals: Path = typer.Option(None, "--evals", help="Path to evaluations database"),
     knowledge: Path = typer.Option(None, "--knowledge", help="Path to knowledge database"),
     session_log: Path = typer.Option(None, "--session-log", help="Path to session.jsonl"),
 ):
-    """Print a human-readable report for a completed workflow run."""
-    from armature.reporting import load_report_data, ReportBuilder
+    """Print a human-readable report for a completed workflow run.
+
+    Identify the run by workflow name or exact run ID:
+
+      armature report --workflow launchpad
+      armature report --run-id abc123
+
+    Save to a file (terminal output suppressed):
+
+      armature report --workflow launchpad --output-file launchpad.md
+      armature report --workflow launchpad --output-file launchpad.html
+    """
+    from armature.reporting import load_report_data
+    from armature.report.run_report import render_run_report, render_run_report_markdown, render_run_report_html
+    from armature.state.traces import TraceStore
+
+    if not run_id and not workflow:
+        typer.echo("Provide --workflow <name> or --run-id <id>.", err=True)
+        raise typer.Exit(1)
+
+    if output_file:
+        ext = output_file.suffix.lower()
+        if ext not in (".md", ".html", ".htm"):
+            typer.echo(f"Unsupported extension '{ext}'. Use .md or .html", err=True)
+            raise typer.Exit(1)
 
     resolved_traces = traces or Path("~/.armature/traces.db").expanduser()
-    resolved_session = session_log or Path(f"~/.armature/runs/{run_id}/session.jsonl").expanduser()
+
+    async def _resolve_run_id() -> str | None:
+        if run_id:
+            return run_id
+        store = TraceStore(resolved_traces)
+        await store.init()
+        resolved = await store.latest_run_id(workflow)
+        if resolved is None:
+            typer.echo(
+                f"No runs found for workflow '{workflow}' in {resolved_traces}.",
+                err=True,
+            )
+        return resolved
+
+    resolved_id = asyncio.run(_resolve_run_id())
+    if resolved_id is None:
+        raise typer.Exit(1)
+
+    resolved_session = session_log or Path(f"~/.armature/runs/{resolved_id}/session.jsonl").expanduser()
 
     async def _load():
         return await load_report_data(
-            run_id=run_id,
+            run_id=resolved_id,
             traces_db=resolved_traces,
             evals_db=evals,
             knowledge_db=knowledge,
@@ -259,14 +302,22 @@ def report(
     data = asyncio.run(_load())
     if data is None:
         typer.echo(
-            f"No traces found for run_id='{run_id}'.\n"
-            f"  Looked in: {resolved_traces}\n"
-            f"  Run 'armature report --list' or check ~/.armature/runs/ for valid run IDs.",
+            f"No traces found for run_id='{resolved_id}'.\n"
+            f"  Looked in: {resolved_traces}",
             err=True,
         )
         raise typer.Exit(1)
 
-    typer.echo(ReportBuilder(data).build())
+    if output_file:
+        ext = output_file.suffix.lower()
+        if ext == ".md":
+            content = render_run_report_markdown(data)
+        else:
+            content = render_run_report_html(data)
+        output_file.write_text(content, encoding="utf-8")
+        typer.echo(f"Report written to {output_file}")
+    else:
+        render_run_report(data)
 
 
 @app.command()
@@ -478,6 +529,46 @@ def export(
 
     bundle_dir = HermesEmitter().emit(loaded, output)
     typer.echo(f"Hermes-agent bundle written to: {bundle_dir}")
+
+
+@app.command()
+def watch(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    host: str = typer.Option("0.0.0.0", "--host", help="Host for webhook listener"),
+    port: int = typer.Option(8081, "--port", "-p", help="Port for webhook triggers"),
+    traces: Path = typer.Option(None, "--traces", help="Path to traces SQLite database"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress run output"),
+):
+    """Run trigger listeners for a spec. Blocks until Ctrl-C."""
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    from armature.spec.loader import load_spec
+    from armature.service.triggers import TriggerDispatcher
+
+    try:
+        loaded = load_spec(spec)
+    except Exception as exc:
+        typer.echo(f"Failed to parse spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    if not loaded.triggers:
+        typer.echo("No triggers defined in spec — nothing to watch.", err=True)
+        raise typer.Exit(1)
+
+    async def _run_fn(payload: dict) -> None:
+        harness = Harness(spec=loaded, traces_db=traces)
+        result = await harness.run({"trigger_payload": payload})
+        if not quiet:
+            typer.echo(f"Run complete: {list(result.keys())}")
+
+    dispatcher = TriggerDispatcher()
+    typer.echo(f"Watching {len(loaded.triggers)} trigger(s). Press Ctrl-C to stop.")
+    try:
+        asyncio.run(dispatcher.run_forever(loaded, _run_fn, host=host, port=port))
+    except KeyboardInterrupt:
+        typer.echo("Watch stopped.")
 
 
 @app.command()

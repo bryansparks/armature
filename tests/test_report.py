@@ -468,7 +468,7 @@ def test_cli_report_full_run_produces_output(tmp_path):
     assert result.exit_code == 0
     assert "run1" in result.output
     assert "demo_wf" in result.output
-    assert "Temperatures are rising." in result.output
+    assert "research" in result.output  # stage ID appears in timeline
 
 
 # ── Failure Signatures / Diagnostics section ──────────────────────────────────

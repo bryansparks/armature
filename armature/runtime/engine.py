@@ -44,6 +44,14 @@ def _extract_quorum_score(role_type: str, result: dict) -> float | None:
 _GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
 
 
+def _carry_output_cap(stage_id: str, spec: "HarnessSpec") -> int:
+    if spec.continuation:
+        carry_ids = {e.key.split(".")[0] for e in spec.continuation.carry_forward}
+        if stage_id in carry_ids:
+            return 2000
+    return 200
+
+
 def _build_mission_block(
     mission: str,
     context: dict,
@@ -116,6 +124,7 @@ class Harness:
         resolved_traces = Path(traces_db).expanduser() if traces_db else _GLOBAL_TRACES_DB.expanduser()
         self._traces = TraceStore(resolved_traces)
         self._on_event = on_event
+        self._on_token = None   # async (chunk: str)->None; set by service layer for streaming
         self._transcript: list[dict[str, Any]] = []
         if use_cache:
             from armature.cache.llm_cache import LLMCache
@@ -335,6 +344,7 @@ class Harness:
                             skill_library=self._spec.skill_library,
                             cache=self._llm_cache,
                             mission_context=mission_ctx,
+                            on_token=self._on_token if stage.response_stage else None,
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()
@@ -356,13 +366,15 @@ class Harness:
                             output_valid=output_valid,
                             quorum_score=_extract_quorum_score(stage.role.type.value, result),
                             escalation_count=result.pop("_escalation_count", 0),
+                            tools_declared=result.pop("_tools_declared", []),
+                            tools_called=result.pop("_tools_called", []),
                             spec_version=self._spec_version,
                             inputs_hash=hashlib.sha256(
                                 json.dumps(context, sort_keys=True, default=str).encode()
                             ).hexdigest()[:32],
                             policy_version=self._policy_version,
                             inputs={k: str(v)[:200] for k, v in context.items()},
-                            outputs={k: str(v)[:200] for k, v in result.items()},
+                            outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
                         ))
                     else:
@@ -694,6 +706,10 @@ class Harness:
 
         context = dict(inputs or {})
         context["run_id"] = self._run_id
+        if self._spec.continuation:
+            _prior = await self._load_prior_context()
+            if _prior is not None:
+                context[self._spec.continuation.inject_as] = _prior
         self._validate_inputs(context)
         self._provenance: dict[str, str] = {k: "user_input" for k in (inputs or {})}
 
@@ -835,6 +851,25 @@ class Harness:
                 pass  # behaviors must never block execution
 
             return results
+
+    async def _load_prior_context(self) -> dict | None:
+        cfg = self._spec.continuation
+        if not cfg or not cfg.carry_forward:
+            return None
+        await self._ensure_traces()
+        prior_run_id = await self._traces.latest_run_id(self._spec.name)
+        if prior_run_id is None or prior_run_id == self._run_id:
+            return None
+        run_outputs = await self._traces.get_run_outputs(prior_run_id)
+        result: dict = {}
+        for entry in cfg.carry_forward:
+            parts = entry.key.split(".", 1)
+            if len(parts) != 2:
+                continue
+            stage_id, output_key = parts
+            if stage_id in run_outputs and output_key in run_outputs[stage_id]:
+                result[output_key] = run_outputs[stage_id][output_key]
+        return result or None
 
     async def evaluate(
         self,

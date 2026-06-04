@@ -18,6 +18,8 @@ class StageStats:
     avg_quorum: float | None
     escalation_rate: float
     is_post_run: bool
+    avg_tools_declared: float = 0.0
+    avg_tools_called: float = 0.0
 
 
 @dataclass
@@ -55,6 +57,7 @@ class DashboardData:
     safety_stats: SafetyStats
     ihr_trend: list[float]  # ordered oldest → newest
     last_run_id: str | None
+    last_run_at: str | None = None
 
     @property
     def current_ihr(self) -> float | None:
@@ -107,6 +110,14 @@ def build_stage_stats(traces: list[TraceRecord]) -> dict[str, StageStats]:
 
         is_post_run = any(t.role_type == "post_run" for t in stage_traces)
 
+        tool_traces = [t for t in stage_traces if t.tools_declared]
+        if tool_traces:
+            avg_tools_declared = sum(len(t.tools_declared) for t in tool_traces) / len(tool_traces)
+            avg_tools_called = sum(len(t.tools_called) for t in tool_traces) / len(tool_traces)
+        else:
+            avg_tools_declared = 0.0
+            avg_tools_called = 0.0
+
         stats[stage_id] = StageStats(
             stage_id=stage_id,
             role_type=stage_traces[0].role_type,
@@ -116,6 +127,8 @@ def build_stage_stats(traces: list[TraceRecord]) -> dict[str, StageStats]:
             avg_quorum=avg_quorum,
             escalation_rate=escalated / n,
             is_post_run=is_post_run,
+            avg_tools_declared=avg_tools_declared,
+            avg_tools_called=avg_tools_called,
         )
     return stats
 

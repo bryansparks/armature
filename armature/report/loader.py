@@ -55,6 +55,13 @@ async def load_dashboard_data(
 
     last_run_id = run_ids_seen[-1] if run_ids_seen else None
 
+    # Most recent trace timestamp for display
+    last_run_at: str | None = None
+    if last_run_id:
+        last_run_traces = [t for t in traces if t.run_id == last_run_id]
+        if last_run_traces:
+            last_run_at = max(t.timestamp for t in last_run_traces)
+
     # Load improvement log
     log_path = improve_log
     if log_path is None:
@@ -73,4 +80,5 @@ async def load_dashboard_data(
         safety_stats=safety_stats,
         ihr_trend=ihr_trend,
         last_run_id=last_run_id,
+        last_run_at=last_run_at,
     )

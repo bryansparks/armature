@@ -1,5 +1,6 @@
 """Rich panel renderables — one function per dashboard panel."""
 from __future__ import annotations
+from datetime import datetime, timezone
 
 from rich.columns import Columns
 from rich.panel import Panel
@@ -42,24 +43,32 @@ def health_strip(data: DashboardData) -> Panel:
     rich_color = _HEALTH_COLORS.get(color, "white")
 
     line1 = Text()
-    line1.append(f"IHR  ", style="bold")
+    line1.append("IHR", style="bold")
+    line1.append("  Instruction-Harness Rate — composite quality score (0–1)  ", style="dim")
     line1.append(_ihr_bar(ihr))
     line1.append(f"  {ihr:.2f}", style=f"bold {rich_color}")
     if delta is not None:
         line1.append(f"  {_delta_text(delta)}", style="bold green" if delta >= 0 else "bold red")
 
     spark = sparkline(data.ihr_trend) if data.ihr_trend else "—"
-    line2 = Text(spark + "  IHR trend", style="dim")
+    line2 = Text(spark + "  trend across runs", style="dim")
 
     content = Text()
     content.append_text(line1)
     content.append("\n")
     content.append_text(line2)
 
-    title = (
-        f"[bold]{data.workflow_name}[/bold]  "
-        f"[dim]{data.total_runs} runs[/dim]"
-    )
+    run_info = f"{data.total_runs} runs"
+    if data.last_run_at:
+        try:
+            dt = datetime.fromisoformat(data.last_run_at).astimezone()
+            ts = dt.strftime("%Y-%m-%d %H:%M")
+            tz = dt.strftime("%Z")
+        except Exception:
+            ts = data.last_run_at[:16].replace("T", " ")
+            tz = "UTC"
+        run_info += f"  ·  last run {ts} {tz}"
+    title = f"[bold]{data.workflow_name}[/bold]  [dim]{run_info}[/dim]"
     return Panel(content, title=title, border_style=rich_color, padding=(0, 1))
 
 
@@ -82,11 +91,12 @@ def stage_breakdown(data: DashboardData) -> Panel:
     t.add_column("Status", justify="center")
     t.add_column("Fail%", justify="right")
     t.add_column("Latency", justify="right")
-    t.add_column("Quorum", justify="right")
+    t.add_column("Agree%", justify="right")
     t.add_column("Esc%", justify="right")
+    t.add_column("Tools", justify="right")
 
     if not data.stage_stats:
-        t.add_row("—", "no data", "—", "—", "—", "—")
+        t.add_row("—", "no data", "—", "—", "—", "—", "—")
     else:
         for s in data.stage_stats.values():
             row_style = _stage_row_style(s)
@@ -103,8 +113,12 @@ def stage_breakdown(data: DashboardData) -> Panel:
             latency = f"{s.avg_latency_ms / 1000:.1f}s" if s.avg_latency_ms < 60_000 else f"{s.avg_latency_ms / 60_000:.1f}m"
             quorum = f"{s.avg_quorum:.2f}" if s.avg_quorum is not None else "—"
             esc = f"{s.escalation_rate * 100:.0f}%"
+            if s.avg_tools_declared > 0:
+                tools = f"{round(s.avg_tools_called)}/{round(s.avg_tools_declared)}"
+            else:
+                tools = "—"
 
-            t.add_row(s.stage_id, status, fail_pct, latency, quorum, esc, style=row_style)
+            t.add_row(s.stage_id, status, fail_pct, latency, quorum, esc, tools, style=row_style)
 
     return Panel(t, title="[bold]Stage Breakdown[/bold]", border_style="dim", padding=(0, 0))
 

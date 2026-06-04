@@ -126,6 +126,7 @@ class LLMNode(BaseNode):
         skill_library: dict[str, SkillDef] | None = None,
         cache: "LLMCache | None" = None,
         mission_context: str = "",
+        on_token=None,
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -141,6 +142,7 @@ class LLMNode(BaseNode):
         self._max_tool_iterations = 10
         self._cache = cache
         self._mission_context = mission_context
+        self._on_token = on_token  # async (chunk: str) -> None; enables token streaming
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
@@ -252,6 +254,25 @@ class LLMNode(BaseNode):
             tier_config = getattr(self._tiers, active[0])
         return self._model_string(tier_config)
 
+    async def _stream_response(self, model: str, kwargs: dict) -> tuple[str, int, int]:
+        """Stream tokens via litellm; call self._on_token for each non-empty chunk.
+
+        Returns (full_content, input_tokens, output_tokens).
+        No retry/escalation — streaming cannot be rewound mid-response.
+        """
+        chunks: list[str] = []
+        input_tokens = output_tokens = 0
+        async for chunk in await litellm_completion(model=model, stream=True, **kwargs):
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                chunks.append(delta)
+                await self._on_token(delta)
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                output_tokens = getattr(usage, "completion_tokens", 0) or 0
+        return "".join(chunks), input_tokens, output_tokens
+
     def _append_transcript(self, messages: list[dict], model: str, response: str) -> None:
         if self._transcript is None:
             return
@@ -269,6 +290,7 @@ class LLMNode(BaseNode):
         role = self._stage.role
         # Per-stage filtering: only tools explicitly declared on the role are exposed.
         # Empty role.tools → no tools in prompt, no dispatch (clean by default).
+        tools_declared: list[str] = list(role.tools) if role.tools else []
         if self._registry and role.tools:
             all_descriptors = {t["name"]: t for t in self._registry.descriptors()}
             stage_tools = [all_descriptors[name] for name in role.tools if name in all_descriptors]
@@ -310,6 +332,25 @@ class LLMNode(BaseNode):
 
         is_json_mode = self._stage.output_mode.value in ("json", "guided_json")
 
+        # Streaming path: text mode only; bypasses cache, retry, and tier escalation.
+        if self._on_token is not None and not is_json_mode:
+            tier_name = self._resolve_tier_name()
+            tier_config = getattr(self._tiers, tier_name, None) or getattr(
+                self._tiers, self._active_tier_order()[0]
+            )
+            model = self._model_string(tier_config)
+            stream_kwargs = {"messages": messages, **self._tier_extra_kwargs(tier_config)}
+            content, input_tok, output_tok = await self._stream_response(model, stream_kwargs)
+            self._append_transcript(messages, model, content)
+            return {
+                "content": content,
+                "_input_tokens": input_tok,
+                "_output_tokens": output_tok,
+                "_escalation_count": 0,
+                "_tools_declared": tools_declared,
+                "_tools_called": [],
+            }
+
         if self._cache is not None:
             cache_key = self._cache._make_key(
                 self._resolve_model(),
@@ -321,6 +362,7 @@ class LLMNode(BaseNode):
                 return json.loads(cached)
 
         result = await self._execute_with_escalation(messages, is_json_mode, stage_tools)
+        result["_tools_declared"] = tools_declared
 
         if self._cache is not None:
             await self._cache.put(cache_key, json.dumps(result, default=str))
@@ -335,6 +377,7 @@ class LLMNode(BaseNode):
         tried: set[str] = set()
         content = ""
         tier_attempt = -1
+        tools_called: list[str] = []
 
         for attempt_tier in [tier_name] + active_order:
             if attempt_tier in tried:
@@ -397,6 +440,7 @@ class LLMNode(BaseNode):
                     ],
                 })
                 for tc in msg.tool_calls:
+                    tools_called.append(tc.function.name)
                     try:
                         args = json.loads(tc.function.arguments)
                         tool_result = await self._registry.dispatch(tc.function.name, args)
@@ -428,16 +472,17 @@ class LLMNode(BaseNode):
                     result["_input_tokens"] = input_tokens
                     result["_output_tokens"] = output_tokens
                     result["_escalation_count"] = tier_attempt
+                    result["_tools_called"] = tools_called
                     return result
                 continue  # escalate to next tier
 
             if content:
                 self._append_transcript(messages, model, content)
-                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt}
+                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt, "_tools_called": tools_called}
             continue  # empty text response — escalate to next tier
 
         # All tiers exhausted
         if not parse_as_json:
             # All tiers returned empty content — report as empty, not a parse error
-            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt}
-        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt}
+            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called}
+        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called}

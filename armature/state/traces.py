@@ -28,6 +28,8 @@ class TraceRecord(BaseModel):
     inputs_hash: str = ""
     policy_version: str = ""
     inputs_provenance: dict[str, str] = Field(default_factory=dict)
+    tools_declared: list[str] = Field(default_factory=list)
+    tools_called: list[str] = Field(default_factory=list)
 
 
 class IhrResult(BaseModel):
@@ -39,6 +41,7 @@ class IhrResult(BaseModel):
     latency_score: float
     n_traces: int
     avg_escalation_count: float = 0.0
+    hfr: float = 0.0
 
 
 _CREATE_SQL = """
@@ -81,6 +84,8 @@ class TraceStore:
                 "inputs_hash TEXT DEFAULT ''",
                 "policy_version TEXT DEFAULT ''",
                 "inputs_provenance_json TEXT DEFAULT '{}'",
+                "tools_declared_json TEXT DEFAULT '[]'",
+                "tools_called_json TEXT DEFAULT '[]'",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -97,8 +102,9 @@ class TraceStore:
                     input_tokens, output_tokens, latency_ms, success, output_valid,
                     quorum_score, timestamp, inputs_json, outputs_json,
                     error_type, escalation_count, spec_version,
-                    inputs_hash, policy_version, inputs_provenance_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    inputs_hash, policy_version, inputs_provenance_json,
+                    tools_declared_json, tools_called_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -109,6 +115,8 @@ class TraceStore:
                     trace.error_type, trace.escalation_count, trace.spec_version,
                     trace.inputs_hash, trace.policy_version,
                     json.dumps(trace.inputs_provenance),
+                    json.dumps(trace.tools_declared),
+                    json.dumps(trace.tools_called),
                 ),
             )
             await db.commit()
@@ -170,7 +178,24 @@ class TraceStore:
             inputs_hash=d.get("inputs_hash") or "",
             policy_version=d.get("policy_version") or "",
             inputs_provenance=json.loads(d.get("inputs_provenance_json") or "{}"),
+            tools_declared=json.loads(d.get("tools_declared_json") or "[]"),
+            tools_called=json.loads(d.get("tools_called_json") or "[]"),
         )
+
+    async def latest_run_id(self, workflow_name: str) -> str | None:
+        """Return the run_id of the most recent run for the given workflow."""
+        async with aiosqlite.connect(self._path) as db:
+            cursor = await db.execute(
+                "SELECT run_id FROM traces WHERE workflow_name = ? ORDER BY timestamp DESC LIMIT 1",
+                (workflow_name,),
+            )
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def get_run_outputs(self, run_id: str) -> dict[str, dict]:
+        """Return {stage_id: outputs_dict} for all stages of a run."""
+        traces = await self.query_by_run(run_id)
+        return {t.stage_id: t.outputs for t in traces}
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:
         async with aiosqlite.connect(self._path) as db:
@@ -194,12 +219,14 @@ class TraceStore:
         avg_latency_ms = sum(t.latency_ms for t in traces) / n
         latency_score = max(0.0, 1.0 - avg_latency_ms / 5000.0)
         avg_escalation_count = sum(t.escalation_count for t in traces) / n
+        hfr = sum(1 for t in traces if t.escalation_count == 0) / n
 
         ihr = (
-            0.40 * output_valid_rate
-            + 0.30 * success_rate
+            0.35 * output_valid_rate
+            + 0.25 * success_rate
             + 0.20 * avg_quorum_score
             + 0.10 * latency_score
+            + 0.10 * hfr
         )
         return IhrResult(
             run_id=run_id,
@@ -210,4 +237,5 @@ class TraceStore:
             latency_score=latency_score,
             n_traces=n,
             avg_escalation_count=avg_escalation_count,
+            hfr=hfr,
         )

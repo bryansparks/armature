@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -162,6 +162,7 @@ class Stage(BaseModel):
     output_max_chars: int | None = None # per-stage override; truncates stored result; falls back to contracts.output_max_chars
     evaluate: list[str] = Field(default_factory=list)  # declarative quality criteria evaluated post-run
     post_run: bool = False             # when True, stage runs after all normal stages with full transcript + diagnostics
+    response_stage: bool = False       # when True, stream tokens to caller in real time
 
 
 class TraceConfig(BaseModel):
@@ -232,6 +233,31 @@ class SandboxConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+class ContinuationKey(BaseModel):
+    key: str  # "stage_id.output_key" dotted notation
+
+
+class ContinuationConfig(BaseModel):
+    carry_forward: list[ContinuationKey] = Field(default_factory=list)
+    inject_as: str = "prior_run"
+
+
+class CronTrigger(BaseModel):
+    type: Literal["cron"] = "cron"
+    schedule: str
+
+
+class WebhookTrigger(BaseModel):
+    type: Literal["webhook"] = "webhook"
+    path: str
+
+
+TriggerConfig = Annotated[
+    CronTrigger | WebhookTrigger,
+    Field(discriminator="type"),
+]
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -250,6 +276,8 @@ class HarnessSpec(BaseModel):
     safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
     safety_mode: Literal["permissive", "strict"] = "permissive"
     memory: MemoryConfig | None = None
+    continuation: ContinuationConfig | None = None
+    triggers: list[TriggerConfig] = Field(default_factory=list)
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
