@@ -25,9 +25,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`mission:` field on HarnessSpec** — a single-line or multi-paragraph statement of the workflow's overall goal. Automatically injected into every LLM stage's system prompt as a `[Workflow Mission]` block, followed by a `[Prior stages]` breadcrumb (compact JSON preview of each completed stage's output). Keeps agents anchored to the stated goal across long-running workflows (hours or days) without any per-stage configuration. Non-LLM stages are unaffected.
 
+### Low-latency / streaming
+
+- **`response_stage: true` on a Stage** — designates a single text-mode LLM stage as the streaming response. When the HTTP service executes the workflow, tokens from that stage are forwarded to the SSE event stream in real time as `{"type": "token", "content": "..."}` events. A `{"type": "response_stage_complete", "stage_id": "...", "content": "<full text>"}` event fires as soon as the response is assembled, before background stages finish. Clients can render the response immediately without waiting for `run_complete`. JSON-mode stages (`output_mode: json` / `guided_json`) silently ignore `response_stage: true` and use the normal non-streaming path.
+
+### Long-horizon state & triggers
+
+- **`continuation:` spec block** — enables long-horizon workflows that remember outputs across activations. `carry_forward` lists stage keys from a prior run to pull forward; `inject_as` names the context key they appear under (default: `prior_run`). `Harness._load_prior_context()` resolves the last completed run via `TraceStore.get_run_outputs()` and merges the values into the initial context before the DAG executes.
+- **Output truncation cap raised (200 → 2000 chars)** for carry-forward stages — ensures meaningful summaries survive the round-trip without being silently clipped.
+- **`triggers:` spec block** — `CronTrigger` and `WebhookTrigger` models added to `HarnessSpec` with full Pydantic validation. Model and validation layer only; firing is handled by `armature watch`.
+- **`armature watch <spec>`** — daemon command that blocks until Ctrl-C. `TriggerDispatcher` runs a `_cron_loop` (powered by `croniter`) for scheduled triggers and a Starlette-backed `_webhook_server` for HTTP triggers; both fire `Harness.run()` on each event. `croniter>=2.0` added as a core dependency.
+
+### Research-backed improvements (arXiv:2605.30621v1)
+
+- **Cheap-evolver for `SelfImproveRunner`** — spec refinement now explicitly uses a medium-tier model (not the frontier). arXiv:2605.30621v1 shows ≤3.1pp quality difference between frontier and medium-tier evolvers; the cost savings are substantial. `SpecRefiner`'s docstring updated to reflect this intentional design choice.
+- **Harness-Following Rate (HFR)** added as a fifth IHR component (10% weight). HFR = fraction of trajectories where the model adheres to harness instructions on the first attempt (`escalation_count == 0`). IHR formula updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr). Both `TraceStore.compute_ihr` and `SelfImproveRunner._compute_ihr` updated.
+- **Skill-Load Rate (SLR) diagnostic** — new `low_skill_activation` `DiagnosticCode` fires when a stage declares tools in `role.tools` but the model never invokes any. `TraceRecord` gains `tools_declared` and `tools_called` fields; `LLMNode` collects called tool names during the ReAct loop and passes them to the engine for trace recording. `SpecRefiner` system prompt updated to advise strengthening role descriptions when `low_skill_activation` is detected.
+
 ### Tests
 
-- 1,230 tests passing (up from 1,202 at v0.1.0 release)
+- 1,276 tests passing (up from 1,202 at v0.1.0 release)
 
 ---
 

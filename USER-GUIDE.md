@@ -70,6 +70,9 @@ This guide covers everything you need to build agentic workflows with Armature: 
 31. [Rogue signal tracking](#31-rogue-signal-tracking)
 32. [Safety rule composition](#32-safety-rule-composition)
 33. [Mission context for long-horizon workflows](#33-mission-context-for-long-horizon-workflows)
+34. [Low-latency / streaming stages](#34-low-latency--streaming-stages)
+35. [Continuation — rolling memory across runs](#35-continuation--rolling-memory-across-runs)
+36. [Triggers — cron and webhook activation](#36-triggers--cron-and-webhook-activation)
 
 ---
 
@@ -2272,15 +2275,18 @@ Armature includes a closed-loop self-improvement system that analyzes workflow t
 The `armature improve` command runs one analysis cycle:
 
 1. **Load traces** for the workflow from the trace database (default: `~/.armature/traces.db`)
-2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces:
-   - IHR = `0.40 × output_valid_rate + 0.30 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score`
+2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces (arXiv:2605.30621v1):
+   - IHR = `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score + 0.10 × hfr`
+   - **HFR** (Harness-Following Rate) = fraction of traces where `escalation_count == 0`; models that consistently need to escalate to a stronger tier are not truly following harness instructions
 3. **Run DiagnosticAnalyzer** to identify failure signatures — which stages are failing and how:
    - `stage_failed` — the stage raised an exception
    - `output_invalid` — the stage produced output that didn't match its schema
    - `low_confidence` — the stage's quorum score was consistently low
    - `high_escalation` — the stage frequently escalated to a larger model tier
+   - `postcondition_failed` — a tool postcondition check failed after execution
+   - `low_skill_activation` — the stage declared tools in `role.tools` but the model never invoked any (low Skill-Load Rate per arXiv:2605.30621v1)
 4. **Verify previous cycle's predictions** — compare the current diagnostic state against what the prior cycle predicted would be fixed
-5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (a frontier LLM) with the current spec + diagnostics + quality metrics
+5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per arXiv:2605.30621v1) with the current spec + diagnostics + quality metrics
 6. **Apply the revised spec** (unless `--no-apply`)
 7. **Write an audit log entry** (JSONL) with all metrics, diagnostics, predictions, and verification results
 
@@ -3383,6 +3389,293 @@ For short, single-purpose workflows (two or three tightly coupled stages), the o
 
 ---
 
-*Armature User Guide — built from eight academic papers, one industry governance framework, and one open-source agent architecture project. 1,230 tests. MIT license.*
+## 34. Low-latency / streaming stages
 
-*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, and mission context (§33) to maintain focus across long-horizon runs. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
+Standard Armature workflows complete fully before returning a result — fine for batch jobs and background pipelines, but noticeable when a human is waiting on a conversational reply. The `response_stage: true` flag marks a single LLM stage as the streaming response point: its tokens are forwarded to the SSE event stream token-by-token, so the client can start rendering before the stage finishes, let alone before background stages complete.
+
+### The problem: batch latency in interactive workflows
+
+```
+gather_context → respond → log_analytics
+                   ↑
+          user is waiting here
+```
+
+Without streaming, the user waits for the entire `respond` stage to finish (plus `log_analytics`). With `response_stage: true`, the user sees the first token within milliseconds of the model starting to generate, and `log_analytics` runs invisibly in parallel.
+
+### Declaring a response stage
+
+```yaml
+stages:
+  - id: respond
+    response_stage: true
+    role:
+      type: worker
+      prompt: "Answer the user's question concisely."
+```
+
+That is the only change. The engine detects the flag, enables litellm token streaming for that stage, and hooks up the token → SSE pipeline automatically.
+
+### SSE event sequence
+
+When the HTTP service (`POST /run/async` + `GET /run/{job_id}/events`) executes a workflow with a response stage:
+
+```
+data: {"type": "stage_start",             "stage_id": "respond"}
+data: {"type": "token",    "content": "Sure"}
+data: {"type": "token",    "content": ", here is the answer"}
+data: {"type": "token",    "content": "…"}
+data: {"type": "response_stage_complete",  "stage_id": "respond", "content": "<full assembled text>"}
+data: {"type": "stage_complete",           "stage_id": "respond"}
+… background stages continue …
+data: {"type": "run_complete"}
+```
+
+| Event | When | Purpose |
+|---|---|---|
+| `token` | Each chunk from the model | Progressive rendering |
+| `response_stage_complete` | Stage done; full text available | Signal to display the answer |
+| `stage_complete` | After all hooks fire | Standard completion marker |
+| `run_complete` | All stages done | Full result available via `GET /run/{job_id}` |
+
+The client should render on `response_stage_complete` — it carries the fully assembled `content` field so there's no need to concatenate individual `token` events.
+
+### Constraints
+
+- **Text mode only.** A stage with `output_mode: json` or `output_mode: guided_json` cannot stream meaningfully — the full JSON payload must be assembled before parsing. If `response_stage: true` is set on a JSON-mode stage it is silently ignored and the normal non-streaming path runs.
+- **One response stage per workflow.** Designating multiple stages as `response_stage: true` is technically valid YAML but only the stages that actually run will emit streaming events. For clarity, keep it to one.
+- **No tier escalation during streaming.** The streaming path uses the primary tier for the stage (no retry, no escalation). Design the response stage for reliability: short prompt, well-tested model.
+- **CLI use.** `armature run` does not stream to the terminal — `response_stage: true` is a no-op for CLI execution. It only takes effect when the workflow runs through the HTTP service.
+
+### Combining with `mission:`
+
+`mission:` and `response_stage: true` are orthogonal and compose naturally. A chat workflow that needs long-horizon focus can use both:
+
+```yaml
+mission: "Provide accurate, concise answers about Acme's Q3 financials."
+
+stages:
+  - id: retrieve
+    role:
+      type: researcher
+      prompt: "Retrieve relevant financial data."
+
+  - id: respond
+    response_stage: true
+    depends_on: [retrieve]
+    role:
+      type: worker
+      prompt: "Answer the user's question using the retrieved data."
+```
+
+Every stage receives the mission block in its system prompt; `respond` additionally streams its tokens to the client.
+
+---
+
+## 35. Continuation — rolling memory across runs
+
+**Problem.** Every `Harness.run()` starts from a clean slate. A daily monitor workflow, a recurring competitive analysis, or a conversational agent has no memory of what it concluded yesterday unless you build that plumbing yourself.
+
+**Solution.** Declare a `continuation:` block naming which stage outputs to carry forward. On every activation after the first, the Harness queries the prior run's traces, assembles the named values, and injects them into the context as `prior_run` (or any name you choose). Every stage that references `prior_run` in its prompt or `signature.input` can reason about what the workflow concluded last time.
+
+### Spec syntax
+
+```yaml
+continuation:
+  carry_forward:
+    - key: monitor.summary          # stage_id.output_key dotted notation
+    - key: analyst.recommendations
+  inject_as: prior_run              # default; any valid context key name
+```
+
+Each `key` is `stage_id.output_key`. The engine looks up the most recent successful run's traces, extracts those values, and merges them into a single dict that gets injected at the start of every stage's context.
+
+### How a stage uses it
+
+```yaml
+stages:
+  - id: monitor
+    role:
+      name: Monitor
+      type: worker
+      description: |
+        Analyse today's signals. Prior run summary: {{ prior_run.summary }}
+        Identify what has changed since then and what still holds.
+    signature:
+      input:
+        prior_run: "Prior run context (absent on first activation)"
+```
+
+On the **first run**, `prior_run` is absent from context — the stage simply doesn't see it. On **subsequent runs**, `prior_run.summary` contains whatever the `monitor` stage returned in the previous activation.
+
+### Output storage cap
+
+Armature normally truncates stored outputs at 200 characters to keep the trace DB lean. For stages that appear in `carry_forward`, the cap is automatically raised to **2000 characters** so values survive the round-trip through TraceStore. No configuration required.
+
+### Full example: daily monitor
+
+```yaml
+name: daily-monitor
+version: "1.0"
+mission: "Track signal changes across activations and surface meaningful drift."
+
+continuation:
+  carry_forward:
+    - key: monitor.summary
+    - key: analyst.alert_level
+  inject_as: prior_run
+
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+
+stages:
+  - id: monitor
+    role:
+      name: Monitor
+      type: worker
+      description: |
+        Compare today's signals against prior context.
+        Prior summary: {{ prior_run.summary | default('No prior run.') }}
+        Prior alert level: {{ prior_run.alert_level | default('unknown') }}
+        Return a new summary and alert_level (low/medium/high).
+
+  - id: analyst
+    role:
+      name: Analyst
+      type: judge
+      description: |
+        Review the monitor's assessment. Return alert_level and recommendations.
+    depends_on: [monitor]
+```
+
+Run this with `armature run` or `armature watch` (§36). The second activation automatically sees what the first run concluded.
+
+### Properties
+
+| Property | Behaviour |
+|---|---|
+| `carry_forward` | List of `stage_id.output_key` dotted strings |
+| `inject_as` | Context key where the assembled dict is injected (default: `prior_run`) |
+| **First run** | No prior run → `inject_as` key is absent from context |
+| **Subsequent runs** | Most recent prior run's outputs are queried from TraceStore |
+| **Output cap** | 200 chars for normal stages; 2000 chars for stages in `carry_forward` |
+| **Missing keys** | If a carry-forward key wasn't produced in the prior run, it is silently omitted |
+
+---
+
+## 36. Triggers — cron and webhook activation
+
+**Problem.** Long-horizon workflows need to be woken by an event — a scheduled time, an inbound HTTP call, a new file — not a human typing `armature run`. Manually scheduling cron jobs or writing webhook handlers for each workflow is boilerplate that belongs in the framework.
+
+**Solution.** Declare a `triggers:` list in the spec. Then run `armature watch <spec>` — a daemon that starts one listener per trigger and fires `Harness.run()` on each event, injecting the trigger payload into context. Combined with `continuation:` (§35), this turns a one-shot workflow into a persistent, self-aware agentic team.
+
+### Spec syntax
+
+```yaml
+triggers:
+  - type: cron
+    schedule: "0 9 * * *"       # standard 5-field cron expression
+  - type: webhook
+    path: /webhook/my-workflow   # path the HTTP listener exposes
+```
+
+Multiple triggers of different types can coexist. The spec is validated at load time — malformed expressions are caught by `armature validate` before the daemon starts.
+
+#### Cron trigger
+
+```yaml
+triggers:
+  - type: cron
+    schedule: "0 6 * * 1-5"   # 6 AM Mon-Fri
+```
+
+Uses standard 5-field cron syntax (`minute hour dom month dow`). The daemon computes the next fire time using `croniter`, sleeps until then, fires `Harness.run({"trigger_payload": {}})`, then loops.
+
+#### Webhook trigger
+
+```yaml
+triggers:
+  - type: webhook
+    path: /webhook/my-workflow
+```
+
+The daemon starts a Starlette HTTP server (default port 8081). A `POST` to `/webhook/my-workflow` fires the workflow with the request body passed as `trigger_payload.body`:
+
+```bash
+curl -X POST http://localhost:8081/webhook/my-workflow \
+     -H "Content-Type: application/json" \
+     -d '{"event": "new_data", "source": "pipeline"}'
+```
+
+Inside the workflow, the payload is available as `{{ trigger_payload.body.event }}`, `{{ trigger_payload.body.source }}`, etc.
+
+### Running the daemon
+
+```bash
+armature watch my_workflow.yml               # default port 8081
+armature watch my_workflow.yml --port 9000   # custom webhook port
+armature watch my_workflow.yml --quiet       # suppress per-run output
+armature watch my_workflow.yml --traces /path/to/traces.db
+```
+
+The daemon blocks until `Ctrl-C`. Each trigger fires independently — a cron tick and an inbound webhook can run concurrently.
+
+### CLI options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<spec>` | required | Path to workflow spec YAML |
+| `--host` | `0.0.0.0` | Bind address for the webhook listener |
+| `--port`, `-p` | `8081` | Port for webhook triggers |
+| `--traces` | `~/.armature/traces.db` | Path to the traces SQLite database |
+| `--quiet`, `-q` | off | Suppress per-run completion output |
+
+### Combining with `continuation:`
+
+This is the intended pairing for long-horizon workflows:
+
+```yaml
+name: market-monitor
+version: "1.0"
+
+continuation:
+  carry_forward:
+    - key: analyst.summary
+    - key: analyst.alert_level
+  inject_as: prior_run
+
+triggers:
+  - type: cron
+    schedule: "0 8 * * 1-5"   # every weekday at 8 AM
+
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: worker
+      description: |
+        Analyse today's market signals.
+        Prior summary: {{ prior_run.summary | default('First run.') }}
+        Return summary and alert_level.
+```
+
+Each weekday morning the daemon fires the workflow. The analyst sees what was concluded the previous trading day and can identify drift, escalation, or resolution without any external state management.
+
+### Properties
+
+| Property | Behaviour |
+|---|---|
+| **Cron** | `croniter` computes next fire time; sleeps between ticks |
+| **Webhook** | Starlette HTTP server; one POST route per `WebhookTrigger.path` |
+| **Payload** | Injected as `trigger_payload` in context (`body` + `path` for webhooks) |
+| **Concurrency** | Each trigger runs as an independent asyncio task |
+| **Validation** | `triggers:` is parsed and validated at spec load; `armature validate` catches errors |
+| **No triggers** | `armature watch` exits with an error if the spec declares no triggers |
+
+---
+
+*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,276 tests. MIT license.*
+
+*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*

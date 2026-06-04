@@ -46,9 +46,9 @@ Every production harness must implement all nine of these. Armature ships them a
 |---|-----------|-------------|------------------------|
 | 1 | **Iteration Loop** | Assemble context → call model → dispatch tool → update state → check termination | `DAGExecutor` + async stage runner |
 | 2 | **Context Management** | Keep, summarize, or drop context as it grows | `ContextManager`, prompt assembler pipeline |
-| 3 | **Tools, Skills, Registry** | File I/O, HTTP, shell, and higher-level skills (RAG, RaaS) | `ToolRegistry`, `BuiltinSkills` |
+| 3 | **Tools, Skills, Registry** | File I/O, HTTP, shell, and higher-level skills (RAG, Quorum (another open source project to consider)) | `ToolRegistry`, `BuiltinSkills` |
 | 4 | **Subagents** | Fan out work to N child agents in parallel with isolated context | `SubagentNode`, `asyncio.gather` |
-| 5 | **Built-in Skills** | Non-negotiable out-of-box capabilities | SLM/LoRA, RAG, RaaS skills bundled |
+| 5 | **Built-in Skills** | Non-negotiable out-of-box capabilities | SLM/LoRA, RAG, Quorum (another open source project to consider) skills bundled |
 | 6 | **Session Persistence** | Append-only event log; runs survive crashes and resume | `SessionLog` (JSONL), `ArtifactStore` |
 | 7 | **Prompt Assembly** | Static prefix + spec NL + dynamic context + few-shot examples | `PromptAssembler`, Jinja2 templates |
 | 8 | **Lifecycle Hooks** | Pre/post-stage and pre/post-tool injection for policy, logging, cost | `HookRegistry`, `HookDecision` |
@@ -62,7 +62,7 @@ Every stage declares one of four roles. The harness enforces distinct behavioral
 |------|-----------|---------------------|
 | `worker` | Small/medium SLM | Structured execution, tool calls. Output schema enforced via guided decoding. 80–90% of task volume. |
 | `orchestrator` | Frontier | Multi-step planning, routing decisions, full workflow state access. |
-| `judge` | Frontier | Quality scoring, RaaS deliberation. The only role that can block a workflow from advancing. |
+| `judge` | Frontier | Quality scoring, consensus deliberation. The only role that can block a workflow from advancing. |
 | `researcher` | Frontier or large | RAG synthesis, complex reasoning over retrieved context. |
 
 The harness automatically escalates: if a worker fails schema validation or produces low-confidence output, it re-routes to the next model tier without workflow author intervention.
@@ -124,6 +124,8 @@ stages:
 ```
 
 The `post_run: true` marker enables the in-run adaptation loop from Continual Harness. The refiner stage automatically receives `_transcript` (all prior stage outputs) and `_diagnostics` (structured failure signatures) in its context.
+
+Two additional top-level spec fields are supported. `continuation:` carries named stage outputs across successive runs — `carry_forward` lists `key: <stage>.<field>` pairs and `inject_as` names the dict injected into every stage's context (defaults to `prior_run`). `triggers:` declares a list of `CronTrigger` (with `schedule:`) or `WebhookTrigger` (with `path:`) entries that are validated at spec load time and honored by `armature watch`.
 
 ### Parallel Fan-Out
 
@@ -251,6 +253,8 @@ Every run writes structured, tamper-evident trace records:
 | `inputs_provenance` | Per-key origin map: `"user_input"`, `"stage:id"`, `"memory"`, `"stale_memory"` |
 | `error_type` | Failure classification (including `PostconditionFailed`) |
 
+`TraceStore.get_run_outputs(run_id)` returns the named outputs for any completed run; the `continuation:` spec block calls this at run start to inject prior-run values into every stage's context.
+
 **IHR (Implicit Harness Rating):** `0.40 × output_validity + 0.30 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score`. A well-tuned workflow should score above 0.80.
 
 ```bash
@@ -342,6 +346,7 @@ armature dashboard <spec> --watch           # auto-refresh
 armature dashboard <spec> --format json    # machine-readable JSON
 armature export-traces                      # export traces as SFT/DPO training data
 armature channels start                     # messaging channel connectors
+armature watch <spec>                       # daemon: fire run() on every cron/webhook trigger
 ```
 
 ---

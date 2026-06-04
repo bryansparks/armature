@@ -120,6 +120,7 @@ armature dashboard <spec> --watch             # auto-refresh every 5 seconds
 armature dashboard <spec> --format json       # machine-readable JSON output
 armature export-traces                        # export traces as SFT/DPO training data
 armature channels start                       # messaging channel connectors
+armature watch <spec>                         # listen for cron/webhook triggers and fire runs
 ```
 
 ---
@@ -282,6 +283,7 @@ Governance layer operating at definition-time (static risk scoring), runtime-tru
 | AutoHarness | Harness-as-verifier, NL-to-spec synthesis (`SpecDrafter`), `AutoHarness` loop | ✅ |
 | AgentSpec | Pre/post-tool hooks, declarative safety DSL (6 operators, 5 actions) | ✅ |
 | Continual Harness | 4-code failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
+| Harness Benefit (arXiv:2605.30621v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th IHR component, SLR `low_skill_activation` diagnostic | ✅ |
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
@@ -338,9 +340,8 @@ Armature is the **execution layer** — the first component in a larger system d
                                                                │ richer context
                                                     ┌──────────▼──────────┐
                                                     │  Loop 4:            │
-                                                    │  RaaS               │
-                                                    │  (Reasoning as a    │
-                                                    │  Service)           │
+                                                    │  Consensus          │
+                                                    │  deliberation       │
                                                     │                     │
                                                     │  Calibrate          │
                                                     │  deliberation       │
@@ -352,7 +353,7 @@ Armature is the **execution layer** — the first component in a larger system d
                                                     └─────────────────────┘
 
   ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,230 tests passing.
+  All four loops are implemented. 1,276 tests passing.
 ```
 
 **The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.
@@ -372,9 +373,12 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Native tool calling** | Stages declare `role.tools` to scope which registry tools they can call; the engine runs a ReAct dispatch loop — tool calls returned by the model are executed and results fed back until a final response is produced |
 | **Direct tool call** | A `tool_call` stage invokes a registered tool without an LLM — deterministic, zero-latency, no JSON hallucination. Args are Jinja2-rendered against context. |
 | **Mission context** | A `mission:` field on the spec is automatically injected into every LLM stage's system prompt, anchoring agents to the stated goal across long-running workflows and including a compact prior-stage breadcrumb |
+| **Continuation** | A `continuation:` block carries selected stage outputs from a prior run into the next activation via `carry_forward` key references; the merged values arrive under an `inject_as` context key (default: `prior_run`). Enables long-horizon workflows that accumulate state across repeated executions without custom code. |
+| **Triggers** | A `triggers:` list declares `cron` (schedule expression) and `webhook` (HTTP path) trigger sources. `armature watch <spec>` runs a persistent dispatcher that fires `Harness.run()` on every matching event. |
+| **Response stage** | Mark one text-mode LLM stage as `response_stage: true` to enable token streaming; the HTTP service forwards each token to the SSE stream immediately and fires a `response_stage_complete` event so clients can render the answer before background stages finish |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
-| **IHR** | Implicit Harness Rating — composite quality score (output validity, success rate, quorum score, latency) computed per run from the trace store |
+| **IHR** | Implicit Harness Rating — 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, per arXiv:2605.30621v1 |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
 ---
