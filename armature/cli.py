@@ -181,14 +181,26 @@ def run(
 def serve(
     host: str = typer.Option("0.0.0.0", "--host", help="Bind host"),
     port: int = typer.Option(8080, "--port", "-p", help="Bind port"),
+    specs_dir: Path = typer.Option(None, "--specs-dir", help="Directory of workflow specs to register"),
 ):
     """Start the Armature HTTP service."""
     try:
         import uvicorn
-        from armature.service.app import app as fastapi_app
+        from armature.service.app import build_app
+        from armature.service.registry import WorkflowRegistry
     except ImportError:
         typer.echo("FastAPI/uvicorn not installed. Run: pip install 'armature[service]'", err=True)
         raise typer.Exit(1)
+
+    registry = WorkflowRegistry()
+    if specs_dir:
+        if not specs_dir.is_dir():
+            typer.echo(f"specs-dir not found: {specs_dir}", err=True)
+            raise typer.Exit(1)
+        registry.load_dir(specs_dir)
+        typer.echo(f"Registered {len(registry.list_all())} workflow(s) from {specs_dir}")
+
+    fastapi_app = build_app(registry=registry)
     typer.echo(f"Starting Armature service on {host}:{port}")
     uvicorn.run(fastapi_app, host=host, port=port)
 
