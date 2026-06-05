@@ -29,6 +29,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`response_stage: true` on a Stage** — designates a single text-mode LLM stage as the streaming response. When the HTTP service executes the workflow, tokens from that stage are forwarded to the SSE event stream in real time as `{"type": "token", "content": "..."}` events. A `{"type": "response_stage_complete", "stage_id": "...", "content": "<full text>"}` event fires as soon as the response is assembled, before background stages finish. Clients can render the response immediately without waiting for `run_complete`. JSON-mode stages (`output_mode: json` / `guided_json`) silently ignore `response_stage: true` and use the normal non-streaming path.
 
+### Named workflow registry
+
+- **`WorkflowRegistry`** (`armature/service/registry.py`) — in-memory registry of named `HarnessSpec` objects. `load_dir(path)` scans a directory for `*.yaml`/`*.yml` specs and keys each by `spec.name`, silently skipping malformed files. `register(spec)` adds a single spec; `get(name)` returns a spec or `None`; `list_all()` returns a list of `{name, description, stages}` dicts for API enumeration.
+- **`build_app(registry)` factory** — `armature/service/app.py` is refactored so the FastAPI application is constructed from an injected `WorkflowRegistry`. The module-level `app = build_app()` default is preserved for backward compatibility with existing deployments.
+- **`GET /workflows`** — list all registered workflows (name, description, stage count).
+- **`GET /workflows/{name}`** — workflow metadata (name, description, version, stages list).
+- **`POST /workflows/{name}/run`** — synchronous run; accepts `{"inputs": {...}}`; returns `{run_id, status, result}`.
+- **`POST /workflows/{name}/run/async`** — async run; returns `{job_id, status}`; poll or stream results via the existing `GET /run/{job_id}` and `GET /run/{job_id}/events` endpoints.
+- **`armature serve --specs-dir <path>`** — new flag that loads all YAML specs from the given directory into a `WorkflowRegistry` at startup and prints the registration count. Existing `armature serve` (no flag) is unaffected.
+
 ### Long-horizon state & triggers
 
 - **`continuation:` spec block** — enables long-horizon workflows that remember outputs across activations. `carry_forward` lists stage keys from a prior run to pull forward; `inject_as` names the context key they appear under (default: `prior_run`). `Harness._load_prior_context()` resolves the last completed run via `TraceStore.get_run_outputs()` and merges the values into the initial context before the DAG executes.
@@ -44,7 +54,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Tests
 
-- 1,276 tests passing (up from 1,202 at v0.1.0 release)
+- 1,286 tests passing (up from 1,202 at v0.1.0 release)
 
 ---
 

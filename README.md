@@ -110,6 +110,7 @@ armature validate <spec>                      # validate spec + show KYA-inspire
 armature new [output]                         # interactive spec creation wizard
 armature doctor                               # environment health check
 armature serve                                # start HTTP service (requires armature[service])
+armature serve --specs-dir ./specs/          # serve with named workflow registry (/workflows API)
 armature optimize <spec>                      # single-shot meta-harness optimizer
 armature improve <spec>                       # analyze traces, auto-apply spec improvements
 armature improve <spec> --apply-pending       # promote a staged pending.yaml revision
@@ -422,6 +423,7 @@ armature/
 ├── emitters/       # HermesEmitter — agent bundle generation
 ├── adapters/       # Observability adapters (LangFuse, LangSmith)
 ├── templates/      # Reusable workflow spec templates
+├── service/        # FastAPI HTTP service — WorkflowRegistry, build_app(), /workflows API
 └── cli.py          # CLI entry point
 
 examples/           # Annotated workflow YAML specs (copy and modify)

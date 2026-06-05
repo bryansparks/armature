@@ -73,6 +73,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
 34. [Low-latency / streaming stages](#34-low-latency--streaming-stages)
 35. [Continuation — rolling memory across runs](#35-continuation--rolling-memory-across-runs)
 36. [Triggers — cron and webhook activation](#36-triggers--cron-and-webhook-activation)
+37. [Named workflow registry](#37-named-workflow-registry)
 
 ---
 
@@ -3676,6 +3677,147 @@ Each weekday morning the daemon fires the workflow. The analyst sees what was co
 
 ---
 
-*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,276 tests. MIT license.*
+## 37. Named workflow registry
+
+**Problem.** The existing `POST /run` endpoint requires the caller to supply a spec path. That leaks filesystem details to clients, ties API contracts to deployment layout, and makes it impossible to enumerate what workflows are available without inspecting the server's directory tree.
+
+**Solution.** `WorkflowRegistry` holds named specs in memory. Start the service with `--specs-dir` and every YAML spec in that directory is pre-loaded and addressable by name. Callers discover available workflows from the API and invoke them by name — no path knowledge needed.
+
+### WorkflowRegistry
+
+`armature.service.registry.WorkflowRegistry` exposes four methods:
+
+| Method | Description |
+|---|---|
+| `load_dir(path)` | Scan `path` for `*.yaml`/`*.yml` files; load each as a `HarnessSpec`; key by `spec.name`. Malformed files are skipped silently. |
+| `register(spec)` | Add a single `HarnessSpec` to the registry. |
+| `get(name)` | Return the named `HarnessSpec`, or `None` if not found. |
+| `list_all()` | Return a list of `{name, description, stages}` dicts. |
+
+### Starting the service with --specs-dir
+
+```bash
+armature serve --specs-dir ./specs/              # load all YAML specs in ./specs/
+armature serve --specs-dir ./specs/ --port 9000  # custom port
+```
+
+At startup the service prints how many workflows were registered, e.g. `Registered 4 workflows`. The existing `armature serve` (no flag) continues to work unchanged — `build_app()` accepts an optional registry and falls back to no-registry mode for backward compatibility.
+
+### The /workflows routes
+
+#### List all workflows
+
+```http
+GET /workflows
+```
+
+Response:
+
+```json
+[
+  {"name": "summarize", "description": "Summarize input text.", "stages": 2},
+  {"name": "market-monitor", "description": "Daily signal monitor.", "stages": 3}
+]
+```
+
+#### Get workflow metadata
+
+```http
+GET /workflows/{name}
+```
+
+Response:
+
+```json
+{
+  "name": "summarize",
+  "description": "Summarize input text.",
+  "version": "1.0",
+  "stages": ["ingest", "summarizer"]
+}
+```
+
+Returns `404` if `name` is not registered.
+
+#### Synchronous run
+
+```http
+POST /workflows/{name}/run
+Content-Type: application/json
+
+{"inputs": {"text": "Your content here..."}}
+```
+
+Response:
+
+```json
+{
+  "run_id": "a3f7c21d",
+  "status": "complete",
+  "result": {"summarizer": {"content": "..."}}
+}
+```
+
+#### Async run
+
+```http
+POST /workflows/{name}/run/async
+Content-Type: application/json
+
+{"inputs": {"text": "Your content here..."}}
+```
+
+Response:
+
+```json
+{"job_id": "b9e1d04a", "status": "queued"}
+```
+
+Poll or stream via the existing endpoints:
+- `GET /run/{job_id}` — status and result when complete
+- `GET /run/{job_id}/events` — SSE stream with `token`, `response_stage_complete`, and `run_complete` events
+
+### Combining with continuation: and triggers:
+
+Named workflows work with every other Armature feature. A common pattern for long-horizon automation:
+
+```yaml
+name: market-monitor
+version: "1.0"
+
+continuation:
+  carry_forward:
+    - key: analyst.summary
+  inject_as: prior_run
+
+triggers:
+  - type: cron
+    schedule: "0 8 * * 1-5"
+
+stages:
+  - id: analyst
+    role:
+      type: worker
+      description: |
+        Analyse today's signals.
+        Prior run: {{ prior_run.summary | default('First run.') }}
+```
+
+Register this spec once with `--specs-dir`. Trigger it via `armature watch` (§36) for scheduled runs, or call `POST /workflows/market-monitor/run` to fire it on demand. The `continuation:` block ensures each activation sees what the previous one concluded.
+
+### Endpoint summary
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/workflows` | List all registered workflows |
+| `GET` | `/workflows/{name}` | Metadata for a single workflow |
+| `POST` | `/workflows/{name}/run` | Synchronous run |
+| `POST` | `/workflows/{name}/run/async` | Async run; poll via `/run/{job_id}` |
+
+All existing `/run` and `/run/async` endpoints are preserved.
+
+---
+
+*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,286 tests. MIT license.*
 
 *For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
