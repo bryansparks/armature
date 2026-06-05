@@ -338,6 +338,227 @@ The core fields (`stages`, `depends_on`, `role`, `model_tiers`, `fan_out`, `fan_
 
 ---
 
+## Embedding Armature in Your Application
+
+**Can I use Armature from inside my existing Python application?**
+
+Yes — the simplest integration is a direct Python call. Import `Harness` and `load_spec`, load your spec once at startup, then invoke `harness.run(inputs)` wherever you need it:
+
+```python
+import asyncio
+from armature.spec.loader import load_spec
+from armature.runtime.engine import Harness
+
+spec = load_spec("specs/risk-assessment.yaml")
+
+async def assess_contract(contract_text: str) -> dict:
+    harness = Harness(spec=spec)
+    return await harness.run({"contract_text": contract_text})
+```
+
+`Harness.run()` is a standard Python coroutine. It fits naturally into any `asyncio`-based application (FastAPI, Starlette, AIOHTTP, Celery async workers, etc.). For synchronous callers, wrap it with `asyncio.run()`.
+
+**How do I add Armature to an existing FastAPI application?**
+
+Use `build_app()` to create the Armature FastAPI sub-application and mount it under a path prefix:
+
+```python
+from fastapi import FastAPI
+from armature.service.app import build_app
+from armature.service.registry import WorkflowRegistry
+
+# Your existing app
+app = FastAPI(title="MyApp")
+
+# Load Armature workflows from a directory
+registry = WorkflowRegistry()
+registry.load_dir(Path("specs/"))
+
+# Mount Armature under /ai — all /workflows routes available at /ai/workflows
+armature_app = build_app(registry)
+app.mount("/ai", armature_app)
+```
+
+Your application and Armature share one process and one port. Clients POST to `/ai/workflows/risk-assessment/run` and get structured results back. No separate service to deploy or manage.
+
+**Can I register individual workflows from code rather than a directory?**
+
+Yes — register specs one at a time with `registry.register()`:
+
+```python
+from armature.service.registry import WorkflowRegistry
+from armature.spec.loader import load_spec
+
+registry = WorkflowRegistry()
+registry.register(load_spec("specs/summarizer.yaml"))
+registry.register(load_spec("specs/classifier.yaml"))
+# ... add more as needed
+```
+
+This is useful when your app loads specs from a database, generates them dynamically, or controls which workflows are available based on tenant configuration.
+
+**How do I call Armature from a non-Python app (Ruby, Go, Node.js, etc.)?**
+
+Run Armature as a sidecar service and call it over HTTP:
+
+```bash
+# Start the Armature service (separate process, same host)
+armature serve --specs-dir ./specs/ --port 8765
+```
+
+Then from any language:
+
+```bash
+# Any HTTP client
+curl -X POST http://localhost:8765/workflows/risk-assessment/run \
+  -H "Content-Type: application/json" \
+  -d '{"inputs": {"contract_text": "..."}}'
+```
+
+The response is a JSON object with `run_id`, `status`, and `result`. This is the standard service integration pattern for polyglot architectures — Armature becomes an AI capability endpoint that any service on the network can call.
+
+**What if the workflow is slow? I don't want to block my HTTP request.**
+
+Use the async endpoint, which returns a `job_id` immediately:
+
+```bash
+# Fire and forget — returns in milliseconds
+curl -X POST http://localhost:8765/workflows/risk-assessment/run/async \
+  -d '{"inputs": {"contract_text": "..."}}'
+# → {"job_id": "abc123", "status": "pending"}
+
+# Poll for completion
+curl http://localhost:8765/run/abc123
+# → {"status": "complete", "result": {...}}
+```
+
+Or stream real-time stage events via SSE while the workflow runs:
+
+```javascript
+const es = new EventSource('/run/abc123/events');
+es.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  if (event.type === 'stage_complete') updateProgressUI(event.stage_id);
+  if (event.type === 'run_complete') es.close();
+};
+```
+
+**How do I pass runtime data from my app into a workflow?**
+
+Pass an `inputs` dict to `harness.run()`. Every key becomes available as a Jinja2 variable in stage descriptions and `skip_if` expressions:
+
+```python
+result = await harness.run({
+    "user_id": current_user.id,
+    "document_url": upload.url,
+    "tenant_config": tenant.settings,
+})
+```
+
+In the spec:
+
+```yaml
+stages:
+  - id: analyse
+    role:
+      description: |
+        Analyse the document at {{ document_url }} for tenant {{ tenant_config.name }}.
+```
+
+Any serializable Python value works — strings, numbers, lists, dicts.
+
+**How do I get structured data back from a workflow to use in my app?**
+
+Declare an `output_schema` on the final stage and use `output_mode: guided_json`. The harness validates and returns a clean dict:
+
+```yaml
+stages:
+  - id: assess
+    role:
+      output_mode: guided_json
+      output_schema:
+        type: object
+        required: [risk_level, confidence, summary]
+        properties:
+          risk_level:
+            type: string
+            enum: [low, medium, high, critical]
+          confidence:
+            type: number
+          summary:
+            type: string
+```
+
+The result of `harness.run()` is a dict keyed by stage ID. Access the final stage output directly:
+
+```python
+result = await harness.run(inputs)
+risk = result["assess"]["risk_level"]      # "high"
+confidence = result["assess"]["confidence"] # 0.92
+```
+
+**How do I trigger a workflow from an application event (new record, file upload, webhook)?**
+
+Three patterns depending on your architecture:
+
+**1. Direct call from event handler** — simplest, works when your app is Python:
+```python
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile):
+    path = await save_file(file)
+    harness = Harness(spec=spec)
+    result = await harness.run({"file_path": str(path)})
+    await db.save_analysis(result)
+    return {"analysis": result}
+```
+
+**2. Background task** — for long workflows that shouldn't block the HTTP response:
+```python
+from fastapi import BackgroundTasks
+
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile, bg: BackgroundTasks):
+    path = await save_file(file)
+    bg.add_task(run_analysis_workflow, str(path))
+    return {"status": "processing"}
+
+async def run_analysis_workflow(file_path: str):
+    harness = Harness(spec=spec)
+    result = await harness.run({"file_path": file_path})
+    await db.save_analysis(result)
+```
+
+**3. Armature webhook trigger** — for external events (Stripe webhooks, GitHub events, form submissions) when you want the trigger handled declaratively in the spec:
+```yaml
+triggers:
+  - type: webhook
+    path: /webhook/document-uploaded
+```
+```bash
+armature watch specs/document-analysis.yaml --port 8081
+```
+Your upstream service POSTs to `http://your-host:8081/webhook/document-uploaded` and Armature fires the workflow with the request body as `trigger_payload`.
+
+**Can I run multiple different workflows from one service?**
+
+Yes — that is exactly what the named workflow registry is for. Load all your specs from a directory and every workflow gets its own route:
+
+```bash
+armature serve --specs-dir ./specs/
+# → GET  /workflows                        (list all)
+# → POST /workflows/risk-assessment/run    (run one)
+# → POST /workflows/document-summary/run   (run another)
+# → POST /workflows/compliance-audit/run   (run a third)
+```
+
+All workflows share one process and one SQLite trace database. Each workflow's traces are namespaced by workflow name so quality reports stay separate.
+
+**Does embedding Armature add significant overhead to my application?**
+
+No measurable startup overhead beyond loading the spec (a Pydantic parse, typically <50ms). Per-run overhead is negligible compared to LLM call latency — the DAG executor, context management, and trace recording add a few milliseconds per stage. The dominant cost is always the LLM calls themselves.
+
+---
+
 ## Documentation Map
 
 | Topic | Document |
