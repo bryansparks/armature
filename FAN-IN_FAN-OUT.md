@@ -4,6 +4,12 @@ Parallel map-reduce for agentic workflows — no orchestration code required.
 
 ---
 
+Fan-out and fan-in are well-established computer science concepts, not invented by Armature. They appear across several distinct fields: **digital logic** (how many inputs a gate can drive / receive), **distributed systems** (Google's MapReduce, Apache Spark, Hadoop — scatter work across nodes, gather results back), **message queues** (one SNS message fans out to N subscribers; N producers fan in to one queue), and **software architecture** (fan-out in a call graph is the number of functions a module calls; fan-in is how many modules call it — a standard coupling metric).
+
+What Armature contributed is the *expression* of the pattern — not the concept itself. Declaring `fan_out: 10` and `partition_source: "{{ documents }}"` in a YAML spec, and having the harness automatically handle the semaphore, per-item context isolation, error containment, and fan-in strategy, is the design work. The underlying idea is decades old; the value is making it a first-class, zero-boilerplate primitive in a declarative agentic workflow spec that non-engineers can write and read.
+
+---
+
 ## The core idea
 
 Fan-out/fan-in answers the question: **"I have a list of N things — how do I process all of them without writing N stages?"**
