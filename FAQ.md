@@ -272,7 +272,31 @@ On every activation after the first, the harness loads those values from the pre
 
 **How do safety rules work?**
 
-Declare `safety_rules:` in the spec. Each rule names a tool, a condition on one of its arguments, and an action (`block`, `warn`, `log`, `require_approval`). In `safety_mode: strict`, any blocked tool call raises `PermissionError` — useful for production environments where unintended file writes or API calls would be costly.
+Declare `safety_rules:` in the spec. Each rule names a tool, a condition on one of its arguments, and an action (`block`, `warn`, `log`, `require_approval`). In `safety_mode: strict`, any blocked tool call raises `PermissionError` — useful for production environments where unintended file writes or API calls would be costly. See `SAFETY-AND-GOVERNANCE.md`.
+
+**Can I pause a workflow and require a human to approve before continuing?**
+
+Yes — use a `gate: human` stage. It renders a Jinja2 message (the `present:` field) to the terminal, prompts for `yes/no/feedback`, and returns `{"approved": true, "feedback": null}` or `{"approved": false, "feedback": "..."}`. Downstream stages can reference `{{ gate_stage.approved }}` and `{{ gate_stage.feedback }}`. Combine with `skip_if:` to skip all downstream stages if not approved, or pass `feedback` into a revision stage's description so the model can correct its output. See `HUMAN-IN-THE-LOOP.md`.
+
+**What happens if a long workflow fails partway through? Do I have to start over?**
+
+Not if you enable `checkpoint: true` in the spec. After every completed stage, the harness atomically writes the result to `checkpoint.json` in the session directory. On the next run, completed stages are skipped and their results are loaded directly — the workflow resumes from the last successful point. A 45-minute, $30 pipeline that fails on stage 10 of 12 resumes in seconds at near-zero cost. See `CHECKPOINT-AND-RESUME.md`.
+
+**How do I build a workflow out of smaller, reusable workflows?**
+
+Use `subagent_spec: path/to/child.yaml` on a stage. The harness loads the child spec and runs it as a full `Harness` instance. The child's result dict flows back as the parent stage's result. Combine with `fan_out: N` to run N child workflows concurrently — each gets a partition of the input. Child workflows have their own traces, can be run standalone for testing, and can be self-improved independently with `armature improve`. See `SUBAGENT-COMPOSITION.md`.
+
+**How do I prevent a stage from seeing context it shouldn't (credentials, upstream outputs it doesn't need)?**
+
+Set `isolated: true` on the stage and declare `signature.input` with the keys the stage needs. The harness filters the context to only those keys before passing it to the stage or child workflow. This prevents sensitive data from leaking into workers, creates a typed interface between pipeline sections, and makes stage behavior more predictable (LLMs are influenced by everything they see). See `CONTEXT-ISOLATION.md`.
+
+**What is quorum scoring and how is it different from IHR?**
+
+Quorum score is a per-execution confidence value extracted from `judge` stage outputs — specifically the `score`, `quality_score`, or `confidence` field (searched in that order). It represents how certain the judge is about its own output. IHR uses `avg_quorum_score` (weighted at 20%) across all traces for the workflow. Consistently low quorum scores (near 0.5) trigger the `LOW_CONFIDENCE` diagnostic and drive the self-improvement loop to enrich the judge's description. See `QUORUM-SCORING.md`.
+
+**How do all these features work together in a production deployment?**
+
+They compose. The governance stack (safety rules + human gates + strict mode) defines what agents can do. The reliability stack (checkpoint + continuation + model tiers + on_fail.loop) ensures the workflow completes at scale. The quality stack (IHR + traces + judge pattern + self-improvement) ensures the output is worth running at all. No other framework combines all three in a single declarative spec. See `ARMATURE-IN-PRODUCTION.md` for the full combinatorial story.
 
 ---
 
@@ -575,9 +599,16 @@ No measurable startup overhead beyond loading the spec (a Pydantic parse, typica
 | Role taxonomy | `ROLE-TAXONOMY.md` |
 | Model tiers | `MODEL-TIERS.md` |
 | Judge pattern | `JUDGE-PATTERN.md` |
+| Quorum scoring | `QUORUM-SCORING.md` |
 | Mission context | `MISSION-AS-CONTEXT.md` |
 | Declarative control flow | `DECLARATIVE-CONTROL-FLOW.md` |
 | IHR and self-improvement | `IHR-AND-SELF-IMPROVEMENT.md` |
+| Safety and governance | `SAFETY-AND-GOVERNANCE.md` |
+| Human-in-the-loop gates | `HUMAN-IN-THE-LOOP.md` |
+| Checkpoint and resume | `CHECKPOINT-AND-RESUME.md` |
+| Subagent composition | `SUBAGENT-COMPOSITION.md` |
+| Context isolation | `CONTEXT-ISOLATION.md` |
+| All features in production | `ARMATURE-IN-PRODUCTION.md` |
 | Philosophy and design decisions | `ARMATURE-PHILOSOPHY.md` |
 
 ---
