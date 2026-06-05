@@ -20,7 +20,7 @@ Neither, precisely. It is a **harness** — a finished execution environment for
 
 **What kind of workflows is Armature designed for?**
 
-Directed pipelines where the structure is known in advance: gather → analyze → synthesize → judge → report. Fan-out patterns (process N documents in parallel), recurring workflows (daily monitors, nightly analysis), and workflows that need to improve themselves based on accumulated results. It is not designed for open-ended ReAct-style agents that loop indefinitely until they decide they are done.
+Directed pipelines where the structure is known in advance: gather → analyze → synthesize → judge → report. Fan-out patterns (process N documents in parallel), recurring workflows (daily monitors, nightly analysis), and workflows that need to improve themselves based on accumulated results. It is not designed for open-ended ReAct-style agents that loop indefinitely until they decide they are done. See `DAG-vs-LANGGRAPH.md` for a detailed breakdown of where each tool fits.
 
 ---
 
@@ -69,13 +69,15 @@ Run it:
 armature run hello-world.yaml
 ```
 
+See `BUILD_FIRST_WORKFLOW.md` for a step-by-step walkthrough of building your first real workflow.
+
 ---
 
 ## Core Concepts
 
 **What is a workflow spec?**
 
-A YAML file that defines a workflow as a directed acyclic graph (DAG) of stages. The spec declares the workflow name, model tiers, the stages and their roles, `depends_on` relationships, safety rules, and optional features like `continuation:` (rolling memory) and `triggers:` (cron + webhook activation). The harness reads the spec and handles everything else.
+A YAML file that defines a workflow as a directed acyclic graph (DAG) of stages. The spec declares the workflow name, model tiers, the stages and their roles, `depends_on` relationships, safety rules, and optional features like `continuation:` (rolling memory) and `triggers:` (cron + webhook activation). The harness reads the spec and handles everything else. See `USER-GUIDE.md` for the complete spec field reference.
 
 **What are the four stage types?**
 
@@ -109,7 +111,7 @@ A string at the spec level that is automatically prepended to every LLM agent's 
 
 **How does Armature handle stage ordering?**
 
-Each stage declares `depends_on: [stage_a, stage_b]`. The DAGExecutor uses Kahn's topological sort to compute execution waves: all stages whose dependencies are satisfied run concurrently via `asyncio.gather`. No explicit parallelism code required.
+Each stage declares `depends_on: [stage_a, stage_b]`. The DAGExecutor uses Kahn's topological sort to compute execution waves: all stages whose dependencies are satisfied run concurrently via `asyncio.gather`. No explicit parallelism code required. See `DECLARATIVE-CONTROL-FLOW.md` for the full control flow reference including `skip_if`, `condition`, and `on_fail.loop`.
 
 **How does fan-out/fan-in work?**
 
@@ -127,7 +129,7 @@ Use `skip_if:` with a Jinja2 expression:
 skip_if: "{{ review_results | selectattr('requires_escalation') | list | length == 0 }}"
 ```
 
-When the expression renders truthy, the stage is skipped (returns `{"_skipped": True}`) with zero LLM cost. The inverse (`condition:`) runs the stage only when the expression is truthy.
+When the expression renders truthy, the stage is skipped (returns `{"_skipped": True}`) with zero LLM cost. The inverse (`condition:`) runs the stage only when the expression is truthy. See `DECLARATIVE-CONTROL-FLOW.md`.
 
 **How do I retry a failed stage?**
 
@@ -145,7 +147,7 @@ On each retry, `_retry_attempt`, `_last_error`, and `_last_result` are injected 
 
 **What happens when a stage times out?**
 
-Set `timeout_s:` on the stage. If the wall-clock time (including all retries) exceeds the limit, a `TimeoutError` is raised and propagated as a stage failure. Combine with `fail_as_value: true` to catch it as a structured value rather than aborting the run.
+Set `timeout_s:` on the stage. If the wall-clock time (including all retries) exceeds the limit, a `TimeoutError` is raised and propagated as a stage failure. Combine with `fail_as_value: true` to catch it as a structured value rather than aborting the run. See `DECLARATIVE-CONTROL-FLOW.md`.
 
 ---
 
@@ -167,7 +169,7 @@ It gives you a single number to track across runs — the equivalent of error ra
 
 **What are traces and what do they record?**
 
-Every stage execution writes a `TraceRecord` to SQLite: stage ID, run ID, workflow name, inputs, outputs (truncated at 200 chars by default, 2000 for continuation stages), latency, success flag, output validity, quorum score, and escalation count. Traces persist across runs and are the input to self-improvement.
+Every stage execution writes a `TraceRecord` to SQLite: stage ID, run ID, workflow name, inputs, outputs (truncated at 200 chars by default, 2000 for continuation stages), latency, success flag, output validity, quorum score, and escalation count. Traces persist across runs and are the input to self-improvement. See `IHR-AND-SELF-IMPROVEMENT.md`.
 
 **How do I view traces and quality reports?**
 
@@ -187,7 +189,7 @@ evaluate:
   - "No recommendations contradict the cited data"
 ```
 
-After the run, `EvaluationRunner` scores each criterion using an LLM evaluator and records pass/fail + score (0.0–1.0) to the evaluation store. Think of these as acceptance tests for individual stages.
+After the run, `EvaluationRunner` scores each criterion using an LLM evaluator and records pass/fail + score (0.0–1.0) to the evaluation store. Think of these as acceptance tests for individual stages. See `IHR-AND-SELF-IMPROVEMENT.md`.
 
 **What is the Judge pattern?**
 
@@ -211,11 +213,11 @@ See `IHR-AND-SELF-IMPROVEMENT.md`.
 
 **Is it safe to auto-apply spec improvements?**
 
-The harness classifies every proposed change. Changes to `role.description`, `on_fail`, `model_tier`, and `timeout_s` auto-apply. Changes that add or remove stages, modify `output_schema`, or alter safety rules are written to a `.pending.yaml` file and require explicit human approval. You can also run with `--dry-run` to preview changes without applying.
+The harness classifies every proposed change. Changes to `role.description`, `on_fail`, `model_tier`, and `timeout_s` auto-apply. Changes that add or remove stages, modify `output_schema`, or alter safety rules are written to a `.pending.yaml` file and require explicit human approval. You can also run with `--dry-run` to preview changes without applying. See `IHR-AND-SELF-IMPROVEMENT.md` for the full governance model.
 
 **How many runs before self-improvement activates?**
 
-By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement cycle only fires if IHR is also below `target_ihr` (default 0.90).
+By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement cycle only fires if IHR is also below `target_ihr` (default 0.90). See `IHR-AND-SELF-IMPROVEMENT.md`.
 
 **Can I run self-improvement automatically after every run?**
 
@@ -223,7 +225,7 @@ By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement 
 armature run myworkflow.yaml --auto-improve
 ```
 
-This runs the improvement cycle immediately after the workflow completes.
+This runs the improvement cycle immediately after the workflow completes. See `IHR-AND-SELF-IMPROVEMENT.md`.
 
 ---
 
@@ -324,13 +326,15 @@ Data-sensitive stages use `model_tier: small` (local); synthesis and judgment us
 - **Simple single-call LLM applications** with no orchestration. Use the provider SDK directly.
 - **Workflows where the number of steps is determined at runtime by the model.** Armature's DAG is fixed at spec-load time.
 
+See `DAG-vs-LANGGRAPH.md` for the full comparison including where the two tools compose well together.
+
 **Does Armature handle streaming responses?**
 
 Yes. Mark a stage with `response_stage: true` and attach an `on_token` callback (or use the service layer's SSE endpoint). Tokens stream in real time while the stage executes.
 
 **Can non-engineers write Armature specs?**
 
-Yes, with some ramp-up. YAML is readable by anyone familiar with CI/CD pipelines or Kubernetes configs. The four role types and `depends_on` are intuitive. Complex Jinja2 expressions in `skip_if` or `partition_source` may need engineering help, but the bulk of a workflow spec — stage descriptions, model tier assignments, role names — is accessible to product managers and domain experts.
+Yes, with some ramp-up. YAML is readable by anyone familiar with CI/CD pipelines or Kubernetes configs. The four role types and `depends_on` are intuitive. Complex Jinja2 expressions in `skip_if` or `partition_source` may need engineering help, but the bulk of a workflow spec — stage descriptions, model tier assignments, role names — is accessible to product managers and domain experts. See `ARMATURE-PHILOSOPHY.md` for the design principles behind the YAML-first authoring surface.
 
 **Is the spec format stable?**
 
