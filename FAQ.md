@@ -1,0 +1,360 @@
+# Armature FAQ
+
+Frequently asked questions about Armature — the declarative agentic workflow harness.
+
+---
+
+## What is Armature?
+
+**What is Armature in one sentence?**
+
+Armature is a declarative, YAML-based execution harness for multi-agent LLM workflows — you describe what agents should do and how they relate, and the harness handles orchestration, concurrency, retries, safety, quality scoring, and self-improvement automatically.
+
+**Who is Armature for?**
+
+Teams building production agentic pipelines that need to run reliably, improve over time, and be understood by non-engineers. It fits well when: the workflow has a defined structure (even a complex one), quality and observability matter, and you want the harness to handle production concerns without building them yourself.
+
+**Is Armature a framework or a library?**
+
+Neither, precisely. It is a **harness** — a finished execution environment for workflows. A library gives you building blocks; a framework prescribes patterns; a harness handles everything operational and lets you focus on domain logic. Orchestration, concurrency, retries, telemetry, quality scoring, safety enforcement, and a REST API are all built in. You supply the workflow spec (YAML) and any custom tool modules (Python).
+
+**What kind of workflows is Armature designed for?**
+
+Directed pipelines where the structure is known in advance: gather → analyze → synthesize → judge → report. Fan-out patterns (process N documents in parallel), recurring workflows (daily monitors, nightly analysis), and workflows that need to improve themselves based on accumulated results. It is not designed for open-ended ReAct-style agents that loop indefinitely until they decide they are done.
+
+---
+
+## Getting Started
+
+**What are the system requirements?**
+
+Python 3.11 or later. No other infrastructure required — traces are stored in SQLite, the service layer uses FastAPI (optional), and LLM calls go through LiteLLM. No message queue, no Redis, no vector store needed for basic operation.
+
+**Which LLM providers does Armature support?**
+
+Any provider supported by [LiteLLM](https://litellm.ai): Anthropic, OpenAI, Google (Gemini), Azure OpenAI, AWS Bedrock, Cohere, Mistral, and local models via Ollama. Different model tiers in the same workflow can use different providers — your `small` tier can run on Ollama locally while `frontier` calls Anthropic.
+
+**How do I install Armature?**
+
+```bash
+pip install armature                    # core
+pip install 'armature[service]'         # adds FastAPI HTTP service
+pip install 'armature[telemetry]'       # adds OpenTelemetry export
+```
+
+**What does the simplest possible workflow look like?**
+
+```yaml
+name: hello-world
+version: "1.0"
+model_tiers:
+  small:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+
+stages:
+  - id: greet
+    role:
+      name: Greeter
+      type: worker
+      model_tier: small
+      description: |
+        Write a one-sentence welcome message for a new user.
+        Return {"message": "..."}.
+```
+
+Run it:
+
+```bash
+armature run hello-world.yaml
+```
+
+---
+
+## Core Concepts
+
+**What is a workflow spec?**
+
+A YAML file that defines a workflow as a directed acyclic graph (DAG) of stages. The spec declares the workflow name, model tiers, the stages and their roles, `depends_on` relationships, safety rules, and optional features like `continuation:` (rolling memory) and `triggers:` (cron + webhook activation). The harness reads the spec and handles everything else.
+
+**What are the four stage types?**
+
+1. **LLM call** — a `role:` block with a system prompt, model tier, and output format
+2. **Tool call** — a `tool_call:` block that invokes a registered tool deterministically (no LLM)
+3. **Adapter** — a `adapter:` reference to a Python function or shell command
+4. **Subagent** — a `subagent_spec:` that spawns a child workflow (optionally with fan-out/fan-in)
+
+**What are the four role types?**
+
+| Role | Default tier | Cognitive posture |
+|------|-------------|-------------------|
+| `worker` | small | Execute a well-defined task on a well-defined input |
+| `researcher` | large | Gather, synthesize, surface relevant context |
+| `judge` | frontier | Evaluate, score, validate, decide |
+| `orchestrator` | frontier | Integrate, synthesize, produce final output |
+
+See `ROLE-TAXONOMY.md` for the full explanation including default tier rationale and the organizational analogy.
+
+**What is a model tier?**
+
+An abstract name (`tiny`, `small`, `medium`, `large`, `frontier`, or custom) that maps to a specific model + provider. You configure the actual model in one `model_tiers:` block at the top of the spec. Stages reference the tier name, not the model directly. Swapping models means editing one line, not touching every stage. See `MODEL-TIERS.md`.
+
+**What is the `mission:` field?**
+
+A string at the spec level that is automatically prepended to every LLM agent's system prompt. It keeps all agents oriented toward the same goal without repeating it in every stage description. The harness also injects a `[Prior stages]` breadcrumb (200-char preview of each completed stage's output) alongside the mission. See `MISSION-AS-CONTEXT.md`.
+
+---
+
+## DAG, Parallelism, and Control Flow
+
+**How does Armature handle stage ordering?**
+
+Each stage declares `depends_on: [stage_a, stage_b]`. The DAGExecutor uses Kahn's topological sort to compute execution waves: all stages whose dependencies are satisfied run concurrently via `asyncio.gather`. No explicit parallelism code required.
+
+**How does fan-out/fan-in work?**
+
+Declare `fan_out: N` and `partition_source: "{{ some_list }}"` on a stage. The harness evaluates the Jinja2 expression, gets a Python list, and runs the stage once per item — up to N concurrent executions, bounded by a semaphore. Per-item failures return `{"_fan_out_error": "..."}` rather than aborting the batch. The `fan_in` strategy (`list`, `merge`, `first`, `consensus`) controls how N results are collapsed back into one value for downstream stages. See `FAN-IN_FAN-OUT.md`.
+
+**Does Armature support cycles in the workflow graph?**
+
+No — deliberately. Armature is a DAG executor. If you need a ReAct-style loop that runs indefinitely until the model decides to stop, LangGraph is the right tool. For bounded retries (retry this stage up to N times if it fails), use `on_fail.loop`. For conditional re-runs of a downstream stage, restructure the workflow. See `DAG-vs-LANGGRAPH.md` for the full comparison.
+
+**How do I skip a stage conditionally?**
+
+Use `skip_if:` with a Jinja2 expression:
+
+```yaml
+skip_if: "{{ review_results | selectattr('requires_escalation') | list | length == 0 }}"
+```
+
+When the expression renders truthy, the stage is skipped (returns `{"_skipped": True}`) with zero LLM cost. The inverse (`condition:`) runs the stage only when the expression is truthy.
+
+**How do I retry a failed stage?**
+
+```yaml
+on_fail:
+  loop:
+    stage: self
+    max: 3
+    backoff_s: 2.0         # wait 2s, 4s, 8s between attempts
+    backoff_max_s: 30.0
+    until: "{{ score >= 0.85 }}"  # stop retrying when this is satisfied
+```
+
+On each retry, `_retry_attempt`, `_last_error`, and `_last_result` are injected into the stage's context. The role description can reference `{{ _last_result }}` so the model sees its previous attempt and can correct it. See `DECLARATIVE-CONTROL-FLOW.md`.
+
+**What happens when a stage times out?**
+
+Set `timeout_s:` on the stage. If the wall-clock time (including all retries) exceeds the limit, a `TimeoutError` is raised and propagated as a stage failure. Combine with `fail_as_value: true` to catch it as a structured value rather than aborting the run.
+
+---
+
+## Quality and Observability
+
+**What is IHR?**
+
+Implicit Harness Rating — a composite quality metric (0.0–1.0) computed over accumulated traces:
+
+```
+IHR = 0.35 × output_valid_rate
+    + 0.25 × success_rate
+    + 0.20 × avg_quorum_score
+    + 0.10 × latency_score
+    + 0.10 × happy_path_rate
+```
+
+It gives you a single number to track across runs — the equivalent of error rate for traditional software. See `IHR-AND-SELF-IMPROVEMENT.md`.
+
+**What are traces and what do they record?**
+
+Every stage execution writes a `TraceRecord` to SQLite: stage ID, run ID, workflow name, inputs, outputs (truncated at 200 chars by default, 2000 for continuation stages), latency, success flag, output validity, quorum score, and escalation count. Traces persist across runs and are the input to self-improvement.
+
+**How do I view traces and quality reports?**
+
+```bash
+armature report --workflow my-workflow          # aggregate quality dashboard
+armature report --run-id abc123                 # single-run detail
+```
+
+**How do I declare quality criteria for a stage?**
+
+Use `evaluate:` on a stage:
+
+```yaml
+evaluate:
+  - "Output contains specific numerical evidence"
+  - "Risk level is classified as low, medium, or high"
+  - "No recommendations contradict the cited data"
+```
+
+After the run, `EvaluationRunner` scores each criterion using an LLM evaluator and records pass/fail + score (0.0–1.0) to the evaluation store. Think of these as acceptance tests for individual stages.
+
+**What is the Judge pattern?**
+
+Using one LLM to evaluate the output of another. In Armature, a `judge` role type signals a stage whose purpose is evaluation rather than production. The common pattern: many cheap `worker` stages do the work, one expensive `judge` stage validates the result. See `JUDGE-PATTERN.md`.
+
+---
+
+## Self-Improvement
+
+**How does trace-driven self-improvement work?**
+
+After enough runs accumulate:
+
+1. `armature improve myworkflow.yaml` loads all traces for the workflow
+2. Computes rolling IHR and runs `DiagnosticAnalyzer` to identify failure signatures (`output_invalid`, `stage_failed`, `low_confidence`, `high_escalation`, `low_skill_activation`)
+3. If IHR < target (default 0.90) and ≥ 3 traces exist, `SpecRefiner` (an LLM call to a medium-tier model) proposes targeted YAML changes
+4. Safe changes (descriptions, retries, model tier upgrades) auto-apply; risky changes (stage additions/removals, schema changes, safety rule modifications) go to `.pending.yaml` for human review
+5. The refiner declares falsifiable predictions about what it expects to fix; the next cycle verifies those predictions
+
+See `IHR-AND-SELF-IMPROVEMENT.md`.
+
+**Is it safe to auto-apply spec improvements?**
+
+The harness classifies every proposed change. Changes to `role.description`, `on_fail`, `model_tier`, and `timeout_s` auto-apply. Changes that add or remove stages, modify `output_schema`, or alter safety rules are written to a `.pending.yaml` file and require explicit human approval. You can also run with `--dry-run` to preview changes without applying.
+
+**How many runs before self-improvement activates?**
+
+By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement cycle only fires if IHR is also below `target_ihr` (default 0.90).
+
+**Can I run self-improvement automatically after every run?**
+
+```bash
+armature run myworkflow.yaml --auto-improve
+```
+
+This runs the improvement cycle immediately after the workflow completes.
+
+---
+
+## Production and Operations
+
+**Can I expose Armature workflows as an HTTP API?**
+
+Yes. `armature serve --specs-dir ./specs/` starts a FastAPI service with:
+
+- `GET /workflows` — list all registered workflows
+- `GET /workflows/{name}` — workflow metadata
+- `POST /workflows/{name}/run` — synchronous run
+- `POST /workflows/{name}/run/async` — returns a `job_id` immediately
+- `GET /run/{job_id}` — poll job status
+- `GET /run/{job_id}/events` — SSE stream for real-time stage events
+
+**How do I trigger workflows on a schedule or via webhook?**
+
+Add a `triggers:` block to the spec:
+
+```yaml
+triggers:
+  - type: cron
+    schedule: "0 9 * * 1-5"        # weekdays at 9am
+  - type: webhook
+    path: /webhook/my-workflow
+```
+
+Then run `armature watch myworkflow.yaml`. The daemon blocks until Ctrl-C, fires `Harness.run()` on each trigger event, and injects the trigger payload as `trigger_payload` in the context.
+
+**What is the `continuation:` block?**
+
+It enables rolling memory across runs — the agentic equivalent of stateful services. Declare which stage outputs to carry forward:
+
+```yaml
+continuation:
+  carry_forward:
+    - key: monitor.summary
+    - key: analyst.recommendations
+  inject_as: prior_run
+```
+
+On every activation after the first, the harness loads those values from the previous run's traces and injects them as `prior_run` in the context. Every stage that references `{{ prior_run.summary }}` can reason about prior work.
+
+**How do safety rules work?**
+
+Declare `safety_rules:` in the spec. Each rule names a tool, a condition on one of its arguments, and an action (`block`, `warn`, `log`, `require_approval`). In `safety_mode: strict`, any blocked tool call raises `PermissionError` — useful for production environments where unintended file writes or API calls would be costly.
+
+---
+
+## Comparisons
+
+**How does Armature compare to LangGraph?**
+
+LangGraph is a graph-construction library built around **cycles** — the core primitive is a stateful loop (`think → act → observe → think`). You write Python to construct the graph explicitly. Observability, safety, quality scoring, and APIs are left to you.
+
+Armature is a finished harness built around **directed pipelines**. The DAG is implicit from `depends_on:` declarations in YAML. Observability, safety, IHR scoring, self-improvement, and a REST API are built in. The tradeoff: no cycles, but everything production requires is already there.
+
+They compose: a LangGraph ReAct agent can be one tool that an Armature worker stage calls via HTTP. See `DAG-vs-LANGGRAPH.md`.
+
+**How does Armature compare to LangChain?**
+
+LangChain is a large, broad library of LLM utilities — chains, retrievers, memory abstractions, document loaders. It provides building blocks. Armature is opinionated about execution: YAML spec, DAG execution, four role types, built-in quality metrics. If you want full flexibility in how you assemble components, LangChain; if you want a production-ready harness with governance built in, Armature.
+
+**How does Armature compare to CrewAI?**
+
+CrewAI uses a "crew" metaphor with agents and tasks, typically with a manager agent orchestrating others. Armature uses explicit DAG stages instead of dynamic agent delegation. The result: Armature workflows are more predictable and auditable (every execution path is determined by the spec), CrewAI allows more dynamic task allocation. For regulated industries or workflows where auditability matters, the deterministic Armature DAG is usually preferable.
+
+**How does Armature compare to AutoGen?**
+
+AutoGen is built around multi-agent conversation — agents message each other in flexible dialogue patterns. Armature stages are not conversational; they produce structured outputs that flow downstream. If the problem is "simulate a conversation between agents to reach a decision," AutoGen fits. If the problem is "process these 500 documents in a defined pipeline," Armature fits.
+
+**Can I use Armature with local/self-hosted models?**
+
+Yes. Configure a tier to use Ollama or any OpenAI-compatible local endpoint:
+
+```yaml
+model_tiers:
+  small:
+    provider: ollama
+    model: llama3.2
+    api_base: http://localhost:11434
+  frontier:
+    provider: anthropic
+    model: claude-opus-4-7
+```
+
+Data-sensitive stages use `model_tier: small` (local); synthesis and judgment use `model_tier: frontier` (cloud). See `MODEL-TIERS.md`.
+
+---
+
+## Limitations and When Not to Use Armature
+
+**When should I NOT use Armature?**
+
+- **Open-ended tool-use agents** that loop indefinitely until they decide they are done. Use LangGraph.
+- **Purely conversational agents** where agent-to-agent messaging is the core pattern. Use AutoGen.
+- **Simple single-call LLM applications** with no orchestration. Use the provider SDK directly.
+- **Workflows where the number of steps is determined at runtime by the model.** Armature's DAG is fixed at spec-load time.
+
+**Does Armature handle streaming responses?**
+
+Yes. Mark a stage with `response_stage: true` and attach an `on_token` callback (or use the service layer's SSE endpoint). Tokens stream in real time while the stage executes.
+
+**Can non-engineers write Armature specs?**
+
+Yes, with some ramp-up. YAML is readable by anyone familiar with CI/CD pipelines or Kubernetes configs. The four role types and `depends_on` are intuitive. Complex Jinja2 expressions in `skip_if` or `partition_source` may need engineering help, but the bulk of a workflow spec — stage descriptions, model tier assignments, role names — is accessible to product managers and domain experts.
+
+**Is the spec format stable?**
+
+The core fields (`stages`, `depends_on`, `role`, `model_tiers`, `fan_out`, `fan_in`, `skip_if`, `on_fail`) are stable. Fields added in recent versions (`continuation`, `triggers`, `mission`) follow the same Pydantic validation and are backward-compatible — existing specs without those fields continue to work.
+
+---
+
+## Documentation Map
+
+| Topic | Document |
+|-------|----------|
+| Getting started | `BUILD_FIRST_WORKFLOW.md` |
+| Full spec reference | `USER-GUIDE.md` |
+| Architecture internals | `ARCHITECTURE.md` |
+| DAG vs. LangGraph | `DAG-vs-LANGGRAPH.md` |
+| Fan-out/fan-in | `FAN-IN_FAN-OUT.md` |
+| Role taxonomy | `ROLE-TAXONOMY.md` |
+| Model tiers | `MODEL-TIERS.md` |
+| Judge pattern | `JUDGE-PATTERN.md` |
+| Mission context | `MISSION-AS-CONTEXT.md` |
+| Declarative control flow | `DECLARATIVE-CONTROL-FLOW.md` |
+| IHR and self-improvement | `IHR-AND-SELF-IMPROVEMENT.md` |
+| Philosophy and design decisions | `ARMATURE-PHILOSOPHY.md` |
+
+---
+
+*Armature — the harness is more important than the model.*
