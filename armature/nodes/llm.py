@@ -467,6 +467,14 @@ class LLMNode(BaseNode):
                     result = _extract_json_from_response(content)
                 if result is not None and not isinstance(result, dict):
                     result = _extract_json_from_response(content)
+                if result is not None and self._stage.output_schema:
+                    try:
+                        import jsonschema as _jsonschema
+                        _jsonschema.validate(result, self._stage.output_schema)
+                    except ImportError:
+                        pass  # jsonschema not available — skip schema validation
+                    except _jsonschema.ValidationError:
+                        result = None  # schema-invalid → escalate to next tier
                 if result is not None:
                     self._append_transcript(messages, model, content)
                     result["_input_tokens"] = input_tokens

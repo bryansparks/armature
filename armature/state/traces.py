@@ -30,6 +30,7 @@ class TraceRecord(BaseModel):
     inputs_provenance: dict[str, str] = Field(default_factory=dict)
     tools_declared: list[str] = Field(default_factory=list)
     tools_called: list[str] = Field(default_factory=list)
+    sandbox_image_digest: str | None = None
 
 
 class IhrResult(BaseModel):
@@ -86,6 +87,7 @@ class TraceStore:
                 "inputs_provenance_json TEXT DEFAULT '{}'",
                 "tools_declared_json TEXT DEFAULT '[]'",
                 "tools_called_json TEXT DEFAULT '[]'",
+                "sandbox_image_digest TEXT",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -103,8 +105,9 @@ class TraceStore:
                     quorum_score, timestamp, inputs_json, outputs_json,
                     error_type, escalation_count, spec_version,
                     inputs_hash, policy_version, inputs_provenance_json,
-                    tools_declared_json, tools_called_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    tools_declared_json, tools_called_json,
+                    sandbox_image_digest)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -117,6 +120,7 @@ class TraceStore:
                     json.dumps(trace.inputs_provenance),
                     json.dumps(trace.tools_declared),
                     json.dumps(trace.tools_called),
+                    trace.sandbox_image_digest,
                 ),
             )
             await db.commit()
@@ -180,6 +184,7 @@ class TraceStore:
             inputs_provenance=json.loads(d.get("inputs_provenance_json") or "{}"),
             tools_declared=json.loads(d.get("tools_declared_json") or "[]"),
             tools_called=json.loads(d.get("tools_called_json") or "[]"),
+            sandbox_image_digest=d.get("sandbox_image_digest") or None,
         )
 
     async def latest_run_id(self, workflow_name: str) -> str | None:

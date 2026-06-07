@@ -89,9 +89,17 @@ def validate(
         typer.echo(f"Failed to parse spec: {exc}", err=True)
         raise typer.Exit(1)
 
-    errors = validate_spec(loaded, strict=False)
+    all_issues = validate_spec(loaded, strict=False)
+    hard_errors = [e for e in all_issues if e.severity == "error"]
+    warnings = [e for e in all_issues if e.severity == "warning"]
 
-    if not errors:
+    if warnings:
+        typer.echo(f"⚠ {len(warnings)} warning(s):")
+        for w in warnings:
+            stage_label = f"  stage='{w.stage_id}'" if w.stage_id else ""
+            typer.echo(f"  [{w.code}]{stage_label}: {w.message}")
+
+    if not hard_errors:
         from armature.spec.risk import compute_spec_risk
         risk = compute_spec_risk(loaded)
         typer.echo(f"✓ '{loaded.name}' is valid ({len(loaded.stages)} stages)")
@@ -101,8 +109,8 @@ def validate(
             typer.echo(f"    {sign}{factor.delta}  {factor.label}")
         return
 
-    typer.echo(f"✗ '{loaded.name}' has {len(errors)} validation error(s):\n", err=True)
-    for e in errors:
+    typer.echo(f"✗ '{loaded.name}' has {len(hard_errors)} validation error(s):\n", err=True)
+    for e in hard_errors:
         stage_label = f"  stage='{e.stage_id}'" if e.stage_id else ""
         typer.echo(f"  [{e.code}]{stage_label}: {e.message}", err=True)
     raise typer.Exit(1)

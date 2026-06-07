@@ -163,6 +163,7 @@ class Stage(BaseModel):
     evaluate: list[str] = Field(default_factory=list)  # declarative quality criteria evaluated post-run
     post_run: bool = False             # when True, stage runs after all normal stages with full transcript + diagnostics
     response_stage: bool = False       # when True, stream tokens to caller in real time
+    sandbox_image: str | None = None   # per-stage Docker image override; falls back to sandbox.image
 
 
 class TraceConfig(BaseModel):
@@ -231,6 +232,10 @@ class SandboxConfig(BaseModel):
     workspace: str = "/workspace"
     host_workspace: str = "."
     env: dict[str, str] = Field(default_factory=dict)
+    cpu_limit: str | None = None    # e.g. "1.5" → --cpus 1.5
+    memory_limit: str | None = None # e.g. "512m" → --memory 512m
+    runtime: str = "docker"         # container CLI binary: "docker", "podman", "nerdctl"
+    platform: str | None = None     # e.g. "linux/amd64" → --platform linux/amd64
 
 
 class ContinuationKey(BaseModel):

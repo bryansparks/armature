@@ -303,4 +303,32 @@ Safety rules compose with the rest of the harness without configuration:
 
 ---
 
-*Safety rules are the governance layer of the agentic workflow. They are not application logic — they are policy. Keeping them in YAML, next to the spec, means they are visible, reviewable, and version-controlled. The rogue signal counter turns that policy into an observable: you always know whether agents stayed within bounds.*
+## Container isolation — the execution-layer complement
+
+Safety rules govern what agents are *allowed* to do. The Docker sandbox governs what containers are *capable* of doing. They are different controls at different layers, and they compose.
+
+Enable container isolation with `sandbox.mode: docker` in the spec:
+
+```yaml
+sandbox:
+  mode: docker
+  image: python:3.11-slim
+  allow_network: false
+  cpu_limit: "1.0"
+  memory_limit: "512m"
+```
+
+With this in place:
+- Shell commands run inside ephemeral Docker containers that disappear after each call
+- The container sees only the `host_workspace` directory — nothing else on the host filesystem is accessible
+- `allow_network: false` (the default) adds `--network none` — no outbound connections possible
+- `cpu_limit` and `memory_limit` prevent runaway resource consumption
+- Each run records `sandbox_image_digest` in every trace — the SHA256 content hash of the image that executed the call
+
+A policy rule says "this tool call is not permitted." The container says "even if it runs, it cannot reach anything outside the declared workspace." Defense in depth: policy at the safety-rule layer, enforcement at the execution layer.
+
+For the full reference on sandbox configuration, per-stage image overrides, resource limits, and the audit trail, see `SANDBOX-AND-ISOLATION.md`.
+
+---
+
+*Safety rules are the governance layer of the agentic workflow. They are not application logic — they are policy. Keeping them in YAML, next to the spec, means they are visible, reviewable, and version-controlled. The rogue signal counter turns that policy into an observable: you always know whether agents stayed within bounds. Pair them with the Docker sandbox for defense in depth: policy defines what is allowed; the container enforces what is possible.*

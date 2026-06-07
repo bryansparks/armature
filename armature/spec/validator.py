@@ -13,6 +13,7 @@ class SpecError:
     code: str        # machine-readable tag, e.g. "UNDEFINED_DEPENDENCY"
     message: str     # human-readable description
     stage_id: str | None = None
+    severity: str = "error"  # "error" or "warning"
 
 
 class SpecValidationError(ValueError):
@@ -134,6 +135,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         name for name, val in spec.model_tiers.model_dump().items()
         if val is not None
     }
+    _LOW_TIER_NAMES: frozenset[str] = frozenset({"tiny", "small"})
     for stage in spec.stages:
         if stage.role is not None:
             if stage.role.model_tier is not None:
@@ -157,6 +159,25 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                         ),
                         stage_id=stage.id,
                     ))
+
+    # ── guided_json stages on low tiers risk schema failures ─────────────
+    for stage in spec.stages:
+        if stage.output_mode != "guided_json" or stage.role is None or not defined_tiers:
+            continue
+        effective_tier = stage.role.model_tier
+        if effective_tier is None:
+            effective_tier = getattr(spec.role_type_defaults, stage.role.type.value, None)
+        if effective_tier and effective_tier in _LOW_TIER_NAMES and effective_tier in defined_tiers:
+            errors.append(SpecError(
+                code="GUIDED_JSON_LOW_TIER_RISK",
+                message=(
+                    f"Stage '{stage.id}' uses output_mode='guided_json' with tier '{effective_tier}'. "
+                    f"Small/tiny models frequently produce schema-invalid JSON, forcing tier "
+                    f"escalation and added latency. Consider 'medium' or higher for guided_json stages."
+                ),
+                stage_id=stage.id,
+                severity="warning",
+            ))
 
     # ── Contract.inputs entries have required name field ──────────────────
     for i, inp in enumerate(spec.contracts.inputs):
@@ -199,7 +220,38 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         inp["name"] for inp in spec.contracts.inputs if "name" in inp
     }
 
+    # Keys the harness always injects into context at runtime — never flag these.
+    harness_injected_keys: set[str] = {
+        "run_id",           # set by Harness.run() before any stage executes
+        "_transcript",      # available in post_run stages
+        "_diagnostics",     # available in post_run stages
+        "_stale_memory_keys",  # injected when memory has stale entries
+    }
+    if spec.continuation:
+        harness_injected_keys.add(spec.continuation.inject_as)
+    if spec.memory:
+        harness_injected_keys.add(spec.memory.inject_as)
+        if spec.memory.inject_knowledge_as:
+            harness_injected_keys.add(spec.memory.inject_knowledge_as)
+
+    # Warn when a post_run stage has no signature filter and the workflow has fan_out
+    # stages — the full _transcript will be enormous and will likely overflow context.
+    has_fan_out = any(s.fan_out for s in spec.stages if not s.post_run)
     for stage in spec.stages:
+        # Post_run stage with no signature.input and a fan_out workflow → transcript overflow risk.
+        if stage.post_run and has_fan_out and (stage.signature is None or not stage.signature.input):
+            errors.append(SpecError(
+                code="POST_RUN_TRANSCRIPT_OVERFLOW_RISK",
+                message=(
+                    f"Stage '{stage.id}' is a post_run stage with no signature.input filter. "
+                    f"This workflow has fan_out stages, so _transcript will be very large "
+                    f"and may exceed the model's context limit. "
+                    f"Add 'signature.input' to select only the outputs this stage needs."
+                ),
+                stage_id=stage.id,
+                severity="warning",
+            ))
+
         if stage.signature is None or not stage.depends_on:
             continue
         for dep_id in stage.depends_on:
@@ -238,6 +290,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     key in stage_ids               # key is any stage ID (context is cumulative)
                     or key in all_upstream_output_keys  # key is an output field of a dep stage
                     or key in workflow_input_keys       # key is declared in contracts.inputs
+                    or key in harness_injected_keys     # key is injected by the harness at runtime
                 )
                 if not valid:
                     errors.append(SpecError(

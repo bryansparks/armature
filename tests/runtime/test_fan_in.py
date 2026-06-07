@@ -304,3 +304,67 @@ async def test_fan_in_consensus_invalid_value_raises(tmp_path):
     from armature.nodes.subagent import _fan_in
     result = _fan_in([{"a": 1}], "unknown_strategy")
     assert result == {"results": [{"a": 1}]}
+
+
+# ── partition_source error hint ───────────────────────────────────────────────
+
+async def test_partition_source_null_error_hints_at_upstream_stage(tmp_path):
+    """When partition_source resolves to None because an upstream stage returned null
+    for the referenced key, the error message names the upstream stage and key."""
+    async def noop(args):
+        return {}
+
+    harness = _make_harness([
+        Stage(
+            id="planner",
+            tool_call=ToolCallConfig(name="noop"),
+            depends_on=[],
+        ),
+        Stage(
+            id="runner",
+            tool_call=ToolCallConfig(name="noop"),
+            fan_out=5,
+            fan_in="list",
+            partition_source="{{ planner.queries }}",
+            partition_key="q",
+            depends_on=["planner"],
+        ),
+    ], tmp_path)
+    _register(harness, "noop", noop)
+
+    with pytest.raises(ValueError) as exc_info:
+        # planner returns {} so planner.queries is None/Undefined → error
+        await harness.run({})
+
+    msg = str(exc_info.value)
+    assert "planner" in msg
+    assert "queries" in msg
+
+
+async def test_partition_source_null_error_suggests_output_valid(tmp_path):
+    """The null partition_source error message mentions checking output_valid."""
+    async def noop(args):
+        return {}
+
+    harness = _make_harness([
+        Stage(
+            id="src",
+            tool_call=ToolCallConfig(name="noop"),
+            depends_on=[],
+        ),
+        Stage(
+            id="fan",
+            tool_call=ToolCallConfig(name="noop"),
+            fan_out=3,
+            fan_in="list",
+            partition_source="{{ src.items }}",
+            partition_key="item",
+            depends_on=["src"],
+        ),
+    ], tmp_path)
+    _register(harness, "noop", noop)
+
+    with pytest.raises(ValueError) as exc_info:
+        await harness.run({})
+
+    assert "output_valid" in str(exc_info.value).lower() or "guided_json" in str(exc_info.value).lower()

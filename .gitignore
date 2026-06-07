@@ -8,6 +8,9 @@ dist/
 htmlcov/
 .env
 
+# Auto-memory (local only, never public)
+memory/
+
 # Internal architecture and scratch files (not for public repo)
 examples/dangerous-pretzel/
 VISION.md

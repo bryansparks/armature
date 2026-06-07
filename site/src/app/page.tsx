@@ -897,7 +897,7 @@ stages:
 
         <Reveal delay={0.2}>
           <div style={{ marginTop: 24, padding: '16px 20px', borderRadius: 8, backgroundColor: A.bg, border: `1px solid ${A.border}` }}>
-            <span style={{ fontFamily: MONO, fontSize: 12, color: A.researcher }}>$ pip install armature-harness</span>
+            <span style={{ fontFamily: MONO, fontSize: 12, color: A.researcher }}>$ pip install armature</span>
             <span style={{ fontFamily: MONO, fontSize: 12, color: A.textMuted }}> &nbsp;· then set ANTHROPIC_API_KEY and run.</span>
           </div>
         </Reveal>

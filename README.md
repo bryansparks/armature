@@ -10,6 +10,8 @@ No framework dependency. No prescribed team structure. Just a DAG executor, an L
 
 Armature is the execution engine for **Reasoning Automation** — end-to-end business processes where multi-agent deliberation replaces brittle rule-based logic. The harness owns orchestration, retries, safety, telemetry, and human approval gates. You supply the domain logic as YAML workflow specs and Python tool modules. The same engine that runs a code-review pipeline can run a contract risk assessment, a social media creative chain, or a compliance audit — without any changes to Armature itself.
 
+> **Part of a larger vision.** Armature is one component of a broader autonomous-organization platform I'm building under the working name ElfTech — a stack of AI systems covering reasoning, deliberation, code generation, deployment, and coordination. More details to come. Stay tuned.
+
 ---
 
 ## What it does
@@ -380,6 +382,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
 | **IHR** | Implicit Harness Rating — 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, per arXiv:2605.30621v1 |
+| **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
 ---

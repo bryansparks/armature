@@ -198,6 +198,76 @@ async def test_no_escalation_if_no_higher_tier():
     assert result.get("_parse_error") is True  # gracefully returns parse error
 
 
+async def test_tier_escalation_on_schema_null_required_field():
+    """A null required field (e.g. {"queries": null}) should trigger escalation.
+
+    This is the root cause of the research-analyst partition_source NoneType bug:
+    the small model returns valid JSON but with a required array field set to null.
+    Without schema validation, the null is accepted and fan-out fails downstream.
+    """
+    stage = make_stage(RoleType.WORKER)
+    stage.output_mode = OutputMode.GUIDED_JSON
+    stage.output_schema = {
+        "type": "object",
+        "required": ["queries"],
+        "properties": {
+            "queries": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    tiers = ModelTiers(
+        small=ModelTierConfig(provider="ollama", model="qwen2.5:7b"),
+        medium=ModelTierConfig(provider="ollama", model="qwen2.5:14b"),
+    )
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    call_count = 0
+
+    async def mock_completion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return make_litellm_response('{"queries": null}')  # schema-invalid
+        return make_litellm_response('{"queries": ["q1", "q2"]}')
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        result = await node.execute({})
+
+    assert call_count == 2, "should escalate when required field is null"
+    assert isinstance(result.get("queries"), list)
+    assert "_parse_error" not in result
+
+
+async def test_schema_valid_result_is_not_escalated():
+    """A structurally valid response matching the schema should NOT trigger escalation."""
+    stage = make_stage(RoleType.WORKER)
+    stage.output_mode = OutputMode.GUIDED_JSON
+    stage.output_schema = {
+        "type": "object",
+        "required": ["queries"],
+        "properties": {
+            "queries": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    tiers = ModelTiers(
+        small=ModelTierConfig(provider="ollama", model="qwen2.5:7b"),
+        medium=ModelTierConfig(provider="ollama", model="qwen2.5:14b"),
+    )
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    call_count = 0
+
+    async def mock_completion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return make_litellm_response('{"queries": ["q1", "q2"]}')
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        result = await node.execute({})
+
+    assert call_count == 1, "valid schema response should not escalate"
+    assert result["queries"] == ["q1", "q2"]
+
+
 # ---------------------------------------------------------------------------
 # Task 2: LLM retry with exponential backoff
 # ---------------------------------------------------------------------------

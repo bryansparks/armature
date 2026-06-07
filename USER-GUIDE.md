@@ -3818,6 +3818,148 @@ All existing `/run` and `/run/async` endpoints are preserved.
 
 ---
 
-*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,286 tests. MIT license.*
+## 38. Docker sandbox isolation
 
-*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
+**Problem.** Shell tool calls run with the permissions of the Armature process — access to the full filesystem, the network, all installed software. An LLM generating a shell command could, in principle, access files outside the intended workspace, make outbound HTTP calls, or consume unbounded CPU and memory.
+
+**Solution.** Enable `sandbox.mode: docker` to route all shell, file_write, and file_read tool calls through ephemeral Docker containers. The container sees only the declared workspace directory, network is off by default, and CPU/memory are bounded per call.
+
+### Basic configuration
+
+```yaml
+sandbox:
+  mode: docker                   # default: none (no sandboxing)
+  image: python:3.11-slim        # Docker image for all stages
+  timeout_s: 60.0                # max wall-clock time per shell call
+  allow_network: false           # --network none (default)
+  workspace: /workspace          # container path
+  host_workspace: ./scratch      # host directory bind-mounted to workspace
+  env:                           # environment variables injected as -e flags
+    PYTHONPATH: /workspace/lib
+  cpu_limit: "1.0"               # --cpus 1.0 (null = no cap)
+  memory_limit: "512m"           # --memory 512m (null = no cap)
+```
+
+The resulting docker command for each shell call:
+
+```
+docker run --rm \
+  --network none \
+  --cpus 1.0 \
+  --memory 512m \
+  -v /abs/path/to/scratch:/workspace \
+  -e PYTHONPATH=/workspace/lib \
+  python:3.11-slim \
+  sh -c "<agent's shell command>"
+```
+
+The container is removed (`--rm`) immediately after the call. No state persists between calls at the container level — only files written to the mounted workspace directory.
+
+### `sandbox:` field reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `mode` | `none` \| `docker` | `none` | `docker` routes tool calls through containers. `none` leaves handlers unchanged. |
+| `image` | string | `python:3.11-slim` | Default container image. Overridable per stage with `sandbox_image`. |
+| `runtime` | string | `"docker"` | Container CLI binary. `"docker"` works with Docker Desktop, OrbStack, Rancher Desktop, and Podman-with-shim. Set to `"podman"` or `"nerdctl"` for native use of those runtimes. |
+| `platform` | string \| null | `null` | Forces a specific image platform, e.g. `"linux/amd64"`. `null` uses the host's native arch. Not needed for public multi-arch images. |
+| `timeout_s` | float | `300.0` | Seconds before `subprocess.TimeoutExpired` is raised. |
+| `allow_network` | bool | `false` | `false` adds `--network none`. |
+| `workspace` | string | `/workspace` | Mount point inside the container. |
+| `host_workspace` | string | `.` | Host directory bind-mounted into the container. Resolved to absolute at harness init. |
+| `env` | dict | `{}` | Variables passed as `-e KEY=VALUE`. |
+| `cpu_limit` | string \| null | `null` | Passed as `--cpus <value>` when set. |
+| `memory_limit` | string \| null | `null` | Passed as `--memory <value>` when set. |
+
+### Per-stage image override
+
+Different stages often need different execution environments. Add `sandbox_image` to any stage to override the spec-level `image` for that stage only:
+
+```yaml
+sandbox:
+  mode: docker
+  image: python:3.11-slim    # default
+
+stages:
+  - id: extract              # uses python:3.11-slim
+    role: ...
+
+  - id: transform
+    sandbox_image: ubuntu:22.04    # override for this stage only
+    role: ...
+
+  - id: render
+    sandbox_image: node:20-slim
+    role: ...
+```
+
+The override applies only during `transform`'s execution. After the stage completes, subsequent stages return to `sandbox.image`. This removes the need to build monolithic images with all dependencies.
+
+### Image digest tracing
+
+When `mode: docker`, the harness captures the image digest at startup via `docker inspect` and records it on every `TraceRecord` as `sandbox_image_digest`. A Docker image tag is mutable (the same tag can point to different content after a registry push). The digest is the SHA256 content hash — immutable.
+
+Query it from the trace store:
+
+```python
+traces = await store.query(workflow_name="my-workflow")
+for t in traces:
+    print(f"{t.stage_id}: {t.sandbox_image_digest}")
+```
+
+`sandbox_image_digest` is `null` when `mode: none`, when Docker is unavailable, or when the image has no local manifest.
+
+### Resource limits
+
+`cpu_limit` and `memory_limit` prevent an LLM-generated shell command from consuming unbounded host resources. Set them to match the expected workload:
+
+```yaml
+sandbox:
+  cpu_limit: "0.5"    # 50% of one core
+  memory_limit: "256m"
+```
+
+On a host running multiple concurrent workflows, bounded containers mean one CPU-intensive stage cannot starve another.
+
+### What the sandbox does not cover
+
+- **LLM API calls** — model calls go to the provider API directly; sandbox does not intercept them
+- **Inter-stage data** — the context dict is not sandboxed; use `isolated: true` + `signature.input` (§7, `CONTEXT-ISOLATION.md`) to scope stage inputs
+- **File encryption** — workspace files are plaintext on the host
+- **Subagent specs** — configure `sandbox:` in each child spec independently
+
+### Composing sandbox with safety rules
+
+Safety rules (§11) and the sandbox are complementary controls at different layers:
+
+| Layer | What it controls |
+|---|---|
+| Safety rules | What the agent is *allowed to request* |
+| Sandbox | What the container is *capable of doing* |
+
+Use both in production. A safety rule blocks `rm -rf` before the call dispatches. The sandbox independently prevents the container from accessing anything outside the workspace even if a call runs. Defense in depth: policy at the rule layer, enforcement at the execution layer.
+
+```yaml
+safety_mode: strict
+safety_rules:
+  - tool: shell
+    condition: {field: cmd, op: starts_with, value: "python /workspace/"}
+    action: allow
+
+sandbox:
+  mode: docker
+  image: python:3.11-slim
+  allow_network: false
+  cpu_limit: "1.0"
+  memory_limit: "512m"
+```
+
+The spec is the complete statement of what this agent can do and what its execution environment is capable of. Both layers are readable by a security reviewer without understanding the LLM.
+
+See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry usage, workspace configuration, and the enterprise security posture.
+
+---
+
+*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,302 tests. MIT license.*
+
+*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*

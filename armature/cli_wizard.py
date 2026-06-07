@@ -27,7 +27,7 @@ _PROVIDER_DEFAULTS: dict[str, dict] = {
 _TIER_NAMES = ["tiny", "small", "medium", "large", "frontier"]
 _ROLE_TYPES = ["worker", "researcher", "judge", "orchestrator"]
 _OUTPUT_MODES = ["text", "json", "guided_json"]
-_STAGE_TYPES = ["LLM (role)", "Script / command", "Human gate", "Subagent workflow"]
+_STAGE_TYPES = ["LLM (role)", "Direct tool call", "Script / command", "Human gate", "Subagent workflow"]
 _FAN_IN_MODES = ["list", "merge", "first"]
 _SAFETY_OPS = ["contains", "not_contains", "equals", "not_equals", "matches_regex", "truthy"]
 _SAFETY_ACTIONS = ["block", "warn", "log"]
@@ -57,7 +57,7 @@ def _console():
         return None
 
 
-_TOTAL_STEPS = 6
+_TOTAL_STEPS = 7
 
 
 def _header(text: str) -> None:
@@ -137,7 +137,7 @@ def _stage_card(stage_id: str, stage_type_label: str, extra: str = "") -> None:
 
 
 def _wizard_welcome() -> None:
-    """Full-width welcome banner for armature new."""
+    """Full-width welcome banner with AI-first routing screen."""
     c = _console()
     if c:
         from rich.panel import Panel
@@ -147,14 +147,31 @@ def _wizard_welcome() -> None:
         text.append("  armature ", style="bold white")
         text.append("new", style="bold cyan")
         text.append("  ·  Workflow Spec Builder\n\n", style="bold white")
-        text.append("  Walk through the prompts to generate a ready-to-run YAML spec.\n", style="dim")
-        text.append("  Every answer can be edited in the generated file afterwards.\n", style="dim")
+        text.append("  ★  Armature is an AI-first tool.\n", style="bold yellow")
+        text.append("\n", style="")
+        text.append("  The richest workflows come from within Claude Code, Codex, or Gemini CLI,\n", style="dim")
+        text.append("  where an AI with CLAUDE.md (or AGENTS.md) in context generates complete\n", style="dim")
+        text.append("  specs — richer prompts, correct schemas, fewer validation errors — far\n", style="dim")
+        text.append("  beyond what a Q&A wizard can produce.\n\n", style="dim")
+        text.append("  In Claude Code:  ", style="dim")
+        text.append("read CLAUDE.md", style="bold cyan")
+        text.append("  then say: \"Generate an Armature workflow that…\"\n", style="dim")
+        text.append("  Codex / Gemini:  ", style="dim")
+        text.append("AGENTS.md", style="bold cyan")
+        text.append(" is auto-loaded — just describe what you want.\n\n", style="dim")
+        text.append("  Continuing with terminal wizard →\n", style="dim italic")
         c.print()
         c.print(Panel(Align(text, align="left"), border_style="cyan", padding=(0, 1)))
         c.print()
     else:
-        print("\n=== Armature Workflow Wizard ===\n")
-        print("Walk through the prompts to generate a workflow YAML spec.\n")
+        print("\n=== Armature Workflow Wizard ===")
+        print()
+        print("★  Armature is an AI-first tool.")
+        print("   The best workflows are created from within Claude Code, Codex, or Gemini CLI.")
+        print("   Open CLAUDE.md (or AGENTS.md) as context, then describe the workflow you want.")
+        print()
+        print("   Continuing with terminal wizard...")
+        print()
 
 
 def _wizard_complete(output_path: "Path") -> None:
@@ -206,11 +223,20 @@ def _collect_metadata(q) -> dict:
     name = _ask(q, "Workflow name:", validate=lambda v: bool(v.strip()) or "Required")
     description = _ask(q, "Short description (optional):", default="")
     version = _ask(q, "Version string:", default="1.0")
-    result = {"name": name.strip(), "description": description.strip(), "version": version.strip()}
+    _info("  Mission (optional): background context ALL LLM stages inherit — tone, constraints, domain knowledge.")
+    mission = _ask(q, "  Mission statement (leave blank to skip):", default="")
+    result = {
+        "name": name.strip(),
+        "description": description.strip(),
+        "version": version.strip(),
+        "mission": mission.strip(),
+    }
+    mission_preview = (result["mission"][:57] + "...") if len(result["mission"]) > 60 else result["mission"]
     _section_done([
         ("Name", result["name"]),
         ("Version", result["version"]),
         ("Description", result["description"] or "(none)"),
+        ("Mission", mission_preview or "(none)"),
     ])
     return result
 
@@ -299,10 +325,60 @@ def _collect_role_defaults(q, tiers: list[dict]) -> dict:
     return {}
 
 
+def _collect_contracts_and_tools(q) -> tuple[dict, list[str]]:
+    """Collect contracts (inputs + limits) and tool module registrations.
+
+    Returns (contracts_dict, list_of_module_paths).
+    """
+    _section_panel(
+        "Runtime Interface", step=4,
+        description="Declare workflow inputs (contracts) and any custom tool modules.",
+    )
+
+    # ── Contracts: inputs ───────────────────────────────────────────────────
+    _info("  contracts.inputs: every --input key=value passed at run time must be declared here.")
+    inputs: list[dict] = []
+    while True:
+        key = _ask(q, "  Input name (blank to stop, e.g. 'topic'):", default="")
+        if not key.strip():
+            break
+        desc = _ask(q, f"  Description for '{key.strip()}' (optional):", default="")
+        inputs.append({"name": key.strip(), "description": desc.strip()})
+
+    # ── Contracts: limits ───────────────────────────────────────────────────
+    max_iter = _ask(q, "  Max stage iterations (safety ceiling):", default="40")
+    max_llm  = _ask(q, "  Max LLM calls:", default="200")
+    timeout  = _ask(q, "  Timeout in hours:", default="1.0")
+
+    contracts = {
+        "inputs": inputs,
+        "max_iterations": int(max_iter),
+        "max_llm_calls":  int(max_llm),
+        "timeout_hours":  float(timeout),
+    }
+
+    # ── Tools ───────────────────────────────────────────────────────────────
+    _info("  tools: Python modules that register callable tools (web_search, fetch_url, etc.).")
+    _info("  Each module must define:  def register(registry: ToolRegistry) -> None")
+    tool_modules: list[str] = []
+    while True:
+        mod = _ask(q, "  Tool module path (blank to stop, e.g. my_pkg.tools.web):", default="")
+        if not mod.strip():
+            break
+        tool_modules.append(mod.strip())
+
+    _section_done([
+        ("Inputs", ", ".join(i["name"] for i in inputs) or "(none)"),
+        ("Max iterations / LLM calls", f"{max_iter} / {max_llm}"),
+        ("Tool modules", ", ".join(tool_modules) or "(none)"),
+    ])
+    return contracts, tool_modules
+
+
 def _collect_stages(q, tiers: list[dict]) -> tuple[list[dict], list[dict]]:
     """Returns (stages, adapters)."""
     _section_panel(
-        "Stages", step=4,
+        "Stages", step=5,
         description="Build the workflow DAG — add stages one at a time.",
     )
 
@@ -377,6 +453,28 @@ def _collect_stages(q, tiers: list[dict]) -> tuple[list[dict], list[dict]]:
             if on_fail_max:
                 stage["on_fail"] = {"loop": {"stage": stage_id, "max": int(on_fail_max)}}
 
+        elif stage_type.startswith("Direct"):
+            tool_name = _ask(q, "  Tool name (must be registered in tools:):", default="web_search")
+            _info("  Tool arguments — Jinja2 allowed (e.g. {{ search_item.query }}). Blank key to stop.")
+            args: dict[str, str] = {}
+            while True:
+                key = _ask(q, "    Arg name (blank to stop):", default="")
+                if not key.strip():
+                    break
+                val = _ask(q, f"    Value for '{key.strip()}':", default=f"{{{{ {key.strip()} }}}}")
+                args[key.strip()] = val.strip()
+            stage["tool_call"] = {"name": tool_name, "args": args}
+
+            if q.confirm("  Fan-out (run this tool in parallel across a list)?", default=False).ask():
+                fan_out_n = _ask(q, "  Max parallel invocations:", default="5")
+                fan_in = q.select("  Fan-in strategy:", choices=_FAN_IN_MODES).ask()
+                partition_src = _ask(q, "  partition_source Jinja2 expr (e.g. {{ plan.queries }}):")
+                partition_key = _ask(q, "  partition_key name (e.g. search_item):", default="item")
+                stage["fan_out"] = int(fan_out_n)
+                stage["fan_in"] = fan_in
+                stage["partition_source"] = partition_src
+                stage["partition_key"] = partition_key
+
         elif stage_type.startswith("Script"):
             adapter_name = _slug(_ask(q, "  Adapter name:", default=f"{stage_id}_cmd"))
             cmd = _ask(q, "  Shell command:", default=f"echo 'Running {stage_id}'")
@@ -418,7 +516,7 @@ def _collect_stages(q, tiers: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 def _collect_safety_rules(q, adapters: list[dict]) -> list[dict]:
-    _section_panel("Safety Rules", step=5, description="Declarative allow/block rules evaluated before every adapter call.")
+    _section_panel("Safety Rules", step=6, description="Declarative allow/block rules evaluated before every adapter call.")
     if not adapters:
         _info("No script adapters defined — skipping safety rules.")
         return []
@@ -453,7 +551,7 @@ def _collect_safety_rules(q, adapters: list[dict]) -> list[dict]:
 
 
 def _collect_memory(q, stages: list[dict]) -> dict | None:
-    _section_panel("Cross-Run Memory", step=6, description="Capture stage outputs across runs and inject them at startup.")
+    _section_panel("Cross-Run Memory", step=7, description="Capture stage outputs across runs and inject them at startup.")
     if not q.confirm(
         "Enable cross-run memory? (captures stage outputs across runs)", default=False
     ).ask():
@@ -503,59 +601,111 @@ def generate_yaml(
     adapters: list[dict],
     safety_rules: list[dict],
     memory: dict | None,
+    contracts: dict | None = None,
+    tools: list[str] | None = None,
 ) -> str:
     out = StringIO()
+    slug = _slug(meta["name"])
 
     def w(line: str = "") -> None:
         out.write(line + "\n")
 
-    # ── Header ──
+    # ── File header ──────────────────────────────────────────────────────────
     w(f"# {'=' * 60}")
     w(f"# Armature Workflow: {meta['name']}")
     w(f"# Generated by: armature new")
-    w(f"# Edit role descriptions and model choices before running.")
+    w(f"# {'=' * 60}")
+    w(f"#")
+    w(f"# Next steps:")
+    w(f"#   1. Refine each stage description — this is where output quality comes from.")
+    w(f"#   2. Complete output_schema fields for guided_json stages.")
+    w(f"#   3. armature validate {slug}.yml")
+    w(f"#   4. armature run {slug}.yml --input topic=\"your value here\"")
+    w(f"#")
+    w(f"# Tip: in Claude Code, load CLAUDE.md and ask it to improve this spec.")
     w(f"# {'=' * 60}")
     w()
     w(f"name: {meta['name']}")
     w(f"version: \"{meta['version']}\"")
-    if meta["description"]:
+    if meta.get("description"):
         w(f"description: {_wrap_description(meta['description'], 2)}")
+    if meta.get("mission"):
+        w()
+        w("# mission: injected as background context into the system prompt of every LLM stage.")
+        w("# Use for workflow-wide invariants: tone, domain constraints, formatting rules.")
+        w("mission: >")
+        for line in textwrap.wrap(meta["mission"], width=76):
+            w(f"  {line}")
     w()
 
-    # ── Model tiers ──
-    w("# ── Model Tiers ────────────────────────────────────────────")
-    w("# Swap models here without touching individual stages.")
+    # ── Contracts ────────────────────────────────────────────────────────────
+    w("# ── Contracts ───────────────────────────────────────────────")
+    w("# Declare every runtime input the workflow accepts.")
+    w("# Pass them at invocation:  armature run spec.yml --input topic=\"AI trends\"")
+    w("contracts:")
+    if contracts and contracts.get("inputs"):
+        w("  inputs:")
+        for inp in contracts["inputs"]:
+            w(f"    - name: {inp['name']}")
+            if inp.get("description"):
+                w(f"      description: \"{inp['description']}\"")
+    else:
+        w("  inputs: []  # list every --input key, e.g.: [{name: topic}, {name: focus}]")
+    max_iter = contracts["max_iterations"] if contracts else 40
+    max_llm  = contracts["max_llm_calls"]  if contracts else 200
+    timeout  = contracts["timeout_hours"]   if contracts else 1.0
+    w(f"  max_iterations: {max_iter}    # hard ceiling on total stage executions")
+    w(f"  max_llm_calls: {max_llm}     # total LLM API calls allowed across all stages")
+    w(f"  timeout_hours: {timeout}     # wall-clock limit (fractions OK, e.g. 0.5)")
+    w()
+
+    # ── Model tiers ──────────────────────────────────────────────────────────
+    w("# ── Model Tiers ─────────────────────────────────────────────")
+    w("# Named model slots. Stages reference tier names — swap all models at once here.")
+    w("# Valid tier names: tiny | small | medium | large | frontier")
     w("model_tiers:")
     for t in tiers:
         w(f"  {t['tier']}:")
-        w(f"    provider: {t['provider']}")
+        w(f"    provider: {t['provider']}  # anthropic | openai | openrouter | ollama | azure | bedrock")
         w(f"    model: {t['model']}")
         if t["api_base"]:
             w(f"    api_base: {t['api_base']}")
         if t["api_key_env"]:
-            w(f"    api_key_env: {t['api_key_env']}")
+            w(f"    api_key_env: {t['api_key_env']}  # env var name holding the API key")
         if t["temperature"]:
-            w(f"    temperature: {t['temperature']}")
+            w(f"    temperature: {t['temperature']}  # 0.0–1.0; lower = more deterministic")
         if t["max_tokens"]:
             w(f"    max_tokens: {t['max_tokens']}")
     w()
 
-    # ── Role type defaults ──
+    # ── Role type defaults ────────────────────────────────────────────────────
     if role_defaults:
-        w("# ── Role Type Defaults ─────────────────────────────────────")
+        w("# ── Role Type Defaults ──────────────────────────────────────")
         w("# Stages that omit model_tier inherit from here.")
+        w("# Valid role types: worker | researcher | judge | orchestrator")
         w("role_type_defaults:")
         for role, tier in role_defaults.items():
             w(f"  {role}: {tier}")
         w()
     else:
-        w("# role_type_defaults: (using built-in: worker=small, judge/orchestrator=frontier, researcher=large)")
+        w("# role_type_defaults: (built-ins: worker=small, judge=frontier, orchestrator=frontier, researcher=large)")
         w()
 
-    # ── Adapters ──
+    # ── Tools ────────────────────────────────────────────────────────────────
+    if tools:
+        w("# ── Tools ──────────────────────────────────────────────────")
+        w("# Python modules that register callable tools for tool_call stages.")
+        w("# Each module must define:  def register(registry: ToolRegistry) -> None")
+        w("tools:")
+        for mod in tools:
+            w(f"  - module: {mod}")
+        w()
+
+    # ── Adapters ─────────────────────────────────────────────────────────────
     if adapters:
         w("# ── Adapters ────────────────────────────────────────────────")
-        w("# Script/command stages reference adapters defined here.")
+        w("# Shell/Python adapters. Referenced by adapter: field in stages.")
+        w("# type: script (shell command) | python (callable function)")
         w("adapters:")
         for a in adapters:
             w(f"  {a['name']}:")
@@ -566,10 +716,12 @@ def generate_yaml(
             w(f"    timeout: {a['timeout']}")
         w()
 
-    # ── Safety rules ──
+    # ── Safety rules ─────────────────────────────────────────────────────────
     if safety_rules:
         w("# ── Safety Rules ────────────────────────────────────────────")
-        w("# Evaluated before every adapter invocation. block/warn/log.")
+        w("# Evaluated before every adapter/tool invocation.")
+        w("# action: block (abort) | warn (log + continue) | log (silent)")
+        w("# op: contains | not_contains | equals | not_equals | matches_regex | truthy")
         w("safety_rules:")
         for r in safety_rules:
             w(f"  - tool: {r['tool']}")
@@ -583,11 +735,11 @@ def generate_yaml(
                 w(f"    message: \"{r['message']}\"")
         w()
 
-    # ── Memory ──
+    # ── Memory ───────────────────────────────────────────────────────────────
     if memory:
-        w("# ── Cross-Run Memory ────────────────────────────────────────")
+        w("# ── Cross-Run Memory ─────────────────────────────────────────")
         w("# Captures stage outputs across runs and injects them at run start.")
-        w(f"# Stored at: ~/.armature/memory/{meta['name']}.db")
+        w(f"# Access in stage descriptions:  {{{{ {memory['inject_as']} }}}}")
         w("memory:")
         w(f"  enabled: {str(memory['enabled']).lower()}")
         if memory["capture"]:
@@ -599,9 +751,17 @@ def generate_yaml(
         w(f"  inject_as: {memory['inject_as']}")
         w()
 
-    # ── Stages ──
-    w("# ── Stages ─────────────────────────────────────────────────")
-    w("# The workflow DAG. Execution order is resolved from depends_on.")
+    # ── Stages ───────────────────────────────────────────────────────────────
+    w("# ── Stages ──────────────────────────────────────────────────")
+    w("# The workflow DAG. Execution order resolved from depends_on fields.")
+    w("# Stage types: role (LLM) | tool_call | gate | adapter | subagent_spec")
+    w("#")
+    w("# Jinja2 context — runtime inputs and all upstream stage outputs are available:")
+    w("#   {{ topic }}                   runtime input declared in contracts.inputs")
+    w("#   {{ researcher.content }}      text output of a stage with output_mode: text")
+    w("#   {{ planner.queries }}         JSON field from a guided_json stage 'planner'")
+    w("#   {{ item.query }}              partition variable inside a fan-out stage")
+    w("#   {% if x is defined and x %}   guard optional or memory-injected values")
     w("stages:")
     for s in stages:
         w(f"  - id: {s['id']}")
@@ -610,20 +770,42 @@ def generate_yaml(
             role = s["role"]
             w(f"    role:")
             w(f"      name: {role['name']}")
-            w(f"      type: {role['type']}")
+            w(f"      type: {role['type']}  # worker | researcher | judge | orchestrator")
             if "model_tier" in role:
-                w(f"      model_tier: {role['model_tier']}")
+                w(f"      model_tier: {role['model_tier']}  # overrides role_type_defaults for this stage")
             desc_block = _wrap_description(role["description"], 8)
             w(f"      description: {desc_block}")
-            w(f"    output_mode: {s['output_mode']}")
+            w(f"    output_mode: {s['output_mode']}  # text | guided_json")
 
             if s.get("output_mode") in ("json", "guided_json"):
-                w("    # output_schema:")
-                w("    #   type: object")
-                w("    #   required: [field1, field2]")
-                w("    #   properties:")
-                w("    #     field1: { type: string }")
-                w("    #     field2: { type: number }")
+                w("    # guided_json: auto-escalates to the next model tier on parse failure.")
+                w("    # Define every field downstream stages will reference.")
+                w("    output_schema:")
+                w("      type: object")
+                w("      required: [result]")
+                w("      properties:")
+                w("        result:")
+                w("          type: string")
+                w("          description: Primary output of this stage")
+                w("        # Add more fields your downstream stages need, for example:")
+                w("        # confidence: {type: number, description: Score from 0.0 to 1.0}")
+                w("        # items: {type: array, items: {type: string}}")
+
+        elif "tool_call" in s:
+            tc = s["tool_call"]
+            w(f"    tool_call:")
+            w(f"      name: {tc['name']}")
+            if tc.get("args"):
+                w(f"      args:")
+                for k, v in tc["args"].items():
+                    w(f"        {k}: \"{v}\"")
+            if "fan_out" in s:
+                w(f"    fan_out: {s['fan_out']}  # max parallel partitions")
+                w(f"    fan_in: {s['fan_in']}   # list (collect all) | merge (dict merge) | first")
+                if s.get("partition_source"):
+                    w(f"    partition_source: \"{s['partition_source']}\"  # Jinja2 expr resolving to a list")
+                if s.get("partition_key"):
+                    w(f"    partition_key: {s['partition_key']}  # name injected per partition")
 
         elif "gate" in s:
             w(f"    gate: {s['gate']}")
@@ -644,6 +826,8 @@ def generate_yaml(
                 w(f"    partition_key: {s['partition_key']}")
 
         if "signature" in s:
+            w(f"    # signature.input: limits which context keys are visible to this stage.")
+            w(f"    # Essential for post_run stages and fan-out workflows (avoids huge _transcript).")
             w(f"    signature:")
             w(f"      input:")
             for k, d in s["signature"]["input"].items():
@@ -652,7 +836,7 @@ def generate_yaml(
         if "on_fail" in s:
             loop = s["on_fail"]["loop"]
             w(f"    on_fail:")
-            w(f"      loop:")
+            w(f"      loop:  # retry this stage on failure, up to max times")
             w(f"        stage: {loop['stage']}")
             w(f"        max: {loop['max']}")
 
@@ -734,6 +918,7 @@ def run_wizard(output_path: Path | None = None) -> None:
             _section_panel("Role Type Defaults", step=3, description="Using saved defaults.")
             _info("  Skipped — loaded from ~/.armature/config.yml")
 
+        contracts, tool_modules = _collect_contracts_and_tools(q)
         stages, adapters = _collect_stages(q, tiers)
         safety_rules = _collect_safety_rules(q, adapters)
         memory = _collect_memory(q, stages)
@@ -741,7 +926,10 @@ def run_wizard(output_path: Path | None = None) -> None:
         print("\n\nWizard cancelled.")
         return
 
-    yaml_text = generate_yaml(meta, tiers, role_defaults, stages, adapters, safety_rules, memory)
+    yaml_text = generate_yaml(
+        meta, tiers, role_defaults, stages, adapters, safety_rules, memory,
+        contracts=contracts, tools=tool_modules,
+    )
 
     _header("Generated Spec")
     _preview(yaml_text)

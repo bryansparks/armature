@@ -44,19 +44,21 @@ This document describes three production stacks — each one a natural compositi
 
 ## Stack 1: Enterprise Governance
 
-**Features:** Safety rules + strict mode + human gates + rogue signal counter
+**Features:** Safety rules + strict mode + human gates + Docker sandbox + rogue signal counter
 
 ---
 
 Enterprise AI teams face a recurring problem. Agents are powerful, but their actions are hard to govern. You can read the code and understand what an agent *could* do; you cannot easily tell what it *did* do, or whether the constraints you intended are actually enforced. Traditional software has this problem too — which is why we invented firewalls, IAM policies, and audit logs. Agentic workflows need the same infrastructure.
 
-Armature's governance stack answers this at three levels.
+Armature's governance stack answers this at four levels.
 
 **What agents can do** is declared in `safety_rules:`. Each rule targets a tool, inspects an argument field, and takes a policy action — block, log, require approval. In strict mode, the rule list becomes an allowlist: anything not explicitly permitted is blocked by default. This is the IAM default-deny posture applied to tool calls. The rogue signal counter surfaces how often agents attempted something prohibited — zero means the workflow ran entirely within its declared policy, non-zero means something tried to exceed its bounds.
 
+**What the execution environment can touch** is constrained by the Docker sandbox. When `sandbox.mode: docker` is set, every shell command runs in an ephemeral container that disappears after the call. The container sees only the declared workspace directory — nothing else on the host filesystem is accessible. Network is off by default. CPU and memory are capped. Every trace records the image content digest. Policy defines what is allowed; the container enforces what is possible. These are different controls at different layers — defense in depth.
+
 **Where humans must decide** is declared with `gate: human`. Gates are first-class stages in the workflow DAG. They pause execution, present context from upstream stages using Jinja2 templates, and collect structured approval or feedback. The gate result flows into downstream stages as a normal context variable — stages can branch on `{{ review_gate.approved }}` or incorporate `{{ review_gate.feedback }}` into their instructions. This is accountability encoded as structure, not as a comment in a prompt.
 
-**The governance config is version-controlled YAML** alongside the workflow spec. Security teams can audit `safety_rules:` in a PR. Operations teams can grep for `gate: human` to find every approval checkpoint. The spec is the contract.
+**The governance config is version-controlled YAML** alongside the workflow spec. Security teams can audit `safety_rules:` and `sandbox:` in a PR. Operations teams can grep for `gate: human` to find every approval checkpoint. The spec is the contract.
 
 ```yaml
 name: vendor-contract-processor
@@ -133,7 +135,34 @@ stages:
     depends_on: [legal_review_gate]
 ```
 
-**What you get:** A compliance-ready agentic pipeline. The security team can read the governance layer in five minutes without understanding LLMs. The `rogue_signals` field in the run summary tells them, per run, whether the agent stayed within bounds. A workflow with `rogue_signals: 0` on every run means the governance config is correctly calibrated. A workflow with `rogue_signals: 3` means something tried to do something it should not — and the trace records exactly which call, which rule, and which decision.
+Adding a `sandbox:` block to the spec extends the governance posture to the execution layer:
+
+```yaml
+sandbox:
+  mode: docker
+  image: python:3.11-slim
+  allow_network: false
+  cpu_limit: "1.0"
+  memory_limit: "512m"
+  host_workspace: ./contract_workspace
+```
+
+Added to the vendor-contract-processor spec above, this means:
+- Shell tool calls run in an ephemeral container with no network
+- The container cannot access anything outside `./contract_workspace`
+- Resource consumption is bounded per execution
+
+**What you get:** A compliance-ready agentic pipeline. The security team can read the governance layer in five minutes without understanding LLMs. The answer to "what can this agent touch on our infrastructure?" is:
+
+- Computation happens in ephemeral, resource-constrained, network-isolated containers that disappear after each call
+- Files are scoped to an explicit workspace directory; nothing outside it is visible
+- Network is off by default; explicitly enabled only when declared in the spec
+- Environment is the image you specify, not whatever happens to be installed on the host
+- Every execution is traceable by model, inputs, policy version, and image digest
+
+That is a security posture you can describe to a security team in two sentences and defend in a review. The container boundary is the security boundary — an established, well-understood concept that does not require explaining a new abstraction.
+
+The `rogue_signals` field in the run summary tells them, per run, whether the agent stayed within policy bounds. A workflow with `rogue_signals: 0` on every run means the governance config is correctly calibrated. A workflow with `rogue_signals: 3` means something tried to do something it should not — and the trace records exactly which call, which rule, and which decision.
 
 ---
 

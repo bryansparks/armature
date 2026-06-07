@@ -300,6 +300,69 @@ They compose. The governance stack (safety rules + human gates + strict mode) de
 
 ---
 
+## Memory and Context
+
+**How does Armature handle agent memory?**
+
+Armature provides four distinct memory layers, each operating at a different time horizon:
+
+1. **Mission context** — the `mission:` string plus a prior-stages breadcrumb is injected automatically into every LLM system prompt. Zero configuration.
+2. **Continuation** — `carry_forward:` keys bring selected structured outputs from the previous run into the current run as `prior_run`. Rolling cross-run memory.
+3. **MemoryStore** — a rolling window of named stage output captures across many runs. Newest-to-oldest, quality-ranked, staleness-aware. Injected as `_memory`.
+4. **KnowledgeStore** — LLM-extracted entity/fact/confidence triples stored in SQLite with FTS5 full-text search. Injected as `_knowledge`. Accumulates indefinitely.
+
+See `MEMORY-AND-CONTEXT.md` for the full breakdown of all four layers, configuration examples, and comparisons to RAG and vector stores.
+
+**How is Armature's memory different from LangChain's ConversationBufferMemory?**
+
+LangChain's buffer stores raw message text and grows unboundedly. Armature's MemoryStore stores **structured JSON outputs** — only what you declare worth capturing — in a bounded rolling window with quality-ranked eviction. The signal-to-noise ratio is orders of magnitude higher because you choose what to remember, not every token that ever appeared. `KnowledgeStore` goes further: an LLM distills raw captures into entity/fact triples that can be queried across all accumulated runs.
+
+**Do I need a vector database for Armature's knowledge system?**
+
+No external infrastructure required. KnowledgeStore uses SQLite with the FTS5 extension (full-text search, built into Python's standard `sqlite3` module). For most structured knowledge retrieval — facts about companies, customers, domains, or recurring workflows — keyword search over LLM-extracted triples is more precise than vector similarity. If you need semantic search over large unstructured document corpora, use an external vector DB accessed via a tool call.
+
+**How do I prevent a workflow's memory from polluting fan-out workers?**
+
+Use `isolated: true` + `signature.input` on the fan-out stage. Declare exactly which context keys each worker receives — for example, `[doc_path, _knowledge, prior_run]`. The harness filters the context to those keys before passing it to the worker. Workers cannot accidentally see parent pipeline state or each other's outputs. See `CONTEXT-ISOLATION.md`.
+
+**How many runs does memory persist across?**
+
+- **Continuation**: carries values from exactly the most recent prior run.
+- **MemoryStore**: rolling window per `(stage_id, capture_key)` pair; default 5 entries, configurable per capture. Entries older than 30 days are flagged as stale.
+- **KnowledgeStore**: cumulative across all runs — facts are added each run and never automatically evicted. The FTS5 index returns the top-10 most relevant records per query.
+
+---
+
+## Streaming and Chat
+
+**Can Armature stream tokens to a user interface?**
+
+Yes. Mark any stage with `response_stage: true`. When that stage executes, tokens are streamed token-by-token to the job's SSE event queue rather than being buffered until completion. Use the async endpoint (`POST /workflows/{name}/run/async`) to get a `job_id`, then connect to `GET /run/{job_id}/events` to receive the SSE stream. Token events have type `"token"` and a `"content"` field containing the individual token.
+
+**How do I use Armature as a backend for a chat application?**
+
+The sidecar pattern: your chat application calls Armature over HTTP, streams the response back to the user. The application handles UI; Armature handles all AI reasoning. A typical flow:
+1. User submits a query to your application
+2. Application `POST`s to `/workflows/your-assistant/run/async`
+3. Application connects to `/run/{job_id}/events` and streams token events to the frontend
+4. User sees the response arriving in real time, backed by multi-stage reasoning (classify → retrieve → draft → validate)
+
+See `CHATBOT-AND-STREAMING.md` for the full pattern, code examples, latency optimization, and WebSocket integration.
+
+**How does Armature handle multi-turn conversations?**
+
+Use `continuation:` to carry structured outputs across turns. Each turn is a fresh workflow activation; the harness loads the prior turn's declared outputs (e.g., `response_text`, `conversation_summary`) and injects them as `prior_run`. A rolling summary field compresses conversation history without unbounded growth — cheaper and more durable than replaying a full transcript.
+
+**How fast is time-to-first-token?**
+
+Depends on your pre-processing pipeline. A typical support assistant with two fast classification/retrieval stages (haiku, ~80ms + ~150ms) before a streaming response stage (opus) achieves time-to-first-token around 700–800ms. Parallel pre-processing (multiple stages with no `depends_on`) reduces this further. See `CHATBOT-AND-STREAMING.md` for the latency analysis.
+
+**Is Armature appropriate for general-purpose chatbots?**
+
+For structured reasoning behind a chat interface — yes. For open-ended free-form conversation where the AI decides at runtime how many steps to take — better handled by a framework designed for cycles (LangGraph, etc.). Armature's strength is that the workflow structure is defined in the spec: you control which stages run, in what order, at what cost. The chat user gets a streaming response; the workflow author gets full auditability of every step that produced it.
+
+---
+
 ## Comparisons
 
 **How does Armature compare to LangGraph?**
@@ -363,6 +426,102 @@ Yes, with some ramp-up. YAML is readable by anyone familiar with CI/CD pipelines
 **Is the spec format stable?**
 
 The core fields (`stages`, `depends_on`, `role`, `model_tiers`, `fan_out`, `fan_in`, `skip_if`, `on_fail`) are stable. Fields added in recent versions (`continuation`, `triggers`, `mission`) follow the same Pydantic validation and are backward-compatible — existing specs without those fields continue to work.
+
+---
+
+## Sandbox and Isolation
+
+**How do I run tool calls inside an isolated Docker container?**
+
+Add a `sandbox:` block to your spec and set `mode: docker`:
+
+```yaml
+sandbox:
+  mode: docker
+  image: python:3.11-slim
+  allow_network: false
+  cpu_limit: "1.0"
+  memory_limit: "512m"
+  host_workspace: ./workspace
+```
+
+With this set, every `shell` tool call runs inside an ephemeral Docker container that disappears after each call. The container can only see the `host_workspace` directory — nothing else on the host filesystem. Network is off by default. CPU and memory are bounded. The default is `mode: none`, which leaves all tool handlers unchanged.
+
+See `SANDBOX-AND-ISOLATION.md` for the full reference.
+
+---
+
+**Can I use different Docker images for different stages?**
+
+Yes — set `sandbox_image` on any individual stage to override the spec-level `sandbox.image` default:
+
+```yaml
+sandbox:
+  mode: docker
+  image: python:3.11-slim       # default
+
+stages:
+  - id: extract                 # uses python:3.11-slim
+    role: ...
+
+  - id: transform
+    sandbox_image: ubuntu:22.04 # this stage only
+    role: ...
+
+  - id: render
+    sandbox_image: node:20-slim # different image
+    role: ...
+    depends_on: [transform]
+```
+
+The override applies only to that stage's shell calls and resets automatically afterward. This is useful when different stages need different tool dependencies without building a single monolithic image.
+
+---
+
+**What resource constraints can I apply to containers?**
+
+Two fields control resource limits on individual container executions:
+
+- `cpu_limit` — passed as `--cpus <value>` to Docker. Example: `"1.0"` (one full core), `"0.5"` (half a core). `null` (the default) omits the flag, leaving no CPU cap.
+- `memory_limit` — passed as `--memory <value>` to Docker. Example: `"512m"`, `"1g"`. `null` omits the flag.
+
+These prevent runaway resource consumption from LLM-generated shell commands and enable predictable resource budgets when running multiple concurrent workflows on the same host.
+
+---
+
+**How do I audit which exact Docker image ran each stage?**
+
+When `sandbox.mode: docker`, Armature runs `docker inspect` at harness startup to capture the image content digest (SHA256). This digest is stored on every `TraceRecord` as `sandbox_image_digest`.
+
+Query it from the trace store:
+
+```python
+traces = await store.query(workflow_name="my-workflow")
+for t in traces:
+    print(f"{t.stage_id}: {t.sandbox_image_digest}")
+```
+
+The digest is the content hash of the image — immutable, unlike a tag. Even if `python:3.11-slim` is updated on the registry, runs before and after the update will show different digests in the trace. This gives you proof of exactly which image content executed at any point in time — useful for regulated environments, incident response, and reproducibility audits.
+
+---
+
+**Does the sandbox replace safety rules, or do they work together?**
+
+They work together at different layers.
+
+Safety rules inspect tool arguments *before dispatch* — they define what the agent is *allowed to request*. The sandbox constrains the execution environment *at runtime* — it defines what the container is *capable of doing*. These are complementary controls, not alternatives.
+
+A safety rule can block shell calls containing `rm -rf`. The sandbox independently prevents the container from accessing anything outside the mounted workspace. A security reviewer reads both in the same YAML file: what the policy permits, and what the container is physically capable of.
+
+The practical result: the answer to "what can this agent touch on our infrastructure?" becomes:
+
+- Computation in ephemeral, resource-bounded, network-isolated containers that disappear after each call
+- Files scoped to one directory; nothing outside it is visible
+- Network off by default; enabled only when declared
+- Environment is the specified image, not the host's installed software
+- Every execution traceable by model, inputs, policy version, and image digest
+
+The container boundary is the security boundary — an established concept that does not require explaining a new abstraction. See `SANDBOX-AND-ISOLATION.md` for the full picture, and `SAFETY-AND-GOVERNANCE.md` for the policy layer.
 
 ---
 
@@ -587,13 +746,194 @@ No measurable startup overhead beyond loading the spec (a Pydantic parse, typica
 
 ---
 
+## Role Types and Model Tiers
+
+**What are the four role types and when do I use each?**
+
+Every LLM stage declares one of four role types. The type sets the model's cognitive posture and maps to a default cost tier via `role_type_defaults`:
+
+| Type | Cognitive posture | Default tier |
+|------|-------------------|-------------|
+| `researcher` | Gather and synthesize information, explore breadth | `large` |
+| `worker` | Execute a defined task with narrow scope | `small` |
+| `judge` | Evaluate quality, resolve conflicts, make decisions | `large` |
+| `orchestrator` | Plan, decompose, direct downstream stages | `large` |
+
+`worker` is the cheapest role — use it for formatting, extraction, or transformation tasks where a capable small model suffices. `judge` should always run on a larger, more capable model; its job is to catch errors in worker outputs. See `ROLE-TAXONOMY.md` for detailed guidance.
+
+**What are model tiers and why use them instead of naming a model directly?**
+
+A model tier is a named capability level (`tiny`, `small`, `medium`, `large`, `frontier`) that you configure once at the top of the spec. Stages reference tier names, never model names. When you want to swap `frontier` from GPT-4 to Claude, you change one line — all stages that use `frontier` update automatically.
+
+The practical benefit: different providers and models in the same workflow. Your `small` tier can run on a local Ollama model while `frontier` calls Anthropic. Your `medium` can be on OpenRouter. Different tiers, one spec.
+
+**What happens when `guided_json` fails on a small model?**
+
+The engine automatically escalates to the next tier. If `small` produces invalid JSON for a stage with `output_mode: guided_json`, the engine retries with `medium`, then `large` if needed. This escalation is logged and tracked in IHR as the Harness-Following Rate (HFR) component. Armature also emits a validator warning (`GUIDED_JSON_LOW_TIER_RISK`) if you declare a `guided_json` stage on a small/tiny tier at spec-write time. See `MODEL-TIERS.md`.
+
+---
+
+## The Judge Pattern and Quorum Scoring
+
+**What is the judge pattern?**
+
+One LLM evaluates the output of another. A `judge` role stage receives a prior stage's output and assesses it for quality, accuracy, scope, or format compliance — then either accepts it, requests a retry, or flags it for human review.
+
+The pattern catches confident hallucinations, scope drift, and uncalibrated confidence before they leave the workflow. A single LLM call is a sample from a distribution; a judge stage inserts a second draw whose sole job is to detect failure modes in the first.
+
+```yaml
+- id: judge
+  role:
+    name: QualityReviewer
+    type: judge
+    description: |
+      Review the analyst's output for accuracy and completeness.
+      ANALYST OUTPUT: {{ analyst.content }}
+  output_mode: guided_json
+  output_schema:
+    type: object
+    required: [accept, confidence, issues]
+    properties:
+      accept: {type: boolean}
+      confidence: {type: number}
+      issues: {type: array, items: {type: string}}
+  on_fail:
+    loop: {stage: analyst, max: 2}
+  depends_on: [analyst]
+```
+
+When `accept` is false, `on_fail.loop` restarts the `analyst` stage with the judge's `issues` list injected into its context as `_last_error`.
+
+**What is quorum scoring?**
+
+Quorum scoring is the fan-in strategy `fan_in: "consensus"`. When multiple parallel stages produce conflicting outputs, an LLM judge synthesizes them into a single result. Each parallel result gets a `quorum_score` (0–1) reflecting its alignment with the synthesized consensus. Quorum scores feed into IHR's quorum component.
+
+Use it for: parallel research where agents disagree on facts, parallel code reviews where different reviewers flag different issues, or any fan-out where "what did most agents agree on?" is more reliable than any single output. See `QUORUM-SCORING.md`.
+
+---
+
+## Human-in-the-Loop Gates
+
+**How does `gate: human` work?**
+
+A human gate is a stage that blocks execution until a human approves or provides feedback. Set `gate: human` on any stage:
+
+```yaml
+- id: approval_gate
+  gate: human
+  present: |
+    Please review the proposed contract terms before we proceed.
+    TERMS: {{ drafter.content }}
+  depends_on: [drafter]
+```
+
+When the harness reaches this stage, it prints the `present:` message to stdout and waits for keyboard input. The human can type `approve`, `reject`, or free-form feedback. Their response is stored in context as `{{ approval_gate.response }}` and `{{ approval_gate.approved }}` (boolean) for downstream stages to act on.
+
+**Can I use gates in a long-running workflow running in CI or as a service?**
+
+Yes — via the HTTP service. When running `armature serve`, gates dispatch to an approval queue rather than stdin. A `GET /approvals` endpoint lists pending gates; `POST /approvals/{id}/approve` or `/reject` resolves them. The workflow resumes automatically. See `HUMAN-IN-THE-LOOP.md`.
+
+---
+
+## Checkpoint and Resume
+
+**What is checkpoint mode and when should I use it?**
+
+Checkpoint mode persists each stage's result to disk as it completes. If the workflow crashes or is interrupted, the next run detects which stages already have valid results and skips them — resuming from the last successful point.
+
+Enable it with one line: `checkpoint: true` in the spec. Use it for any workflow that takes more than a few minutes, fans out across many items, or makes expensive external API calls that you don't want to repeat.
+
+```yaml
+name: compliance-audit
+checkpoint: true
+
+stages:
+  - id: fetch_documents     # if this completes, it won't re-run on resume
+    ...
+  - id: review_each         # fan-out: 100 documents — partial completion is preserved
+    fan_out: 100
+    ...
+```
+
+**Does checkpoint mode affect normal (non-interrupted) runs?**
+
+No. On a clean run, stages complete and write their checkpoints, but the next `armature run` starts fresh unless you pass `--resume`. Checkpoint files are stored in `.armature/checkpoints/{run_id}/`. See `CHECKPOINT-AND-RESUME.md`.
+
+---
+
+## Subagent Composition
+
+**What is a subagent stage?**
+
+A subagent stage loads a separate YAML spec and runs it as a full, independent workflow inside a single parent stage. The parent sees one stage; the child is an entire DAG executing inside it.
+
+```yaml
+- id: deep_analysis
+  subagent_spec: workflows/deep-analysis.yaml
+  depends_on: [gather]
+```
+
+Use subagents to: reuse a workflow across multiple parent specs, run the same child workflow in parallel across N items (fan-out of subagents), or keep complex sub-pipelines in separate files that can be tested independently.
+
+**How does fan-out of subagents work?**
+
+Combine `fan_out`, `partition_source`, and `subagent_spec`:
+
+```yaml
+- id: analyze_each_doc
+  fan_out: 20
+  partition_source: "{{ gather.documents }}"
+  partition_key: doc_item
+  subagent_spec: workflows/single-doc-review.yaml
+  fan_in: list
+  depends_on: [gather]
+```
+
+This runs up to 20 instances of `single-doc-review.yaml` concurrently, one per document, and collects results into a list. Each child receives `doc_item` in its context. See `SUBAGENT-COMPOSITION.md`.
+
+---
+
+## Mission Context and Long-Horizon Workflows
+
+**What is the `mission:` field?**
+
+The `mission:` field is a workflow-level statement of purpose that is automatically injected into every LLM stage's system prompt. Every agent in the workflow sees it, without any per-stage configuration.
+
+```yaml
+name: legal-review
+mission: >
+  You are reviewing contracts for a healthcare SaaS company.
+  Our primary concern is HIPAA compliance, data residency, and liability caps.
+  Flag anything that requires legal counsel before signing.
+```
+
+Without `mission:`, long workflows drift — later agents forget what the early ones were trying to accomplish. With `mission:`, every agent has the workflow's north star. See `MISSION-AS-CONTEXT.md`.
+
+**What is the `continuation:` block for?**
+
+`continuation:` enables long-horizon workflows that carry forward outputs from their previous activation. On each run after the first, the harness retrieves named keys from the prior run's traces and injects them into the context as `prior_run` (or a custom name):
+
+```yaml
+continuation:
+  carry_forward:
+    - key: analyst.recommendations
+    - key: monitor.summary
+  inject_as: prior_run
+```
+
+Use it for daily monitors, weekly analysis workflows, or any workflow that needs to reason about "what did we find last time?" See the continuation section in `USER-GUIDE.md`.
+
+---
+
 ## Documentation Map
 
 | Topic | Document |
 |-------|----------|
+| Quick spec reference (one page) | `ARMATURE-SPEC-REF.md` |
 | Getting started | `BUILD_FIRST_WORKFLOW.md` |
 | Full spec reference | `USER-GUIDE.md` |
 | Architecture internals | `ARCHITECTURE.md` |
+| For AI coding agents | `AGENTS.md` |
 | DAG vs. LangGraph | `DAG-vs-LANGGRAPH.md` |
 | Fan-out/fan-in | `FAN-IN_FAN-OUT.md` |
 | Role taxonomy | `ROLE-TAXONOMY.md` |
@@ -604,10 +944,13 @@ No measurable startup overhead beyond loading the spec (a Pydantic parse, typica
 | Declarative control flow | `DECLARATIVE-CONTROL-FLOW.md` |
 | IHR and self-improvement | `IHR-AND-SELF-IMPROVEMENT.md` |
 | Safety and governance | `SAFETY-AND-GOVERNANCE.md` |
+| Sandbox and container isolation | `SANDBOX-AND-ISOLATION.md` |
 | Human-in-the-loop gates | `HUMAN-IN-THE-LOOP.md` |
 | Checkpoint and resume | `CHECKPOINT-AND-RESUME.md` |
 | Subagent composition | `SUBAGENT-COMPOSITION.md` |
 | Context isolation | `CONTEXT-ISOLATION.md` |
+| Memory and context (all layers) | `MEMORY-AND-CONTEXT.md` |
+| Chat and streaming (sidecar pattern) | `CHATBOT-AND-STREAMING.md` |
 | All features in production | `ARMATURE-IN-PRODUCTION.md` |
 | Philosophy and design decisions | `ARMATURE-PHILOSOPHY.md` |
 

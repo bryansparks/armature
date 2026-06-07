@@ -99,3 +99,69 @@ def test_load_spec_as_string_path(tmp_path):
     )
     spec = load_spec(str(spec_file))
     assert spec.name == "str-path-test"
+
+
+def test_vars_do_not_destroy_runtime_jinja2_expressions(tmp_path):
+    """Runtime Jinja2 expressions like {{ upstream.key }} must be preserved
+    when load_spec is called with vars containing only user inputs.
+
+    This is the root cause of the partition_source NoneType bug:
+    load_spec rendered '{{ plan_searches.queries }}' to '' (ChainableUndefined)
+    then NativeEnvironment.from_string('').render() returned None.
+    """
+    spec_file = tmp_path / "fanout.yaml"
+    spec_file.write_text(
+        'name: test-fanout\n'
+        'stages:\n'
+        '  - id: planner\n'
+        '    role:\n'
+        '      name: Planner\n'
+        '      type: worker\n'
+        '      description: "Plan for {{ topic }}"\n'
+        '    output_mode: guided_json\n'
+        '    output_schema:\n'
+        '      type: object\n'
+        '      properties:\n'
+        '        items: {type: array}\n'
+        '    depends_on: []\n'
+        '  - id: worker\n'
+        '    fan_out: 5\n'
+        '    fan_in: list\n'
+        '    partition_source: "{{ planner.items }}"\n'
+        '    partition_key: item\n'
+        '    tool_call:\n'
+        '      name: my_tool\n'
+        '      args:\n'
+        '        input: "{{ item.value }}"\n'
+        '    depends_on: [planner]\n'
+    )
+    # Simulate what the CLI does: pass user inputs as vars
+    spec = load_spec(spec_file, vars={"topic": "AI research"})
+
+    worker = next(s for s in spec.stages if s.id == "worker")
+    # partition_source must be preserved as a Jinja2 expression, not erased
+    assert worker.partition_source == "{{ planner.items }}", (
+        f"partition_source was destroyed by spec-load rendering: {worker.partition_source!r}"
+    )
+    # tool_call args must also be preserved
+    assert worker.tool_call.args["input"] == "{{ item.value }}", (
+        f"tool_call arg was destroyed: {worker.tool_call.args['input']!r}"
+    )
+    # spec-level vars ARE substituted (correct behavior)
+    planner = next(s for s in spec.stages if s.id == "planner")
+    assert "AI research" in planner.role.description
+
+
+def test_vars_substituted_in_spec_level_fields(tmp_path):
+    """Spec-level vars ARE substituted into spec fields like name."""
+    spec_file = tmp_path / "templated.yaml"
+    spec_file.write_text(
+        'name: "wf-{{ env }}"\n'
+        'stages:\n'
+        '  - id: s1\n'
+        '    tool_call:\n'
+        '      name: t\n'
+        '    depends_on: []\n'
+    )
+    spec = load_spec(spec_file, vars={"env": "staging"})
+    assert spec.name == "wf-staging"

@@ -390,3 +390,79 @@ async def test_old_db_without_provenance_column_returns_empty_dict(tmp_path):
     await store.init()
     results = await store.query(workflow_name="wf")
     assert results[0].inputs_provenance == {}
+
+
+# ---------------------------------------------------------------------------
+# sandbox_image_digest — Phase 3
+# ---------------------------------------------------------------------------
+
+def test_trace_record_has_sandbox_image_digest_field():
+    """TraceRecord must have sandbox_image_digest defaulting to None."""
+    rec = TraceRecord(run_id="r", workflow_name="w", stage_id="s", role_type="worker", model="m")
+    assert rec.sandbox_image_digest is None
+
+
+def test_trace_record_sandbox_image_digest_round_trips():
+    """TraceRecord correctly stores a sandbox_image_digest value."""
+    rec = TraceRecord(
+        run_id="r", workflow_name="w", stage_id="s", role_type="worker", model="m",
+        sandbox_image_digest="sha256:abc123",
+    )
+    assert rec.sandbox_image_digest == "sha256:abc123"
+
+
+async def test_trace_store_persists_and_retrieves_sandbox_image_digest(tmp_path):
+    """TraceStore round-trips sandbox_image_digest through the database."""
+    store = TraceStore(tmp_path / "digest_test.db")
+    await store.init()
+
+    await store.record(TraceRecord(
+        run_id="run-digest", workflow_name="wf", stage_id="stage_a",
+        role_type="worker", model="m",
+        sandbox_image_digest="sha256:deadbeef",
+    ))
+    results = await store.query(workflow_name="wf")
+    assert len(results) == 1
+    assert results[0].sandbox_image_digest == "sha256:deadbeef"
+
+
+async def test_trace_store_returns_none_digest_when_not_set(tmp_path):
+    """TraceStore returns sandbox_image_digest=None when field was not written."""
+    store = TraceStore(tmp_path / "no_digest.db")
+    await store.init()
+
+    await store.record(TraceRecord(
+        run_id="run-no-digest", workflow_name="wf", stage_id="stage_a",
+        role_type="worker", model="m",
+    ))
+    results = await store.query(workflow_name="wf")
+    assert results[0].sandbox_image_digest is None
+
+
+async def test_old_db_without_digest_column_migrates_cleanly(tmp_path):
+    """TraceStore.init() adds sandbox_image_digest column to existing DBs without error."""
+    import aiosqlite
+    db_path = tmp_path / "old_nodigest.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("""
+            CREATE TABLE traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL, workflow_name TEXT NOT NULL,
+                stage_id TEXT NOT NULL, role_type TEXT NOT NULL, model TEXT NOT NULL,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                latency_ms REAL DEFAULT 0.0, success INTEGER NOT NULL DEFAULT 1,
+                output_valid INTEGER NOT NULL DEFAULT 1, quorum_score REAL,
+                timestamp TEXT NOT NULL, inputs_json TEXT DEFAULT '{}',
+                outputs_json TEXT DEFAULT '{}'
+            )
+        """)
+        await db.execute(
+            "INSERT INTO traces (run_id, workflow_name, stage_id, role_type, model, timestamp) "
+            "VALUES ('r1','wf','s1','worker','model','2025-01-01T00:00:00+00:00')"
+        )
+        await db.commit()
+
+    store = TraceStore(db_path)
+    await store.init()  # must not raise
+    results = await store.query(workflow_name="wf")
+    assert results[0].sandbox_image_digest is None

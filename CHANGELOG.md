@@ -6,7 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.2.0] — 2026-06-07
 
 ### ActiveGraph-inspired (arXiv:2605.21997)
 
@@ -156,4 +156,5 @@ Initial public release.
 - `armature dashboard <spec> [--watch] [--format json]` — health dashboard
 - 1,202 tests
 
-[0.1.0]: https://github.com/elftech/armature/releases/tag/v0.1.0
+[0.2.0]: https://github.com/bryansparks/armature/releases/tag/v0.2.0
+[0.1.0]: https://github.com/bryansparks/armature/releases/tag/v0.1.0

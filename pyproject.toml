@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "armature"
-version = "0.1.0"
+version = "0.2.0"
 description = "Agent execution harness — wraps LLMs in structured, inspectable workflow specs"
 authors = [
     {name = "Bryan Sparks", email = "bryan@drycanyon.com"},

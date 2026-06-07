@@ -99,11 +99,25 @@ class Harness:
         register_builtins(self._registry)
         self._load_tool_modules()
         from armature.sandbox.docker import DockerSandboxProvider
-        DockerSandboxProvider.wrap_registry(
+        from armature.spec.models import SandboxMode
+        self._sandbox_provider = DockerSandboxProvider()
+        self._sandbox_provider.wrap_registry(
             self._registry,
             self._spec.sandbox,
             Path(self._spec.sandbox.host_workspace).expanduser().resolve(),
         )
+        self._sandbox_image_digest: str | None = None
+        if self._spec.sandbox.mode == SandboxMode.DOCKER:
+            try:
+                import subprocess as _sp
+                _proc = _sp.run(
+                    [self._spec.sandbox.runtime, "inspect", "--format", "{{.Id}}", self._spec.sandbox.image],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _proc.returncode == 0:
+                    self._sandbox_image_digest = _proc.stdout.strip() or None
+            except Exception:
+                pass  # docker not available or image not pulled; proceed without digest
         self._policy_version = hashlib.sha256(
             str([r.model_dump() for r in self._spec.safety_rules]).encode()
         ).hexdigest()[:12]
@@ -252,6 +266,8 @@ class Harness:
             role_label = f"{stage.role.name} ({stage.role.type.value})" if stage.role else None
             self._on_event("stage_start", {"stage": stage.id, "kind": stage_kind, "role": role_label})
 
+        self._sandbox_provider.set_stage_image(stage.sandbox_image)
+
         decision = await self._hooks.run_pre_stage(stage.id, context)
         if decision == HookDecision.BLOCK:
             raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
@@ -318,6 +334,7 @@ class Harness:
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
+                            sandbox_image_digest=self._sandbox_image_digest,
                         ))
                     elif stage.role:
                         _stage_type = "llm"
@@ -353,6 +370,7 @@ class Harness:
                         output_valid = "_parse_error" not in result
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result
                                                       if not k.startswith("_")})
+                        _escalation_count = result.pop("_escalation_count", 0)
                         await self._traces.record(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
@@ -365,7 +383,7 @@ class Harness:
                             success=True,
                             output_valid=output_valid,
                             quorum_score=_extract_quorum_score(stage.role.type.value, result),
-                            escalation_count=result.pop("_escalation_count", 0),
+                            escalation_count=_escalation_count,
                             tools_declared=result.pop("_tools_declared", []),
                             tools_called=result.pop("_tools_called", []),
                             spec_version=self._spec_version,
@@ -376,7 +394,17 @@ class Harness:
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
+                            sandbox_image_digest=self._sandbox_image_digest,
                         ))
+                        if _escalation_count > 0 and stage.output_mode == "guided_json" and self._on_event:
+                            self._on_event("tier_escalation_warning", {
+                                "stage": stage.id,
+                                "escalation_count": _escalation_count,
+                                "message": (
+                                    f"Stage '{stage.id}' required {_escalation_count} tier escalation(s) "
+                                    f"for guided_json output. Consider using a higher model tier."
+                                ),
+                            })
                     else:
                         raise ValueError(
                             f"Stage '{stage.id}' has no role, adapter, gate, or tool_call"
@@ -410,6 +438,7 @@ class Harness:
                                 policy_version=self._policy_version,
                                 inputs={k: str(v)[:200] for k, v in context.items()},
                                 inputs_provenance=dict(self._get_provenance()),
+                                sandbox_image_digest=self._sandbox_image_digest,
                             ))
                         except Exception:
                             pass  # telemetry must never block execution
@@ -471,9 +500,26 @@ class Harness:
         items = env.from_string(stage.partition_source).render(**context)
 
         if not isinstance(items, (list, tuple)):
+            hint = ""
+            # Try to give actionable context: parse "{{ stage_id.key }}" and check
+            # whether that upstream stage returned null/missing for that key.
+            src = stage.partition_source.strip().strip("{}").strip()
+            if "." in src:
+                src_stage, _, src_key = src.partition(".")
+                src_stage = src_stage.strip()
+                src_key = src_key.strip()
+                upstream = context.get(src_stage)
+                if isinstance(upstream, dict) and upstream.get(src_key) is None:
+                    hint = (
+                        f" Stage '{src_stage}' returned null for '{src_key}' — "
+                        f"check output_valid in traces: the model may have failed "
+                        f"to produce a valid guided_json response."
+                    )
+                elif upstream is None:
+                    hint = f" Stage '{src_stage}' has no output in context."
             raise ValueError(
                 f"Stage '{stage.id}' partition_source resolved to "
-                f"{type(items).__name__}, expected list"
+                f"{type(items).__name__}, expected list.{hint}"
             )
 
         max_concurrent = stage.fan_out or 20

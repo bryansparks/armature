@@ -227,3 +227,135 @@ def test_strict_true_raises_on_mismatch():
     ])
     with pytest.raises(SpecValidationError):
         validate_spec(spec, strict=True)
+
+
+# ── Harness-injected context keys ─────────────────────────────────────────────
+
+def test_run_id_is_always_valid_signature_input():
+    """run_id is injected by the harness at runtime — never flag it as undefined."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="upstream", tool_call=ToolCallConfig(name="t"), depends_on=[]),
+            Stage(id="a", tool_call=ToolCallConfig(name="t"), depends_on=["upstream"],
+                  signature=Signature(input={"run_id": "str", "topic": "str"})),
+        ],
+        contracts={"inputs": [{"name": "topic"}]},
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)
+
+
+def test_continuation_inject_as_is_valid_signature_input():
+    """Keys injected by continuation.inject_as are harness-injected — never flag them."""
+    from armature.spec.models import ContinuationConfig, ContinuationKey
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="upstream", tool_call=ToolCallConfig(name="t"), depends_on=[]),
+            Stage(id="a", tool_call=ToolCallConfig(name="t"), depends_on=["upstream"],
+                  signature=Signature(input={"prior_research": "str"})),
+        ],
+        continuation=ContinuationConfig(
+            carry_forward=[ContinuationKey(key="some_stage.some_key")],
+            inject_as="prior_research",
+        ),
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)
+
+
+def test_memory_inject_as_is_valid_signature_input():
+    """Keys injected by memory.inject_as are harness-injected — never flag them."""
+    from armature.spec.models import MemoryConfig, MemoryCapture
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="upstream", tool_call=ToolCallConfig(name="t"), depends_on=[]),
+            Stage(id="a", tool_call=ToolCallConfig(name="t"), depends_on=["upstream"],
+                  signature=Signature(input={"_prior_sources": "str"})),
+        ],
+        memory=MemoryConfig(
+            enabled=True,
+            capture=[MemoryCapture(stage="a", key="x")],
+            inject_as="_prior_sources",
+        ),
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)
+
+
+def test_transcript_and_diagnostics_valid_in_post_run_signature():
+    """_transcript and _diagnostics are injected into post_run context — never flag them."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="a", tool_call=ToolCallConfig(name="t"), depends_on=[]),
+            Stage(id="post", post_run=True, tool_call=ToolCallConfig(name="t"),
+                  depends_on=["a"],
+                  signature=Signature(input={"_transcript": "list", "_diagnostics": "list"})),
+        ],
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)
+
+
+# ── Post-run stage without signature warns when workflow has fan_out ───────────
+
+def test_post_run_with_fan_out_and_no_signature_emits_warning():
+    """A post_run stage with no signature.input gets the full _transcript,
+    which grows large when the workflow has fan_out stages. Emit a WARNING."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="searcher", tool_call=ToolCallConfig(name="t"),
+                  fan_out=10, partition_source="{{ items }}", depends_on=[],
+                  partition_key="item"),
+            Stage(id="analyst", post_run=True, tool_call=ToolCallConfig(name="t"),
+                  depends_on=[]),
+        ],
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "POST_RUN_TRANSCRIPT_OVERFLOW_RISK" in warning_codes
+
+
+def test_post_run_with_signature_no_warning_even_with_fan_out():
+    """A post_run stage that declares signature.input filters its context — no warning needed."""
+    from armature.spec.models import Signature
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="searcher", tool_call=ToolCallConfig(name="t"),
+                  fan_out=10, partition_source="{{ items }}", depends_on=[],
+                  partition_key="item"),
+            Stage(id="analyst", post_run=True, tool_call=ToolCallConfig(name="t"),
+                  depends_on=[],
+                  signature=Signature(input={"searcher": "list"})),
+        ],
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if hasattr(e, "severity") and e.severity == "warning"}
+    assert "POST_RUN_TRANSCRIPT_OVERFLOW_RISK" not in warning_codes
+
+
+def test_post_run_without_fan_out_no_warning():
+    """A post_run stage with no fan_out in the workflow — transcript is small, no warning."""
+    spec = HarnessSpec(
+        name="wf",
+        stages=[
+            Stage(id="worker", tool_call=ToolCallConfig(name="t"), depends_on=[]),
+            Stage(id="analyst", post_run=True, tool_call=ToolCallConfig(name="t"),
+                  depends_on=[]),
+        ],
+        validate=False,
+    )
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if hasattr(e, "severity") and e.severity == "warning"}
+    assert "POST_RUN_TRANSCRIPT_OVERFLOW_RISK" not in warning_codes

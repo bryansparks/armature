@@ -220,7 +220,7 @@ def test_wrap_registry_replaces_shell_handler(tmp_path):
     original_shell_handler = registry.get("shell").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     new_shell_handler = registry.get("shell").handler
     assert new_shell_handler is not original_shell_handler
@@ -235,7 +235,7 @@ def test_wrap_registry_replaces_file_write_handler(tmp_path):
     original = registry.get("file_write").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     assert registry.get("file_write").handler is not original
 
@@ -249,7 +249,7 @@ def test_wrap_registry_replaces_file_read_handler(tmp_path):
     original = registry.get("file_read").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     assert registry.get("file_read").handler is not original
 
@@ -270,7 +270,7 @@ async def test_shell_handler_invokes_docker_run(tmp_path):
         allow_network=False,
         workspace="/workspace",
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="ok\n", stderr="", returncode=0))
 
@@ -299,7 +299,7 @@ async def test_shell_handler_mounts_host_workspace(tmp_path):
         workspace="/workspace",
         allow_network=False,
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -319,7 +319,7 @@ async def test_shell_handler_uses_rm_flag(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -346,7 +346,7 @@ async def test_allow_network_false_adds_network_none_flag(tmp_path):
         image="python:3.11-slim",
         allow_network=False,
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -374,7 +374,7 @@ async def test_allow_network_true_omits_network_none_flag(tmp_path):
         image="python:3.11-slim",
         allow_network=True,
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -403,7 +403,7 @@ async def test_env_dict_passed_as_docker_e_flags(tmp_path):
         allow_network=False,
         env={"MY_VAR": "hello", "ANOTHER": "world"},
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -428,7 +428,7 @@ async def test_file_write_writes_to_host_workspace(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     result = await registry.get("file_write").handler(
         {"path": "output.txt", "content": "sandbox content"}
@@ -447,7 +447,7 @@ async def test_file_write_creates_subdirectory(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     await registry.get("file_write").handler(
         {"path": "subdir/nested/file.txt", "content": "deep"}
@@ -469,7 +469,7 @@ async def test_file_read_reads_from_host_workspace(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     source = tmp_path / "data.txt"
     source.write_text("container data")
@@ -486,7 +486,7 @@ async def test_file_read_missing_file_returns_error(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     result = await registry.get("file_read").handler({"path": "nonexistent.txt"})
 
@@ -506,7 +506,7 @@ def test_wrap_registry_mode_none_does_not_replace_shell(tmp_path):
     original_shell_handler = registry.get("shell").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.NONE)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     assert registry.get("shell").handler is original_shell_handler
 
@@ -520,7 +520,7 @@ def test_wrap_registry_mode_none_does_not_replace_file_write(tmp_path):
     original = registry.get("file_write").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.NONE)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     assert registry.get("file_write").handler is original
 
@@ -534,7 +534,7 @@ def test_wrap_registry_mode_none_does_not_replace_file_read(tmp_path):
     original = registry.get("file_read").handler
 
     sandbox = SandboxConfig(mode=SandboxMode.NONE)
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     assert registry.get("file_read").handler is original
 
@@ -555,7 +555,7 @@ async def test_shell_handler_passes_timeout_to_subprocess(tmp_path):
         timeout_s=42.0,
         allow_network=False,
     )
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
 
@@ -573,7 +573,7 @@ async def test_shell_handler_returns_stdout_stderr_exit_code(tmp_path):
 
     registry = _make_registry_with_builtins()
     sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
-    DockerSandboxProvider.wrap_registry(registry, sandbox, tmp_path)
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
 
     fake_proc = MagicMock(stdout="hello\n", stderr="", returncode=0)
     mock_run = MagicMock(return_value=fake_proc)
@@ -586,3 +586,252 @@ async def test_shell_handler_returns_stdout_stderr_exit_code(tmp_path):
     assert "exit_code" in result
     assert result["stdout"] == "hello\n"
     assert result["exit_code"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 15. Resource limits — Phase 1
+# ---------------------------------------------------------------------------
+
+def test_sandbox_config_cpu_limit_default_is_none():
+    """SandboxConfig().cpu_limit defaults to None."""
+    from armature.spec.models import SandboxConfig
+    assert SandboxConfig().cpu_limit is None
+
+
+def test_sandbox_config_memory_limit_default_is_none():
+    """SandboxConfig().memory_limit defaults to None."""
+    from armature.spec.models import SandboxConfig
+    assert SandboxConfig().memory_limit is None
+
+
+async def test_cpu_limit_adds_cpus_flag(tmp_path):
+    """When cpu_limit is set, docker command must include --cpus <value>."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+        cpu_limit="1.5",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+    assert "--cpus" in cmd_str
+    assert "1.5" in cmd_str
+
+
+async def test_memory_limit_adds_memory_flag(tmp_path):
+    """When memory_limit is set, docker command must include --memory <value>."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+        memory_limit="512m",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+    assert "--memory" in cmd_str
+    assert "512m" in cmd_str
+
+
+async def test_no_resource_limits_omits_cpu_memory_flags(tmp_path):
+    """When cpu_limit and memory_limit are None, neither flag appears in the docker command."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+    assert "--cpus" not in cmd_str
+    assert "--memory" not in cmd_str
+
+
+# ---------------------------------------------------------------------------
+# 16. Stage-level image override — Phase 2
+# ---------------------------------------------------------------------------
+
+def test_stage_model_has_sandbox_image_field():
+    """Stage must have a sandbox_image field defaulting to None."""
+    from armature.spec.models import Stage
+    stage = Stage(id="s1")
+    assert stage.sandbox_image is None
+
+
+def test_stage_sandbox_image_round_trips():
+    """Stage correctly stores a custom sandbox_image."""
+    from armature.spec.models import Stage
+    stage = Stage(id="s1", sandbox_image="ubuntu:22.04")
+    assert stage.sandbox_image == "ubuntu:22.04"
+
+
+def test_docker_sandbox_provider_is_instantiable():
+    """DockerSandboxProvider must be instantiable (not static-only)."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    provider = DockerSandboxProvider()
+    assert provider is not None
+
+
+def test_provider_instance_has_set_stage_image():
+    """DockerSandboxProvider instance must have a set_stage_image method."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    provider = DockerSandboxProvider()
+    assert callable(getattr(provider, "set_stage_image", None))
+
+
+async def test_set_stage_image_overrides_image_in_docker_command(tmp_path):
+    """After set_stage_image(), the shell handler uses the override image."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",  # default
+    )
+    provider = DockerSandboxProvider()
+    registry = _make_registry_with_builtins()
+    provider.wrap_registry(registry, sandbox, tmp_path)
+
+    provider.set_stage_image("ubuntu:22.04")  # override
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "uname"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+    assert "ubuntu:22.04" in cmd_str
+    assert "python:3.11-slim" not in cmd_str
+
+
+async def test_set_stage_image_none_restores_default(tmp_path):
+    """set_stage_image(None) restores the spec-level default image."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+    )
+    provider = DockerSandboxProvider()
+    registry = _make_registry_with_builtins()
+    provider.wrap_registry(registry, sandbox, tmp_path)
+
+    provider.set_stage_image("ubuntu:22.04")
+    provider.set_stage_image(None)  # reset
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "uname"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = cmd if isinstance(cmd, str) else " ".join(cmd)
+    assert "python:3.11-slim" in cmd_str
+    assert "ubuntu:22.04" not in cmd_str
+
+
+# ---------------------------------------------------------------------------
+# 17. Runtime override and platform flag — configurable container CLI
+# ---------------------------------------------------------------------------
+
+def test_sandbox_config_runtime_default_is_docker():
+    """SandboxConfig().runtime defaults to 'docker'."""
+    from armature.spec.models import SandboxConfig
+    assert SandboxConfig().runtime == "docker"
+
+
+def test_sandbox_config_platform_default_is_none():
+    """SandboxConfig().platform defaults to None."""
+    from armature.spec.models import SandboxConfig
+    assert SandboxConfig().platform is None
+
+
+async def test_custom_runtime_replaces_docker_binary(tmp_path):
+    """When runtime='podman', the shell command starts with 'podman' not 'docker'."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+        runtime="podman",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "podman"
+    assert "docker" not in cmd[0]
+
+
+async def test_platform_adds_platform_flag(tmp_path):
+    """When platform is set, the docker command includes --platform <value>."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+        platform="linux/amd64",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = " ".join(cmd)
+    assert "--platform" in cmd_str
+    assert "linux/amd64" in cmd_str
+
+
+async def test_no_platform_omits_platform_flag(tmp_path):
+    """When platform is None, no --platform flag appears in the docker command."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(
+        mode=SandboxMode.DOCKER,
+        image="python:3.11-slim",
+    )
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        await registry.get("shell").handler({"cmd": "echo hi"})
+
+    cmd = mock_run.call_args[0][0]
+    cmd_str = " ".join(cmd)
+    assert "--platform" not in cmd_str

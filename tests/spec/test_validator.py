@@ -3,6 +3,7 @@ import pytest
 from armature.spec.models import (
     HarnessSpec, Stage, Role, RoleType, Adapter, ModelTiers, ModelTierConfig,
     ToolCallConfig, LoopConfig, OnFailConfig, Contract, ToolSafetyRule, SafetyCondition,
+    OutputMode, RoleTypeDefaults,
 )
 from armature.spec.validator import validate_spec, SpecError, SpecValidationError
 
@@ -527,3 +528,65 @@ def test_no_conflict_when_allow_and_block_target_different_tools():
     ])
     errors = validate_spec(spec, strict=False)
     assert "CONFLICTING_SAFETY_RULES" not in codes(errors)
+
+
+# ── guided_json low-tier risk warning ─────────────────────────────────────────
+
+def _guided_json_stage(sid="s", model_tier: str | None = None) -> Stage:
+    return Stage(
+        id=sid,
+        role=Role(name="r", type=RoleType.WORKER, description="d", model_tier=model_tier),
+        output_mode=OutputMode.GUIDED_JSON,
+        output_schema={"type": "object", "properties": {"result": {"type": "string"}}},
+        depends_on=[],
+    )
+
+
+def test_guided_json_small_tier_emits_warning():
+    """GUIDED_JSON_LOW_TIER_RISK warning fires for explicit small tier + guided_json."""
+    tiers = ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini"))
+    spec = HarnessSpec(name="wf", stages=[_guided_json_stage(model_tier="small")], model_tiers=tiers)
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "GUIDED_JSON_LOW_TIER_RISK" in warning_codes
+
+
+def test_guided_json_tiny_tier_emits_warning():
+    """GUIDED_JSON_LOW_TIER_RISK warning fires for explicit tiny tier + guided_json."""
+    tiers = ModelTiers(
+        tiny=ModelTierConfig(provider="openai", model="gpt-4o-mini"),
+        small=ModelTierConfig(provider="openai", model="gpt-4o-mini"),
+    )
+    spec = HarnessSpec(name="wf", stages=[_guided_json_stage(model_tier="tiny")], model_tiers=tiers)
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "GUIDED_JSON_LOW_TIER_RISK" in warning_codes
+
+
+def test_guided_json_medium_tier_no_warning():
+    """No warning for medium (or higher) tier with guided_json."""
+    tiers = ModelTiers(medium=ModelTierConfig(provider="openai", model="gpt-4o"))
+    spec = HarnessSpec(name="wf", stages=[_guided_json_stage(model_tier="medium")], model_tiers=tiers)
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "GUIDED_JSON_LOW_TIER_RISK" not in warning_codes
+
+
+def test_guided_json_small_via_role_type_default_emits_warning():
+    """Warning fires when effective tier resolves through role_type_defaults to small."""
+    tiers = ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini"))
+    defaults = RoleTypeDefaults(worker="small")
+    # No explicit model_tier on stage; role type is worker → defaults to small
+    stage = _guided_json_stage(model_tier=None)
+    spec = HarnessSpec(name="wf", stages=[stage], model_tiers=tiers, role_type_defaults=defaults)
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "GUIDED_JSON_LOW_TIER_RISK" in warning_codes
+
+
+def test_guided_json_no_model_tiers_no_warning():
+    """No warning when no model tiers are defined (e.g. unit-test specs)."""
+    spec = HarnessSpec(name="wf", stages=[_guided_json_stage(model_tier=None)], model_tiers=ModelTiers())
+    errors = validate_spec(spec, strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert "GUIDED_JSON_LOW_TIER_RISK" not in warning_codes
