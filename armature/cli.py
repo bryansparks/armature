@@ -76,6 +76,37 @@ def _print_run_header(spec, quiet: bool) -> None:
     if extras:
         typer.echo("  " + "  ·  ".join(extras))
 
+    # Agent roster
+    all_stages = normal + post_run
+    if all_stages:
+        col = max(len(s.id) for s in all_stages) + 2
+        typer.echo("")
+        typer.echo("  Agents:")
+        for stage in all_stages:
+            if stage.role:
+                kind = f"{stage.role.name} ({stage.role.type.value})"
+            elif stage.tool_call:
+                kind = "tool_call"
+            elif stage.gate:
+                kind = "human gate"
+            elif stage.subagent_spec:
+                kind = "subagent"
+            elif stage.adapter:
+                kind = "adapter"
+            else:
+                kind = "?"
+
+            badges = []
+            if stage.fan_out:
+                badges.append(f"[fan-out ×{stage.fan_out}]")
+            if stage.skip_if:
+                badges.append("[conditional]")
+            if stage.post_run:
+                badges.append("[post-run]")
+            badge_str = "  " + "  ".join(badges) if badges else ""
+
+            typer.echo(f"    {stage.id:<{col}}{kind}{badge_str}")
+
     typer.echo("  " + "─" * 72)
 
 
