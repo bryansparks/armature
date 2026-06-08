@@ -19,6 +19,66 @@ def new(
     run_wizard(output_path=output)
 
 
+def _print_run_header(spec, quiet: bool) -> None:
+    if quiet:
+        return
+
+    normal = [s for s in spec.stages if not s.post_run]
+    post_run = [s for s in spec.stages if s.post_run]
+    fan_outs = [s for s in normal if s.fan_out]
+
+    stage_label = f"{len(normal)} stage{'s' if len(normal) != 1 else ''}"
+    if fan_outs:
+        stage_label += f", {len(fan_outs)} fan-out"
+    if post_run:
+        stage_label += f", {len(post_run)} post-run"
+
+    safety = spec.safety_mode if spec.safety_mode != "permissive" else ""
+    safety_str = f"  ·  safety: {safety}" if safety else ""
+    typer.echo(f"\n{spec.name}  v{spec.version}  ·  {stage_label}{safety_str}")
+
+    if spec.description:
+        desc = spec.description.strip().replace("\n", " ")
+        if len(desc) > 100:
+            desc = desc[:97] + "..."
+        typer.echo(f"  {desc}")
+
+    # Model tiers
+    tier_names = ["tiny", "small", "medium", "large", "frontier"]
+    tiers = [(n, getattr(spec.model_tiers, n)) for n in tier_names if getattr(spec.model_tiers, n)]
+    if spec.model_tiers.__pydantic_extra__:
+        tiers += [(k, v) for k, v in spec.model_tiers.__pydantic_extra__.items() if v]
+    if tiers:
+        parts = []
+        provider = None
+        for name, cfg in tiers:
+            short = cfg.model.split("/")[-1] if "/" in cfg.model else cfg.model
+            parts.append(f"{name}={short}")
+            if provider is None:
+                provider = cfg.provider
+        provider_str = f"  ({provider})" if provider else ""
+        typer.echo(f"  Tiers: {'  ·  '.join(parts)}{provider_str}")
+
+    # Extras line
+    extras = []
+    if spec.tools:
+        extras.append("tools: " + ", ".join(t.module for t in spec.tools))
+    if spec.mcp_servers:
+        extras.append(f"mcp: {len(spec.mcp_servers)} server{'s' if len(spec.mcp_servers) != 1 else ''}")
+    if spec.continuation:
+        n = len(spec.continuation.carry_forward)
+        extras.append(f"continuation: {n} key{'s' if n != 1 else ''}")
+    if spec.triggers:
+        types = ", ".join(t.type for t in spec.triggers)
+        extras.append(f"triggers: {types}")
+    if spec.checkpoint:
+        extras.append("checkpoint: on")
+    if extras:
+        typer.echo("  " + "  ·  ".join(extras))
+
+    typer.echo("  " + "─" * 72)
+
+
 def _version_callback(value: bool) -> None:
     if value:
         from armature import __version__
@@ -160,8 +220,7 @@ def run(
         typer.echo("Dry run — no execution.")
         return
 
-    if not quiet:
-        typer.echo(f"Running: {harness.name}")
+    _print_run_header(harness._spec, quiet)
     harness._on_event = _make_on_event(quiet)
 
     async def _run():
