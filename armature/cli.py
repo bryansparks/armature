@@ -19,14 +19,28 @@ def new(
     run_wizard(output_path=output)
 
 
-def _print_run_header(spec, quiet: bool) -> None:
+_ROLE_COLORS: dict[str, str] = {
+    "orchestrator": "magenta",
+    "researcher": "green",
+    "judge": "yellow",
+    "critic": "red",
+    "planner": "#60a5fa",
+    "validator": "yellow",
+}
+
+
+def _print_run_header(
+    spec,
+    quiet: bool,
+    parsed_inputs: dict | None = None,
+    last_run: dict | None = None,
+) -> None:
     if quiet:
         return
 
     from rich.console import Console
     from rich.table import Table
     from rich import box
-    from rich.text import Text
 
     console = Console(highlight=False)
 
@@ -40,19 +54,22 @@ def _print_run_header(spec, quiet: bool) -> None:
     if post_run_stages:
         stage_label += f", {len(post_run_stages)} post-run"
 
-    # ── title ──────────────────────────────────────────────────────────
-    console.print()
-    title = Text()
-    title.append(spec.name, style="bold")
-    title.append(f"  v{spec.version}", style="dim")
-    title.append(f"  ·  {stage_label}")
+    # ── top rule with workflow identity ─────────────────────────────────
+    safety_str = ""
     if spec.safety_mode and spec.safety_mode != "permissive":
-        title.append(f"  ·  safety: {spec.safety_mode}", style="bold yellow")
-    console.print(title)
+        safety_str = f"  [bold yellow]safety: {spec.safety_mode}[/bold yellow]"
+    title_text = (
+        f"[bold]{spec.name}[/bold]"
+        f"  [#888888]v{spec.version}[/#888888]"
+        f"  [#888888]·[/#888888]  {stage_label}"
+        f"{safety_str}"
+    )
+    console.print()
+    console.rule(title_text, style="#888888")
 
     if spec.description:
         desc = spec.description.strip().replace("\n", " ")
-        console.print(f"  [italic dim]{desc}[/italic dim]")
+        console.print(f"  [italic]{desc}[/italic]")
 
     console.print()
 
@@ -63,18 +80,44 @@ def _print_run_header(spec, quiet: bool) -> None:
         tiers += [(k, v) for k, v in spec.model_tiers.__pydantic_extra__.items() if v]
     if tiers:
         parts = "  ".join(
-            f"[cyan]{name}[/cyan] [dim]›[/dim] {cfg.model.split('/')[-1] if '/' in cfg.model else cfg.model}"
+            f"[cyan]{name}[/cyan] [#888888]›[/#888888] {cfg.model.split('/')[-1] if '/' in cfg.model else cfg.model}"
             for name, cfg in tiers
         )
         provider = tiers[0][1].provider if tiers else ""
-        console.print(f"  [dim]Tiers[/dim]    {parts}  [dim]({provider})[/dim]")
+        console.print(f"  [#888888]Tiers[/#888888]    {parts}  [#888888]({provider})[/#888888]")
 
-    # ── declared inputs ─────────────────────────────────────────────────
+    # ── declared inputs with runtime values ──────────────────────────────
     _injected = {"run_id", "prior_run", "prior_research", "_prior_sources", "_memory", "_knowledge"}
     if spec.contracts and spec.contracts.inputs:
         user_inputs = [i.get("name", str(i)) for i in spec.contracts.inputs if i.get("name") not in _injected]
         if user_inputs:
-            console.print("  [dim]Inputs[/dim]   " + "  [dim]·[/dim]  ".join(user_inputs))
+            parts = []
+            for name in user_inputs:
+                val = (parsed_inputs or {}).get(name)
+                if val is not None:
+                    s = str(val)
+                    display = (s[:48] + "…") if len(s) > 48 else s
+                    parts.append(f"{name} [#888888]=[/#888888] [italic]\"{display}\"[/italic]")
+                else:
+                    parts.append(f"[#888888]{name}[/#888888]")
+            console.print("  [#888888]Inputs[/#888888]   " + "  [#888888]·[/#888888]  ".join(parts))
+
+    # ── last run timing ──────────────────────────────────────────────────
+    if last_run:
+        def _fmt_ago(s: float) -> str:
+            if s < 60:   return f"{int(s)}s ago"
+            if s < 3600: return f"{int(s / 60)}m ago"
+            if s < 86400: return f"{int(s / 3600)}h ago"
+            return f"{int(s / 86400)}d ago"
+
+        def _fmt_dur(s: float) -> str:
+            if s < 60: return f"{s:.0f}s"
+            m, sec = divmod(int(s), 60)
+            return f"{m}m {sec}s"
+
+        ago = _fmt_ago(last_run["ago_s"])
+        dur = _fmt_dur(last_run["elapsed_s"])
+        console.print(f"  [#888888]Last run[/#888888] {ago}  [#888888]·[/#888888]  completed in {dur}")
 
     # ── flags / extras ──────────────────────────────────────────────────
     extras = []
@@ -91,7 +134,7 @@ def _print_run_header(spec, quiet: bool) -> None:
     if spec.checkpoint:
         extras.append("checkpoint")
     if extras:
-        console.print("  [dim]Flags[/dim]    " + "  [dim]·[/dim]  ".join(extras))
+        console.print("  [#888888]Flags[/#888888]    " + "  [#888888]·[/#888888]  ".join(extras))
 
     # ── agent table ─────────────────────────────────────────────────────
     console.print()
@@ -106,34 +149,37 @@ def _print_run_header(spec, quiet: bool) -> None:
     table = Table(
         box=box.SIMPLE_HEAD,
         show_header=True,
-        header_style="bold dim",
+        header_style="bold #888888",
         padding=(0, 1),
         show_edge=False,
     )
     table.add_column("Stage", style="bold", no_wrap=True)
     table.add_column("Agent", no_wrap=True)
     table.add_column("Tier", style="cyan", no_wrap=True)
-    table.add_column("Notes", style="dim", no_wrap=True)
+    table.add_column("Notes", style="#888888", no_wrap=True)
 
     for stage in normal + post_run_stages:
         tier = _resolve_tier(stage)
 
         if stage.role:
-            agent = f"{stage.role.name} [dim]({stage.role.type.value})[/dim]"
+            rt = stage.role.type.value
+            color = _ROLE_COLORS.get(rt, "")
+            rt_markup = f"[{color}]({rt})[/{color}]" if color else f"[#888888]({rt})[/#888888]"
+            agent = f"{stage.role.name} {rt_markup}"
         elif stage.tool_call:
-            agent = "[dim]tool_call[/dim]"
+            agent = "[#888888]tool_call[/#888888]"
         elif stage.gate:
-            agent = "[dim]human gate[/dim]"
+            agent = "[#888888]human gate[/#888888]"
         elif stage.subagent_spec:
-            agent = "[dim]subagent[/dim]"
+            agent = "[#888888]subagent[/#888888]"
         elif stage.adapter:
-            agent = "[dim]adapter[/dim]"
+            agent = "[#888888]adapter[/#888888]"
         else:
-            agent = "[dim]—[/dim]"
+            agent = "[#888888]—[/#888888]"
 
         notes = []
         if stage.fan_out:
-            notes.append(f"fan-out ×{stage.fan_out}")
+            notes.append(f"fan-out \xd7{stage.fan_out}")
         if stage.skip_if:
             notes.append("conditional")
         if stage.post_run:
@@ -142,7 +188,7 @@ def _print_run_header(spec, quiet: bool) -> None:
         table.add_row(stage.id, agent, tier, "  ·  ".join(notes) if notes else "")
 
     console.print(table)
-    console.rule(style="dim")
+    console.rule(style="#888888")
 
 
 def _version_callback(value: bool) -> None:
@@ -175,32 +221,96 @@ def parse_inputs(raw: list[str]) -> dict:
     return result
 
 
-def _make_on_event(quiet: bool):
+def _make_on_event(quiet: bool, fan_out_ids: set | None = None):
     """Return an on_event callback that prints live progress."""
     if quiet:
         return None
 
+    import sys
     from rich.console import Console
     console = Console(highlight=False)
     err_console = Console(stderr=True, highlight=False)
 
+    _fo_ids = fan_out_ids or set()
+    # Per-fan-out-stage state: {stage_id: {started, done, times, line_len}}
+    _fan: dict = {}
+    _active: list = [None]  # [current_fan_stage_id | None]
+
+    def _update_fan_line(sid: str) -> None:
+        st = _fan[sid]
+        started, done = st["started"], st["done"]
+        in_flight = started - done
+        times = st["times"]
+        avg = f"  avg {sum(times)/len(times):.1f}s" if times else ""
+        line = f"  ⟳ {sid}  {done}/{started} done  {in_flight} in-flight{avg}"
+        pad = max(0, st["line_len"] - len(line))
+        sys.stdout.write(f"\r{line}" + " " * pad)
+        sys.stdout.flush()
+        st["line_len"] = len(line)
+
+    def _finalize_fan() -> None:
+        sid = _active[0]
+        if sid is None:
+            return
+        st = _fan.get(sid, {})
+        # Clear the line then print final summary
+        sys.stdout.write("\r" + " " * (st.get("line_len", 0) + 4) + "\r")
+        sys.stdout.flush()
+        done = st.get("done", 0)
+        times = st.get("times", [])
+        avg = f"  [dim]avg {sum(times)/len(times):.1f}s[/dim]" if times else ""
+        console.print(f"  [green]✓[/green] [bold]{sid}[/bold] [dim]\xd7{done}[/dim]{avg}")
+        _active[0] = None
+
     def on_event(event_type: str, data: dict) -> None:
+        stage = data.get("stage", "")
+
+        # Finalize any in-progress fan-out when a different stage fires
+        if _active[0] is not None and stage != _active[0]:
+            _finalize_fan()
+
         if event_type == "stage_start":
+            if stage in _fo_ids:
+                if stage not in _fan:
+                    _fan[stage] = {"started": 0, "done": 0, "times": [], "line_len": 0}
+                _fan[stage]["started"] += 1
+                _active[0] = stage
+                _update_fan_line(stage)
+                return
             kind = data.get("kind", "?")
             role = f" [dim]{data['role']}[/dim]" if data.get("role") else ""
-            console.print(f"  [cyan]→[/cyan] [bold]{data['stage']}[/bold] [dim]({kind})[/dim]{role}")
+            console.print(f"  [cyan]→[/cyan] [bold]{stage}[/bold] [dim]({kind})[/dim]{role}")
+
         elif event_type == "stage_complete":
-            console.print(f"  [green]✓[/green] {data['stage']} [dim]({data['elapsed_s']}s)[/dim]")
+            if stage in _fo_ids and _active[0] == stage:
+                try:
+                    elapsed = float(data.get("elapsed_s", 0))
+                except (TypeError, ValueError):
+                    elapsed = 0.0
+                _fan[stage]["done"] += 1
+                _fan[stage]["times"].append(elapsed)
+                _update_fan_line(stage)
+                return
+            console.print(f"  [green]✓[/green] {stage} [dim]({data['elapsed_s']}s)[/dim]")
+
         elif event_type == "stage_skipped":
             reason = data.get("reason", "")
-            console.print(f"  [dim]- {data['stage']} [skipped: {reason}][/dim]")
+            console.print(f"  [dim]- {stage} [skipped: {reason}][/dim]")
+
         elif event_type == "stage_resumed":
-            console.print(f"  [yellow]↩[/yellow] {data['stage']} [dim][resumed from checkpoint][/dim]")
+            console.print(f"  [yellow]↩[/yellow] {stage} [dim][resumed from checkpoint][/dim]")
+
         elif event_type == "stage_failed":
-            err_console.print(f"  [red]✗[/red] [bold]{data['stage']}[/bold] [[red]{data['type']}[/red]]: {data['reason'][:80]}")
+            if _active[0] == stage:
+                _finalize_fan()
+            err_console.print(f"  [red]✗[/red] [bold]{stage}[/bold] [[red]{data['type']}[/red]]: {data['reason'][:80]}")
+
         elif event_type == "retry_attempt":
-            console.print(f"  [yellow]⟳[/yellow] {data['stage']} retry {data['attempt']}/{data['max']} [dim]{data['reason'][:60]}[/dim]")
+            console.print(f"  [yellow]⟳[/yellow] {stage} retry {data['attempt']}/{data['max']} [dim]{data['reason'][:60]}[/dim]")
+
         elif event_type == "run_summary":
+            if _active[0] is not None:
+                _finalize_fan()
             rogue = data.get("rogue_signals", 0)
             failed = data["stages_failed"]
             rogue_str = f", [bold red]{rogue} blocked[/bold red]" if rogue else ""
@@ -291,13 +401,37 @@ def run(
         typer.echo("Dry run — no execution.")
         return
 
-    _print_run_header(harness._spec, quiet)
-    harness._on_event = _make_on_event(quiet)
-
     async def _run():
+        last_run_info = None
+        if not quiet:
+            try:
+                from datetime import datetime, timezone
+                await harness._traces.init()
+                last_rid = await harness._traces.latest_run_id(harness._spec.name)
+                if last_rid:
+                    prior_traces = await harness._traces.query_by_run(last_rid)
+                    if prior_traces:
+                        first_ts = datetime.fromisoformat(prior_traces[0].timestamp)
+                        if first_ts.tzinfo is None:
+                            first_ts = first_ts.replace(tzinfo=timezone.utc)
+                        ago_s = (datetime.now(timezone.utc) - first_ts).total_seconds()
+                        total_s = sum(t.latency_ms for t in prior_traces) / 1000
+                        last_run_info = {"ago_s": ago_s, "elapsed_s": total_s}
+            except Exception:
+                pass
+        _print_run_header(harness._spec, quiet, parsed_inputs, last_run_info)
+        fan_out_ids = {s.id for s in harness._spec.stages if s.fan_out}
+        harness._on_event = _make_on_event(quiet, fan_out_ids=fan_out_ids)
         return await harness.run(parsed_inputs, force=force)
 
     result = asyncio.run(_run())
+
+    if not quiet:
+        from rich.console import Console
+        Console(highlight=False).print(
+            f"  [#888888]→[/#888888]  [bold]armature dashboard {spec}[/bold]"
+            f"  [#888888]to review history and quality metrics[/#888888]"
+        )
 
     result_json = json.dumps(result, indent=2, default=str)
     if output_file:
