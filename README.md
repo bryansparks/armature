@@ -31,14 +31,20 @@ Stages declare `depends_on` relationships. The engine resolves execution order a
 ## Installation
 
 ```bash
-pip install armature
+pip install "git+https://github.com/bryansparks/armature.git@v0.2.0"
 ```
 
 With optional extras:
 
 ```bash
-pip install 'armature[service]'    # FastAPI HTTP service
-pip install 'armature[telemetry]'  # OpenTelemetry export
+pip install "armature[service] @ git+https://github.com/bryansparks/armature.git@v0.2.0"   # FastAPI HTTP service
+pip install "armature[telemetry] @ git+https://github.com/bryansparks/armature.git@v0.2.0" # OpenTelemetry export
+```
+
+Verify:
+
+```bash
+armature --version
 ```
 
 Set your LLM provider key:
