@@ -185,10 +185,10 @@ def test_run_echo_workflow_produces_json():
     assert result.exit_code == 0
     # JSON output on stdout
     output = result.output
-    # Find the JSON block (after the progress lines)
-    json_start = output.find("{")
+    # Find the JSON block — look for \n{ (standalone brace) to skip Rich panel output
+    json_start = output.find("\n{")
     assert json_start >= 0, f"No JSON found in output: {output!r}"
-    data = json.loads(output[json_start:])
+    data = json.loads(output[json_start + 1:])
     assert data["echo"]["exit_code"] == 0
     assert "hello" in data["echo"]["stdout"]
 

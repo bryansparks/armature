@@ -35,12 +35,13 @@ def _render_args(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any
     if not any(isinstance(v, str) and "{{" in v for v in args.values()):
         return args
     from jinja2.nativetypes import NativeEnvironment
-    from jinja2 import ChainableUndefined
+    from jinja2 import ChainableUndefined, Undefined as _JinjaUndefined
     env = NativeEnvironment(undefined=ChainableUndefined)
     rendered = {}
     for k, v in args.items():
         if isinstance(v, str) and "{{" in v:
-            rendered[k] = env.from_string(v).render(**context)
+            result = env.from_string(v).render(**context)
+            rendered[k] = None if isinstance(result, _JinjaUndefined) else result
         else:
             rendered[k] = v
     return rendered
