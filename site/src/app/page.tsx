@@ -243,7 +243,7 @@ function HowItWorks() {
       title: 'The workflow rewrites itself.',
       body: 'Every run generates a trace. The SelfImproveRunner computes IHR across all stages, identifies which ones drag the score down, and rewrites targeted YAML sections. Add --auto-improve to any run and Armature applies safe fixes automatically — or stages structural rewrites for human review. The next run is better. Verifiably.',
       detail: [
-        'IHR = 0.40×valid + 0.30×success + 0.20×quorum + 0.10×latency',
+        'IHR = 0.35×valid_rate + 0.25×success + 0.20×quorum + 0.10×latency + 0.10×happy_path',
         'DiagnosticAnalyzer identifies the lowest-scoring stages',
         'SpecRefiner rewrites only the underperforming YAML sections',
         'Prediction-verification: fixes are confirmed or flagged each cycle',
@@ -360,6 +360,16 @@ function ThreeRoles() {
         'Criteria validation', 'Structured pass/fail decisions',
       ],
     },
+    {
+      color: '#60A5FA', dim: 'rgba(96,165,250,0.1)', label: 'Orchestrator',
+      glyph: '⬢',
+      tagline: 'Coordinates.',
+      body: 'The control plane. Orchestrators manage multi-stage execution pipelines, route work to specialized subteams, handle branching and conditional logic, and ensure all dependencies are satisfied before downstream stages run.',
+      examples: [
+        'Multi-stage routing', 'Parallel fan-out coordination',
+        'Conditional branching', 'Error recovery & retry logic',
+      ],
+    },
   ];
 
   return (
@@ -377,18 +387,18 @@ function ThreeRoles() {
             fontFamily: SERIF, fontSize: 36, fontWeight: 400,
             color: A.textBright, lineHeight: 1.25, margin: '12px 0 12px',
           }}>
-            Three roles. Every agent has one.
+            Four roles. Every agent has one.
           </h2>
           <p style={{
             fontFamily: SANS, fontSize: 16, color: A.textSecondary,
             lineHeight: 1.7, margin: '0 0 48px', maxWidth: 580,
           }}>
             Roles aren&apos;t a label — they determine execution order, context access, and contribution
-            to the self-improvement health score. A well-designed maturity has all three.
+            to the self-improvement health score. A well-designed maturity uses all four.
           </p>
         </Reveal>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 20 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 20 }}>
           {roles.map((role, i) => (
             <Reveal key={i} delay={i * 0.1}>
               <div style={{
@@ -466,7 +476,7 @@ function SelfImprovement() {
           }}>
             AWS AgentCore, LangGraph, and CrewAI let you build agent workflows. Armature
             does that too — and then automatically improves them across runs using the
-            Improvement Health Rating loop.
+            Implicit Harness Rating loop.
           </p>
         </Reveal>
 
@@ -478,13 +488,14 @@ function SelfImprovement() {
             borderRadius: 12, borderLeft: `4px solid ${A.judge}`,
           }}>
             <div style={{ fontFamily: MONO, fontSize: 10, fontWeight: 600, color: A.judge, textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 14 }}>
-              Improvement Health Rating (IHR)
+              Implicit Harness Rating (IHR)
             </div>
             <div style={{ fontFamily: MONO, fontSize: 18, color: A.textBright, lineHeight: 1.6 }}>
-              IHR = <span style={{ color: A.researcher }}>0.40 × valid_rate</span>
-              {' + '}<span style={{ color: A.worker }}>0.30 × success_rate</span>
+              IHR = <span style={{ color: A.researcher }}>0.35 × valid_rate</span>
+              {' + '}<span style={{ color: A.worker }}>0.25 × success_rate</span>
               {' + '}<span style={{ color: A.judge }}>0.20 × avg_quorum</span>
               {' + '}<span style={{ color: A.textSecondary }}>0.10 × latency_score</span>
+              {' + '}<span style={{ color: A.researcher }}>0.10 × happy_path_rate</span>
             </div>
             <div style={{ fontFamily: SANS, fontSize: 13, color: A.textMuted, marginTop: 10, lineHeight: 1.5 }}>
               Scored 0–1.0 per run. SpecRefiner targets stages whose contribution drops the overall IHR.
@@ -673,7 +684,7 @@ function ResearchFoundation() {
             fontFamily: SERIF, fontSize: 36, fontWeight: 400,
             color: A.textBright, lineHeight: 1.25, margin: '12px 0 12px',
           }}>
-            Nine papers. One framework.
+            Ten sources. One framework.
             <br /><span style={{ color: A.researcher, fontStyle: 'italic' }}>All implemented.</span>
           </h2>
           <p style={{
@@ -906,6 +917,90 @@ stages:
   );
 }
 
+// ─── ECOSYSTEM ────────────────────────────────────────────────────────────────
+function Ecosystem() {
+  const projects = [
+    {
+      name: 'Argus',
+      icon: '🔐',
+      tagline: 'Security & Quality Scanner',
+      desc: 'Combines 7 industry tools (gitleaks, semgrep, gosec, etc.) with LLM code review in a single command. Scans repositories in 3-8 minutes. A production reference implementation of Armature.',
+      link: 'https://github.com/bryansparks/argus',
+      color: '#EC4899',
+    },
+    {
+      name: 'Research-Analyst',
+      icon: '📊',
+      tagline: 'Automated Research Briefings',
+      desc: 'Deep-dive research powered by web search, source extraction, and synthesis — declared as a YAML workflow. Supports continuation for weekly incremental briefings and scheduled runs.',
+      link: 'https://github.com/bryansparks/Research-Project',
+      color: '#06B6D4',
+    },
+  ];
+
+  return (
+    <section style={{ padding: '88px 32px', maxWidth: 1060, margin: '0 auto' }}>
+      <Reveal>
+        <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: A.textMuted, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+          Built with Armature
+        </span>
+        <h2 style={{
+          fontFamily: SERIF, fontSize: 36, fontWeight: 400,
+          color: A.textBright, lineHeight: 1.25, margin: '12px 0 12px',
+        }}>
+          Reference implementations.
+          <br /><span style={{ color: A.researcher, fontStyle: 'italic' }}>Production-ready.</span>
+        </h2>
+        <p style={{
+          fontFamily: SANS, fontSize: 16, color: A.textSecondary,
+          lineHeight: 1.7, margin: '0 0 48px', maxWidth: 620,
+        }}>
+          Open-source projects that showcase what Armature can do — security scanning, automated research, and more.
+        </p>
+      </Reveal>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
+        {projects.map((proj, i) => (
+          <Reveal key={i} delay={i * 0.1}>
+            <a href={proj.link} target="_blank" rel="noopener noreferrer" style={{
+              padding: '32px', height: '100%',
+              backgroundColor: A.surface, border: `1px solid ${A.border}`,
+              borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 16,
+              textDecoration: 'none', cursor: 'pointer',
+              transition: 'border-color 0.2s ease',
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = proj.color; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = A.border; }}>
+              <div style={{ fontSize: 40 }}>{proj.icon}</div>
+              <div>
+                <div style={{
+                  fontFamily: MONO, fontSize: 11, fontWeight: 700,
+                  color: proj.color, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', marginBottom: 4,
+                }}>{proj.name}</div>
+                <h3 style={{
+                  fontFamily: SERIF, fontSize: 22, fontWeight: 400,
+                  color: A.textBright, margin: '0 0 8px',
+                }}>{proj.tagline}</h3>
+              </div>
+              <p style={{
+                fontFamily: SANS, fontSize: 14, color: A.textSecondary,
+                lineHeight: 1.7, margin: 0, flex: 1,
+              }}>{proj.desc}</p>
+              <div style={{
+                fontFamily: MONO, fontSize: 12, color: proj.color,
+                marginTop: 8, display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                View on GitHub →
+              </div>
+            </a>
+          </Reveal>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ─── OPEN SOURCE CTA ──────────────────────────────────────────────────────────
 function OpenSourceCTA() {
   return (
@@ -956,7 +1051,7 @@ function OpenSourceCTA() {
               { val: 'Python 3.11+', lbl: 'runtime' },
               { val: 'MIT', lbl: 'license' },
               { val: 'LiteLLM', lbl: 'provider layer' },
-              { val: '1,221+', lbl: 'tests passing' },
+              { val: '1,286+', lbl: 'tests passing' },
             ].map((s, i) => (
               <div key={i} style={{ flex: 1, textAlign: 'center', padding: '0 16px', borderRight: i < 3 ? `1px solid ${A.border}` : 'none' }}>
                 <div style={{ fontFamily: SERIF, fontSize: 22, color: A.researcher, marginBottom: 4 }}>{s.val}</div>
@@ -966,6 +1061,118 @@ function OpenSourceCTA() {
           </div>
         </div>
       </Reveal>
+    </section>
+  );
+}
+
+// ─── V0.2.0 FEATURES ──────────────────────────────────────────────────────────
+function V0_2_0_Features() {
+  const features = [
+    {
+      title: 'mission: field',
+      desc: 'Anchors all LLM stages to a stated goal. Prevents drift in long workflows — the system automatically validates that each stage output moves toward the mission.',
+      icon: '🎯',
+    },
+    {
+      title: 'continuation: block',
+      desc: 'Cross-run context carry-forward. Start where you left off. Enables incremental research, weekly briefings, or ongoing analysis without resetting state.',
+      icon: '↻',
+    },
+    {
+      title: 'armature watch + triggers:',
+      desc: 'Cron and webhook daemon. Schedule workflows (6am daily), react to events, or expose HTTP endpoints that kick off runs. Turn any workflow into a service.',
+      icon: '⏰',
+    },
+    {
+      title: 'response_stage: true',
+      desc: 'SSE token streaming. Converts any workflow into a streaming API. Perfect for chatbots, real-time UIs, and interactive agents.',
+      icon: '↙',
+    },
+    {
+      title: 'armature replay <run_id>',
+      desc: 'Replay any run with cached LLM responses. Debug via transcript, understand exactly why a result was produced, or rerun with different safety rules.',
+      icon: '▶️',
+    },
+    {
+      title: 'Static risk scoring',
+      desc: 'armature validate now scores LOW/MEDIUM/HIGH/CRITICAL before any run. Catch dangerous specs early with Governance layers, tool bans, and safety drift detection.',
+      icon: '⚠️',
+    },
+  ];
+
+  return (
+    <section style={{ padding: '88px 32px', maxWidth: 1060, margin: '0 auto' }}>
+      <Reveal>
+        <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: A.textMuted, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+          What's New in v0.2.0
+        </span>
+        <h2 style={{
+          fontFamily: SERIF, fontSize: 36, fontWeight: 400,
+          color: A.textBright, lineHeight: 1.25, margin: '12px 0 12px',
+        }}>
+          Long-running workflows.
+          <br /><span style={{ color: A.researcher, fontStyle: 'italic' }}>Production hardened.</span>
+        </h2>
+        <p style={{
+          fontFamily: SANS, fontSize: 16, color: A.textSecondary,
+          lineHeight: 1.7, margin: '0 0 48px', maxWidth: 620,
+        }}>
+          v0.2.0 adds mission anchoring, cross-run continuation, triggers, streaming responses, and governance — making Armature workflows production-grade for services, scheduled jobs, and interactive systems.
+        </p>
+      </Reveal>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        {features.map((f, i) => (
+          <Reveal key={i} delay={i * 0.05}>
+            <div style={{
+              padding: '28px', height: '100%',
+              backgroundColor: A.surface, border: `1px solid ${A.border}`,
+              borderRadius: 12, display: 'flex', gap: 16, flexDirection: 'column',
+            }}>
+              <div style={{
+                fontSize: 32, lineHeight: 1,
+              }}>{f.icon}</div>
+              <div>
+                <h3 style={{
+                  fontFamily: MONO, fontSize: 13, fontWeight: 700,
+                  color: A.researcher, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', margin: '0 0 8px',
+                }}>{f.title}</h3>
+                <p style={{
+                  fontFamily: SANS, fontSize: 14, color: A.textSecondary,
+                  lineHeight: 1.7, margin: 0,
+                }}>{f.desc}</p>
+              </div>
+            </div>
+          </Reveal>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ─── ELFTECH ATTRIBUTION ──────────────────────────────────────────────────────
+function ElfTechAttribution() {
+  return (
+    <section style={{
+      padding: '40px 32px',
+      backgroundColor: A.surface,
+      borderTop: `1px solid ${A.border}`,
+      textAlign: 'center',
+    }}>
+      <p style={{
+        fontFamily: SANS, fontSize: 14, color: A.textSecondary,
+        lineHeight: 1.6, margin: 0, maxWidth: 600, marginLeft: 'auto', marginRight: 'auto',
+      }}>
+        Armature is an open-source project from{' '}
+        <a href="https://elftech.com" style={{ color: A.researcher, textDecoration: 'none', fontWeight: 600 }}>
+          ElfTech
+        </a>{' '}
+        — we build autonomous AI systems for operational work. Explore our full platform at{' '}
+        <a href="https://elftech.com" style={{ color: A.researcher, textDecoration: 'none', fontWeight: 600 }}>
+          elftech.com
+        </a>.
+      </p>
     </section>
   );
 }
@@ -980,9 +1187,12 @@ export default function ArmatureLanding() {
       <HowItWorks />
       <ThreeRoles />
       <SelfImprovement />
+      <V0_2_0_Features />
       <ResearchFoundation />
       <CodeExample />
+      <Ecosystem />
       <OpenSourceCTA />
+      <ElfTechAttribution />
       <Footer />
     </div>
   );
