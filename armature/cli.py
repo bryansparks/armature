@@ -23,91 +23,126 @@ def _print_run_header(spec, quiet: bool) -> None:
     if quiet:
         return
 
+    from rich.console import Console
+    from rich.table import Table
+    from rich import box
+    from rich.text import Text
+
+    console = Console(highlight=False)
+
     normal = [s for s in spec.stages if not s.post_run]
-    post_run = [s for s in spec.stages if s.post_run]
+    post_run_stages = [s for s in spec.stages if s.post_run]
     fan_outs = [s for s in normal if s.fan_out]
 
-    stage_label = f"{len(normal)} stage{'s' if len(normal) != 1 else ''}"
+    stage_label = f"{len(normal)} stages"
     if fan_outs:
         stage_label += f", {len(fan_outs)} fan-out"
-    if post_run:
-        stage_label += f", {len(post_run)} post-run"
+    if post_run_stages:
+        stage_label += f", {len(post_run_stages)} post-run"
 
-    safety = spec.safety_mode if spec.safety_mode != "permissive" else ""
-    safety_str = f"  ·  safety: {safety}" if safety else ""
-    typer.echo(f"\n{spec.name}  v{spec.version}  ·  {stage_label}{safety_str}")
+    # ── title ──────────────────────────────────────────────────────────
+    console.print()
+    title = Text()
+    title.append(spec.name, style="bold")
+    title.append(f"  v{spec.version}", style="dim")
+    title.append(f"  ·  {stage_label}")
+    if spec.safety_mode and spec.safety_mode != "permissive":
+        title.append(f"  ·  safety: {spec.safety_mode}", style="bold yellow")
+    console.print(title)
 
     if spec.description:
         desc = spec.description.strip().replace("\n", " ")
-        if len(desc) > 100:
-            desc = desc[:97] + "..."
-        typer.echo(f"  {desc}")
+        console.print(f"  [italic dim]{desc}[/italic dim]")
 
-    # Model tiers
+    console.print()
+
+    # ── model tiers ─────────────────────────────────────────────────────
     tier_names = ["tiny", "small", "medium", "large", "frontier"]
     tiers = [(n, getattr(spec.model_tiers, n)) for n in tier_names if getattr(spec.model_tiers, n)]
     if spec.model_tiers.__pydantic_extra__:
         tiers += [(k, v) for k, v in spec.model_tiers.__pydantic_extra__.items() if v]
     if tiers:
-        parts = []
-        provider = None
-        for name, cfg in tiers:
-            short = cfg.model.split("/")[-1] if "/" in cfg.model else cfg.model
-            parts.append(f"{name}={short}")
-            if provider is None:
-                provider = cfg.provider
-        provider_str = f"  ({provider})" if provider else ""
-        typer.echo(f"  Tiers: {'  ·  '.join(parts)}{provider_str}")
+        parts = "  ".join(
+            f"[cyan]{name}[/cyan] [dim]›[/dim] {cfg.model.split('/')[-1] if '/' in cfg.model else cfg.model}"
+            for name, cfg in tiers
+        )
+        provider = tiers[0][1].provider if tiers else ""
+        console.print(f"  [dim]Tiers[/dim]    {parts}  [dim]({provider})[/dim]")
 
-    # Extras line
+    # ── declared inputs ─────────────────────────────────────────────────
+    _injected = {"run_id", "prior_run", "prior_research", "_prior_sources", "_memory", "_knowledge"}
+    if spec.contracts and spec.contracts.inputs:
+        user_inputs = [i.get("name", str(i)) for i in spec.contracts.inputs if i.get("name") not in _injected]
+        if user_inputs:
+            console.print("  [dim]Inputs[/dim]   " + "  [dim]·[/dim]  ".join(user_inputs))
+
+    # ── flags / extras ──────────────────────────────────────────────────
     extras = []
     if spec.tools:
         extras.append("tools: " + ", ".join(t.module for t in spec.tools))
     if spec.mcp_servers:
-        extras.append(f"mcp: {len(spec.mcp_servers)} server{'s' if len(spec.mcp_servers) != 1 else ''}")
+        extras.append(f"mcp: {len(spec.mcp_servers)}")
     if spec.continuation:
         n = len(spec.continuation.carry_forward)
-        extras.append(f"continuation: {n} key{'s' if n != 1 else ''}")
+        extras.append(f"continuation ({n} key{'s' if n != 1 else ''})")
     if spec.triggers:
         types = ", ".join(t.type for t in spec.triggers)
-        extras.append(f"triggers: {types}")
+        extras.append(f"triggers ({types})")
     if spec.checkpoint:
-        extras.append("checkpoint: on")
+        extras.append("checkpoint")
     if extras:
-        typer.echo("  " + "  ·  ".join(extras))
+        console.print("  [dim]Flags[/dim]    " + "  [dim]·[/dim]  ".join(extras))
 
-    # Agent roster
-    all_stages = normal + post_run
-    if all_stages:
-        col = max(len(s.id) for s in all_stages) + 2
-        typer.echo("")
-        typer.echo("  Agents:")
-        for stage in all_stages:
-            if stage.role:
-                kind = f"{stage.role.name} ({stage.role.type.value})"
-            elif stage.tool_call:
-                kind = "tool_call"
-            elif stage.gate:
-                kind = "human gate"
-            elif stage.subagent_spec:
-                kind = "subagent"
-            elif stage.adapter:
-                kind = "adapter"
-            else:
-                kind = "?"
+    # ── agent table ─────────────────────────────────────────────────────
+    console.print()
 
-            badges = []
-            if stage.fan_out:
-                badges.append(f"[fan-out ×{stage.fan_out}]")
-            if stage.skip_if:
-                badges.append("[conditional]")
-            if stage.post_run:
-                badges.append("[post-run]")
-            badge_str = "  " + "  ".join(badges) if badges else ""
+    def _resolve_tier(stage):
+        if not stage.role:
+            return "—"
+        if stage.role.model_tier:
+            return stage.role.model_tier
+        return getattr(spec.role_type_defaults, stage.role.type.value, "")
 
-            typer.echo(f"    {stage.id:<{col}}{kind}{badge_str}")
+    table = Table(
+        box=box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="bold dim",
+        padding=(0, 1),
+        show_edge=False,
+    )
+    table.add_column("Stage", style="bold", no_wrap=True)
+    table.add_column("Agent", no_wrap=True)
+    table.add_column("Tier", style="cyan", no_wrap=True)
+    table.add_column("Notes", style="dim", no_wrap=True)
 
-    typer.echo("  " + "─" * 72)
+    for stage in normal + post_run_stages:
+        tier = _resolve_tier(stage)
+
+        if stage.role:
+            agent = f"{stage.role.name} [dim]({stage.role.type.value})[/dim]"
+        elif stage.tool_call:
+            agent = "[dim]tool_call[/dim]"
+        elif stage.gate:
+            agent = "[dim]human gate[/dim]"
+        elif stage.subagent_spec:
+            agent = "[dim]subagent[/dim]"
+        elif stage.adapter:
+            agent = "[dim]adapter[/dim]"
+        else:
+            agent = "[dim]—[/dim]"
+
+        notes = []
+        if stage.fan_out:
+            notes.append(f"fan-out ×{stage.fan_out}")
+        if stage.skip_if:
+            notes.append("conditional")
+        if stage.post_run:
+            notes.append("[yellow]post-run[/yellow]")
+
+        table.add_row(stage.id, agent, tier, "  ·  ".join(notes) if notes else "")
+
+    console.print(table)
+    console.rule(style="dim")
 
 
 def _version_callback(value: bool) -> None:
@@ -145,31 +180,36 @@ def _make_on_event(quiet: bool):
     if quiet:
         return None
 
+    from rich.console import Console
+    console = Console(highlight=False)
+    err_console = Console(stderr=True, highlight=False)
+
     def on_event(event_type: str, data: dict) -> None:
         if event_type == "stage_start":
             kind = data.get("kind", "?")
-            role = f" [{data['role']}]" if data.get("role") else ""
-            typer.echo(f"  → {data['stage']} ({kind}){role}")
+            role = f" [dim]{data['role']}[/dim]" if data.get("role") else ""
+            console.print(f"  [cyan]→[/cyan] [bold]{data['stage']}[/bold] [dim]({kind})[/dim]{role}")
         elif event_type == "stage_complete":
-            typer.echo(f"  ✓ {data['stage']} ({data['elapsed_s']}s)")
+            console.print(f"  [green]✓[/green] {data['stage']} [dim]({data['elapsed_s']}s)[/dim]")
         elif event_type == "stage_skipped":
             reason = data.get("reason", "")
-            typer.echo(f"  - {data['stage']} [skipped: {reason}]")
+            console.print(f"  [dim]- {data['stage']} [skipped: {reason}][/dim]")
         elif event_type == "stage_resumed":
-            typer.echo(f"  ↩ {data['stage']} [resumed from checkpoint]")
+            console.print(f"  [yellow]↩[/yellow] {data['stage']} [dim][resumed from checkpoint][/dim]")
         elif event_type == "stage_failed":
-            typer.echo(f"  ✗ {data['stage']} [{data['type']}]: {data['reason'][:80]}", err=True)
+            err_console.print(f"  [red]✗[/red] [bold]{data['stage']}[/bold] [[red]{data['type']}[/red]]: {data['reason'][:80]}")
         elif event_type == "retry_attempt":
-            typer.echo(f"  ⟳ {data['stage']} retry {data['attempt']}/{data['max']}: {data['reason'][:60]}")
+            console.print(f"  [yellow]⟳[/yellow] {data['stage']} retry {data['attempt']}/{data['max']} [dim]{data['reason'][:60]}[/dim]")
         elif event_type == "run_summary":
             rogue = data.get("rogue_signals", 0)
-            rogue_str = f", {rogue} blocked" if rogue else ""
-            typer.echo(
-                f"\nDone in {data['elapsed_s']}s — "
-                f"{data['stages_ran']} ran, "
-                f"{data['stages_skipped']} skipped, "
-                f"{data['stages_resumed']} resumed, "
-                f"{data['stages_failed']} failed"
+            failed = data["stages_failed"]
+            rogue_str = f", [bold red]{rogue} blocked[/bold red]" if rogue else ""
+            failed_str = f"[bold red]{failed} failed[/bold red]" if failed else f"[dim]{failed} failed[/dim]"
+            console.print(
+                f"\n[bold]Done[/bold] in [bold]{data['elapsed_s']}s[/bold] — "
+                f"[green]{data['stages_ran']} ran[/green]  "
+                f"[dim]{data['stages_skipped']} skipped[/dim]  "
+                f"{failed_str}"
                 f"{rogue_str}"
             )
 
