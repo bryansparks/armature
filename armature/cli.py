@@ -19,9 +19,23 @@ def new(
     run_wizard(output_path=output)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from armature import __version__
+        typer.echo(f"armature {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
-def main():
-    """Armature — ELF ecosystem agent harness runner."""
+def main(
+    version: bool = typer.Option(
+        None, "--version", "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
+    """Armature — multi-agent workflow engine."""
 
 
 def parse_inputs(raw: list[str]) -> dict:
