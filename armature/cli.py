@@ -278,8 +278,8 @@ def _make_on_event(quiet: bool, fan_out_ids: set | None = None):
                 _update_fan_line(stage)
                 return
             kind = data.get("kind", "?")
-            role = f" [dim]{data['role']}[/dim]" if data.get("role") else ""
-            console.print(f"  [cyan]→[/cyan] [bold]{stage}[/bold] [dim]({kind})[/dim]{role}")
+            role = f" [#888888]{data['role']}[/#888888]" if data.get("role") else ""
+            console.print(f"  [cyan]→[/cyan] [bold]{stage}[/bold] [#888888]({kind})[/#888888]{role}")
 
         elif event_type == "stage_complete":
             if stage in _fo_ids and _active[0] == stage:
@@ -291,14 +291,14 @@ def _make_on_event(quiet: bool, fan_out_ids: set | None = None):
                 _fan[stage]["times"].append(elapsed)
                 _update_fan_line(stage)
                 return
-            console.print(f"  [green]✓[/green] {stage} [dim]({data['elapsed_s']}s)[/dim]")
+            console.print(f"  [green]✓[/green] {stage} [#888888]({data['elapsed_s']}s)[/#888888]")
 
         elif event_type == "stage_skipped":
             reason = data.get("reason", "")
-            console.print(f"  [dim]- {stage} [skipped: {reason}][/dim]")
+            console.print(f"  [#888888]- {stage} (skipped: {reason})[/#888888]")
 
         elif event_type == "stage_resumed":
-            console.print(f"  [yellow]↩[/yellow] {stage} [dim][resumed from checkpoint][/dim]")
+            console.print(f"  [yellow]↩[/yellow] {stage} [#888888][resumed from checkpoint][/#888888]")
 
         elif event_type == "stage_failed":
             if _active[0] == stage:
@@ -306,7 +306,7 @@ def _make_on_event(quiet: bool, fan_out_ids: set | None = None):
             err_console.print(f"  [red]✗[/red] [bold]{stage}[/bold] [[red]{data['type']}[/red]]: {data['reason'][:80]}")
 
         elif event_type == "retry_attempt":
-            console.print(f"  [yellow]⟳[/yellow] {stage} retry {data['attempt']}/{data['max']} [dim]{data['reason'][:60]}[/dim]")
+            console.print(f"  [yellow]⟳[/yellow] {stage} retry {data['attempt']}/{data['max']} [#888888]{data['reason'][:60]}[/#888888]")
 
         elif event_type == "run_summary":
             if _active[0] is not None:
@@ -314,16 +314,75 @@ def _make_on_event(quiet: bool, fan_out_ids: set | None = None):
             rogue = data.get("rogue_signals", 0)
             failed = data["stages_failed"]
             rogue_str = f", [bold red]{rogue} blocked[/bold red]" if rogue else ""
-            failed_str = f"[bold red]{failed} failed[/bold red]" if failed else f"[dim]{failed} failed[/dim]"
+            failed_str = f"[bold red]{failed} failed[/bold red]" if failed else f"[#888888]{failed} failed[/#888888]"
             console.print(
                 f"\n[bold]Done[/bold] in [bold]{data['elapsed_s']}s[/bold] — "
                 f"[green]{data['stages_ran']} ran[/green]  "
-                f"[dim]{data['stages_skipped']} skipped[/dim]  "
+                f"[#888888]{data['stages_skipped']} skipped[/#888888]  "
                 f"{failed_str}"
                 f"{rogue_str}"
             )
 
     return on_event
+
+
+def _find_primary_stage(spec) -> str | None:
+    """Return the terminal non-post-run stage ID (the DAG leaf with deepest dependencies)."""
+    normal = [s for s in spec.stages if not s.post_run]
+    if not normal:
+        return None
+    depended_on = {dep for s in normal for dep in (s.depends_on or [])}
+    leaves = [s for s in normal if s.id not in depended_on]
+    if not leaves:
+        return normal[-1].id
+    return max(leaves, key=lambda s: len(s.depends_on or [])).id
+
+
+def _show_primary_output(spec, result: dict, quiet: bool) -> None:
+    if quiet or not result:
+        return
+    stage_id = _find_primary_stage(spec)
+    if not stage_id:
+        return
+    stage_out = result.get(stage_id)
+    if not stage_out:
+        return
+
+    if isinstance(stage_out, dict) and "content" in stage_out:
+        text = str(stage_out["content"]).strip()
+    elif isinstance(stage_out, str):
+        text = stage_out.strip()
+    elif isinstance(stage_out, (list, dict)):
+        text = json.dumps(stage_out, indent=2, default=str)
+    else:
+        text = str(stage_out).strip()
+
+    if not text:
+        return
+
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console(highlight=False)
+    truncated = (text[:500] + "\n[#888888]…[/#888888]") if len(text) > 500 else text
+    console.print()
+    console.print(Panel(
+        truncated,
+        title=f"[bold]{stage_id}[/bold]",
+        subtitle="[#888888]primary output[/#888888]",
+        border_style="#888888",
+        padding=(0, 1),
+    ))
+
+
+def _save_last_result(workflow_name: str, result: dict) -> None:
+    try:
+        save_dir = Path.home() / ".armature" / "last"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        (save_dir / f"{workflow_name}.json").write_text(
+            json.dumps(result, indent=2, default=str)
+        )
+    except Exception:
+        pass
 
 
 @app.command()
@@ -426,11 +485,16 @@ def run(
 
     result = asyncio.run(_run())
 
+    _show_primary_output(harness._spec, result, quiet)
+    _save_last_result(harness._spec.name, result)
+
     if not quiet:
         from rich.console import Console
         Console(highlight=False).print(
-            f"  [#888888]→[/#888888]  [bold]armature dashboard {spec}[/bold]"
-            f"  [#888888]to review history and quality metrics[/#888888]"
+            f"\n  [#888888]→[/#888888]  [bold]armature last {spec}[/bold]"
+            f"  [#888888]to re-read this output  [/#888888]"
+            f" [#888888]·[/#888888]  [bold]armature dashboard {spec}[/bold]"
+            f"  [#888888]for history and metrics[/#888888]"
         )
 
     result_json = json.dumps(result, indent=2, default=str)
@@ -952,6 +1016,153 @@ def doctor(
 
     if not all_ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def last(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    stage: str = typer.Option(None, "--stage", "-s", help="Stage to show (default: primary output stage)"),
+    full: bool = typer.Option(False, "--full", "-f", help="Show complete output without truncation"),
+):
+    """Show the primary output from the most recent run of a workflow."""
+    from armature.spec.loader import load_spec
+    try:
+        loaded = load_spec(spec)
+    except Exception as exc:
+        typer.echo(f"Failed to load spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    save_path = Path.home() / ".armature" / "last" / f"{loaded.name}.json"
+    if not save_path.exists():
+        typer.echo(
+            f"No saved result for '{loaded.name}'.\n"
+            f"Run the workflow first:  armature run {spec} --input ...",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    result = json.loads(save_path.read_text())
+    target_id = stage or _find_primary_stage(loaded)
+    if not target_id or target_id not in result:
+        typer.echo(f"Stage '{target_id}' not found in last run result.", err=True)
+        raise typer.Exit(1)
+
+    stage_out = result[target_id]
+    if isinstance(stage_out, dict) and "content" in stage_out:
+        text = str(stage_out["content"]).strip()
+    elif isinstance(stage_out, str):
+        text = stage_out.strip()
+    elif isinstance(stage_out, (list, dict)):
+        text = json.dumps(stage_out, indent=2, default=str)
+    else:
+        text = str(stage_out).strip()
+
+    limit = 2000
+    if not full and len(text) > limit:
+        display = text[:limit] + f"\n\n[#888888]… {len(text) - limit} more characters — use --full to see all[/#888888]"
+    else:
+        display = text
+
+    from rich.console import Console
+    from rich.panel import Panel
+    Console(highlight=False).print(Panel(
+        display,
+        title=f"[bold]{target_id}[/bold]  [#888888]·[/#888888]  [#888888]{loaded.name}[/#888888]",
+        border_style="#888888",
+        padding=(0, 1),
+    ))
+
+
+@app.command()
+def explain(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+):
+    """Explain what a workflow does in plain English using an LLM."""
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    from armature.spec.loader import load_spec
+    try:
+        loaded = load_spec(spec)
+    except Exception as exc:
+        typer.echo(f"Failed to load spec: {exc}", err=True)
+        raise typer.Exit(1)
+
+    # Pick the smallest available model to keep cost low
+    tier_names = ["small", "tiny", "medium", "large", "frontier"]
+    model_cfg = None
+    for t in tier_names:
+        cfg = getattr(loaded.model_tiers, t, None)
+        if cfg:
+            model_cfg = cfg
+            break
+    if not model_cfg and loaded.model_tiers.__pydantic_extra__:
+        model_cfg = next(iter(loaded.model_tiers.__pydantic_extra__.values()), None)
+
+    if not model_cfg:
+        typer.echo("No model tier configured in spec.", err=True)
+        raise typer.Exit(1)
+
+    inputs = [i.get("name", str(i)) for i in (loaded.contracts.inputs if loaded.contracts else [])]
+    stage_lines = []
+    for s in loaded.stages:
+        if s.role:
+            desc = (s.role.description or "").strip().replace("\n", " ")[:100]
+            stage_lines.append(f"  - {s.id} ({s.role.type.value}): {s.role.name} — {desc}")
+        elif s.tool_call:
+            stage_lines.append(f"  - {s.id}: calls tool {s.tool_call.name}" + (f" ×{s.fan_out} parallel" if s.fan_out else ""))
+        else:
+            stage_lines.append(f"  - {s.id}: {s.id}")
+
+    prompt = (
+        f"You are explaining an Armature multi-agent workflow to a new user.\n\n"
+        f"Workflow: {loaded.name}\n"
+        f"Description: {loaded.description or '(none)'}\n"
+        f"Mission: {(loaded.mission or '(none)').strip()[:300]}\n"
+        f"Inputs required: {', '.join(inputs) or 'none'}\n\n"
+        f"Stages:\n{chr(10).join(stage_lines)}\n\n"
+        f"Write a friendly plain-English explanation:\n"
+        f"1. One sentence — what does this workflow accomplish?\n"
+        f"2. What does the user need to provide as input?\n"
+        f"3. Walk through each stage in one sentence — what does it do and why?\n"
+        f"4. What does the user get at the end?\n\n"
+        f"Be concrete, jargon-free, and use the actual stage and agent names."
+    )
+
+    import litellm
+    import os
+
+    api_key_env = getattr(model_cfg, "api_key_env", None)
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+    litellm_model = f"{model_cfg.provider}/{model_cfg.model}" if model_cfg.provider else model_cfg.model
+
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console(highlight=False)
+    short_model = model_cfg.model.split("/")[-1]
+    console.print(f"\n  [#888888]Explaining[/#888888] [bold]{loaded.name}[/bold] [#888888]via {short_model}…[/#888888]")
+
+    try:
+        response = litellm.completion(
+            model=litellm_model,
+            messages=[{"role": "user", "content": prompt}],
+            api_key=api_key or None,
+            max_tokens=1000,
+            temperature=0.3,
+        )
+        explanation = response.choices[0].message.content.strip()
+    except Exception as exc:
+        typer.echo(f"LLM call failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+    console.print()
+    console.print(Panel(
+        explanation,
+        title=f"[bold]{loaded.name}[/bold]  [#888888]explained[/#888888]",
+        border_style="#888888",
+        padding=(0, 1),
+    ))
 
 
 @channels_app.command("start")
