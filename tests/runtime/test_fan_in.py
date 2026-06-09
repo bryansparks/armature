@@ -256,6 +256,43 @@ async def test_per_item_exception_caught_as_fan_out_error(tmp_path):
     assert "item failed" in bad["_fan_out_error"]
 
 
+async def test_fan_out_fail_as_value_when_partition_source_undefined(tmp_path):
+    """A fan-out stage with fail_as_value=True returns _failed dict when
+    partition_source resolves to undefined (e.g., upstream guided_json parse error).
+
+    Regression: _execute_fan_out_stage raised ValueError outside the try/except
+    block that honours fail_as_value, so the flag was silently ignored.
+    """
+    async def produce_parse_error(args):
+        return {"_parse_error": True, "raw": "```json\n{}\n```"}
+
+    harness = _make_harness([
+        Stage(
+            id="upstream",
+            tool_call=ToolCallConfig(name="produce_error"),
+            depends_on=[],
+        ),
+        Stage(
+            id="fanout",
+            tool_call=ToolCallConfig(name="proc", args={"x": "{{ it }}"}),
+            partition_source="{{ upstream.items }}",
+            partition_key="it",
+            fan_out=3,
+            fan_in="list",
+            fail_as_value=True,
+            depends_on=["upstream"],
+        ),
+    ], tmp_path)
+    _register(harness, "produce_error", produce_parse_error)
+
+    async def proc(args): return {"ok": True}
+    _register(harness, "proc", proc)
+
+    result = await harness.run({})
+    assert result["fanout"].get("_failed") is True
+    assert "expected list" in result["fanout"]["_failed_reason"]
+
+
 # ── Phase E: fan_in="consensus" (RED) ────────────────────────────────────────
 
 async def test_consensus_fan_in_calls_judge(tmp_path):

@@ -673,7 +673,24 @@ class Harness:
                 return {"_skipped": True}
 
         if stage.partition_source is not None:
-            result = await self._execute_fan_out_stage(stage, context)
+            try:
+                result = await self._execute_fan_out_stage(stage, context)
+            except Exception as exc:
+                if stage.fail_as_value:
+                    failed = {
+                        "_failed": True,
+                        "_failed_reason": str(exc),
+                        "_failed_type": type(exc).__name__,
+                    }
+                    if self._on_event:
+                        self._on_event("stage_failed", {
+                            "stage": stage.id,
+                            "type": type(exc).__name__,
+                            "reason": str(exc),
+                        })
+                    self._checkpoint_write(stage.id, failed)
+                    return failed
+                raise
             result = self._maybe_truncate(stage, result)
             self._checkpoint_write(stage.id, result)
             return result
