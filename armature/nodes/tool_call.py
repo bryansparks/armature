@@ -41,7 +41,12 @@ def _render_args(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any
     for k, v in args.items():
         if isinstance(v, str) and "{{" in v:
             result = env.from_string(v).render(**context)
-            rendered[k] = None if isinstance(result, _JinjaUndefined) else result
+            # NativeEnvironment calls ast.literal_eval on rendered strings, which
+            # converts "..." to Python's Ellipsis singleton. Treat Ellipsis and
+            # other non-data singletons the same as Undefined.
+            if isinstance(result, _JinjaUndefined) or result is ...:
+                result = None
+            rendered[k] = result
         else:
             rendered[k] = v
     return rendered

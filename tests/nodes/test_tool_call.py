@@ -116,6 +116,23 @@ def test_render_args_no_templates_returns_unchanged():
     assert result == {"dir": "/fixed/path", "count": 3}
 
 
+def test_render_args_ellipsis_value_becomes_none():
+    """If NativeEnvironment resolves a template to '...' the result is Python's
+    Ellipsis singleton.  _render_args must convert it to None so tool handlers
+    receive a usable value instead of an opaque object.
+
+    Regression: LLM returned {"report": "..."} as a placeholder; NativeEnvironment
+    evaluated ast.literal_eval("...") → Ellipsis, which then crashed the tool with
+    AttributeError: 'ellipsis' object has no attribute 'splitlines'.
+    """
+    # The context has a stage output whose 'report' value is the literal string "..."
+    # NativeEnvironment will eval that to Python's Ellipsis object.
+    args = {"markdown": "{{ stage.report }}"}
+    context = {"stage": {"report": "..."}}
+    result = _render_args(args, context)
+    assert result["markdown"] is None
+
+
 async def test_execute_with_template_args():
     stage = make_stage("search", {"input": "{{ topic }}"})
     reg = make_registry("search")
