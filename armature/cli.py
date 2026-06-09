@@ -502,8 +502,10 @@ def run(
         output_file.write_text(result_json)
         if not quiet:
             typer.echo(f"Result written to {output_file}")
-    else:
+    elif quiet:
+        # quiet mode = machine-readable; emit full JSON for piping/scripting
         typer.echo(result_json)
+    # interactive mode: primary output panel + armature last already cover this
 
     if auto_improve:
         from armature.synthesis.improve import SelfImproveRunner

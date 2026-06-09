@@ -181,14 +181,10 @@ def test_on_event_stage_failed_prints():
 # ── armature run (actual execution) ──────────────────────────────────────────
 
 def test_run_echo_workflow_produces_json():
-    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hello"])
+    # Interactive mode no longer dumps full JSON (use --quiet for machine-readable output)
+    result = runner.invoke(app, ["run", str(ECHO), "--input", "message=hello", "--quiet"])
     assert result.exit_code == 0
-    # JSON output on stdout
-    output = result.output
-    # Find the JSON block — look for \n{ (standalone brace) to skip Rich panel output
-    json_start = output.find("\n{")
-    assert json_start >= 0, f"No JSON found in output: {output!r}"
-    data = json.loads(output[json_start + 1:])
+    data = json.loads(result.output)
     assert data["echo"]["exit_code"] == 0
     assert "hello" in data["echo"]["stdout"]
 
