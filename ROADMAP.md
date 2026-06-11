@@ -82,6 +82,35 @@ Replace the current append-only session log with a proper event store: every har
 
 ---
 
+## Medium-term (iterative deepening and sub-agent loops)
+
+**DAG loopback via `IterateConfig`**
+
+Today the DAG executes strictly forward. A class of workflows — deep research, progressive refinement, anything where a judge stage should be able to say "not good enough, go around again" — wants a downstream stage to trigger re-execution of an earlier sub-DAG with accumulated context. This is the sub-agent / iterative-deepening pattern: each pass dives deeper, informed by what the previous passes found.
+
+The designed (not yet built) mechanism is an `IterateConfig` block on a judge-like stage that loops back to an earlier stage:
+
+```yaml
+iterate:
+  from_stage: decompose_query
+  max_iterations: 3
+  until: "{{ not continue_research }}"
+  carry_forward: [coverage_gaps, key_themes]
+```
+
+Each iteration re-executes the sub-DAG from `from_stage` through the current stage, injecting an `_iteration` counter and `_prior_*` carried-forward outputs into context, with an `accumulate_strategy` (`replace` or `append`) controlling how carried keys build up across passes. The result is full iteration awareness in LLM prompts and a single trace with a single merged report.
+
+**Why it's not in v1:** the engine change touches `spec/models.py`, `validator.py`, and the core `Harness.run()` loop. Design review identified ten runtime risks (context explosion across iterations, `max_llm_calls` budget overflow, fan-out redundancy, trace duplication, cycle-detection interactions, checkpoint awareness, and others) and impacts to seven test suites. That risk profile was the wrong thing to absorb immediately before the open-source release, so it was deferred deliberately.
+
+**What works today without engine changes:**
+
+- **Continuation + external re-trigger** — use the existing `continuation.carry_forward` mechanism to pass prior-run context across separate workflow invocations; each iteration is a fresh run that picks up where the last left off. Costs: something external must re-invoke Armature, each iteration produces its own report and trace, and stages have no `_iteration` awareness.
+- **Post-run trigger stage** — a final stage calls a webhook that re-triggers the workflow, removing the external orchestrator. Same per-iteration trace/report fragmentation and no iteration counter, plus runaway-loop risk since no central budget spans the iterations.
+
+These workarounds are serviceable for early adopters; `IterateConfig` is the durable design once the runtime risks can be addressed with proper test coverage. Validation signal to watch: users hand-rolling the webhook pattern or asking for merged multi-pass reports.
+
+---
+
 ## Medium-term (scaling and operations)
 
 **Model-tier auto-registration**
