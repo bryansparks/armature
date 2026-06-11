@@ -42,12 +42,12 @@ async def llm_completion(**kwargs) -> Any:
 
 # ── SpecRefiner ───────────────────────────────────────────────────────────────
 
-_REFINER_SYSTEM = """\
+_REFINER_BASE = """\
 You are an expert at refining Armature workflow specs to address performance issues.
 
 You will receive:
 1. The current YAML spec
-2. Diagnostic failure signatures (stage IDs + failure codes)
+2. Diagnostic failure signatures (stage IDs + failure codes + causal attribution)
 3. IHR (Implicit Harness Rating) breakdown — output validity, success rate, quorum score
 4. Optionally: improvement suggestions from a post-run analysis stage
 
@@ -55,13 +55,18 @@ Your task: produce a revised YAML that addresses the diagnosed issues.
 
 Rules:
 - Make TARGETED changes only. Do not rewrite stages that are performing well.
-- You MAY modify: role.description, output_schema, on_fail.loop.max, model_tier, stage timeout_s
-- Do NOT add or remove stages. Do NOT change stage IDs or role names.
+- Use the causal_status to guide your fix:
+    spec_problem → improve role.description or relax output_schema
+    model_problem → upgrade model_tier or increase on_fail.loop.max
+    tool_problem → review tool usage in role.description
 - If a stage has LOW_CONFIDENCE: enrich its description with explicit evaluation criteria.
-- If a stage has OUTPUT_INVALID: relax or correct the output_schema required fields.
+- If a stage has OUTPUT_INVALID (spec_problem): relax or correct the output_schema required fields.
+- If a stage has OUTPUT_INVALID (model_problem): upgrade model_tier.
 - If a stage has HIGH_ESCALATION: increase on_fail.loop.max or upgrade model_tier.
-- If a stage has STAGE_FAILED: add a timeout_s or upgrade model_tier.
+- If a stage has STAGE_FAILED (spec_problem/timeout): add or increase timeout_s.
+- If a stage has STAGE_FAILED (model_problem): upgrade model_tier.
 - If a stage has LOW_SKILL_ACTIVATION: strengthen role.description to explicitly instruct tool use; list tools by name and when to invoke them.
+- Do NOT add or remove stages. Do NOT change stage IDs or role names.
 
 Output format — two sections, in order:
 1. The complete revised YAML (no markdown fences, no explanation).
@@ -76,6 +81,22 @@ Output format — two sections, in order:
    Example: {"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}
    Use [] for empty lists. These predictions will be verified in the next cycle.
 """
+
+
+def _make_refiner_system_prompt(
+    editable_surfaces: list[str] | None = None,
+    diversity_hint: str | None = None,
+) -> str:
+    prompt = _REFINER_BASE
+    if editable_surfaces:
+        all_surfaces = {"descriptions", "schemas", "model_tiers", "retry_counts", "timeouts"}
+        locked = sorted(all_surfaces - set(editable_surfaces))
+        prompt += f"\nEditable surfaces (ONLY these may be changed): {', '.join(sorted(editable_surfaces))}\n"
+        if locked:
+            prompt += f"DO NOT modify: {', '.join(locked)}\n"
+    if diversity_hint:
+        prompt += f"\n{diversity_hint}\n"
+    return prompt
 
 
 @dataclass
@@ -103,10 +124,18 @@ class SpecRefiner:
         diagnostics: list[DiagnosticResult],
         ihr: "IhrResult | None",
         refiner_suggestions: str | None = None,
+        editable_surfaces: list[str] | None = None,
+        diversity_hint: str | None = None,
     ) -> RefinerResult | None:
         """Return RefinerResult (spec, yaml_text, predictions) or None if unparseable."""
         diag_lines = "\n".join(
-            f"  [{d.stage_id}] {d.code.value}: {d.details}" for d in diagnostics
+            f"  [{d.stage_id}] {d.code.value}"
+            + (
+                f" [{d.causal_attribution.causal_status.value}/{d.causal_attribution.mechanism.value}]"
+                if d.causal_attribution else ""
+            )
+            + f": {d.details}"
+            for d in diagnostics
         ) or "  (none)"
 
         if ihr:
@@ -127,10 +156,12 @@ class SpecRefiner:
         if refiner_suggestions:
             user_content += f"\n\nPost-run analysis suggestions:\n{refiner_suggestions}"
 
+        system_prompt = _make_refiner_system_prompt(editable_surfaces, diversity_hint)
+
         response = await llm_completion(
             model=self._model,
             messages=[
-                {"role": "system", "content": _REFINER_SYSTEM},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
         )

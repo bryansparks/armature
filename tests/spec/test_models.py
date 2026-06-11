@@ -343,3 +343,29 @@ def test_model_tier_config_full():
     assert mtc.max_tokens == 4096
     assert mtc.tool_calling is True
     assert mtc.api_key_env == "ANTHROPIC_API_KEY"
+
+
+# ── SelfImprovementConfig ─────────────────────────────────────────────────────
+
+from armature.spec.models import SelfImprovementConfig, EditableSurface
+
+
+def test_self_improvement_config_defaults():
+    cfg = SelfImprovementConfig()
+    assert EditableSurface.DESCRIPTIONS in cfg.editable_surfaces
+    assert EditableSurface.RETRY_COUNTS in cfg.editable_surfaces
+    assert EditableSurface.TIMEOUTS in cfg.editable_surfaces
+    assert EditableSurface.SCHEMAS not in cfg.editable_surfaces
+    assert EditableSurface.MODEL_TIERS not in cfg.editable_surfaces
+
+
+def test_self_improvement_config_explicit():
+    cfg = SelfImprovementConfig(editable_surfaces=[EditableSurface.SCHEMAS, EditableSurface.MODEL_TIERS])
+    assert cfg.editable_surfaces == [EditableSurface.SCHEMAS, EditableSurface.MODEL_TIERS]
+
+
+def test_harness_spec_has_self_improvement_field():
+    from armature.spec.models import HarnessSpec
+    spec = HarnessSpec(name="wf", stages=[])
+    assert hasattr(spec, "self_improvement")
+    assert isinstance(spec.self_improvement, SelfImprovementConfig)

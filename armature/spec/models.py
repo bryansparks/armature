@@ -247,6 +247,27 @@ class ContinuationConfig(BaseModel):
     inject_as: str = "prior_run"
 
 
+class EditableSurface(str, Enum):
+    DESCRIPTIONS = "descriptions"
+    SCHEMAS = "schemas"
+    MODEL_TIERS = "model_tiers"
+    RETRY_COUNTS = "retry_counts"
+    TIMEOUTS = "timeouts"
+
+
+_DEFAULT_EDITABLE_SURFACES = [
+    EditableSurface.DESCRIPTIONS,
+    EditableSurface.RETRY_COUNTS,
+    EditableSurface.TIMEOUTS,
+]
+
+
+class SelfImprovementConfig(BaseModel):
+    editable_surfaces: list[EditableSurface] = Field(
+        default_factory=lambda: list(_DEFAULT_EDITABLE_SURFACES)
+    )
+
+
 class CronTrigger(BaseModel):
     type: Literal["cron"] = "cron"
     schedule: str
@@ -287,3 +308,4 @@ class HarnessSpec(BaseModel):
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)

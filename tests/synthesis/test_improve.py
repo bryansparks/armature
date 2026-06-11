@@ -952,3 +952,64 @@ stages:
 
     # Original spec must be unchanged
     assert spec_file.read_text() == _MINIMAL_SPEC_YAML
+
+
+# ── editable surfaces in SpecRefiner prompt ───────────────────────────────────
+
+async def test_spec_refiner_includes_editable_surfaces_in_prompt():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    captured_messages = []
+
+    async def mock_llm(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        await refiner.refine(
+            spec_yaml=_MINIMAL_SPEC_YAML,
+            diagnostics=[],
+            ihr=None,
+            editable_surfaces=["descriptions", "retry_counts"],
+        )
+
+    system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
+    assert "descriptions" in system_content
+    assert "retry_counts" in system_content
+
+
+async def test_spec_refiner_lists_locked_surfaces_as_do_not_modify():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    captured_messages = []
+
+    async def mock_llm(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        await refiner.refine(
+            spec_yaml=_MINIMAL_SPEC_YAML,
+            diagnostics=[],
+            ihr=None,
+            editable_surfaces=["descriptions"],
+        )
+
+    system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
+    assert "DO NOT modify" in system_content
+    assert "schemas" in system_content
+    assert "model_tiers" in system_content
+
+
+async def test_spec_refiner_no_surface_restriction_when_surfaces_is_none():
+    """When editable_surfaces is None, the system prompt should not restrict surfaces."""
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    captured_messages = []
+
+    async def mock_llm(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+
+    system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
+    assert "DO NOT modify" not in system_content
