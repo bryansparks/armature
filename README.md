@@ -6,11 +6,11 @@
 
 A lightweight, declarative agent execution harness. Define multi-agent workflows as YAML specs. Run them with a single Python call or from the CLI.
 
+![Armature demo — pip install, a YAML spec, and a real workflow run](demo-hero.gif)
+
 No framework dependency. No prescribed team structure. Just a DAG executor, an LLM adapter, and your workflow spec.
 
 Armature is the execution engine for **Reasoning Automation** — end-to-end business processes where multi-agent deliberation replaces brittle rule-based logic. The harness owns orchestration, retries, safety, telemetry, and human approval gates. You supply the domain logic as YAML workflow specs and Python tool modules. The same engine that runs a code-review pipeline can run a contract risk assessment, a social media creative chain, or a compliance audit — without any changes to Armature itself.
-
-> **Part of a larger vision.** Armature is one component of a broader autonomous-organization platform I'm building under the working name ElfTech — a stack of AI systems covering reasoning, deliberation, code generation, deployment, and coordination. More details to come. Stay tuned.
 
 ---
 
