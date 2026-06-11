@@ -164,6 +164,18 @@ The default target is 0.90. The default minimum trace count is 3. You need at le
 
 Each diagnostic is tagged with the `stage_id` it came from, so the refiner knows exactly which stage to target. A `low_confidence` on `analyst` is a different problem than a `low_confidence` on `final_judge`, even if the fix looks similar.
 
+### Causal attribution
+
+Inspired by Self-Harness (arXiv:2606.09498v1), each `DiagnosticResult` carries a **causal 3-tuple** decomposing the failure into three orthogonal dimensions:
+
+| Field | Question | Example values |
+|---|---|---|
+| `terminal_cause` | What broke? | `execution_error`, `schema_validation`, `low_confidence`, `postcondition`, `prompt_weak` |
+| `causal_status` | Whose fault? | `spec_problem`, `model_problem`, `tool_problem` |
+| `mechanism` | How exactly? | `timeout`, `model_underpowered`, `schema_too_strict`, `prompt_missing_instruction` |
+
+A `stage_failed` with `mechanism=timeout` → add `timeout_s`. The same code with `mechanism=runtime_error, causal_status=model_problem` → upgrade the model tier. The surface diagnostic code is identical; the right fix is different.
+
 ---
 
 ## What SpecRefiner does with the diagnosis
@@ -179,6 +191,34 @@ The refiner's instructions are specific:
 - `low_skill_activation`: rewrite the description to explicitly name tools and when to invoke them
 
 It makes **targeted changes only** — stages performing well are not touched. The revised YAML is a minimal diff from the original, not a rewrite.
+
+### Editable surfaces
+
+You can bound what the refiner is allowed to change with the `self_improvement:` spec field:
+
+```yaml
+self_improvement:
+  editable_surfaces:
+    - descriptions    # role.description text
+    - retry_counts    # on_fail.loop.max
+    - timeouts        # stage.timeout_s
+    # schemas and model_tiers are not listed → locked
+```
+
+The default surfaces are `[descriptions, retry_counts, timeouts]`. Locked surfaces are named in the refiner's system prompt so it cannot accidentally modify them. This is adapted from Self-Harness (arXiv:2606.09498v1), which introduces declared editable sets to bound automated harness evolution.
+
+### Proposal diversity and regression safety
+
+When `n_proposals > 1`, the refiner generates multiple candidates in parallel, each guided by a different diversity hint:
+
+```python
+runner = SelfImproveRunner("my_workflow.yml", db, n_proposals=3)
+report = await runner.analyze()
+print(f"Proposals generated: {report.n_proposals_generated}")
+print(f"Regression-risk filtered: {report.regression_risk_count}")
+```
+
+The candidate whose `predicted_fixes` most overlap the active diagnostic codes is selected. Before selection, **regression gating** filters out candidates that modify stages with no current diagnostics (healthy stages). If all candidates are risky, the best of the risky set is used — the loop never returns no-proposal due to overly cautious gating. Both counts are written to the JSONL audit log for traceability. Adapted from arXiv:2606.09498v1.
 
 ### The governance split
 

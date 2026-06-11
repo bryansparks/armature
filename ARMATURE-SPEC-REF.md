@@ -282,6 +282,25 @@ safety_rules:
 
 ---
 
+## self_improvement:
+
+```yaml
+self_improvement:
+  editable_surfaces:          # surfaces the refiner may modify (default: descriptions, retry_counts, timeouts)
+    - descriptions            # role.description on stages
+    - schemas                 # output_schema definitions
+    - model_tiers             # role.model_tier assignments
+    - retry_counts            # on_fail.loop.max values
+    - timeouts                # stage.timeout_s values
+```
+
+Surfaces NOT listed are locked — the refiner's system prompt explicitly names them as off-limits.
+Default: `[descriptions, retry_counts, timeouts]`. `schemas` and `model_tiers` require human review due to cascading effects.
+
+Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfImproveRunner` to generate multiple candidates and pick the best coverage match.
+
+---
+
 ## Validation Error Codes
 
 | Code | Fix |

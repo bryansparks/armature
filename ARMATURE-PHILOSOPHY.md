@@ -771,7 +771,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=... # optional: send traces to Jaeger/Grafana
 
 ## Summary
 
-Armature is a production-grade agent harness synthesized from eight academic papers spanning February–May 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
+Armature is a production-grade agent harness synthesized from nine academic papers spanning February–June 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
 
 The sixth paper, AHE (arXiv:2604.25850), added accountability to the improvement loop: every spec revision now carries a falsifiable contract, and each subsequent run verifies whether the predicted fixes actually materialized. The harness does not just improve — it explains itself as it does, cycle by cycle.
 
@@ -781,17 +781,19 @@ The AGT governance layer added five capabilities the academic papers left open: 
 
 The async HTTP service and LangGraph sidecar pattern complete the integration story: Armature is clearly positioned as a **batch-oriented multi-stage work engine**, not a conversational loop. LangGraph owns the conversation; Armature owns the heavy lifting inside each turn. The SSE event stream and latency acknowledgement pattern let chatbot users see progress immediately while multi-stage work runs in the background.
 
-With all seven papers and the AGT framework implemented, the harness now has:
+With all nine papers and the AGT framework implemented, the harness now has:
 - **Execution**: DAG orchestration, four role types, parallel fan-out (including consensus synthesis), guided JSON output, model-tier auto-escalation
 - **Quality**: IHR metric, consensus deliberation, output schema validation, declarative evaluation stages, post-condition verification
 - **Safety**: fail-closed strict mode, five rule actions including human approval, reversibility-based blocking, `ToolBlocked` non-retryable exception
 - **Observability**: tamper-evident trace records with inputs hash, policy version, and per-key provenance; OpenTelemetry; run reports with failure signatures; drift score for regression detection
 - **Memory**: cross-run persistence, staleness detection, `_stale_memory_keys` warnings, knowledge extraction
-- **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, prediction-verification accounting, component governance, SFT/DPO trace export
+- **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, causal 3-tuple attribution, declared editable surfaces, K-proposal diversity with regression gating, prediction-verification accounting, component governance, SFT/DPO trace export
 
 The eighth paper (arXiv:2605.30621v1, "Harness Updating Is Not Harness Benefit") addressed a key question about the improvement loop itself: does the evolver need to be as powerful as the executor? The answer is no. The paper shows ≤3.1pp quality difference between frontier and medium-tier evolvers, meaning the `SpecRefiner` can run at medium-tier without quality loss. The paper also introduced two new metrics: Skill-Load Rate (SLR), which measures whether declared tools/skills are actually invoked during execution, and Harness-Following Rate (HFR), which measures whether models adhere to harness instructions on the first attempt. Both are now tracked: `low_skill_activation` is a new `DiagnosticCode` fired when SLR is zero (tools declared but never called), and HFR is the fifth component of the IHR formula (updated weights: `0.35/0.25/0.20/0.10/0.10`).
 
-1,256 tests. All research and industry-framework gaps closed. ActiveGraph event-architecture concepts adopted (LLM caching, audit replay, trace-triggered behaviors); fork-and-diff and full event sourcing deferred to roadmap.
+The ninth paper (arXiv:2606.09498v1, "Self-Harness") asked a different question: given that we can diagnose and propose spec changes, how do we make the proposal process *safer and smarter*? Self-Harness introduces four mechanisms that Armature adopted directly. First, causal 3-tuple failure attribution — each diagnostic now carries a `(terminal_cause, causal_status, mechanism)` triple that distinguishes *what* broke from *whose fault it is* from *how it happened*, giving the refiner enough signal to propose structurally targeted fixes rather than generic prompt rewrites. Second, declared editable surfaces — a `self_improvement.editable_surfaces` spec field that bounds what the refiner is allowed to change; surfaces outside the declared set are named in the system prompt as explicitly locked, reducing hallucinated structural modifications. Third, K-proposal diversity — the refiner generates multiple candidates in parallel, each steered by a different diversity hint, and the candidate whose predicted fixes most overlap the active diagnostics is selected; ensemble generation consistently finds better proposals than single-shot refinement. Fourth, held-out trace-split regression gating — stages that have no current diagnostics are treated as a held-out set; proposals that touch those healthy stages are filtered as regression risks before selection, a practical adaptation of the Self-Harness held-in/held-out acceptance criterion to the Armature trace-based setting.
+
+1,388 tests. All research and industry-framework gaps closed. ActiveGraph event-architecture concepts adopted (LLM caching, audit replay, trace-triggered behaviors); fork-and-diff and full event sourcing deferred to roadmap.
 
 ---
 

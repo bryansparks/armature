@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Self-Harness-inspired (arXiv:2606.09498v1)
+
+- **Causal 3-tuple failure attribution** — `DiagnosticResult` now carries a `causal_attribution: CausalAttribution` field with three orthogonal dimensions: `terminal_cause` (execution_error / schema_validation / low_confidence / postcondition / prompt_weak), `causal_status` (spec_problem / model_problem / tool_problem), and `mechanism` (timeout / runtime_error / schema_too_strict / model_underpowered / judge_uncertain / tier_insufficient / tool_violation / prompt_missing_instruction). The refiner can target fixes at the mechanism rather than guessing from the surface symptom.
+- **Declared editable surfaces** — new `self_improvement:` top-level spec field with `editable_surfaces` list. The five surfaces are `descriptions`, `schemas`, `model_tiers`, `retry_counts`, `timeouts`; defaults are `[descriptions, retry_counts, timeouts]`. `SpecRefiner` system prompt is dynamically generated to restrict the model to the declared surfaces and explicitly name locked ones.
+- **K-proposal diversity** — `SelfImproveRunner` accepts `n_proposals: int` (default 1). When `n_proposals > 1`, `SpecRefiner.refine_many()` generates candidates in parallel via `asyncio.gather` with rotating diversity hints (minimize changes / fix output format / adjust model tier / tighten schema). `_pick_best_proposal()` selects the candidate whose `predicted_fixes` most overlap the active diagnostics.
+- **Held-out trace-split regression gating** — `_healthy_stage_ids()` identifies stages that appear in traces but carry no diagnostics. `_proposal_regression_risk()` flags proposals that modify those healthy stages. Risky proposals are filtered before selection; if all candidates are risky the best of the risky set is used as a fallback. `ImprovementReport` gains `n_proposals_generated` and `regression_risk_count` fields (also written to the JSONL audit log).
+
+### Tests
+
+- 1,388 tests passing (up from 1,286 at v0.2.0)
+
+---
+
 ## [0.2.0] — 2026-06-07
 
 ### ActiveGraph-inspired (arXiv:2605.21997)

@@ -353,7 +353,7 @@ armature watch <spec>                       # daemon: fire run() on every cron/w
 
 ## What's Implemented
 
-All seven papers and the AGT framework are fully implemented. 1,202 tests.
+All nine papers and the AGT framework are fully implemented. 1,388 tests.
 
 | Research concept | Armature implementation |
 |-----------------|------------------------|
