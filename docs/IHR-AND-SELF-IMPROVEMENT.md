@@ -166,7 +166,7 @@ Each diagnostic is tagged with the `stage_id` it came from, so the refiner knows
 
 ### Causal attribution
 
-Inspired by Self-Harness (arXiv:2606.09498v1), each `DiagnosticResult` carries a **causal 3-tuple** decomposing the failure into three orthogonal dimensions:
+Inspired by Self-Harness ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1), each `DiagnosticResult` carries a **causal 3-tuple** decomposing the failure into three orthogonal dimensions:
 
 | Field | Question | Example values |
 |---|---|---|
@@ -180,7 +180,7 @@ A `stage_failed` with `mechanism=timeout` → add `timeout_s`. The same code wit
 
 ## What SpecRefiner does with the diagnosis
 
-SpecRefiner receives three inputs: the current YAML, the list of failure signatures, and the IHR breakdown. It's a medium-tier LLM call — not frontier. Research (arXiv:2605.30621v1) found that medium-tier models achieve equivalent spec-evolution quality to frontier models with at most 3.1 percentage points difference at substantially lower cost. The optimizer uses a cheaper model to make itself better.
+SpecRefiner receives three inputs: the current YAML, the list of failure signatures, and the IHR breakdown. It's a medium-tier LLM call — not frontier. Research ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) found that medium-tier models achieve equivalent spec-evolution quality to frontier models with at most 3.1 percentage points difference at substantially lower cost. The optimizer uses a cheaper model to make itself better.
 
 The refiner's instructions are specific:
 
@@ -205,7 +205,7 @@ self_improvement:
     # schemas and model_tiers are not listed → locked
 ```
 
-The default surfaces are `[descriptions, retry_counts, timeouts]`. Locked surfaces are named in the refiner's system prompt so it cannot accidentally modify them. This is adapted from Self-Harness (arXiv:2606.09498v1), which introduces declared editable sets to bound automated harness evolution.
+The default surfaces are `[descriptions, retry_counts, timeouts]`. Locked surfaces are named in the refiner's system prompt so it cannot accidentally modify them. This is adapted from Self-Harness ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1), which introduces declared editable sets to bound automated harness evolution.
 
 ### Proposal diversity and regression safety
 
@@ -218,7 +218,7 @@ print(f"Proposals generated: {report.n_proposals_generated}")
 print(f"Regression-risk filtered: {report.regression_risk_count}")
 ```
 
-The candidate whose `predicted_fixes` most overlap the active diagnostic codes is selected. Before selection, **regression gating** filters out candidates that modify stages with no current diagnostics (healthy stages). If all candidates are risky, the best of the risky set is used — the loop never returns no-proposal due to overly cautious gating. Both counts are written to the JSONL audit log for traceability. Adapted from arXiv:2606.09498v1.
+The candidate whose `predicted_fixes` most overlap the active diagnostic codes is selected. Before selection, **regression gating** filters out candidates that modify stages with no current diagnostics (healthy stages). If all candidates are risky, the best of the risky set is used — the loop never returns no-proposal due to overly cautious gating. Both counts are written to the JSONL audit log for traceability. Adapted from [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1.
 
 ### The governance split
 

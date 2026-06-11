@@ -178,4 +178,4 @@ The harness is more important than the model. That turned out to be true.
 
 ---
 
-*Armature is open source. The documentation is at the project root. The fastest way to understand it is to read `BUILD_FIRST_WORKFLOW.md` and run the examples. If you've built deliberative agentic systems and care about quality measurement, I'd especially like to hear what you think.*
+*Armature is open source. The documentation is at the project root. The fastest way to understand it is to read `docs/BUILD_FIRST_WORKFLOW.md` and run the examples. If you've built deliberative agentic systems and care about quality measurement, I'd especially like to hear what you think.*

@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT"
 
-pandoc USER-GUIDE.md \
+pandoc docs/USER-GUIDE.md \
   --standalone \
   --toc \
   --toc-depth=2 \
@@ -69,7 +69,7 @@ PY
 
 echo "USER-GUIDE.html regenerated ($(wc -c < USER-GUIDE.html | tr -d ' ') bytes)"
 
-pandoc BUILD_FIRST_WORKFLOW.md \
+pandoc docs/BUILD_FIRST_WORKFLOW.md \
   --standalone \
   --toc \
   --toc-depth=2 \

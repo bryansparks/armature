@@ -2276,7 +2276,7 @@ Armature includes a closed-loop self-improvement system that analyzes workflow t
 The `armature improve` command runs one analysis cycle:
 
 1. **Load traces** for the workflow from the trace database (default: `~/.armature/traces.db`)
-2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces (arXiv:2605.30621v1):
+2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1):
    - IHR = `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score + 0.10 × hfr`
    - **HFR** (Harness-Following Rate) = fraction of traces where `escalation_count == 0`; models that consistently need to escalate to a stronger tier are not truly following harness instructions
 3. **Run DiagnosticAnalyzer** to identify failure signatures — which stages are failing and how:
@@ -2285,11 +2285,11 @@ The `armature improve` command runs one analysis cycle:
    - `low_confidence` — the stage's quorum score was consistently low
    - `high_escalation` — the stage frequently escalated to a larger model tier
    - `postcondition_failed` — a tool postcondition check failed after execution
-   - `low_skill_activation` — the stage declared tools in `role.tools` but the model never invoked any (low Skill-Load Rate per arXiv:2605.30621v1)
+   - `low_skill_activation` — the stage declared tools in `role.tools` but the model never invoked any (low Skill-Load Rate per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1)
 
-   Each diagnostic carries a **causal 3-tuple** `(terminal_cause, causal_status, mechanism)` — inspired by Self-Harness (arXiv:2606.09498v1) — distinguishing *what* broke (execution error, schema validation, low confidence) from *whose fault it is* (spec problem, model problem, or tool problem) and *how* (timeout, underpowered model, missing instruction). This attribution lets the refiner propose structurally different fixes rather than generic prompt rewrites.
+   Each diagnostic carries a **causal 3-tuple** `(terminal_cause, causal_status, mechanism)` — inspired by Self-Harness ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1) — distinguishing *what* broke (execution error, schema validation, low confidence) from *whose fault it is* (spec problem, model problem, or tool problem) and *how* (timeout, underpowered model, missing instruction). This attribution lets the refiner propose structurally different fixes rather than generic prompt rewrites.
 4. **Verify previous cycle's predictions** — compare the current diagnostic state against what the prior cycle predicted would be fixed
-5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per arXiv:2605.30621v1) with the current spec + diagnostics + quality metrics. Three additional mechanisms (from arXiv:2606.09498v1) govern this step:
+5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) with the current spec + diagnostics + quality metrics. Three additional mechanisms (from [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1) govern this step:
    - **Editable surfaces**: the refiner is restricted to spec fields declared in `self_improvement.editable_surfaces`; everything else is locked against modification.
    - **K-proposal diversity**: `n_proposals` parallel candidates are generated with rotating diversity hints (minimize changes, fix output format, adjust model tier, tighten schema); the candidate whose `predicted_fixes` best covers the active diagnostic codes is selected.
    - **Regression gating**: proposals that modify stages with no current diagnostics (healthy stages) are filtered as regression risks; if all candidates are risky, the best of the risky set is used as a fallback.
@@ -2415,7 +2415,7 @@ The default is `[descriptions, retry_counts, timeouts]`. `schemas` and `model_ti
 
 Locking a surface does not prevent the refiner from *diagnosing* problems there — it only prevents the refiner from *changing* it. A `high_escalation` diagnostic can still fire on a stage whose `model_tier` is locked; the refiner will address other surfaces instead.
 
-This design is adapted from the Self-Harness framework (arXiv:2606.09498v1), which introduces declared editable sets to bound the harness's ability to make changes.
+This design is adapted from the Self-Harness framework ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1), which introduces declared editable sets to bound the harness's ability to make changes.
 
 ### Drift score
 
@@ -4002,6 +4002,6 @@ See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry
 
 *Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
 
-*Academic influences: arXiv:2605.30621v1 (IHR metric, Skill-Load Rate, spec refinement without frontier models); arXiv:2606.09498v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
+*Academic influences: [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 (IHR metric, Skill-Load Rate, spec refinement without frontier models); [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
 
 *For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*

@@ -68,4 +68,4 @@ docs/               Architecture, integration, and user guides
 
 ## Spec format questions
 
-See `USER-GUIDE.md` for the full spec reference and `ARCHITECTURE.md` for the design rationale behind each component.
+See `docs/USER-GUIDE.md` for the full spec reference and `docs/ARCHITECTURE.md` for the design rationale behind each component.

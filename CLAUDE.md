@@ -13,8 +13,8 @@ stages, calls LLMs, and handles retries and fan-out automatically.
 3. Validate: `armature validate my_workflow.yml`
 4. Run: `armature run my_workflow.yml --input key=value`
 
-**Working reference:** `ARMATURE-SPEC-REF.md` — all fields and valid values on one page. Load this as context when generating a spec.
-**Full documentation:** `USER-GUIDE.md` — consult for advanced features (fan-out, memory, safety rules, lifecycle hooks, deliberative teams).
+**Working reference:** `docs/ARMATURE-SPEC-REF.md` — all fields and valid values on one page. Load this as context when generating a spec.
+**Full documentation:** `docs/USER-GUIDE.md` — consult for advanced features (fan-out, memory, safety rules, lifecycle hooks, deliberative teams).
 
 ---
 

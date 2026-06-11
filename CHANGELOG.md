@@ -8,7 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Self-Harness-inspired (arXiv:2606.09498v1)
+### Self-Harness-inspired ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1)
 
 - **Causal 3-tuple failure attribution** — `DiagnosticResult` now carries a `causal_attribution: CausalAttribution` field with three orthogonal dimensions: `terminal_cause` (execution_error / schema_validation / low_confidence / postcondition / prompt_weak), `causal_status` (spec_problem / model_problem / tool_problem), and `mechanism` (timeout / runtime_error / schema_too_strict / model_underpowered / judge_uncertain / tier_insufficient / tool_violation / prompt_missing_instruction). The refiner can target fixes at the mechanism rather than guessing from the surface symptom.
 - **Declared editable surfaces** — new `self_improvement:` top-level spec field with `editable_surfaces` list. The five surfaces are `descriptions`, `schemas`, `model_tiers`, `retry_counts`, `timeouts`; defaults are `[descriptions, retry_counts, timeouts]`. `SpecRefiner` system prompt is dynamically generated to restrict the model to the declared surfaces and explicitly name locked ones.
@@ -23,14 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.2.0] — 2026-06-07
 
-### ActiveGraph-inspired (arXiv:2605.21997)
+### ActiveGraph-inspired ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
 
 - **LLM response caching** — `LLMCache` stores responses by SHA-256 content hash (model + messages + kwargs); `--no-cache` flag on `armature run` bypasses the cache for a clean run. Subsequent runs with identical prompts are instant and free.
 - **`armature replay <run_id>`** — reads TraceStore records and renders a stage-by-stage execution table (stage id, role, model, latency, success, quorum score, IHR contribution) with a per-run IHR summary. Enables post-mortem debugging of any historical run without re-executing.
 - **`BehaviorRule` / `BehaviorRegistry`** — trace-triggered reactive hooks. Registered rules receive the recent trace list and fire a handler when their pattern matches. Built-in `ihr_feedback` behavior: after runs where rolling IHR drops below 0.75, the engine prints a Rich-formatted hint suggesting `armature improve`.
 - **`--auto-improve` flag on `armature run`** — after execution, if IHR < 0.75, automatically calls `SelfImproveRunner.analyze()`. Safe changes are applied in-place to the spec; structural proposals that require review go to `{spec}.pending.yaml`.
 
-### KYA-inspired (arXiv:2605.25376, Veldt Labs)
+### KYA-inspired ([arXiv:2605.25376](https://arxiv.org/abs/2605.25376), Veldt Labs)
 
 - **Static spec risk score** — `compute_spec_risk(spec)` scores a HarnessSpec on five weighted factors (tool-call stages, no-judge penalty, require_approval rules, fan-out stages, strict mode credit); returns a `SpecRiskResult` with `score` (0–100), `tier` (LOW / MEDIUM / HIGH / CRITICAL), and `factors` list. Displayed automatically by `armature validate`.
 - **Rogue signal counter** — `RogueSignalCounter` dataclass wired into `SafetyHookBuilder.register()`; incremented on every `ToolBlocked` event at runtime. Count appears in the `run_summary` event and in the CLI run output as `"N blocked"`.
@@ -61,9 +61,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`triggers:` spec block** — `CronTrigger` and `WebhookTrigger` models added to `HarnessSpec` with full Pydantic validation. Model and validation layer only; firing is handled by `armature watch`.
 - **`armature watch <spec>`** — daemon command that blocks until Ctrl-C. `TriggerDispatcher` runs a `_cron_loop` (powered by `croniter`) for scheduled triggers and a Starlette-backed `_webhook_server` for HTTP triggers; both fire `Harness.run()` on each event. `croniter>=2.0` added as a core dependency.
 
-### Research-backed improvements (arXiv:2605.30621v1)
+### Research-backed improvements ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1)
 
-- **Cheap-evolver for `SelfImproveRunner`** — spec refinement now explicitly uses a medium-tier model (not the frontier). arXiv:2605.30621v1 shows ≤3.1pp quality difference between frontier and medium-tier evolvers; the cost savings are substantial. `SpecRefiner`'s docstring updated to reflect this intentional design choice.
+- **Cheap-evolver for `SelfImproveRunner`** — spec refinement now explicitly uses a medium-tier model (not the frontier). [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 shows ≤3.1pp quality difference between frontier and medium-tier evolvers; the cost savings are substantial. `SpecRefiner`'s docstring updated to reflect this intentional design choice.
 - **Harness-Following Rate (HFR)** added as a fifth IHR component (10% weight). HFR = fraction of trajectories where the model adheres to harness instructions on the first attempt (`escalation_count == 0`). IHR formula updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr). Both `TraceStore.compute_ihr` and `SelfImproveRunner._compute_ihr` updated.
 - **Skill-Load Rate (SLR) diagnostic** — new `low_skill_activation` `DiagnosticCode` fires when a stage declares tools in `role.tools` but the model never invokes any. `TraceRecord` gains `tools_declared` and `tools_called` fields; `LLMNode` collects called tool names during the ReAct loop and passes them to the engine for trace recording. `SpecRefiner` system prompt updated to advise strengthening role descriptions when `low_skill_activation` is detected.
 

@@ -241,31 +241,31 @@ Armature is built from nine academic papers, one industry governance framework, 
 
 ### The papers
 
-**[NLAH] Natural-Language Agent Harnesses** — Tsinghua University, March 2026 (arXiv:2603.25723)
+**[NLAH] Natural-Language Agent Harnesses** — Tsinghua University, March 2026 ([arXiv:2603.25723](https://arxiv.org/abs/2603.25723))
 
 Establishes the architectural model. NLAH defines seven mandatory harness components (Contracts, Roles, Stages, Adapters, State, Failure Taxonomy, File-backed State) and shows that workflows defined in structured natural language outperform code-based equivalents on complex benchmark tasks (47.2% vs. 30.4% on OSWorld). It also defines IHR (Implicit Harness Rating), a composite quality metric for scoring run quality objectively, and specifies parallel fan-out as a core orchestration primitive.
 
-**[Meta-Harness] Automated Optimization End-to-End** — Stanford University, March 2026 (arXiv:2603.28052)
+**[Meta-Harness] Automated Optimization End-to-End** — Stanford University, March 2026 ([arXiv:2603.28052](https://arxiv.org/abs/2603.28052))
 
 The paper behind the optimizer. Meta-Harness introduces an outer optimization loop where a frontier model reads execution traces and proposes improvements to the harness spec itself. Key finding: giving the optimizer access to the *history* of prior proposals — what was tried, whether it was accepted, and what score it achieved — improves accuracy from 41% to 57% by enabling causal reasoning. Implemented in `ProposalStore` and `run_loop()`.
 
-**[AutoHarness] LLM-Synthesized Harnesses** — February 2026 (arXiv:2603.03329)
+**[AutoHarness] LLM-Synthesized Harnesses** — February 2026 ([arXiv:2603.03329](https://arxiv.org/abs/2603.03329))
 
 Demonstrates that LLMs can iteratively write their own harness code and produce systems that outperform larger models without harnesses. The concept most directly applied: the **harness-as-verifier**, where the harness validates outputs meet domain-specific legality constraints before accepting them — the ancestor of the `judge` role type and `SpecDrafter`.
 
-**[AgentSpec] Runtime Enforcement for Safe Agents** — March 2025 (arXiv:2503.18666)
+**[AgentSpec] Runtime Enforcement for Safe Agents** — March 2025 ([arXiv:2503.18666](https://arxiv.org/abs/2503.18666))
 
 Introduces a declarative rule language for constraining agent behavior at runtime. Rules are composable, lightweight (sub-millisecond evaluation), and LLM-generatable. Armature implements the full enforcement architecture: pre/post-tool hooks wired into the engine and a declarative condition DSL (`ToolSafetyRule` + `SafetyCondition`) written directly in YAML.
 
-**[Continual Harness] Reset-Free Self-Improvement** — May 2026 (arXiv:2605.09998)
+**[Continual Harness] Reset-Free Self-Improvement** — May 2026 ([arXiv:2605.09998](https://arxiv.org/abs/2605.09998))
 
 Formalizes the two-loop self-improvement design: an inner loop (a `post_run` refiner stage that sees the full transcript after the DAG completes) and an outer loop (`SelfImproveRunner` — load traces → diagnose → propose YAML revision → auto-apply). Introduces the 4-code failure taxonomy (`stage_failed`, `output_invalid`, `low_confidence`, `high_escalation`) and the fine-tuning bridge: high-quality judge traces exported as SFT/DPO training data.
 
-**[AHE] Agentic Harness Engineering** — April 2026 (arXiv:2604.25850)
+**[AHE] Agentic Harness Engineering** — April 2026 ([arXiv:2604.25850](https://arxiv.org/abs/2604.25850))
 
 The accountability paper. AHE introduces the prediction-verification loop: every proposed spec revision carries a falsifiable contract (`predicted_fixes`, `predicted_regressions`), and the next cycle verifies those predictions against observed diagnostic shift. Implements component-level improvement targeting — long-term memory evolution alone yielded +5.6pp; system prompt evolution *alone* caused -2.3pp regression, validating the "one component at a time" discipline.
 
-**[System Scaling] From Model Scaling to System Scaling** — May 2026 (arXiv:2605.26112)
+**[System Scaling] From Model Scaling to System Scaling** — May 2026 ([arXiv:2605.26112](https://arxiv.org/abs/2605.26112))
 
 Identifies three system-level failure modes: stale memory reaching LLMs without warning, context values flowing between stages without provenance, and tool side effects going unverified. Adds drift score (regression detection across improvement cycles) and component governance (auto-apply vs. human-review classification for spec changes).
 
@@ -273,11 +273,11 @@ Identifies three system-level failure modes: stale memory reaching LLMs without 
 
 Five governance primitives borrowed directly: reversibility classification for every tool call (`FULL / PARTIAL / NONE`), tamper-evident SHA-256 hashing of trace inputs and the governing policy, a `require_approval` gate wired into the tool-call path, and `safety_mode: strict` (fail-closed — deny on no-match).
 
-**[ActiveGraph]** — yoheinakajima, May 2026 (arXiv:2605.21997)
+**[ActiveGraph]** — yoheinakajima, May 2026 ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
 
 Graph-memory agent architecture introducing content-addressed caching of LLM responses and event-triggered reactive behaviors. Adopted concepts: SHA-256 cache keying by model + messages + kwargs (`LLMCache`), audit replay from the trace store (`armature replay`), and the `BehaviorRule`/`BehaviorRegistry` hook layer for pattern-triggered post-run behaviors.
 
-**[KYA] Know Your Agents** — Veldt Labs, May 2026 (arXiv:2605.25376)
+**[KYA] Know Your Agents** — Veldt Labs, May 2026 ([arXiv:2605.25376](https://arxiv.org/abs/2605.25376))
 
 Governance layer operating at definition-time (static risk scoring), runtime-trust (anomaly counting), and composition (only-tighten). Adopted: five-factor static spec risk score surfaced by `armature validate`, `RogueSignalCounter` wired into safety hooks and the run summary, and `CONFLICTING_SAFETY_RULES` validation enforcing the only-tighten composition principle.
 
@@ -292,7 +292,7 @@ Governance layer operating at definition-time (static risk scoring), runtime-tru
 | AutoHarness | Harness-as-verifier, NL-to-spec synthesis (`SpecDrafter`), `AutoHarness` loop | ✅ |
 | AgentSpec | Pre/post-tool hooks, declarative safety DSL (6 operators, 5 actions) | ✅ |
 | Continual Harness | 4-code failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
-| Harness Benefit (arXiv:2605.30621v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th IHR component, SLR `low_skill_activation` diagnostic | ✅ |
+| Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th IHR component, SLR `low_skill_activation` diagnostic | ✅ |
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
@@ -387,7 +387,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Response stage** | Mark one text-mode LLM stage as `response_stage: true` to enable token streaming; the HTTP service forwards each token to the SSE stream immediately and fires a `response_stage_complete` event so clients can render the answer before background stages finish |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
-| **IHR** | Implicit Harness Rating — 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, per arXiv:2605.30621v1 |
+| **IHR** | Implicit Harness Rating — 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
@@ -436,14 +436,61 @@ armature/
 └── cli.py          # CLI entry point
 
 examples/           # Annotated workflow YAML specs (copy and modify)
-docs/
-├── INTEGRATION.md          # LangGraph sidecar pattern, HTTP endpoint reference
-└── use-case-ad-campaign.md # Reference: social ad campaign automation
+docs/               # Full documentation (see index below)
 ```
+
+## Documentation
+
+### Getting started
 
 | Document | Purpose |
 |---|---|
-| [USER-GUIDE.md](USER-GUIDE.md) | Full spec reference — every field, every option, worked examples |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Design rationale, research foundation, implementation table |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to run tests, PR conventions, adding tools and commands |
-| [BUILD_FIRST_WORKFLOW.md](BUILD_FIRST_WORKFLOW.md) | Hands-on tutorial — build a working workflow from scratch |
+| [BUILD_FIRST_WORKFLOW](docs/BUILD_FIRST_WORKFLOW.md) | Hands-on tutorial — build a working workflow from scratch |
+| [USER-GUIDE](docs/USER-GUIDE.md) | Full spec reference — every field, every option, worked examples |
+| [ARMATURE-SPEC-REF](docs/ARMATURE-SPEC-REF.md) | All spec fields and valid values on one page |
+| [FAQ](docs/FAQ.md) | Common questions — positioning, capabilities, comparisons |
+
+### Design & philosophy
+
+| Document | Purpose |
+|---|---|
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Design rationale, research foundation, implementation table |
+| [ARMATURE-PHILOSOPHY](docs/ARMATURE-PHILOSOPHY.md) | Why a harness — philosophy, research papers, architecture deep-dive |
+| [DECLARATIVE-CONTROL-FLOW](docs/DECLARATIVE-CONTROL-FLOW.md) | YAML-first control flow — branching, loops, conditions |
+| [DAG-vs-LANGGRAPH](docs/DAG-vs-LANGGRAPH.md) | How Armature's DAG model compares to LangGraph |
+| [MISSION-AS-CONTEXT](docs/MISSION-AS-CONTEXT.md) | Mission statements as persistent agent context |
+| [ROLE-TAXONOMY](docs/ROLE-TAXONOMY.md) | Agent role definitions and the role system |
+| [MODEL-TIERS](docs/MODEL-TIERS.md) | Routing work across SLM workers and frontier orchestrators |
+
+### Patterns & features
+
+| Document | Purpose |
+|---|---|
+| [JUDGE-PATTERN](docs/JUDGE-PATTERN.md) | Output validation with judge agents |
+| [QUORUM-SCORING](docs/QUORUM-SCORING.md) | Deliberative quality scoring across agents |
+| [FAN-IN_FAN-OUT](docs/FAN-IN_FAN-OUT.md) | Parallel fan-out and aggregation patterns |
+| [SUBAGENT-COMPOSITION](docs/SUBAGENT-COMPOSITION.md) | Composing workflows from subagent stages |
+| [CONTEXT-ISOLATION](docs/CONTEXT-ISOLATION.md) | Isolating subagent context for focus and safety |
+| [MEMORY-AND-CONTEXT](docs/MEMORY-AND-CONTEXT.md) | Memory persistence and context management |
+| [CHECKPOINT-AND-RESUME](docs/CHECKPOINT-AND-RESUME.md) | Execution state persistence and resumption |
+| [CHATBOT-AND-STREAMING](docs/CHATBOT-AND-STREAMING.md) | Chat applications and streaming responses |
+| [HUMAN-IN-THE-LOOP](docs/HUMAN-IN-THE-LOOP.md) | Approval gates and human decision points |
+| [IHR-AND-SELF-IMPROVEMENT](docs/IHR-AND-SELF-IMPROVEMENT.md) | The IHR formula and self-improvement loop |
+
+### Operations & safety
+
+| Document | Purpose |
+|---|---|
+| [ARMATURE-IN-PRODUCTION](docs/ARMATURE-IN-PRODUCTION.md) | Running Armature in production — patterns and case studies |
+| [SAFETY-AND-GOVERNANCE](docs/SAFETY-AND-GOVERNANCE.md) | Safety rules, governance, and guardrails |
+| [SANDBOX-AND-ISOLATION](docs/SANDBOX-AND-ISOLATION.md) | Sandboxed tool execution (Docker isolation) |
+| [INTEGRATION](docs/INTEGRATION.md) | LangGraph sidecar pattern, HTTP endpoint reference |
+
+### Project
+
+| Document | Purpose |
+|---|---|
+| [CONTRIBUTING](CONTRIBUTING.md) | How to run tests, PR conventions, adding tools and commands |
+| [CHANGELOG](CHANGELOG.md) | Release history |
+| [ROADMAP](ROADMAP.md) | Where Armature is headed |
+| [SECURITY](SECURITY.md) | Reporting vulnerabilities |

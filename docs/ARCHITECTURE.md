@@ -23,16 +23,16 @@ Armature synthesizes nine academic papers published between February and June 20
 
 | Source | Key Contribution |
 |--------|-----------------|
-| **NLAH** — Tsinghua, arXiv:2603.25723 | 7-component NL spec format; IHR metric; 47.2% vs 30.4% on OSWorld vs. code harnesses |
-| **Meta-Harness** — Stanford, arXiv:2603.28052 | Trace-based outer optimization loop; causal reasoning over proposal history |
-| **AutoHarness** — arXiv:2603.03329 | NL-to-spec synthesis; harness-as-verifier (judge role ancestry) |
-| **AgentSpec** — arXiv:2503.18666 | Declarative runtime safety rules; pre/post-tool hook architecture |
-| **Continual Harness** — arXiv:2605.09998 | Reset-free self-improvement; 4-code failure taxonomy; inner + outer loops |
-| **AHE** — arXiv:2604.25850 | Prediction-verification accountability; component-level improvement targeting |
-| **System Scaling** — arXiv:2605.26112 | Staleness, provenance, drift score, postcondition verification, component governance |
-| **KYA** — Veldt Labs, arXiv:2605.25376 | Static spec risk scoring; only-tighten safety composition; rogue signal counting |
-| **ActiveGraph** — arXiv:2605.21997 | LLM response caching by content hash; trace-triggered behavior rules; `--auto-improve` gate |
-| **Self-Harness** — arXiv:2606.09498v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
+| **NLAH** — Tsinghua, [arXiv:2603.25723](https://arxiv.org/abs/2603.25723) | 7-component NL spec format; IHR metric; 47.2% vs 30.4% on OSWorld vs. code harnesses |
+| **Meta-Harness** — Stanford, [arXiv:2603.28052](https://arxiv.org/abs/2603.28052) | Trace-based outer optimization loop; causal reasoning over proposal history |
+| **AutoHarness** — [arXiv:2603.03329](https://arxiv.org/abs/2603.03329) | NL-to-spec synthesis; harness-as-verifier (judge role ancestry) |
+| **AgentSpec** — [arXiv:2503.18666](https://arxiv.org/abs/2503.18666) | Declarative runtime safety rules; pre/post-tool hook architecture |
+| **Continual Harness** — [arXiv:2605.09998](https://arxiv.org/abs/2605.09998) | Reset-free self-improvement; 4-code failure taxonomy; inner + outer loops |
+| **AHE** — [arXiv:2604.25850](https://arxiv.org/abs/2604.25850) | Prediction-verification accountability; component-level improvement targeting |
+| **System Scaling** — [arXiv:2605.26112](https://arxiv.org/abs/2605.26112) | Staleness, provenance, drift score, postcondition verification, component governance |
+| **KYA** — Veldt Labs, [arXiv:2605.25376](https://arxiv.org/abs/2605.25376) | Static spec risk scoring; only-tighten safety composition; rogue signal counting |
+| **ActiveGraph** — [arXiv:2605.21997](https://arxiv.org/abs/2605.21997) | LLM response caching by content hash; trace-triggered behavior rules; `--auto-improve` gate |
+| **Self-Harness** — [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 
 The benchmarked insight from NLAH: when workflows are defined in readable, editable natural language rather than code, both humans and optimizers can reason about them causally. A YAML diff is meaningful; a Python AST diff is opaque.
