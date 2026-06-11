@@ -99,6 +99,14 @@ def _make_refiner_system_prompt(
     return prompt
 
 
+_DIVERSITY_HINTS = [
+    "Focus your proposal on improving role.description clarity and specificity.",
+    "Focus your proposal on adjusting on_fail retry limits and model_tier upgrades.",
+    "Focus your proposal on relaxing or tightening output_schema constraints.",
+    "Focus your proposal on adding timeouts and escalation recovery.",
+]
+
+
 @dataclass
 class RefinerResult:
     """Parsed output from SpecRefiner.refine()."""
@@ -216,6 +224,42 @@ class SpecRefiner:
             predicted_regressions=predicted_regressions,
         )
 
+    async def refine_many(
+        self,
+        spec_yaml: str,
+        diagnostics: list[DiagnosticResult],
+        ihr: "IhrResult | None",
+        refiner_suggestions: str | None = None,
+        editable_surfaces: list[str] | None = None,
+        n_proposals: int = 3,
+    ) -> list[RefinerResult]:
+        """Generate n_proposals candidate revisions in parallel, returning only valid ones."""
+        import asyncio
+        tasks = [
+            self.refine(
+                spec_yaml=spec_yaml,
+                diagnostics=diagnostics,
+                ihr=ihr,
+                refiner_suggestions=refiner_suggestions,
+                editable_surfaces=editable_surfaces,
+                diversity_hint=_DIVERSITY_HINTS[i % len(_DIVERSITY_HINTS)],
+            )
+            for i in range(n_proposals)
+        ]
+        results = await asyncio.gather(*tasks)
+        return [r for r in results if r is not None]
+
+
+def _pick_best_proposal(
+    candidates: list[RefinerResult],
+    diagnostics: list[DiagnosticResult],
+) -> "RefinerResult | None":
+    """Select the candidate with the most predicted_fixes covering current diagnostics."""
+    if not candidates:
+        return None
+    diag_keys = {f"{d.code.value}:{d.stage_id}" for d in diagnostics}
+    return max(candidates, key=lambda r: len(set(r.predicted_fixes) & diag_keys))
+
 
 # ── Data structures ───────────────────────────────────────────────────────────
 
@@ -242,6 +286,9 @@ class ImprovementReport:
     # Governance fields — set when proposed change requires human review
     requires_review: bool = False
     pending_path: Path | None = None
+    # K-proposal fields
+    n_proposals_generated: int = 0
+    regression_risk_count: int = 0
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -342,6 +389,7 @@ class SelfImproveRunner:
         min_traces: int = 3,
         auto_apply: bool = True,
         log_path: Path | str | None = None,
+        n_proposals: int = 1,
     ) -> None:
         self._spec_path = Path(spec_path)
         if trace_db:
@@ -357,6 +405,7 @@ class SelfImproveRunner:
         else:
             stem = self._spec_path.stem
             self._log_path = self._spec_path.parent / f"{stem}.improve_log.jsonl"
+        self._n_proposals = n_proposals
 
     async def analyze(self) -> ImprovementReport:
         # Load previous cycle's predictions for verification
@@ -378,6 +427,8 @@ class SelfImproveRunner:
         proposed_yaml: str | None = None
         predicted_fixes: list[str] = []
         predicted_regressions: list[str] = []
+        n_proposals_generated = 0
+        regression_risk_count = 0
 
         if n > 0:
             ihr_result = self._compute_ihr(traces)
@@ -404,12 +455,28 @@ class SelfImproveRunner:
             refiner = SpecRefiner(self._model)
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
             ihr_obj = self._compute_ihr(traces) if traces else None
-            result = await refiner.refine(
-                spec_yaml=spec_yaml,
-                diagnostics=diagnostics,
-                ihr=ihr_obj,
-                # TODO(Task 3): pass editable_surfaces from spec.self_improvement
-            )
+            editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
+
+            if self._n_proposals > 1:
+                candidates = await refiner.refine_many(
+                    spec_yaml=spec_yaml,
+                    diagnostics=diagnostics,
+                    ihr=ihr_obj,
+                    editable_surfaces=editable_surfaces,
+                    n_proposals=self._n_proposals,
+                )
+                n_proposals_generated = len(candidates)
+                result = _pick_best_proposal(candidates, diagnostics)
+            else:
+                result = await refiner.refine(
+                    spec_yaml=spec_yaml,
+                    diagnostics=diagnostics,
+                    ihr=ihr_obj,
+                    editable_surfaces=editable_surfaces,
+                )
+                n_proposals_generated = 1 if result is not None else 0
+                regression_risk_count = 0
+
             if result is not None:
                 proposed_spec = result.spec
                 proposed_yaml = result.yaml_text
@@ -464,6 +531,8 @@ class SelfImproveRunner:
             drift_score=drift_score,
             requires_review=requires_review,
             pending_path=_pending_path,
+            n_proposals_generated=n_proposals_generated,
+            regression_risk_count=regression_risk_count,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────

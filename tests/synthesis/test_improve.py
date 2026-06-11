@@ -1013,3 +1013,131 @@ async def test_spec_refiner_no_surface_restriction_when_surfaces_is_none():
 
     system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
     assert "DO NOT modify" not in system_content
+
+
+# ── refine_many ───────────────────────────────────────────────────────────────
+
+async def test_refine_many_returns_n_valid_results():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    call_count = 0
+
+    async def mock_llm(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        results = await refiner.refine_many(
+            spec_yaml=_MINIMAL_SPEC_YAML,
+            diagnostics=[],
+            ihr=None,
+            n_proposals=3,
+        )
+
+    assert call_count == 3
+    assert len(results) == 3
+    assert all(isinstance(r, RefinerResult) for r in results)
+
+
+async def test_refine_many_filters_none_results():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    call_count = 0
+
+    async def mock_llm(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return _make_llm_response("not: valid: yaml: [[[")
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        results = await refiner.refine_many(
+            spec_yaml=_MINIMAL_SPEC_YAML,
+            diagnostics=[],
+            ihr=None,
+            n_proposals=3,
+        )
+
+    assert len(results) == 2
+
+
+async def test_refine_many_uses_diversity_hints():
+    refiner = SpecRefiner(model="claude-sonnet-4-6")
+    captured_system_prompts = []
+
+    async def mock_llm(**kwargs):
+        msgs = kwargs.get("messages", [])
+        sys_msg = next((m["content"] for m in msgs if m["role"] == "system"), "")
+        captured_system_prompts.append(sys_msg)
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        await refiner.refine_many(
+            spec_yaml=_MINIMAL_SPEC_YAML,
+            diagnostics=[],
+            ihr=None,
+            n_proposals=3,
+        )
+
+    assert len(set(captured_system_prompts)) > 1
+
+
+# ── _pick_best_proposal ───────────────────────────────────────────────────────
+
+def test_pick_best_proposal_selects_highest_coverage():
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    from unittest.mock import MagicMock
+
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="writer"),
+    ]
+
+    r_low = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    r_high = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=["stage_failed:analyst", "output_invalid:writer"])
+
+    best = _pick_best_proposal([r_low, r_high], diags)
+    assert best is r_high
+
+
+def test_pick_best_proposal_returns_none_for_empty_list():
+    from armature.synthesis.improve import _pick_best_proposal
+    assert _pick_best_proposal([], []) is None
+
+
+def test_pick_best_proposal_returns_single_when_one_candidate():
+    from armature.synthesis.improve import _pick_best_proposal
+    from unittest.mock import MagicMock
+    r = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=[])
+    result = _pick_best_proposal([r], [])
+    assert result is r
+
+
+# ── SelfImproveRunner with n_proposals ───────────────────────────────────────
+
+async def test_runner_generates_k_proposals_when_configured(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=3)
+
+    llm_call_count = 0
+
+    async def mock_llm(**kwargs):
+        nonlocal llm_call_count
+        llm_call_count += 1
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        report = await runner.analyze()
+
+    assert report.n_proposals_generated >= 1
+    assert llm_call_count == 3
