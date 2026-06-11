@@ -29,7 +29,7 @@ from typing import Any
 
 import litellm
 
-from armature.spec.models import HarnessSpec
+from armature.spec.models import HarnessSpec, EditableSurface
 from armature.spec.loader import load_spec
 from armature.spec.validator import validate_spec, SpecValidationError
 from armature.state.diagnostics import DiagnosticAnalyzer, DiagnosticResult
@@ -89,7 +89,7 @@ def _make_refiner_system_prompt(
 ) -> str:
     prompt = _REFINER_BASE
     if editable_surfaces:
-        all_surfaces = {"descriptions", "schemas", "model_tiers", "retry_counts", "timeouts"}
+        all_surfaces = {s.value for s in EditableSurface}
         locked = sorted(all_surfaces - set(editable_surfaces))
         prompt += f"\nEditable surfaces (ONLY these may be changed): {', '.join(sorted(editable_surfaces))}\n"
         if locked:
@@ -408,6 +408,7 @@ class SelfImproveRunner:
                 spec_yaml=spec_yaml,
                 diagnostics=diagnostics,
                 ihr=ihr_obj,
+                # TODO(Task 3): pass editable_surfaces from spec.self_improvement
             )
             if result is not None:
                 proposed_spec = result.spec
