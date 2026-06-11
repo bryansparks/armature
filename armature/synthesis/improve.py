@@ -261,6 +261,32 @@ def _pick_best_proposal(
     return max(candidates, key=lambda r: len(set(r.predicted_fixes) & diag_keys))
 
 
+def _healthy_stage_ids(
+    traces: "list",
+    diagnostics: list[DiagnosticResult],
+) -> set[str]:
+    """Return stage IDs that appear in traces but have NO diagnostics (healthy)."""
+    failing = {d.stage_id for d in diagnostics}
+    all_ids = {t.stage_id for t in traces}
+    return all_ids - failing
+
+
+def _proposal_regression_risk(
+    candidate: RefinerResult,
+    old_spec: "HarnessSpec",
+    healthy_stage_ids: set[str],
+) -> bool:
+    """Return True if the proposal modifies any stage that is currently healthy."""
+    if not healthy_stage_ids:
+        return False
+    auto, review = _classify_changes(old_spec, candidate.spec)
+    changed_stages = {
+        k.split(":")[1] for k in {**auto, **review}
+        if ":" in k
+    }
+    return bool(changed_stages & healthy_stage_ids)
+
+
 # ── Data structures ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -467,7 +493,13 @@ class SelfImproveRunner:
                     n_proposals=self._n_proposals,
                 )
                 n_proposals_generated = len(candidates)
-                result = _pick_best_proposal(candidates, diagnostics)
+                healthy = _healthy_stage_ids(traces, diagnostics)
+                safe_candidates = [
+                    c for c in candidates
+                    if not _proposal_regression_risk(c, spec, healthy)
+                ]
+                regression_risk_count = len(candidates) - len(safe_candidates)
+                result = _pick_best_proposal(safe_candidates or candidates, diagnostics)
             else:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
@@ -476,7 +508,11 @@ class SelfImproveRunner:
                     editable_surfaces=editable_surfaces,
                 )
                 n_proposals_generated = 1 if result is not None else 0
-                regression_risk_count = 0
+                if result is not None:
+                    healthy = _healthy_stage_ids(traces, diagnostics)
+                    regression_risk_count = 1 if _proposal_regression_risk(result, spec, healthy) else 0
+                else:
+                    regression_risk_count = 0
 
             if result is not None:
                 proposed_spec = result.spec

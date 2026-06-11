@@ -1141,3 +1141,210 @@ async def test_runner_generates_k_proposals_when_configured(tmp_path):
 
     assert report.n_proposals_generated == 3
     assert llm_call_count == 3
+
+
+# ── _healthy_stage_ids ────────────────────────────────────────────────────────
+
+def test_healthy_stage_ids_excludes_failing_stages():
+    from armature.synthesis.improve import _healthy_stage_ids
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+
+    diags = [DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst")]
+    traces = [
+        make_trace(stage_id="analyst", success=False),
+        make_trace(stage_id="writer", success=True),
+    ]
+    healthy = _healthy_stage_ids(traces, diags)
+    assert "writer" in healthy
+    assert "analyst" not in healthy
+
+
+def test_healthy_stage_ids_empty_when_all_failing():
+    from armature.synthesis.improve import _healthy_stage_ids
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="a"),
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="b"),
+    ]
+    traces = [make_trace(stage_id="a"), make_trace(stage_id="b")]
+    healthy = _healthy_stage_ids(traces, diags)
+    assert healthy == set()
+
+
+# ── _proposal_regression_risk ─────────────────────────────────────────────────
+
+async def test_proposal_regression_risk_false_when_only_failing_stages_touched(tmp_path):
+    from armature.synthesis.improve import _proposal_regression_risk
+    from armature.spec.loader import load_spec
+
+    old_yaml = _MINIMAL_SPEC_YAML
+    new_yaml = _REVISED_SPEC_YAML
+
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+
+    candidate = RefinerResult(spec=new_spec, yaml_text=new_yaml, predicted_fixes=[])
+    risk = _proposal_regression_risk(candidate, old_spec, healthy_stage_ids=set())
+    assert risk is False
+
+
+async def test_proposal_regression_risk_true_when_healthy_stage_touched(tmp_path):
+    from armature.synthesis.improve import _proposal_regression_risk
+    from armature.spec.loader import load_spec
+
+    _TWO_STAGE_OLD = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze topic.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write findings.
+"""
+    _TWO_STAGE_NEW = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze topic.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write findings in a new way.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(_TWO_STAGE_OLD)
+    new_file.write_text(_TWO_STAGE_NEW)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+
+    candidate = RefinerResult(spec=new_spec, yaml_text=_TWO_STAGE_NEW, predicted_fixes=[])
+    risk = _proposal_regression_risk(candidate, old_spec, healthy_stage_ids={"writer"})
+    assert risk is True
+
+
+# ── gating in SelfImproveRunner ───────────────────────────────────────────────
+
+async def test_runner_filters_regression_risk_proposals(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    _TWO_STAGE = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic and produce findings.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary.
+"""
+    spec_file.write_text(_TWO_STAGE)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r2", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r3", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r4", stage_id="writer", success=True, output_valid=True),
+    ])
+
+    _SAFE_PROPOSAL = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic in depth with explicit confidence scoring.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary.
+"""
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=1)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_SAFE_PROPOSAL)
+        report = await runner.analyze()
+
+    assert report.regression_risk_count == 0
+    assert report.proposed_spec is not None
+
+
+async def test_runner_records_regression_risk_count(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    _TWO_STAGE = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic and produce findings.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary.
+"""
+    spec_file.write_text(_TWO_STAGE)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r2", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r3", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r4", stage_id="writer", success=True, output_valid=True),
+    ])
+
+    _RISKY_PROPOSAL = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic and produce findings.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary with extended detail.
+"""
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=1)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_RISKY_PROPOSAL)
+        report = await runner.analyze()
+
+    assert report.regression_risk_count == 1
