@@ -3,7 +3,7 @@
 **Audience:** Engineering leadership  
 **Date:** 2026-05-26  
 **Author:** Bryan Sparks  
-**Status:** Active development — All phases complete (1,238 tests passing)
+**Status:** Active development — All phases complete (1,388 tests passing)
 
 ---
 
@@ -27,7 +27,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes eight academic papers published between February and May 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes nine academic papers published between February and June 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
 
 ### Paper 1: Natural-Language Agent Harnesses (NLAH)
 **Tsinghua University, March 2026** — arXiv:2603.25723
@@ -152,6 +152,30 @@ Finally, the paper addresses governance: not all spec changes should be auto-app
 - `ToolDescriptor.postcondition` — optional `Callable[[dict, Any], bool]`; called after every tool dispatch; `PostconditionFailed` exception raised on `False`; caught by the engine and recorded as `error_type="PostconditionFailed"`; `POSTCONDITION_FAILED` added to `DiagnosticCode`
 - `fan_in: "consensus"` — new fan-in strategy for subagent stages; parallel results are forwarded to `_consensus_judge()`, an async litellm call that synthesizes conflicting outputs into a single best answer
 - `_classify_changes(old_spec, new_spec)` — classifies every proposed spec change as auto-apply (descriptions, timeouts, retry limits) or review-required (stage additions/removals, `output_schema` changes, `safety_rules` modifications); review-required changes are written to `{spec}.pending.yaml` instead of overwriting the live spec; `ImprovementReport.requires_review` and `pending_path` fields surface this to callers
+
+### Paper 9: Self-Harness — Safer and Smarter Spec Evolution
+**June 2026** — arXiv:2606.09498v1
+
+The paper that made the improvement loop safer and smarter. Where the prior papers established *that* the harness should improve and *when* it should trigger, Self-Harness addresses *how* to make proposals that are more targeted, more diverse, and less likely to break things that are already working.
+
+Self-Harness introduces a 3-stage loop: Weakness Mining (characterize failures in depth), Harness Proposal (generate candidates), and Proposal Validation (gate on held-in/held-out split). Armature adopted four mechanisms from this paper:
+
+**1. Causal 3-tuple failure attribution.** Rather than a flat failure code, each diagnostic carries a triple `φ(r) = (terminal_cause, causal_status, mechanism)`. Terminal cause is *what* broke. Causal status is *whose fault* it is — spec problem, model problem, or tool problem. Mechanism is *how*: timeout, underpowered model, schema too strict, missing instruction. The flat code `stage_failed` is the same for a timeout and a runtime error; the triple tells the refiner they need completely different fixes.
+
+**2. Declared editable surfaces.** The spec declares which surfaces the refiner may touch via `self_improvement.editable_surfaces`. Surfaces not listed are named in the refiner's system prompt as explicitly locked. This bounds the refiner's search space and prevents it from hallucinating structural changes (adding stages, modifying safety rules) in response to symptoms that don't require them.
+
+**3. K-proposal diversity with best-coverage selection.** Instead of generating one proposal, the runner generates K candidates in parallel, each steered by a different diversity hint (minimize changes / fix output format / adjust model tier / tighten schema). The candidate whose `predicted_fixes` most overlap the active diagnostic codes is selected. Ensemble generation consistently finds proposals that address more failure modes than single-shot refinement.
+
+**4. Held-out trace-split regression gating.** Self-Harness tests proposed harnesses on a held-out benchmark split. Armature adapts this to the trace-based setting: stages with no current diagnostics are treated as the held-out set — proposals that modify those healthy stages are flagged as regression risks and filtered before selection. If all candidates are risky, the best of the risky set is used as a fallback.
+
+**Armature contributions from this paper:**
+- `CausalAttribution` model (`terminal_cause`, `causal_status`, `mechanism`) added to `DiagnosticResult`; all six diagnostic codes now emit a typed 3-tuple
+- `EditableSurface` enum + `SelfImprovementConfig` + `HarnessSpec.self_improvement` field — declarative surface locking at the spec level
+- `_make_refiner_system_prompt(editable_surfaces, diversity_hint)` — dynamic prompt construction; names locked surfaces explicitly
+- `SpecRefiner.refine_many(n_proposals, ...)` — parallel candidate generation via `asyncio.gather` with rotating diversity hints
+- `_pick_best_proposal(candidates, diagnostics)` — selects the candidate whose `predicted_fixes` most overlap active diagnostic codes
+- `_healthy_stage_ids(traces, diagnostics)` + `_proposal_regression_risk(candidate, old_spec, healthy_stage_ids)` — regression gating before selection
+- `ImprovementReport.n_proposals_generated` + `regression_risk_count` — audit fields written to `ImprovementReport` and JSONL log
 
 ---
 
@@ -388,7 +412,7 @@ This is the strategic differentiator. Each loop makes the others more effective.
 
 ## Current Implementation State
 
-All planned phases are complete. 1,198 tests, passing.
+All planned phases are complete. 1,388 tests, passing.
 
 ### What's Built
 
@@ -664,6 +688,11 @@ The pipeline: frontier Opus runs as judge → high-quality traces accumulate →
 | Static spec risk score | `compute_spec_risk()`; 5 factors; LOW/MEDIUM/HIGH/CRITICAL; surfaced by `armature validate` | ✅ |
 | Rogue signal counter | `RogueSignalCounter`; incremented on every `ToolBlocked`; in `run_summary` | ✅ |
 | Only-tighten safety rule validation | `CONFLICTING_SAFETY_RULES` error code in `validate_spec()` | ✅ |
+| **Paper 9 — Self-Harness (arXiv:2606.09498v1)** | | |
+| Causal 3-tuple failure attribution | `CausalAttribution` (terminal_cause / causal_status / mechanism) on every `DiagnosticResult` | ✅ |
+| Declared editable surfaces | `HarnessSpec.self_improvement.editable_surfaces`; dynamic refiner prompt names locked surfaces | ✅ |
+| K-proposal diversity + best-coverage selection | `SpecRefiner.refine_many()`; rotating diversity hints; `_pick_best_proposal()` | ✅ |
+| Held-out trace-split regression gating | `_healthy_stage_ids()`; `_proposal_regression_risk()`; `regression_risk_count` on `ImprovementReport` | ✅ |
 
 **All research and industry-framework gaps are closed.** KYA closes the final gap: definition-layer risk scoring and safety rule composition governance that operates before a workflow ever executes.
 
