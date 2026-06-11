@@ -2286,8 +2286,13 @@ The `armature improve` command runs one analysis cycle:
    - `high_escalation` — the stage frequently escalated to a larger model tier
    - `postcondition_failed` — a tool postcondition check failed after execution
    - `low_skill_activation` — the stage declared tools in `role.tools` but the model never invoked any (low Skill-Load Rate per arXiv:2605.30621v1)
+
+   Each diagnostic carries a **causal 3-tuple** `(terminal_cause, causal_status, mechanism)` — inspired by Self-Harness (arXiv:2606.09498v1) — distinguishing *what* broke (execution error, schema validation, low confidence) from *whose fault it is* (spec problem, model problem, or tool problem) and *how* (timeout, underpowered model, missing instruction). This attribution lets the refiner propose structurally different fixes rather than generic prompt rewrites.
 4. **Verify previous cycle's predictions** — compare the current diagnostic state against what the prior cycle predicted would be fixed
-5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per arXiv:2605.30621v1) with the current spec + diagnostics + quality metrics
+5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per arXiv:2605.30621v1) with the current spec + diagnostics + quality metrics. Three additional mechanisms (from arXiv:2606.09498v1) govern this step:
+   - **Editable surfaces**: the refiner is restricted to spec fields declared in `self_improvement.editable_surfaces`; everything else is locked against modification.
+   - **K-proposal diversity**: `n_proposals` parallel candidates are generated with rotating diversity hints (minimize changes, fix output format, adjust model tier, tighten schema); the candidate whose `predicted_fixes` best covers the active diagnostic codes is selected.
+   - **Regression gating**: proposals that modify stages with no current diagnostics (healthy stages) are filtered as regression risks; if all candidates are risky, the best of the risky set is used as a fallback.
 6. **Apply the revised spec** (unless `--no-apply`)
 7. **Write an audit log entry** (JSONL) with all metrics, diagnostics, predictions, and verification results
 
@@ -2330,6 +2335,8 @@ The improvement log is written to `<spec_stem>.improve_log.jsonl` by default. Ea
   "ihr_before": 0.71,
   "needs_improvement": true,
   "applied": true,
+  "n_proposals_generated": 3,
+  "regression_risk_count": 1,
   "diagnostics": [
     {"code": "output_invalid", "stage_id": "brand_judge", "details": "4/10 runs failed schema validation"}
   ],
@@ -2340,6 +2347,8 @@ The improvement log is written to `<spec_stem>.improve_log.jsonl` by default. Ea
   "unexpected_regressions": []
 }
 ```
+
+`n_proposals_generated` is the number of parallel candidates produced before selection. `regression_risk_count` is the number of candidates that were filtered because they touched healthy stages; if this equals `n_proposals_generated`, the refiner consistently proposed changes to non-failing stages and the fallback selection was used.
 
 ### Python API
 
@@ -2353,6 +2362,7 @@ runner = SelfImproveRunner(
     target_ihr=0.90,
     min_traces=10,
     auto_apply=True,
+    n_proposals=3,       # generate 3 diverse candidates, pick best coverage
 )
 
 report = await runner.analyze()
@@ -2360,6 +2370,8 @@ report = await runner.analyze()
 print(f"IHR: {report.ihr_before:.3f}")
 print(f"Needs improvement: {report.needs_improvement}")
 print(f"Applied: {report.applied}")
+print(f"Proposals generated: {report.n_proposals_generated}")
+print(f"Regression-risk filtered: {report.regression_risk_count}")
 print(f"Verified fixes: {report.verified_fixes}")
 print(f"Unexpected regressions: {report.unexpected_regressions}")
 ```
@@ -2376,6 +2388,34 @@ The refiner makes targeted changes only — it does not rewrite stages that are 
 | `stage_failed` | Add `timeout_s` or upgrade `model_tier` |
 
 The refiner is explicitly constrained from adding or removing stages, or changing stage IDs.
+
+### Editable surfaces
+
+You can further restrict what the refiner may touch by declaring `editable_surfaces` in your spec:
+
+```yaml
+self_improvement:
+  editable_surfaces:
+    - descriptions    # role.description on stages
+    - retry_counts    # on_fail.loop.max
+    - timeouts        # stage.timeout_s
+    # schemas        ← not listed → locked; refiner cannot touch output_schema
+    # model_tiers    ← not listed → locked; refiner cannot change tier assignments
+```
+
+| Surface | What it covers |
+|---|---|
+| `descriptions` | `role.description` — prompt text for each stage |
+| `schemas` | `output_schema` — JSON Schema definitions |
+| `model_tiers` | `role.model_tier` — tier assignments on stages |
+| `retry_counts` | `on_fail.loop.max` — retry limits |
+| `timeouts` | `stage.timeout_s` — per-stage wall-clock limits |
+
+The default is `[descriptions, retry_counts, timeouts]`. `schemas` and `model_tiers` are locked by default because they have cascading effects that require human review.
+
+Locking a surface does not prevent the refiner from *diagnosing* problems there — it only prevents the refiner from *changing* it. A `high_escalation` diagnostic can still fire on a stage whose `model_tier` is locked; the refiner will address other surfaces instead.
+
+This design is adapted from the Self-Harness framework (arXiv:2606.09498v1), which introduces declared editable sets to bound the harness's ability to make changes.
 
 ### Drift score
 
@@ -3960,6 +4000,8 @@ See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry
 
 ---
 
-*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,302 tests. MIT license.*
+*Armature User Guide — built from ten academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
+
+*Academic influences: arXiv:2605.30621v1 (IHR metric, Skill-Load Rate, spec refinement without frontier models); arXiv:2606.09498v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
 
 *For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
