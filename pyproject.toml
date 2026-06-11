@@ -3,11 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "armature"
+name = "armature-agents"
 version = "0.2.0"
 description = "Agent execution harness — wraps LLMs in structured, inspectable workflow specs"
+readme = "README.md"
+license = {file = "LICENSE"}
 authors = [
-    {name = "Bryan Sparks", email = "bryan@drycanyon.com"},
+    {name = "Bryan Sparks", email = "bryan@elftech.ai"},
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -24,8 +26,20 @@ dependencies = [
 
 [project.urls]
 Repository = "https://github.com/bryansparks/armature"
-Documentation = "https://github.com/bryansparks/armature/blob/main/USER-GUIDE.md"
+Documentation = "https://github.com/bryansparks/armature/blob/main/docs/USER-GUIDE.md"
 Changelog = "https://github.com/bryansparks/armature/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "armature/",
+    "templates/",
+    "examples/",
+    "tests/",
+    "docs/*.md",
+    "README.md",
+    "LICENSE",
+    "run_tests.sh",
+]
 
 [project.scripts]
 armature = "armature.cli:app"

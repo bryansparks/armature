@@ -4,7 +4,7 @@
 
 If you discover a security vulnerability in Armature, please report it privately rather than opening a public issue.
 
-**Email:** bryan@drycanyon.com
+**Email:** bryan@elftech.ai
 
 Include in your report:
 - A description of the vulnerability

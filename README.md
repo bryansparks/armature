@@ -31,14 +31,14 @@ Stages declare `depends_on` relationships. The engine resolves execution order a
 ## Installation
 
 ```bash
-pip install "git+https://github.com/bryansparks/armature.git@v0.2.0"
+pip install armature-agents
 ```
 
 With optional extras:
 
 ```bash
-pip install "armature[service] @ git+https://github.com/bryansparks/armature.git@v0.2.0"   # FastAPI HTTP service
-pip install "armature[telemetry] @ git+https://github.com/bryansparks/armature.git@v0.2.0" # OpenTelemetry export
+pip install "armature-agents[service]"   # FastAPI HTTP service
+pip install "armature-agents[telemetry]" # OpenTelemetry export
 ```
 
 Verify:
