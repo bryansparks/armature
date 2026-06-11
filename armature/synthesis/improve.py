@@ -21,6 +21,7 @@ CLI:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -234,7 +235,6 @@ class SpecRefiner:
         n_proposals: int = 3,
     ) -> list[RefinerResult]:
         """Generate n_proposals candidate revisions in parallel, returning only valid ones."""
-        import asyncio
         tasks = [
             self.refine(
                 spec_yaml=spec_yaml,
@@ -462,6 +462,7 @@ class SelfImproveRunner:
                     spec_yaml=spec_yaml,
                     diagnostics=diagnostics,
                     ihr=ihr_obj,
+                    refiner_suggestions=None,
                     editable_surfaces=editable_surfaces,
                     n_proposals=self._n_proposals,
                 )

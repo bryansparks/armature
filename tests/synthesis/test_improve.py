@@ -1079,7 +1079,7 @@ async def test_refine_many_uses_diversity_hints():
             n_proposals=3,
         )
 
-    assert len(set(captured_system_prompts)) > 1
+    assert len(set(captured_system_prompts)) == 3
 
 
 # ── _pick_best_proposal ───────────────────────────────────────────────────────
@@ -1139,5 +1139,5 @@ async def test_runner_generates_k_proposals_when_configured(tmp_path):
     with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
         report = await runner.analyze()
 
-    assert report.n_proposals_generated >= 1
+    assert report.n_proposals_generated == 3
     assert llm_call_count == 3
