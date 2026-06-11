@@ -6,7 +6,7 @@ Features below are directional — no committed dates or release targets.
 
 ## v1 — Current state (complete)
 
-All v1 scope is implemented. 1,330 tests passing.
+All v1 scope is implemented. 1,388 tests passing.
 
 The v1 harness delivers: YAML-declarative workflow execution, four role types, DAG orchestration with automatic parallelism, fan-out/fan-in, IHR quality scoring, self-improvement loop (inner + outer), prediction-verification accountability, declarative safety rules with strict mode, human-in-the-loop gates, checkpoint/resume, four memory layers (mission context, continuation, MemoryStore, KnowledgeStore), model tiers, a REST API with SSE streaming, the `armature watch` trigger daemon, and a Rich terminal dashboard.
 

@@ -4000,7 +4000,7 @@ See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry
 
 ---
 
-*Armature User Guide — built from ten academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
+*Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
 
 *Academic influences: arXiv:2605.30621v1 (IHR metric, Skill-Load Rate, spec refinement without frontier models); arXiv:2606.09498v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
 

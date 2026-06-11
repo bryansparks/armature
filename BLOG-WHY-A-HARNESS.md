@@ -60,7 +60,7 @@ Stanford published a paper on meta-harnesses — using a frontier model to read 
 
 A third paper formalized failure signatures — specific diagnostic codes that categorize run failures in ways that drive targeted improvement. A stage timeout is a different failure mode than a schema validation error, which is different from a judge returning low confidence. Knowing *which* failure mode you're in tells you *what kind of fix to propose*.
 
-There were eight papers in total. They all pointed at the same thing: the harness is more important than the model, and a harness that can read and improve its own specification is categorically different from one that can't.
+There were nine papers in total. They all pointed at the same thing: the harness is more important than the model, and a harness that can read and improve its own specification is categorically different from one that can't.
 
 ---
 
@@ -128,7 +128,7 @@ I use SLMs almost everywhere in production. I have done serious LoRA fine-tuning
 
 Armature is built with this in mind. The tier system is provider-agnostic. Point a tier at Ollama running locally, or at an OpenAI-compatible endpoint hosting a fine-tuned SLM, and everything works. The built-in trace exporter can produce LoRA training data directly from high-quality runs — frontier model outputs become the training signal for smaller specialist models. The system is designed to let frontier models earn their own obsolescence on any given task.
 
-By the time I was done, there were 1,302 tests passing. That number surprised me. It is the accumulated evidence of how many edge cases production actually has.
+By the time I was done, there were 1,388 tests passing. That number surprised me. It is the accumulated evidence of how many edge cases production actually has.
 
 ---
 
@@ -164,7 +164,7 @@ Each of those recognitions is a small creative act. Armature is their accumulati
 
 ## Where This Lands
 
-Armature is production software. It runs. 1,238 tests say it runs correctly across a large surface area of edge cases. The self-improvement loop works — run a workflow, let it optimize, watch the IHR go up over multiple iterations.
+Armature is production software. It runs. 1,388 tests say it runs correctly across a large surface area of edge cases. The self-improvement loop works — run a workflow, let it optimize, watch the IHR go up over multiple iterations.
 
 But it is also, right now, a project that almost nobody knows exists.
 

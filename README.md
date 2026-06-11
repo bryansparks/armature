@@ -237,7 +237,7 @@ Each use case is a YAML workflow spec + a small set of Python tool modules. The 
 
 ## Research foundation
 
-Armature is built from eight academic papers, one industry governance framework, and one open-source agent architecture project, all published between February 2025 and May 2026. Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
+Armature is built from nine academic papers, one industry governance framework, and one open-source agent architecture project, all published between February and June 2026. Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
 
 ### The papers
 
@@ -362,7 +362,7 @@ Armature is the **execution layer** — the first component in a larger system d
                                                     └─────────────────────┘
 
   ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,276 tests passing.
+  All four loops are implemented. 1,388 tests passing.
 ```
 
 **The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.

@@ -274,7 +274,7 @@ safety_rules:
   - tool: my_cmd
     condition:
       field: cmd              # field to inspect in the tool args
-      op: contains            # contains | not_contains | equals | matches_regex | truthy
+      op: contains            # contains | not_contains | equals | not_equals | matches_regex | truthy
       value: "rm -rf"
     action: block             # block (abort) | warn (continue) | log (silent)
     message: "Dangerous command blocked"

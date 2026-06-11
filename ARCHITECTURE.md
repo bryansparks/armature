@@ -258,7 +258,7 @@ Every run writes structured, tamper-evident trace records:
 
 `TraceStore.get_run_outputs(run_id)` returns the named outputs for any completed run; the `continuation:` spec block calls this at run start to inject prior-run values into every stage's context.
 
-**IHR (Implicit Harness Rating):** `0.40 × output_validity + 0.30 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score`. A well-tuned workflow should score above 0.80.
+**IHR (Implicit Harness Rating):** `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum_score + 0.10 × latency_score + 0.10 × happy_path_rate`. A well-tuned workflow should score above 0.80.
 
 ```bash
 armature report --run-id <id>          # per-run text report
