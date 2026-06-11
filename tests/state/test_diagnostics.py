@@ -150,3 +150,88 @@ def test_non_postcondition_error_does_not_produce_postcondition_diagnostic():
     results = DiagnosticAnalyzer(traces).analyze()
     codes = [r.code for r in results]
     assert DiagnosticCode.POSTCONDITION_FAILED not in codes
+
+
+# ── CausalAttribution ─────────────────────────────────────────────────────────
+
+from armature.state.diagnostics import CausalAttribution, TerminalCause, CausalStatus, FailureMechanism
+
+
+def test_causal_attribution_on_stage_failed_timeout():
+    traces = [make_trace(stage_id="fetcher", success=False, error_type="TimeoutError")]
+    result = DiagnosticAnalyzer(traces).analyze()
+    sf = next(r for r in result if r.code == DiagnosticCode.STAGE_FAILED)
+    assert sf.causal_attribution is not None
+    assert sf.causal_attribution.terminal_cause == TerminalCause.EXECUTION_ERROR
+    assert sf.causal_attribution.causal_status == CausalStatus.SPEC_PROBLEM
+    assert sf.causal_attribution.mechanism == FailureMechanism.TIMEOUT
+
+
+def test_causal_attribution_on_stage_failed_runtime():
+    traces = [make_trace(stage_id="writer", success=False, error_type="ValueError")]
+    result = DiagnosticAnalyzer(traces).analyze()
+    sf = next(r for r in result if r.code == DiagnosticCode.STAGE_FAILED)
+    assert sf.causal_attribution.terminal_cause == TerminalCause.EXECUTION_ERROR
+    assert sf.causal_attribution.causal_status == CausalStatus.MODEL_PROBLEM
+    assert sf.causal_attribution.mechanism == FailureMechanism.RUNTIME_ERROR
+
+
+def test_causal_attribution_on_output_invalid_low_escalation():
+    """Schema validation failed on first attempt → schema too strict."""
+    traces = [make_trace(stage_id="analyst", output_valid=False, escalation_count=0)]
+    result = DiagnosticAnalyzer(traces).analyze()
+    oi = next(r for r in result if r.code == DiagnosticCode.OUTPUT_INVALID)
+    assert oi.causal_attribution.terminal_cause == TerminalCause.SCHEMA_VALIDATION
+    assert oi.causal_attribution.causal_status == CausalStatus.SPEC_PROBLEM
+    assert oi.causal_attribution.mechanism == FailureMechanism.SCHEMA_TOO_STRICT
+
+
+def test_causal_attribution_on_output_invalid_high_escalation():
+    """Schema validation failed after escalation → model underpowered."""
+    traces = [make_trace(stage_id="analyst", output_valid=False, escalation_count=2)]
+    result = DiagnosticAnalyzer(traces).analyze()
+    oi = next(r for r in result if r.code == DiagnosticCode.OUTPUT_INVALID)
+    assert oi.causal_attribution.causal_status == CausalStatus.MODEL_PROBLEM
+    assert oi.causal_attribution.mechanism == FailureMechanism.MODEL_UNDERPOWERED
+
+
+def test_causal_attribution_on_low_confidence():
+    traces = [make_trace(stage_id="judge", role_type="judge", quorum_score=0.1)]
+    result = DiagnosticAnalyzer(traces).analyze()
+    lc = next(r for r in result if r.code == DiagnosticCode.LOW_CONFIDENCE)
+    assert lc.causal_attribution.terminal_cause == TerminalCause.LOW_CONFIDENCE
+    assert lc.causal_attribution.causal_status == CausalStatus.MODEL_PROBLEM
+    assert lc.causal_attribution.mechanism == FailureMechanism.JUDGE_UNCERTAIN
+
+
+def test_causal_attribution_on_high_escalation():
+    traces = [make_trace(stage_id="parser", escalation_count=3)]
+    result = DiagnosticAnalyzer(traces).analyze()
+    he = next(r for r in result if r.code == DiagnosticCode.HIGH_ESCALATION)
+    assert he.causal_attribution.terminal_cause == TerminalCause.SCHEMA_ESCALATION
+    assert he.causal_attribution.causal_status == CausalStatus.MODEL_PROBLEM
+    assert he.causal_attribution.mechanism == FailureMechanism.TIER_INSUFFICIENT
+
+
+def test_causal_attribution_on_postcondition_failed():
+    traces = [make_trace(stage_id="uploader", success=False, error_type="PostconditionFailed")]
+    result = DiagnosticAnalyzer(traces).analyze()
+    pf = next(r for r in result if r.code == DiagnosticCode.POSTCONDITION_FAILED)
+    assert pf.causal_attribution.terminal_cause == TerminalCause.POSTCONDITION
+    assert pf.causal_attribution.causal_status == CausalStatus.TOOL_PROBLEM
+    assert pf.causal_attribution.mechanism == FailureMechanism.TOOL_VIOLATION
+
+
+def test_causal_attribution_on_low_skill_activation():
+    traces = [make_trace(stage_id="searcher", tools_declared=["web_search"], tools_called=[])]
+    result = DiagnosticAnalyzer(traces).analyze()
+    la = next(r for r in result if r.code == DiagnosticCode.LOW_SKILL_ACTIVATION)
+    assert la.causal_attribution.terminal_cause == TerminalCause.PROMPT_WEAK
+    assert la.causal_attribution.causal_status == CausalStatus.SPEC_PROBLEM
+    assert la.causal_attribution.mechanism == FailureMechanism.PROMPT_MISSING_INSTRUCTION
+
+
+def test_clean_trace_has_no_diagnostics():
+    traces = [make_trace(stage_id="s1")]
+    result = DiagnosticAnalyzer(traces).analyze()
+    assert result == []
