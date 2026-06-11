@@ -34,7 +34,7 @@ from armature.spec.models import HarnessSpec, EditableSurface
 from armature.spec.loader import load_spec
 from armature.spec.validator import validate_spec, SpecValidationError
 from armature.state.diagnostics import DiagnosticAnalyzer, DiagnosticResult
-from armature.state.traces import TraceStore, IhrResult
+from armature.state.traces import TraceStore, IhrResult, TraceRecord
 
 
 async def llm_completion(**kwargs) -> Any:
@@ -262,7 +262,7 @@ def _pick_best_proposal(
 
 
 def _healthy_stage_ids(
-    traces: "list",
+    traces: list[TraceRecord],
     diagnostics: list[DiagnosticResult],
 ) -> set[str]:
     """Return stage IDs that appear in traces but have NO diagnostics (healthy)."""
@@ -280,6 +280,8 @@ def _proposal_regression_risk(
     if not healthy_stage_ids:
         return False
     auto, review = _classify_changes(old_spec, candidate.spec)
+    # Only stage-level changes (format "field:stage_id") are checked; structural
+    # changes (stages_added/removed) are governed separately and intentionally excluded.
     changed_stages = {
         k.split(":")[1] for k in {**auto, **review}
         if ":" in k
@@ -508,6 +510,8 @@ class SelfImproveRunner:
                     editable_surfaces=editable_surfaces,
                 )
                 n_proposals_generated = 1 if result is not None else 0
+                # In single-proposal mode, regression risk is informational only — the proposal
+                # is still applied (we don't discard the only candidate).
                 if result is not None:
                     healthy = _healthy_stage_ids(traces, diagnostics)
                     regression_risk_count = 1 if _proposal_regression_risk(result, spec, healthy) else 0
@@ -547,6 +551,8 @@ class SelfImproveRunner:
             missed_predictions=missed_predictions,
             unexpected_regressions=unexpected_regressions,
             drift_score=drift_score,
+            regression_risk_count=regression_risk_count,
+            n_proposals_generated=n_proposals_generated,
         )
 
         return ImprovementReport(
@@ -665,6 +671,8 @@ class SelfImproveRunner:
         missed_predictions: list[str],
         unexpected_regressions: list[str],
         drift_score: float = 0.0,
+        regression_risk_count: int = 0,
+        n_proposals_generated: int = 0,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -688,6 +696,8 @@ class SelfImproveRunner:
             "missed_predictions": missed_predictions,
             "unexpected_regressions": unexpected_regressions,
             "drift_score": drift_score,
+            "regression_risk_count": regression_risk_count,
+            "n_proposals_generated": n_proposals_generated,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

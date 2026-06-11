@@ -1348,3 +1348,59 @@ stages:
         report = await runner.analyze()
 
     assert report.regression_risk_count == 1
+
+
+async def test_runner_fallsback_to_risky_candidates_when_all_risky(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    _TWO_STAGE = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic and produce findings.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary.
+"""
+    spec_file.write_text(_TWO_STAGE)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r2", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r3", stage_id="analyst", output_valid=False, quorum_score=0.20),
+        make_trace(run_id="r4", stage_id="writer", success=True, output_valid=True),
+    ])
+
+    # Both proposals touch "writer" (healthy) — all risky, should fallback
+    _RISKY_PROPOSAL = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic and produce findings.
+  - id: writer
+    depends_on: [analyst]
+    role:
+      name: Writer
+      type: worker
+      description: Write the summary with extended detail.
+"""
+
+    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=2)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_RISKY_PROPOSAL)
+        report = await runner.analyze()
+
+    # All proposals were risky — fallback to full candidates set, still produces a proposal
+    assert report.regression_risk_count == 2
+    assert report.proposed_spec is not None
