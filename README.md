@@ -54,6 +54,22 @@ export ANTHROPIC_API_KEY=sk-...
 # or OPENAI_API_KEY, or configure any litellm-supported provider
 ```
 
+**No API key?** Armature runs against local models via [Ollama](https://ollama.com) — no key, no cloud, nothing leaves your machine:
+
+```bash
+ollama pull llama3.2
+armature run examples/00_hello_ollama.yml --input topic="what a DAG is"
+```
+
+The only difference is the model tier in the spec:
+
+```yaml
+model_tiers:
+  local:
+    provider: ollama
+    model: llama3.2        # any model from `ollama list`
+```
+
 ---
 
 ## Quick start

@@ -1,0 +1,36 @@
+# Zero-API-key quickstart — runs entirely on a local model via Ollama.
+# Demonstrates: LLM stage, local provider, text output, runtime inputs.
+#
+# Prereqs:
+#   1. Install Ollama: https://ollama.com
+#   2. Pull a model:   ollama pull llama3.2
+#      (any model from `ollama list` works — set it below)
+#
+# Usage:
+#   armature run examples/00_hello_ollama.yml --input topic="what a DAG is"
+#
+# Python:
+#   harness = Harness.from_spec("examples/00_hello_ollama.yml")
+#   result = await harness.run({"topic": "what a DAG is"})
+#   print(result["explainer"]["content"])
+
+name: hello_world_local
+version: "1.0"
+description: Single-stage explainer workflow — local model, no API key
+
+model_tiers:
+  local:
+    provider: ollama
+    model: llama3.2
+
+stages:
+  - id: explainer
+    role:
+      name: Explainer
+      type: worker
+      model_tier: local
+      description: |
+        Explain the following topic clearly and concisely in 3-5 sentences.
+        Write for a technically literate but non-specialist audience.
+    output_mode: text
+    depends_on: []
