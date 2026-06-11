@@ -214,12 +214,12 @@ class TestSafetyGovernance:
         out = render(safety_governance(data))
         assert "abc12345" in out
 
-    def test_stale_memory_count_rendered(self):
+    def test_renders_approval_count(self):
         safety = SafetyStats(
-            warn_hits=0, block_hits=0, approval_hits=0,
+            warn_hits=0, block_hits=0, approval_hits=2,
             postcondition_failures=0,
             current_policy_version=None,
-            stale_memory_count=3,
+            stale_memory_count=0,
         )
         data = DashboardData(
             workflow_name="wf",
@@ -232,7 +232,7 @@ class TestSafetyGovernance:
             last_run_id="r1",
         )
         out = render(safety_governance(data))
-        assert "3" in out
+        assert "2" in out
 
     def test_postcondition_failures_rendered(self):
         safety = SafetyStats(
@@ -253,3 +253,171 @@ class TestSafetyGovernance:
         )
         out = render(safety_governance(data))
         assert "5" in out
+
+    def test_approval_hits_shown_when_nonzero(self):
+        """Real approval count shows in the panel."""
+        safety = SafetyStats(
+            warn_hits=0, block_hits=0, approval_hits=3,
+            postcondition_failures=0,
+            current_policy_version=None,
+            stale_memory_count=0,
+        )
+        data = DashboardData(
+            workflow_name="wf", total_runs=3, traces=[], stage_stats={},
+            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+        )
+        out = render(safety_governance(data))
+        assert "3" in out  # approval count visible
+
+    def test_untracked_rule_hits_show_dash_not_zero(self):
+        """warn_hits and block_hits that are 0/untracked should show — not 0."""
+        safety = SafetyStats(
+            warn_hits=0, block_hits=0, approval_hits=0,
+            postcondition_failures=0,
+            current_policy_version=None,
+            stale_memory_count=0,
+        )
+        data = DashboardData(
+            workflow_name="wf", total_runs=1, traces=[], stage_stats={},
+            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+        )
+        out = render(safety_governance(data))
+        # Should NOT show "0 warn" or "0 block" as if they're real tracked values
+        assert "0 warn" not in out
+        assert "0 block" not in out
+
+    def test_stale_memory_not_shown(self):
+        """'Stale memory' terminology should not appear — confusing to users."""
+        safety = SafetyStats(
+            warn_hits=0, block_hits=0, approval_hits=0,
+            postcondition_failures=0,
+            current_policy_version=None,
+            stale_memory_count=0,
+        )
+        data = DashboardData(
+            workflow_name="wf", total_runs=1, traces=[], stage_stats={},
+            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+        )
+        out = render(safety_governance(data))
+        assert "stale" not in out.lower()
+
+
+# ── stage_breakdown enhancements ─────────────────────────────────────────────
+
+def _make_stage(stage_id, role_type="worker", fan_out_per_run=1, **kwargs):
+    defaults = dict(
+        run_count=1, failure_rate=0.0, avg_latency_ms=100.0,
+        avg_quorum=None, escalation_rate=0.0, is_post_run=False,
+    )
+    defaults.update(kwargs)
+    return StageStats(stage_id=stage_id, role_type=role_type,
+                      fan_out_per_run=fan_out_per_run, **defaults)
+
+
+class TestStageBreakdownStatus:
+    def test_status_symbol_only_no_text(self):
+        """Status column shows glyphs only — no word-wrapping text like 'healthy'."""
+        stats = {"ok": _make_stage("ok", failure_rate=0.0)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "healthy" not in out
+
+    def test_failing_status_symbol_visible(self):
+        stats = {"bad": _make_stage("bad", failure_rate=0.5)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "failing" not in out
+        assert "✗" in out
+
+    def test_degraded_status_symbol_visible(self):
+        stats = {"mid": _make_stage("mid", failure_rate=0.15)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "degraded" not in out
+        assert "⚠" in out
+
+
+class TestStageBreakdownRole:
+    def test_renders_role_column_header(self):
+        stats = {"s": _make_stage("s", role_type="orchestrator")}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "Role" in out
+
+    def test_renders_role_type_value(self):
+        stats = {"coordinator": _make_stage("coordinator", role_type="orchestrator")}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "orchestrator" in out.lower()
+
+    def test_worker_role_rendered(self):
+        stats = {"w": _make_stage("w", role_type="worker")}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "worker" in out.lower()
+
+
+class TestStageBreakdownFanOut:
+    def test_fan_out_column_shows_count_when_greater_than_1(self):
+        stats = {"searcher": _make_stage("searcher", fan_out_per_run=8)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "8" in out
+
+    def test_fan_out_1_shows_dash(self):
+        stats = {"simple": _make_stage("simple", fan_out_per_run=1)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "—" in out
+
+    def test_fan_out_column_header_present(self):
+        stats = {"s": _make_stage("s")}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        assert "×" in out  # fan-out column (× = multiplier symbol)
+
+
+class TestStageBreakdownRowCap:
+    def test_capped_at_12_rows(self):
+        stats = {f"stage_{i}": _make_stage(f"stage_{i}") for i in range(20)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        shown = sum(1 for i in range(20) if f"stage_{i}" in out)
+        assert shown <= 12
+
+    def test_12_stages_all_visible(self):
+        stats = {f"stage_{i}": _make_stage(f"stage_{i}") for i in range(12)}
+        out = render(stage_breakdown(make_dashboard(stage_stats=stats)))
+        shown = sum(1 for i in range(12) if f"stage_{i}" in out)
+        assert shown == 12
+
+
+# ── improvement_timeline enhancements ────────────────────────────────────────
+
+class TestImprovementTimelineRunHistory:
+    def test_no_cycles_shows_run_count(self):
+        data = make_dashboard(improvement_cycles=[], total_runs=15)
+        out = render(improvement_timeline(data))
+        assert "15" in out
+
+    def test_no_cycles_shows_last_run_date(self):
+        data = make_dashboard(improvement_cycles=[], total_runs=5)
+        data.last_run_at = "2026-06-10T14:30:00Z"
+        out = render(improvement_timeline(data))
+        assert "2026-06-10" in out
+
+    def test_no_cycles_zero_runs_renders(self):
+        data = make_dashboard(improvement_cycles=[], total_runs=0)
+        out = render(improvement_timeline(data))
+        assert out  # does not crash
+
+
+class TestImprovementTimelineAllCyclesVisible:
+    def _make_cycles(self, n):
+        return [
+            ImprovementCycle(
+                cycle_number=i + 1,
+                timestamp=f"2026-05-{i + 1:02d}T10:00:00Z",
+                ihr_before=0.72, drift_score=0.0, applied=True,
+                requires_review=False, verified_fixes=0,
+                missed_predictions=0, unexpected_regressions=0,
+                predicted_fixes=[], predicted_regressions=[],
+            )
+            for i in range(n)
+        ]
+
+    def test_all_cycles_shown(self):
+        data = make_dashboard(improvement_cycles=self._make_cycles(15))
+        out = render(improvement_timeline(data))
+        shown = sum(1 for i in range(15) if f"2026-05-{i + 1:02d}" in out)
+        assert shown == 15

@@ -289,6 +289,24 @@ class Harness:
                         _stage_type = "gate"
                         node = HumanGateNode(stage=stage)
                         result = await node.execute(context)
+                        await self._ensure_traces()
+                        gate_latency = (time.monotonic() - t0) * 1000
+                        approved = result.get("approved", True) if isinstance(result, dict) else True
+                        await self._traces.record(TraceRecord(
+                            run_id=self._run_id,
+                            workflow_name=self._spec.name,
+                            stage_id=stage.id,
+                            role_type="gate",
+                            model="",
+                            latency_ms=gate_latency,
+                            success=bool(approved),
+                            output_valid=True,
+                            spec_version=self._spec_version,
+                            policy_version=self._policy_version,
+                            inputs={k: str(v)[:200] for k, v in context.items()},
+                            outputs={k: str(v)[:200] for k, v in (result.items() if isinstance(result, dict) else {})},
+                            inputs_provenance=dict(self._get_provenance()),
+                        ))
                     elif stage.subagent_spec:
                         _stage_type = "subagent"
                         from armature.nodes.subagent import SubagentNode

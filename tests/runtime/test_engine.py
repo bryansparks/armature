@@ -705,3 +705,44 @@ async def test_post_run_result_included_in_run_output(tmp_path):
 
     assert "refiner" in results
     assert results["refiner"]["suggestions"] == ["improve prompt"]
+
+
+# ── gate trace tests ──────────────────────────────────────────────────────────
+
+async def test_gate_stage_writes_trace_with_gate_role_type(tmp_path):
+    """Completed gate stages must write a TraceRecord with role_type='gate'."""
+    spec = HarnessSpec(
+        name="gate-test",
+        stages=[Stage(id="approval", gate="human")],
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "t.db")
+
+    with patch("armature.nodes.gate.HumanGateNode.execute",
+               new_callable=AsyncMock,
+               return_value={"approved": True, "feedback": None}):
+        await harness.run({})
+
+    traces = await harness._traces.query(workflow_name="gate-test", limit=50)
+    gate_traces = [t for t in traces if t.role_type == "gate"]
+    assert len(gate_traces) == 1
+    assert gate_traces[0].stage_id == "approval"
+    assert gate_traces[0].success is True
+
+
+async def test_gate_trace_records_approved_false_on_rejection(tmp_path):
+    """A rejected gate (approved=False) writes a trace with success=False."""
+    spec = HarnessSpec(
+        name="gate-reject",
+        stages=[Stage(id="approval", gate="human", fail_as_value=True)],
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "t.db")
+
+    with patch("armature.nodes.gate.HumanGateNode.execute",
+               new_callable=AsyncMock,
+               return_value={"approved": False, "feedback": "not ready"}):
+        await harness.run({})
+
+    traces = await harness._traces.query(workflow_name="gate-reject", limit=50)
+    gate_traces = [t for t in traces if t.role_type == "gate"]
+    assert len(gate_traces) == 1
+    assert gate_traces[0].success is False

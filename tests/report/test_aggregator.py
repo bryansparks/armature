@@ -125,6 +125,47 @@ class TestBuildStageStats:
         stats = build_stage_stats(traces)
         assert stats["s1"].avg_quorum == pytest.approx(0.9)
 
+    def test_fan_out_per_run_computed_from_same_run_traces(self):
+        """Fan-out stages have multiple traces with the same (run_id, stage_id)."""
+        traces = [
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+        ]
+        stats = build_stage_stats(traces)
+        assert stats["searcher"].fan_out_per_run == 3
+
+    def test_fan_out_per_run_is_1_for_normal_stages(self):
+        """Non-fan-out stages have exactly one trace per run."""
+        traces = [
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="analyst",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_b", workflow_name="wf", stage_id="analyst",
+                        role_type="worker", model="m"),
+        ]
+        stats = build_stage_stats(traces)
+        assert stats["analyst"].fan_out_per_run == 1
+
+    def test_fan_out_per_run_uses_max_across_runs(self):
+        """Fan-out count is the max observed in any single run."""
+        traces = [
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_a", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_b", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_b", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+            TraceRecord(run_id="run_b", workflow_name="wf", stage_id="searcher",
+                        role_type="worker", model="m"),
+        ]
+        stats = build_stage_stats(traces)
+        assert stats["searcher"].fan_out_per_run == 3  # max(2, 3)
+
 
 # ── ImprovementCycle ─────────────────────────────────────────────────────────
 
@@ -245,6 +286,24 @@ class TestLoadSafetyStats:
         ]
         stats = load_safety_stats(traces)
         assert stats.stale_memory_count >= 1
+
+    def test_gate_traces_counted_as_approval_hits(self):
+        """Completed gate stages (role_type='gate') count as approval_hits."""
+        traces = [
+            TraceRecord(run_id="r1", workflow_name="wf", stage_id="human_approval",
+                        role_type="gate", model="", success=True, output_valid=True),
+            TraceRecord(run_id="r2", workflow_name="wf", stage_id="human_approval",
+                        role_type="gate", model="", success=True, output_valid=True),
+            make_trace("analyst"),
+        ]
+        stats = load_safety_stats(traces)
+        assert stats.approval_hits == 2
+
+    def test_no_gate_traces_approval_hits_zero(self):
+        """No gate traces → approval_hits remains 0."""
+        traces = [make_trace("analyst"), make_trace("writer")]
+        stats = load_safety_stats(traces)
+        assert stats.approval_hits == 0
 
 
 # ── DashboardData ─────────────────────────────────────────────────────────────

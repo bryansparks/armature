@@ -84,41 +84,52 @@ def _stage_row_style(s: StageStats) -> str:
     return ""
 
 
+_ROLE_STYLE = {
+    "orchestrator": "cyan",
+    "judge": "magenta",
+    "researcher": "blue",
+    "worker": "",
+    "post_run": "dim",
+    "tool": "dim",
+}
+
+_MAX_STAGE_ROWS = 12
+
+
 def stage_breakdown(data: DashboardData) -> Panel:
     """Per-stage health table."""
     t = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold dim")
-    t.add_column("Stage", style="bold", no_wrap=True)
-    t.add_column("Status", justify="center")
+    t.add_column("Stage", style="bold", no_wrap=True, max_width=14)
+    t.add_column("Role", no_wrap=True, max_width=12)
+    t.add_column("×", justify="right", width=4, no_wrap=True)
+    t.add_column("St", justify="center", width=2, no_wrap=True)
     t.add_column("Fail%", justify="right")
     t.add_column("Latency", justify="right")
-    t.add_column("Agree%", justify="right")
     t.add_column("Esc%", justify="right")
-    t.add_column("Tools", justify="right")
 
     if not data.stage_stats:
-        t.add_row("—", "no data", "—", "—", "—", "—", "—")
+        t.add_row("—", "—", "—", "no data", "—", "—", "—")
     else:
-        for s in data.stage_stats.values():
+        for s in list(data.stage_stats.values())[:_MAX_STAGE_ROWS]:
             row_style = _stage_row_style(s)
             if s.is_post_run:
-                status = Text("○ post-run", style="dim")
+                status = Text("○", style="dim")
             elif s.failure_rate >= 0.20:
-                status = Text("✗ failing", style="red1 bold")
+                status = Text("✗", style="red1 bold")
             elif s.failure_rate >= 0.10:
-                status = Text("⚠ degraded", style="yellow")
+                status = Text("⚠", style="yellow")
             else:
-                status = Text("✓ healthy", style="bright_green")
+                status = Text("✓", style="bright_green")
+
+            role_color = _ROLE_STYLE.get(s.role_type, "")
+            role_text = Text(s.role_type, style=role_color) if role_color else Text(s.role_type)
+            fan_out = "—" if s.fan_out_per_run <= 1 else str(s.fan_out_per_run)
 
             fail_pct = f"{s.failure_rate * 100:.0f}%"
             latency = f"{s.avg_latency_ms / 1000:.1f}s" if s.avg_latency_ms < 60_000 else f"{s.avg_latency_ms / 60_000:.1f}m"
-            quorum = f"{s.avg_quorum:.2f}" if s.avg_quorum is not None else "—"
             esc = f"{s.escalation_rate * 100:.0f}%"
-            if s.avg_tools_declared > 0:
-                tools = f"{round(s.avg_tools_called)}/{round(s.avg_tools_declared)}"
-            else:
-                tools = "—"
 
-            t.add_row(s.stage_id, status, fail_pct, latency, quorum, esc, tools, style=row_style)
+            t.add_row(s.stage_id, role_text, fan_out, status, fail_pct, latency, esc, style=row_style)
 
     return Panel(t, title="[bold]Stage Breakdown[/bold]", border_style="dim", padding=(0, 0))
 
@@ -137,10 +148,18 @@ def improvement_timeline(data: DashboardData) -> Panel:
     t.add_column("✗Miss", justify="right", width=5)
     t.add_column("↯Reg", justify="right", width=4)
 
+    run_subtitle = f"{data.total_runs} run{'s' if data.total_runs != 1 else ''}"
+    if data.last_run_at:
+        try:
+            dt = datetime.fromisoformat(data.last_run_at).astimezone()
+            run_subtitle += f"  ·  {dt.strftime('%Y-%m-%d %H:%M')}"
+        except Exception:
+            run_subtitle += f"  ·  {data.last_run_at[:10]}"
+
     if not data.improvement_cycles:
-        t.add_row("—", "—", "—", "—", "no improvement cycles yet", "—", "—", "—")
+        t.add_row("—", "—", "—", "—", "no cycles", "—", "—", "—")
     else:
-        for c in data.improvement_cycles[:8]:
+        for c in data.improvement_cycles:
             date = c.timestamp[:10] if c.timestamp else "—"
 
             if c.requires_review:
@@ -168,13 +187,14 @@ def improvement_timeline(data: DashboardData) -> Panel:
                 style=row_style,
             )
 
-    return Panel(t, title="[bold]Improvement Cycles[/bold]", border_style="dim", padding=(0, 0))
+    title = f"[bold]Improvement Cycles[/bold]  [dim]{run_subtitle}[/dim]"
+    return Panel(t, title=title, border_style="dim", padding=(0, 0))
 
 
 # ── safety_governance ─────────────────────────────────────────────────────────
 
 def safety_governance(data: DashboardData) -> Panel:
-    """Safety rule hits, governance state, stale memory summary."""
+    """Safety rule hits, governance state."""
     s = data.safety_stats
     lines = Text()
 
@@ -182,15 +202,16 @@ def safety_governance(data: DashboardData) -> Panel:
     lines.append("Policy version  ", style="bold dim")
     lines.append(f"{pv}\n")
 
+    lines.append("Approvals       ", style="bold dim")
+    ap_style = "bright_green" if s.approval_hits > 0 else "dim"
+    lines.append(f"{s.approval_hits} gate{'s' if s.approval_hits != 1 else ''} completed\n", style=ap_style)
+
     lines.append("Rule hits       ", style="bold dim")
-    lines.append(f"{s.warn_hits} warn  │  {s.block_hits} block  │  {s.approval_hits} require_approval\n")
+    lines.append("— warn  │  — block", style="dim")
+    lines.append("  (not yet tracked)\n", style="dim")
 
     lines.append("Postcond. fails ", style="bold dim")
     pc_style = "red1 bold" if s.postcondition_failures > 0 else "bright_green"
     lines.append(f"{s.postcondition_failures}\n", style=pc_style)
-
-    lines.append("Stale memory    ", style="bold dim")
-    stale_style = "red1 bold" if s.stale_memory_count >= 3 else ("yellow" if s.stale_memory_count > 0 else "bright_green")
-    lines.append(f"{s.stale_memory_count} keys\n", style=stale_style)
 
     return Panel(lines, title="[bold]Safety & Governance[/bold]", border_style="dim", padding=(0, 1))

@@ -86,3 +86,44 @@ class TestDashboardCommand:
         assert parsed["ihr_trend"] == [0.70, 0.75, 0.80]
         assert parsed["current_ihr"] == pytest.approx(0.80)
         assert parsed["ihr_delta"] == pytest.approx(0.05)
+
+
+class TestRenderTerminalLayout:
+    def _make_data(self, n_stages=6):
+        from armature.report.aggregator import StageStats
+        stats = {}
+        for i in range(n_stages):
+            stats[f"stage_{i}"] = StageStats(
+                stage_id=f"stage_{i}", role_type="worker", run_count=5,
+                failure_rate=0.0, avg_latency_ms=1200.0, avg_quorum=None,
+                escalation_rate=0.0, is_post_run=False, fan_out_per_run=1,
+            )
+        return DashboardData(
+            workflow_name="test-wf", total_runs=5, traces=[], stage_stats=stats,
+            improvement_cycles=[], safety_stats=load_safety_stats([]),
+            ihr_trend=[0.80], last_run_id="r1",
+        )
+
+    def test_render_terminal_does_not_fill_terminal_height(self):
+        """render_terminal should use only as many lines as content needs."""
+        from armature.report.layout import render_terminal
+        from rich.console import Console
+        from io import StringIO
+        data = self._make_data(n_stages=6)
+        sio = StringIO()
+        c = Console(file=sio, width=130, height=40, highlight=False, markup=False)
+        render_terminal(data, console=c)
+        lines = sio.getvalue().split("\n")
+        assert len(lines) < 35, f"Expected <35 lines for 6 stages, got {len(lines)}"
+
+    def test_render_terminal_stage_rows_not_wrapping(self):
+        """Each stage should occupy exactly 1 line (status glyph, not multi-word text)."""
+        from armature.report.layout import render_terminal
+        from rich.console import Console
+        from io import StringIO
+        data = self._make_data(n_stages=4)
+        sio = StringIO()
+        c = Console(file=sio, width=130, height=40, highlight=False, markup=False)
+        render_terminal(data, console=c)
+        out = sio.getvalue()
+        assert "h…" not in out  # "healthy" wrapping artifact

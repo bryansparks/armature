@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rich.console import Console
+from rich.columns import Columns
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
+from rich.table import Table
 import time
 
 from armature.report.aggregator import DashboardData
@@ -36,9 +38,15 @@ def _build_layout(data: DashboardData) -> Layout:
 
 
 def render_terminal(data: DashboardData, console: Console | None = None) -> None:
-    """Print the full dashboard to the terminal once."""
+    """Print the full dashboard to the terminal once (content-height only)."""
     c = console or Console()
-    c.print(_build_layout(data))
+    c.print(health_strip(data))
+    grid = Table.grid(expand=True)
+    grid.add_column(ratio=1)
+    grid.add_column(ratio=1)
+    right = Group(improvement_timeline(data), safety_governance(data))
+    grid.add_row(stage_breakdown(data), right)
+    c.print(grid)
 
 
 def render_terminal_watch(

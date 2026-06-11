@@ -20,6 +20,7 @@ class StageStats:
     is_post_run: bool
     avg_tools_declared: float = 0.0
     avg_tools_called: float = 0.0
+    fan_out_per_run: int = 1
 
 
 @dataclass
@@ -91,6 +92,11 @@ def build_stage_stats(traces: list[TraceRecord]) -> dict[str, StageStats]:
     for t in traces:
         buckets[t.stage_id].append(t)
 
+    # Per-run counts for fan-out detection: {stage_id: {run_id: count}}
+    per_run_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for t in traces:
+        per_run_counts[t.stage_id][t.run_id] += 1
+
     stats: dict[str, StageStats] = {}
     for stage_id, stage_traces in buckets.items():
         n = len(stage_traces)
@@ -118,6 +124,8 @@ def build_stage_stats(traces: list[TraceRecord]) -> dict[str, StageStats]:
             avg_tools_declared = 0.0
             avg_tools_called = 0.0
 
+        fan_out_per_run = max(per_run_counts[stage_id].values(), default=1)
+
         stats[stage_id] = StageStats(
             stage_id=stage_id,
             role_type=stage_traces[0].role_type,
@@ -129,6 +137,7 @@ def build_stage_stats(traces: list[TraceRecord]) -> dict[str, StageStats]:
             is_post_run=is_post_run,
             avg_tools_declared=avg_tools_declared,
             avg_tools_called=avg_tools_called,
+            fan_out_per_run=fan_out_per_run,
         )
     return stats
 
@@ -184,10 +193,12 @@ def load_safety_stats(traces: list[TraceRecord]) -> SafetyStats:
         if any(v == "stale_memory" for v in provenance.values()):
             stale_memory_count += 1
 
+    approval_hits = sum(1 for t in traces if t.role_type == "gate")
+
     return SafetyStats(
         warn_hits=0,    # derived from session log; not yet tracked in TraceRecord
         block_hits=0,
-        approval_hits=0,
+        approval_hits=approval_hits,
         postcondition_failures=postcondition_failures,
         current_policy_version=current_policy_version,
         stale_memory_count=stale_memory_count,
