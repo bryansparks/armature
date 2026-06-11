@@ -19,7 +19,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes seven academic papers published between February and May 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes nine academic papers published between February and June 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
 
 | Source | Key Contribution |
 |--------|-----------------|
@@ -30,6 +30,9 @@ Armature synthesizes seven academic papers published between February and May 20
 | **Continual Harness** — arXiv:2605.09998 | Reset-free self-improvement; 4-code failure taxonomy; inner + outer loops |
 | **AHE** — arXiv:2604.25850 | Prediction-verification accountability; component-level improvement targeting |
 | **System Scaling** — arXiv:2605.26112 | Staleness, provenance, drift score, postcondition verification, component governance |
+| **KYA** — Veldt Labs, arXiv:2605.25376 | Static spec risk scoring; only-tighten safety composition; rogue signal counting |
+| **ActiveGraph** — arXiv:2605.21997 | LLM response caching by content hash; trace-triggered behavior rules; `--auto-improve` gate |
+| **Self-Harness** — arXiv:2606.09498v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 
 The benchmarked insight from NLAH: when workflows are defined in readable, editable natural language rather than code, both humans and optimizers can reason about them causally. A YAML diff is meaningful; a Python AST diff is opaque.
@@ -311,7 +314,7 @@ A complete LangGraph + Armature template (Docker Compose, bot app, research work
 | CLI | `typer` | Clean, typed, minimal boilerplate |
 | Dashboard | `rich` | Terminal panels, sparklines, live refresh |
 | HTTP service | `FastAPI` | Consistent with Python service patterns |
-| Testing | `pytest` + `pytest-asyncio` | 1,202 tests, all async-compatible |
+| Testing | `pytest` + `pytest-asyncio` | 1,388 tests, all async-compatible |
 
 ---
 

@@ -275,6 +275,8 @@ Every cycle appends a JSONL entry to `myworkflow.improve_log.jsonl`, whether or 
   "target_ihr": 0.90,
   "needs_improvement": true,
   "applied": true,
+  "n_proposals_generated": 3,
+  "regression_risk_count": 1,
   "diagnostics": [
     {"code": "output_invalid", "stage_id": "analyst", "details": "output failed schema validation"},
     {"code": "low_confidence", "stage_id": "reviewer", "details": "confidence=0.22"}

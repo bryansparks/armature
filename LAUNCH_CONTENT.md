@@ -134,11 +134,11 @@ That's it. No Python. No class subclassing. No explicit edge wiring.
 
 The `--auto-improve` flag runs this automatically after every execution.
 
-This loop is grounded in actual research — I synthesized 7 arXiv papers (NLAH, MetaHarness, AutoHarness, AgentSpec, Continual Harness, AHE, KYA, ActiveGraph) into the design. The Tsinghua NLAH paper is the architectural foundation; the finding that YAML specs outperform Python harnesses 47.2% vs 30.4% on OSWorld is what convinced me to commit to the declarative approach. The full citations are in the CHANGELOG.
+This loop is grounded in actual research — I synthesized 9 arXiv papers (NLAH, MetaHarness, AutoHarness, AgentSpec, Continual Harness, AHE, KYA, ActiveGraph, Self-Harness) into the design. The Tsinghua NLAH paper is the architectural foundation; the finding that YAML specs outperform Python harnesses 47.2% vs 30.4% on OSWorld is what convinced me to commit to the declarative approach. The full citations are in the CHANGELOG.
 
 One meta-note: I organized this launch using an Armature launchpad workflow — a spec that drafts platform-specific posts, evaluates them against tone rules, and produces a prioritized launch sequence. I ran it this morning. It worked. That was a good sign.
 
-The project has 1,330 tests (pytest, asyncio), MIT license, and runs on any litellm-supported provider — Anthropic, OpenAI, OpenRouter, Ollama, whatever you have keys for.
+The project has 1,388 tests (pytest, asyncio), MIT license, and runs on any litellm-supported provider — Anthropic, OpenAI, OpenRouter, Ollama, whatever you have keys for.
 
 `pip install armature`
 
@@ -256,7 +256,7 @@ GitHub: https://github.com/bryansparks/armature
 Docs: https://bryansparks.github.io/armature
 HN discussion: [link]
 
-1,330 tests. MIT license. Runs on any litellm provider.
+1,388 tests. MIT license. Runs on any litellm provider.
 
 What would you actually use this for? Specifically: what multi-step AI task do you keep rebuilding from scratch every project?
 
@@ -268,11 +268,11 @@ What would you actually use this for? Specifically: what multi-step AI task do y
 
 ### r/MachineLearning
 
-**Title:** Armature: A declarative agent harness implementing NLAH, MetaHarness, AgentSpec, and 4 other arXiv papers — self-improving YAML workflows with IHR-driven spec evolution [Show HN]
+**Title:** Armature: A declarative agent harness implementing NLAH, MetaHarness, AgentSpec, and 6 other arXiv papers — self-improving YAML workflows with IHR-driven spec evolution [Show HN]
 
 **Body:**
 
-I spent several months synthesizing seven arXiv papers published between February and May 2026 into a working Python library. The result is Armature — a declarative agent execution harness that runs multi-agent workflows defined as YAML specs and improves those specs automatically from execution traces.
+I spent several months synthesizing nine arXiv papers published between February and June 2026 into a working Python library. The result is Armature — a declarative agent execution harness that runs multi-agent workflows defined as YAML specs and improves those specs automatically from execution traces.
 
 The research foundation:
 
@@ -284,6 +284,7 @@ The research foundation:
 - **AHE** (arXiv:2604.25850) — prediction-verification loop: each proposed spec change must include falsifiable contracts for which failure signatures it expects to fix. Next cycle verifies using precision/recall against observed outcomes.
 - **KYA** (arXiv:2605.25376) — static spec risk scoring and the only-tighten safety composition principle (allow rules cannot override block rules).
 - **ActiveGraph** (arXiv:2605.21997) — LLM response caching by content hash, behavior rules as trace-triggered reactive hooks, `--auto-improve` post-run gate.
+- **Self-Harness** (arXiv:2606.09498v1) — causal 3-tuple failure attribution (terminal_cause / causal_status / mechanism); declared editable surfaces to bound automated spec evolution; K-proposal diversity with best-coverage selection; held-out regression gating to protect healthy stages.
 
 **A minimal spec:**
 
@@ -333,7 +334,7 @@ IHR is computed as: `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × 
 
 Full citations in CHANGELOG.md: https://github.com/bryansparks/armature/blob/main/CHANGELOG.md
 
-`pip install armature` — MIT license, 1,330 tests, Python 3.11+.
+`pip install armature` — MIT license, 1,388 tests, Python 3.11+.
 
 ---
 
@@ -390,7 +391,7 @@ The fan-out primitive runs parallel research branches with `asyncio.gather`. If 
 
 Meta-note: I ran a Armature launchpad workflow this morning to organize this launch — a spec that drafted the platform-specific posts and evaluated them against tone criteria. It worked without a single Python change.
 
-`pip install armature` | https://github.com/bryansparks/armature | MIT | 1,330 tests
+`pip install armature` | https://github.com/bryansparks/armature | MIT | 1,388 tests
 
 Curious what local model setups people are running for multi-stage workflows. What's your current go-to for a capable 32B-ish that stays reasonably fast on a single GPU?
 
@@ -482,7 +483,7 @@ What you get without writing any Python orchestration code:
 - **Safety rules** — declarative `block`/`warn`/`require_approval` on any tool call
 - **FastAPI service** — `pip install 'armature[service]'` then `armature serve --specs-dir ./specs`; named workflow API out of the box
 
-No framework dependency. No agent classes to subclass. No prescribed team structure. Just a DAG executor, an LLM adapter, and your spec. 1,330 tests, MIT license.
+No framework dependency. No agent classes to subclass. No prescribed team structure. Just a DAG executor, an LLM adapter, and your spec. 1,388 tests, MIT license.
 
 I used it to organize this launch — a workflow that drafted platform posts and evaluated them against tone rules. That was the final dogfood test.
 
@@ -628,7 +629,7 @@ The v0.2.0 release added `--auto-improve` to run this automatically after every 
 
 ### The research backing
 
-Seven arXiv papers published between February and May 2026 converge on the same insight from different angles: the harness is more important than the model. NLAH (Tsinghua) defined the architectural primitives. MetaHarness (Stanford) proved trace-driven optimization works. Continual Harness formalized the two-loop self-improvement design. AgentSpec gave the safety DSL. AHE introduced prediction-verification to make improvement cycles accountable. KYA added static risk scoring and safety composition rules. ActiveGraph added caching, reactive behavior rules, and the post-run improvement gate.
+Nine arXiv papers published between February and June 2026 converge on the same insight from different angles: the harness is more important than the model. NLAH (Tsinghua) defined the architectural primitives. MetaHarness (Stanford) proved trace-driven optimization works. Continual Harness formalized the two-loop self-improvement design. AgentSpec gave the safety DSL. AHE introduced prediction-verification to make improvement cycles accountable. KYA added static risk scoring and safety composition rules. ActiveGraph added caching, reactive behavior rules, and the post-run improvement gate. Self-Harness (arXiv:2606.09498v1) introduced causal 3-tuple failure attribution, declared editable surfaces to bound spec evolution, K-proposal diversity with best-coverage selection, and regression gating to protect healthy stages.
 
 Every major design decision in Armature traces directly to one of these papers. The citations are in CHANGELOG.md.
 
@@ -660,4 +661,4 @@ If your multi-agent system is failing silently in production, I built this for y
 
 GitHub: https://github.com/bryansparks/armature  
 pip install armature  
-MIT license, 1,330 tests, Python 3.11+
+MIT license, 1,388 tests, Python 3.11+
