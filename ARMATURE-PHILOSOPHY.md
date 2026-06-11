@@ -153,6 +153,25 @@ Finally, the paper addresses governance: not all spec changes should be auto-app
 - `fan_in: "consensus"` — new fan-in strategy for subagent stages; parallel results are forwarded to `_consensus_judge()`, an async litellm call that synthesizes conflicting outputs into a single best answer
 - `_classify_changes(old_spec, new_spec)` — classifies every proposed spec change as auto-apply (descriptions, timeouts, retry limits) or review-required (stage additions/removals, `output_schema` changes, `safety_rules` modifications); review-required changes are written to `{spec}.pending.yaml` instead of overwriting the live spec; `ImprovementReport.requires_review` and `pending_path` fields surface this to callers
 
+### Paper 8: Harness Updating Is Not Harness Benefit — Efficient Spec Evolution
+**May 2026** — arXiv:2605.30621v1
+
+The paper that answered the most practical question about the self-improvement loop: does the model proposing spec changes need to be as powerful as the model executing them? The answer is no — and the margin is surprisingly small. Across benchmarks, medium-tier evolvers achieved within 3.1 percentage points of frontier-tier evolvers at substantially lower cost. This validated using a cheaper model for `SpecRefiner` without sacrificing improvement quality.
+
+The paper also introduced two new harness quality metrics that fill gaps in the original IHR formula:
+
+**Skill-Load Rate (SLR)** measures whether declared tools and skills are actually invoked during execution. A stage that declares `web_search` in its role configuration but never calls it has a role description that fails to prompt tool use — a detectable and fixable problem. SLR = 0 on a stage that always no-ops its declared skills is a distinct failure mode from `output_invalid` or `stage_failed`, requiring a specific fix (rewrite the description to explicitly name the tool and the condition under which it should be called).
+
+**Harness-Following Rate (HFR)** measures whether models adhere to harness instructions on the first attempt. A stage that always hits `on_fail.loop` before succeeding still counts as a success — but it reveals that the base-tier model needed extra prodding, which is a quality signal worth tracking. HFR is the fraction of stage executions that required zero escalations.
+
+Both metrics are now components of IHR, updating the formula from a 4-component weighted sum to a 5-component sum.
+
+**Armature contributions from this paper:**
+- `SpecRefiner` explicitly uses a medium-tier model by default; docstring updated to reflect the intentional cost-quality trade-off
+- `low_skill_activation` added to `DiagnosticCode` — fires when a stage's `TraceRecord.tools_declared` is non-empty but `tools_called` is empty across a run; `SpecRefiner` system prompt updated to advise rewriting the description to prompt tool use
+- `TraceRecord.tools_declared` and `tools_called` fields — populated by `LLMNode` from the stage's declared tools and the tool names actually invoked during the ReAct loop
+- HFR (Harness-Following Rate) added as the fifth IHR component; weights updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr); both `TraceStore.compute_ihr` and `SelfImproveRunner._compute_ihr` updated
+
 ### Paper 9: Self-Harness — Safer and Smarter Spec Evolution
 **June 2026** — arXiv:2606.09498v1
 
