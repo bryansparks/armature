@@ -263,3 +263,36 @@ stages:
       ============================================================
       Do you approve this recommendation?
     depends_on: [synthesizer]
+
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/03_deliberation_standard.yml \
+#     --input objective="Should we migrate our auth system to OAuth 2.0?"
+#
+#   [analyst]      → text: position MODIFY (evidence for migration is strong but
+#                           implementation risk is underestimated)
+#   [strategist]   → text: position PROCEED (OAuth 2.0 is the industry standard;
+#                           delay creates growing technical debt)
+#   [risk_assessor]→ text: position MODIFY (session management migration without
+#                           rollback plan is a HIGH risk)
+#   [challenger]   → text: challenges analyst on "underestimated risk" claim —
+#                           asks for specific failure scenario evidence
+#
+#   [synthesizer] → JSON:
+#     {
+#       "decision":    "Proceed with migration, but require a phased rollout plan
+#                        with per-service rollback capability before kickoff.",
+#       "reasoning":   "Two of three specialists support migration; the MODIFY
+#                        positions converge on implementation risk, not the goal
+#                        itself. Challenger's pushback on the analyst was partially
+#                        accepted — rollback plan addresses the core concern.",
+#       "confidence":  0.78,
+#       "positions":   {"analyst": "MODIFY", "strategist": "PROCEED",
+#                       "risk_assessor": "MODIFY"},
+#       "key_evidence": ["OAuth 2.0 is industry standard reducing future maintenance",
+#                         "Session migration without rollback flagged by 2 of 3 agents"],
+#       "risk_factors": ["No rollback plan currently exists for session store migration"]
+#     }
+#
+#   HUMAN GATE: Presents decision (confidence 0.78) for approval.
+#   Done in ~22s

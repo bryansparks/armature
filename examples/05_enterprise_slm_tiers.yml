@@ -1,0 +1,263 @@
+# Enterprise multi-tier pattern: SLM workers → frontier judge.
+#
+# The core insight: frontier models are powerful but expensive and require
+# sending data to external APIs. Small-to-medium language models (7B-14B
+# parameters, run locally via Ollama) are fast, private, and genuinely good
+# enough for structured extraction, classification, and summarization tasks.
+#
+# Pattern:
+#   extractor (local SLM)   ─┐
+#                             ├─→  judge (frontier)
+#   risk_flagger (local SLM) ─┘
+#
+# What this buys you:
+#   - Data sovereignty: sensitive document content never leaves your network
+#     in the worker stages — only structured extractions go to the frontier
+#   - Cost: 60-80% reduction vs. running all stages on a frontier model
+#   - Speed: local inference has no API latency for the volume stages
+#   - Quality where it counts: the frontier model makes the final call
+#
+# This is particularly well-suited for: contract review, medical record
+# triage, financial document analysis, compliance screening — anywhere
+# data sensitivity matters and you want to minimize external API surface.
+#
+# Prereqs (for the local tier):
+#   1. Install Ollama: https://ollama.com
+#   2. Pull a model:   ollama pull mistral   (or llama3.2, qwen2.5, etc.)
+#      Set `model` below to match whatever is in `ollama list`
+#
+# Usage:
+#   armature run examples/05_enterprise_slm_tiers.yml \
+#     --input contract_text="SERVICE AGREEMENT dated January 1, 2026..."
+#
+# Python:
+#   harness = Harness.from_spec("examples/05_enterprise_slm_tiers.yml")
+#   result = await harness.run({"contract_text": open("contract.txt").read()})
+#   print(result["judge"]["recommendation"])    # e.g. "NEGOTIATE"
+#   print(result["judge"]["must_fix"])
+#
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/05_enterprise_slm_tiers.yml \
+#     --input contract_text="SERVICE AGREEMENT..."
+#
+#   [extractor]    → JSON: {parties: [{name: "Acme Corp", role: "Provider"}, ...],
+#                           effective_date: "2026-01-01", term_months: 24,
+#                           key_clauses: [{type: "liability_cap", ...}, ...]}
+#
+#   [risk_flagger] → JSON: {flags: [
+#                             {clause_type: "IP_ownership", severity: "HIGH",
+#                              issue: "Work product assignment is one-sided..."},
+#                             {clause_type: "auto_renewal", severity: "MEDIUM", ...}
+#                           ], risk_summary: "Two significant flags; one deal-breaker"}
+#
+#   [judge]        → JSON: {recommendation: "NEGOTIATE", confidence: 0.84,
+#                           rationale: "The IP ownership clause is non-standard and
+#                             requires revision before signing. Auto-renewal window
+#                             is short but negotiable...",
+#                           must_fix: ["IP ownership clause §7.2"],
+#                           nice_to_fix: ["Auto-renewal notice window"]}
+#
+#   Done in 18s  ← SLM stages ran locally; frontier only called for final judgment
+
+name: contract_review_enterprise
+version: "1.0"
+description: Contract review — local SLM extraction/flagging, frontier judgment
+
+model_tiers:
+  # Local SLM: runs entirely on your machine. No API key. No data egress.
+  # Swap model to match whatever you have in `ollama list`.
+  local:
+    provider: ollama
+    model: mistral
+
+  # Frontier: used ONLY for the final judgment stage. By this point, sensitive
+  # raw text has already been processed locally; the frontier model receives
+  # only the structured extraction output.
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+stages:
+
+  # Stage 1 (local SLM): Extract structured information from the contract.
+  # Raw document text stays on-premises. Only the structured output flows forward.
+  - id: extractor
+    role:
+      name: Contract Extractor
+      type: worker
+      model_tier: local
+      description: |
+        Extract structured information from the following contract text.
+
+        CONTRACT:
+        {{ contract_text }}
+
+        Extract all key parties, effective date, term length, financial terms,
+        obligations, termination conditions, and governing jurisdiction.
+
+        Quote exact language for important clauses — do not paraphrase.
+        If a field is not present in the contract, use null.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [parties, effective_date, key_clauses]
+      properties:
+        parties:
+          type: array
+          description: All named parties in the contract
+          items:
+            type: object
+            required: [name, role]
+            properties:
+              name:
+                type: string
+              role:
+                type: string
+                description: e.g. "Provider", "Client", "Licensor"
+        effective_date:
+          type: string
+          description: Contract start date (ISO format if possible)
+        term_months:
+          type: integer
+          description: Contract duration in months; null if perpetual or unclear
+        payment_terms:
+          type: string
+          description: Summary of payment obligations, e.g. "Net-30, $5,000/month"
+        key_clauses:
+          type: array
+          description: All clauses worth reviewing — include verbatim excerpts
+          items:
+            type: object
+            required: [type, summary, verbatim_excerpt]
+            properties:
+              type:
+                type: string
+                description: >
+                  Clause category, e.g. "liability_cap", "IP_ownership",
+                  "non_compete", "termination", "auto_renewal", "indemnification"
+              summary:
+                type: string
+              verbatim_excerpt:
+                type: string
+        jurisdiction:
+          type: string
+        governing_law:
+          type: string
+    depends_on: []
+
+  # Stage 2 (local SLM): Flag risky clauses. Still fully local.
+  # Receives extractor's structured output — no raw contract text repeated here.
+  - id: risk_flagger
+    role:
+      name: Risk Flagger
+      type: researcher
+      model_tier: local
+      description: |
+        Review the extracted contract clauses and identify risk flags.
+
+        For each flag:
+        - Name the clause type
+        - Assign severity: HIGH = deal-breaker, MEDIUM = negotiate, LOW = note only
+        - Explain the issue in plain language
+        - Suggest what a fair revision looks like
+
+        Common risk patterns to check:
+        - Unlimited liability or absent liability caps
+        - One-sided IP assignment (all work product transfers to counterparty)
+        - Auto-renewal with short cancellation windows (< 60 days notice)
+        - Non-compete or non-solicit terms broader than reasonable scope
+        - Missing limitation of consequential damages
+        - Unfavorable jurisdiction or governing law
+        - Payment terms creating cash flow disadvantage
+        - Termination for convenience with no wind-down period
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [flags, risk_summary]
+      properties:
+        flags:
+          type: array
+          description: All risk flags identified, ordered HIGH → MEDIUM → LOW
+          items:
+            type: object
+            required: [clause_type, severity, issue, suggested_revision]
+            properties:
+              clause_type:
+                type: string
+              severity:
+                type: string
+                enum: [HIGH, MEDIUM, LOW]
+              issue:
+                type: string
+                description: Plain-language explanation of the problem
+              suggested_revision:
+                type: string
+                description: What a favorable revision of this clause would say
+        clean_clauses:
+          type: array
+          description: Clause types reviewed and found acceptable as-is
+          items:
+            type: string
+        risk_summary:
+          type: string
+          description: One-sentence overall risk profile assessment
+    depends_on: [extractor]
+
+  # Stage 3 (frontier): Final judgment call.
+  # The frontier model sees structured data only — extraction + flags — never
+  # the raw contract text. This minimizes external API exposure while still
+  # leveraging frontier reasoning for the decision that matters.
+  - id: judge
+    role:
+      name: Contract Counsel
+      type: judge
+      model_tier: frontier
+      description: |
+        You have received a structured analysis of a contract from two local
+        review stages:
+        - extractor: structural facts (parties, term, clauses with verbatim text)
+        - risk_flagger: risk flags with severity ratings and suggested revisions
+
+        Make a final recommendation: SIGN, NEGOTIATE, or REJECT.
+
+        Base your recommendation on:
+        - Number and severity of HIGH flags (one HIGH is often enough to NEGOTIATE)
+        - Whether flags indicate a pattern of one-sided drafting vs. isolated issues
+        - Whether HIGH-flagged clauses are unusual for this type of contract
+        - The relative leverage of the parties (inferred from context)
+
+        Be direct. Name the specific clauses driving your recommendation.
+        Do not recommend REJECT unless the contract is fundamentally unworkable.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [recommendation, confidence, rationale]
+      properties:
+        recommendation:
+          type: string
+          enum: [SIGN, NEGOTIATE, REJECT]
+        confidence:
+          type: number
+          description: Confidence in this recommendation — 0.0 (low) to 1.0 (high)
+          minimum: 0.0
+          maximum: 1.0
+        rationale:
+          type: string
+          description: 2-4 sentences explaining the recommendation with clause citations
+        must_fix:
+          type: array
+          description: HIGH-severity flags — must be revised before signing
+          items:
+            type: string
+        nice_to_fix:
+          type: array
+          description: MEDIUM-severity flags — worth pushing back on if possible
+          items:
+            type: string
+        acceptable_as_is:
+          type: array
+          description: Flagged items the frontier judge considers standard/acceptable
+          items:
+            type: string
+    depends_on: [extractor, risk_flagger]

@@ -162,3 +162,32 @@ stages:
 
       Approve to accept this output, or provide feedback.
     depends_on: [critic]
+
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/02_research_pipeline.yml \
+#     --input topic="Impact of remote work on urban real estate" \
+#     --input audience="executive leadership"
+#
+#   [researcher] → JSON:
+#     key_findings: ["Office vacancy in major CBDs reached 20-25% by 2024",
+#                    "Suburban residential demand up 15% in 2021-2023", ...]
+#     trends:      ["Secondary cities gaining population", ...]
+#     gaps:        ["Long-term lease renegotiation data still incomplete"]
+#
+#   [writer] → text (briefing, ~400 words):
+#     "EXECUTIVE BRIEFING: Remote Work and Urban Real Estate
+#      Remote work has fundamentally shifted demand away from central
+#      business districts toward suburban and secondary markets..."
+#
+#   [critic] → JSON:
+#     {
+#       "overall_score": 0.82,
+#       "strengths":   ["Accurate representation of vacancy data",
+#                       "Actionable recommendations specific to the audience"],
+#       "weaknesses":  ["Understates uncertainty in the long-term outlook"],
+#       "verdict":     "APPROVED — well-structured briefing with minor gaps"
+#     }
+#
+#   HUMAN GATE: Presents critic's score (0.82) and verdict for approval.
+#   Done in ~12s

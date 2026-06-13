@@ -29,3 +29,18 @@ stages:
         Write for a technically literate but non-specialist audience.
     output_mode: text
     depends_on: []
+
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/01_hello_world.yml --input topic="quantum computing"
+#
+#   ┌─ explainer ─────────────────────────────────────────────────────────┐
+#   │ Quantum computing leverages quantum mechanical phenomena —          │
+#   │ superposition and entanglement — to process information in ways     │
+#   │ classical computers cannot. Where a classical bit is either 0 or 1, │
+#   │ a qubit can represent both simultaneously until measured. This      │
+#   │ enables certain algorithms (factoring, optimization, simulation)    │
+#   │ to run exponentially faster, though practical quantum computers     │
+#   │ remain limited by noise and error rates.                            │
+#   └─────────────────────────────────────────────────────────────────────┘
+#   Done in 1.8s

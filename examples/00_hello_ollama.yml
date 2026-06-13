@@ -34,3 +34,17 @@ stages:
         Write for a technically literate but non-specialist audience.
     output_mode: text
     depends_on: []
+
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/00_hello_ollama.yml --input topic="what a DAG is"
+#
+#   ┌─ explainer ─────────────────────────────────────────────────────────┐
+#   │ A Directed Acyclic Graph (DAG) is a data structure consisting of    │
+#   │ nodes connected by directed edges, where no path can loop back to   │
+#   │ a previous node. In workflow systems, each node represents a task   │
+#   │ and edges encode dependencies — a task only runs after all tasks    │
+#   │ it depends on have completed. DAGs are central to tools like        │
+#   │ Apache Airflow, Prefect, and Armature's own workflow engine.        │
+#   └─────────────────────────────────────────────────────────────────────┘
+#   Done in 3.1s  (local inference — no API call, no data egress)

@@ -1,0 +1,257 @@
+# Human-in-the-loop (HITL): confidence-gated human escalation.
+#
+# Not every AI decision should be fully automated. This pattern runs the AI
+# pipeline normally and gates on a confidence threshold — routing to a human
+# only when the system is uncertain, rather than interrupting every run.
+#
+# In production you would check the judge's confidence score in application
+# code and conditionally invoke the human gate. This example shows how to
+# wire the gate stage so it's always available, and documents the conditional
+# routing pattern in comments.
+#
+# Use case: customer support ticket triage. A classifier categorizes the
+# ticket and drafts a response; a judge scores confidence. High-confidence
+# responses route to send (or a final human spot-check); low-confidence
+# ones surface to a support agent for review.
+#
+# Demonstrates: guided_json classification, text response drafting,
+#               judge scoring, human gate with structured context display,
+#               application-code conditional routing pattern.
+#
+# Usage:
+#   armature run examples/06_human_in_the_loop.yml \
+#     --input ticket="My account was charged twice for last month's invoice. ..."
+#
+# Python (with conditional gate routing):
+#   harness = Harness.from_spec("examples/06_human_in_the_loop.yml")
+#   result = await harness.run({"ticket": ticket_text})
+#   if result["judge"]["confidence"] >= 0.85:
+#       send_response(result["drafter"]["content"])   # fully automated
+#   else:
+#       queue_for_human_review(result)                # escalate
+#
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/06_human_in_the_loop.yml \
+#     --input ticket="My account was charged twice for last month..."
+#
+#   [classifier] → JSON: {category: "BILLING", sentiment: "FRUSTRATED",
+#                          priority: "HIGH", requires_action: true,
+#                          key_details: ["double charge", "last month"]}
+#
+#   [drafter]    → text: "Hi [Name], I'm sorry about the double charge. I've
+#                          located your account and can see the duplicate transaction
+#                          from [date]..."
+#
+#   [judge]      → JSON: {confidence: 0.91, approved: true,
+#                          feedback: "Response is accurate and empathetic.",
+#                          tone_score: 0.94, accuracy_score: 0.88}
+#
+#   confidence 0.91 ≥ 0.85 threshold → response approved for sending
+#   Done in 6.2s
+#
+# ── If confidence were low (e.g. ticket involves legal threat) ────────────
+#   [judge] → JSON: {confidence: 0.42, approved: false,
+#                     feedback: "Ticket contains potential legal language..."}
+#
+#   HUMAN GATE FIRES:
+#   ============================================================
+#   ESCALATED FOR HUMAN REVIEW — Confidence: 0.42
+#   Category: LEGAL  |  Priority: CRITICAL
+#   ...
+#   ============================================================
+
+name: support_ticket_hitl
+version: "1.0"
+description: Support ticket triage with confidence-gated human escalation
+
+model_tiers:
+  fast:
+    provider: anthropic
+    model: claude-haiku-4-5-20251001
+  frontier:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+stages:
+
+  # Stage 1: Classify the incoming ticket.
+  # Structured output makes the classifier's assessment easy to act on
+  # downstream — in application code and in the drafter's context.
+  - id: classifier
+    role:
+      name: Ticket Classifier
+      type: worker
+      model_tier: fast
+      description: |
+        Classify the following customer support ticket.
+
+        TICKET:
+        {{ ticket }}
+
+        Extract the category, sentiment, priority, and key details the
+        support agent or response drafter needs.
+
+        Be precise about priority: CRITICAL means potential legal/regulatory
+        exposure, service outage, or immediate financial harm to the customer.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [category, sentiment, priority, requires_action, key_details]
+      properties:
+        category:
+          type: string
+          description: Primary ticket category
+          enum: [BILLING, TECHNICAL, ACCOUNT_ACCESS, LEGAL, FEATURE_REQUEST, GENERAL]
+        sentiment:
+          type: string
+          enum: [POSITIVE, NEUTRAL, FRUSTRATED, ANGRY]
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, CRITICAL]
+        requires_action:
+          type: boolean
+          description: Does this ticket require a specific corrective action (not just information)?
+        key_details:
+          type: array
+          description: Specific facts the drafter needs to address
+          items:
+            type: string
+        escalation_signals:
+          type: array
+          description: Any phrases suggesting legal, regulatory, or executive involvement
+          items:
+            type: string
+    depends_on: []
+
+  # Stage 2: Draft a response based on the classification.
+  # The classifier's structured output is automatically available in context,
+  # so the drafter knows the category, priority, and key details to address.
+  - id: drafter
+    role:
+      name: Response Drafter
+      type: worker
+      model_tier: fast
+      description: |
+        Draft a support response for this ticket.
+
+        ORIGINAL TICKET:
+        {{ ticket }}
+
+        Use the classifier's analysis (available in context) to inform the tone,
+        priority of issues addressed, and any corrective action language.
+
+        Guidelines:
+        - Open with acknowledgment of the specific issue (not generic "I'm sorry")
+        - Address every key detail the classifier identified
+        - For BILLING issues: confirm you can investigate / have investigated
+        - For TECHNICAL issues: provide a clear next step or workaround
+        - For CRITICAL priority: escalate tone — assure direct follow-up
+        - Close with a specific next action or timeline, not vague reassurance
+        - Keep under 150 words — support responses should be scannable
+
+        Do not make promises you cannot keep. Use "[Name]" as placeholder.
+    output_mode: text
+    depends_on: [classifier]
+
+  # Stage 3: Judge the drafted response.
+  # The frontier model evaluates both content accuracy and tone quality.
+  # Its confidence score is the key routing signal in application code.
+  - id: judge
+    role:
+      name: Quality Judge
+      type: judge
+      model_tier: frontier
+      description: |
+        Review the drafted support response for quality, accuracy, and tone.
+
+        You have the original ticket, the classifier's analysis, and the
+        drafter's response available in context.
+
+        Evaluate:
+        - Does the response address all key details the classifier identified?
+        - Is the tone appropriate for the sentiment and priority level?
+        - Are there any factual errors, hollow promises, or missing actions?
+        - Is the response complete — does it have a clear next step?
+
+        Assign a confidence score reflecting how appropriate this response is
+        to send without human review:
+        - 0.90+ : send without review
+        - 0.70-0.89 : acceptable, spot-check recommended
+        - below 0.70: escalate to human agent
+
+        If the ticket category is LEGAL or CRITICAL, confidence should not
+        exceed 0.70 regardless of response quality.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [confidence, approved, feedback]
+      properties:
+        confidence:
+          type: number
+          description: Confidence that this response can be sent without human review
+          minimum: 0.0
+          maximum: 1.0
+        approved:
+          type: boolean
+          description: true if confidence >= 0.85 and no blocking issues found
+        feedback:
+          type: string
+          description: One-sentence quality assessment for the audit log
+        issues_found:
+          type: array
+          description: Specific problems that reduced confidence
+          items:
+            type: string
+        tone_score:
+          type: number
+          description: Tone appropriateness — 0.0 (wrong tone) to 1.0 (perfect)
+          minimum: 0.0
+          maximum: 1.0
+        accuracy_score:
+          type: number
+          description: Content accuracy vs. ticket details — 0.0 to 1.0
+          minimum: 0.0
+          maximum: 1.0
+    depends_on: [classifier, drafter]
+
+  # Human escalation gate — fires when confidence is below threshold.
+  #
+  # In application code with conditional routing (recommended for production):
+  #   if result["judge"]["confidence"] < 0.85:
+  #       queue_for_human_review(result)
+  #
+  # In the harness spec, this gate runs unconditionally as a final step —
+  # useful for workflows where every output should have a human checkpoint,
+  # or during initial deployment before you trust the confidence calibration.
+  - id: human_review
+    gate: human
+    present: |
+      ============================================================
+      ESCALATED FOR HUMAN REVIEW
+      ============================================================
+
+      Ticket Category:  {{ classifier.category }}
+      Sentiment:        {{ classifier.sentiment }}
+      Priority:         {{ classifier.priority }}
+      Judge Confidence: {{ judge.confidence }}
+      Judge Verdict:    {{ judge.feedback }}
+
+      ── Original Ticket ──────────────────────────────────────
+      {{ ticket }}
+
+      ── Classifier Key Details ───────────────────────────────
+      {% for d in classifier.key_details %}- {{ d }}
+      {% endfor %}
+
+      ── Drafted Response ─────────────────────────────────────
+      {{ drafter }}
+
+      {% if judge.issues_found %}
+      ── Quality Issues Found ─────────────────────────────────
+      {% for i in judge.issues_found %}- {{ i }}
+      {% endfor %}
+      {% endif %}
+      ============================================================
+      Approve to send this response, or provide revised text below.
+    depends_on: [classifier, drafter, judge]
