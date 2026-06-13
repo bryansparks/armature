@@ -26,12 +26,14 @@ version: "1.0"
 description: Three-round deliberation — specialists, challenger, synthesizer
 
 model_tiers:
+  # SLM tier — runs the 3 specialist analysts and the challenger (4 of 5 stages)
   small:
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  # Frontier tier — reserved for the synthesizer: sole decision authority
   frontier:
-    provider: anthropic
-    model: claude-sonnet-4-6
+    provider: openrouter
+    model: google/gemini-2.5-flash
 
 stages:
 

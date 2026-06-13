@@ -15,8 +15,8 @@ description: Single-stage explainer workflow
 
 model_tiers:
   small:
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
+    provider: openrouter
+    model: qwen/qwen3.6-27b
 
 stages:
   - id: explainer

@@ -21,12 +21,18 @@ version: "1.0"
 description: Research → Write → Critique pipeline with human approval gate
 
 model_tiers:
+  # Worker tier — fast SLM for drafting (text output, forgiving of format quirks)
   small:
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  # Medium tier — balanced model for structured JSON output (researcher stage)
+  medium:
+    provider: openrouter
+    model: google/gemini-2.5-flash
+  # Frontier tier — reserved for the judge (quality gate, sole decision authority)
   frontier:
-    provider: anthropic
-    model: claude-sonnet-4-6
+    provider: openrouter
+    model: google/gemini-2.5-flash
 
 stages:
 
@@ -35,7 +41,7 @@ stages:
     role:
       name: Researcher
       type: researcher
-      model_tier: small
+      model_tier: medium
       description: |
         Research the following topic thoroughly and return structured findings.
 

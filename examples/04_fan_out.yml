@@ -58,12 +58,14 @@ version: "1.0"
 description: Parallel multi-angle competitive analysis with frontier synthesizer
 
 model_tiers:
+  # Fast tier — runs the three parallel analyst branches concurrently
   fast:
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  # Frontier tier — reserved for the synthesizer that sees all three outputs
   frontier:
-    provider: anthropic
-    model: claude-sonnet-4-6
+    provider: openrouter
+    model: google/gemini-2.5-flash
 
 stages:
 

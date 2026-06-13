@@ -73,10 +73,10 @@ model_tiers:
 
   # Frontier: used ONLY for the final judgment stage. By this point, sensitive
   # raw text has already been processed locally; the frontier model receives
-  # only the structured extraction output.
+  # only the structured extraction output — not the raw contract text.
   frontier:
-    provider: anthropic
-    model: claude-sonnet-4-6
+    provider: openrouter
+    model: google/gemini-2.5-flash
 
 stages:
 

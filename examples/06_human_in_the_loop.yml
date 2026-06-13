@@ -66,12 +66,14 @@ version: "1.0"
 description: Support ticket triage with confidence-gated human escalation
 
 model_tiers:
+  # SLM tier — handles classification and response drafting (volume stages)
   fast:
-    provider: anthropic
-    model: claude-haiku-4-5-20251001
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  # Frontier tier — reserved for the judge that scores confidence and routes escalations
   frontier:
-    provider: anthropic
-    model: claude-sonnet-4-6
+    provider: openrouter
+    model: google/gemini-2.5-flash
 
 stages:
 
