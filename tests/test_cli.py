@@ -6,7 +6,7 @@ from armature.cli import app, parse_inputs, _make_on_event
 import typer
 import pytest
 
-runner = CliRunner()
+runner = CliRunner(env={"NO_COLOR": "1"})
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "minimal.yaml"
