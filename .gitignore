@@ -40,3 +40,6 @@ CONTINUATION_PLAN.md
 # Local tooling artifacts
 .benchmarks/
 PRE-LAUNCH-READINESS.md
+
+# Standalone site — hosted on armature.now, not GitHub Pages
+site/
