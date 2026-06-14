@@ -236,6 +236,7 @@ function HowItWorks() {
         'Context dict accumulates all upstream outputs',
         'guided_json with automatic tier escalation on failure',
         'Checkpoint & resume — survive crashes mid-workflow',
+        'Deliberate iteration with loop: and carry_forward',
       ],
     },
     {
@@ -1151,6 +1152,82 @@ function V0_2_0_Features() {
   );
 }
 
+// ─── V0.3.0 FEATURES ──────────────────────────────────────────────────────────
+function V0_3_0_Features() {
+  const features = [
+    {
+      title: 'loop: field',
+      desc: 'Declare deliberate iteration directly on any stage. Separate from on_fail.loop (retry-on-failure) — this is intentional looping: research rounds, refinement cycles, convergence loops.',
+      icon: '↺',
+    },
+    {
+      title: '_iteration variable',
+      desc: 'Always-defined iteration context: _iteration.num (1-based), _iteration.is_first, _iteration.is_last. No more checking if prior_result is defined on the first pass.',
+      icon: '⟳',
+    },
+    {
+      title: 'carry_forward:',
+      desc: 'Dot-path list for selective state carry. Specify exactly which fields from the previous result flow into the next iteration. None means carry everything.',
+      icon: '→',
+    },
+    {
+      title: 'until: condition',
+      desc: 'Jinja2 expression evaluated against the stage result. Stop when approved == true. Stop when confidence > 0.85. Iteration != retry — your YAML says what you mean.',
+      icon: '✓',
+    },
+  ];
+
+  return (
+    <section style={{ padding: '88px 32px', maxWidth: 1060, margin: '0 auto' }}>
+      <Reveal>
+        <span style={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: A.textMuted, textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+          What&apos;s Next in v0.3.0
+        </span>
+        <h2 style={{
+          fontFamily: SERIF, fontSize: 36, fontWeight: 400,
+          color: A.textBright, lineHeight: 1.25, margin: '12px 0 12px',
+        }}>
+          Iterative deepening.
+          <br /><span style={{ color: A.researcher, fontStyle: 'italic' }}>First-class iteration.</span>
+        </h2>
+        <p style={{
+          fontFamily: SANS, fontSize: 16, color: A.textSecondary,
+          lineHeight: 1.7, margin: '0 0 48px', maxWidth: 620,
+        }}>
+          v0.3.0 adds first-class iteration loops — declare intent, not retry logic. Stop when done. Carry only what matters forward.
+        </p>
+      </Reveal>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+        {features.map((f, i) => (
+          <Reveal key={i} delay={i * 0.05}>
+            <div style={{
+              padding: '28px', height: '100%',
+              backgroundColor: A.surface, border: `1px solid ${A.border}`,
+              borderRadius: 12, display: 'flex', gap: 16, flexDirection: 'column',
+            }}>
+              <div style={{
+                fontSize: 32, lineHeight: 1,
+              }}>{f.icon}</div>
+              <div>
+                <h3 style={{
+                  fontFamily: MONO, fontSize: 13, fontWeight: 700,
+                  color: A.researcher, textTransform: 'uppercase',
+                  letterSpacing: '0.05em', margin: '0 0 8px',
+                }}>{f.title}</h3>
+                <p style={{
+                  fontFamily: SANS, fontSize: 14, color: A.textSecondary,
+                  lineHeight: 1.7, margin: 0,
+                }}>{f.desc}</p>
+              </div>
+            </div>
+          </Reveal>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ─── ELFTECH ATTRIBUTION ──────────────────────────────────────────────────────
 function ElfTechAttribution() {
   return (
@@ -1188,6 +1265,7 @@ export default function ArmatureLanding() {
       <ThreeRoles />
       <SelfImprovement />
       <V0_2_0_Features />
+      <V0_3_0_Features />
       <ResearchFoundation />
       <CodeExample />
       <Ecosystem />
