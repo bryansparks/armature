@@ -12,6 +12,8 @@ No framework dependency. No prescribed team structure. Just a DAG executor, an L
 
 Armature is the execution engine for **Reasoning Automation** — end-to-end business processes where multi-agent deliberation replaces brittle rule-based logic. The harness owns orchestration, retries, safety, telemetry, and human approval gates. You supply the domain logic as YAML workflow specs and Python tool modules. The same engine that runs a code-review pipeline can run a contract risk assessment, a social media creative chain, or a compliance audit — without any changes to Armature itself.
 
+For more information, docs, and examples, visit **[armature.now](https://armature.now)**.
+
 ---
 
 ## What it does
