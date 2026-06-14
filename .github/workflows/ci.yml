@@ -25,7 +25,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,service]"
 
       - name: Run tests
         run: python -m pytest tests/ --tb=short -q
