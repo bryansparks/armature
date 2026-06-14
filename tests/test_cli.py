@@ -1,12 +1,18 @@
 """Tests for CLI commands: validate, run (dry-run, inputs), on_event."""
 import json
+import re
 from pathlib import Path
 from typer.testing import CliRunner
 from armature.cli import app, parse_inputs, _make_on_event
 import typer
 import pytest
 
-runner = CliRunner(env={"NO_COLOR": "1"})
+runner = CliRunner()
+
+
+def plain(s: str) -> str:
+    """Strip ANSI escape codes so assertions work regardless of terminal color support."""
+    return re.sub(r'\x1b\[[0-9;]*m', '', s)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "minimal.yaml"
@@ -403,7 +409,7 @@ def test_doctor_shows_ok_or_error_per_check():
 
 def test_auto_improve_flag_appears_in_run_help():
     result = runner.invoke(app, ["run", "--help"])
-    assert "--auto-improve" in result.output
+    assert "--auto-improve" in plain(result.output)
 
 
 def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None):
