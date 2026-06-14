@@ -71,6 +71,17 @@ def compute_spec_risk(spec: "HarnessSpec") -> SpecRiskResult:
         factors.append(RiskFactor(f"{len(fan_out_stages)} fan-out stage(s) (+6 each)", delta))
         raw += delta
 
+    loop_stages = [s for s in spec.stages if s.loop is not None]
+    if loop_stages:
+        delta = len(loop_stages) * 4
+        factors.append(RiskFactor(f"{len(loop_stages)} loop stage(s) (+4 each)", delta))
+        raw += delta
+        high_iter = [s for s in loop_stages if s.loop.max_iterations > 10]
+        if high_iter:
+            delta2 = len(high_iter) * 2
+            factors.append(RiskFactor(f"{len(high_iter)} loop stage(s) with max_iterations>10 (+2 each)", delta2))
+            raw += delta2
+
     if getattr(spec, "safety_mode", "permissive") == "strict":
         factors.append(RiskFactor("strict safety mode (governance credit)", -10))
         raw -= 10

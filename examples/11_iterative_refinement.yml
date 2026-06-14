@@ -1,0 +1,105 @@
+name: iterative-refinement
+version: "1.0"
+description: >
+  Demonstrates the loop feature: a writer iteratively improves a draft
+  until a judge approves it (score >= 0.8) or max iterations is reached.
+
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3-8b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 2048
+
+role_type_defaults:
+  worker: small
+  judge: small
+
+contracts:
+  inputs:
+    - name: topic
+      description: The topic to write about
+
+stages:
+  # ── Round stage: write a draft and evaluate it in one step ─────────────────
+  # This stage is looped. On the first iteration it writes from scratch.
+  # On subsequent iterations it improves the draft based on prior feedback.
+  - id: refine_round
+    loop:
+      max_iterations: 5
+      until: "{{ approved == true }}"
+      carry_forward:
+        - refine_round.draft
+        - refine_round.feedback
+        - refine_round.score
+    role:
+      name: WriterJudge
+      type: worker
+      description: |
+        You are a writer and self-critic. Your task is to write (or improve) a
+        short paragraph about the given topic, then grade your own output.
+
+        TOPIC: {{ topic }}
+
+        {% if _iteration.is_first %}
+        ## First draft
+        Write a clear, engaging paragraph on the topic above. Then self-evaluate it.
+        {% else %}
+        ## Iteration {{ _iteration.num }} — improve on the prior draft
+
+        PRIOR DRAFT:
+        {{ _iteration.carry_forward.refine_round.draft }}
+
+        PRIOR FEEDBACK:
+        {{ _iteration.carry_forward.refine_round.feedback }}
+        (prior score: {{ _iteration.carry_forward.refine_round.score }})
+
+        Rewrite the paragraph to address the feedback above. Then re-evaluate.
+        {% endif %}
+
+        Return a JSON object with exactly these fields:
+        {
+          "draft": "<the full paragraph text>",
+          "score": <a float 0.0–1.0 rating your draft's quality>,
+          "feedback": "<one or two sentences of specific improvement advice>",
+          "approved": <true if score >= 0.8, false otherwise>
+        }
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [draft, score, feedback, approved]
+      properties:
+        draft:
+          type: string
+          description: The written paragraph
+        score:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          description: Quality score (0–1)
+        feedback:
+          type: string
+          description: Specific improvement advice
+        approved:
+          type: boolean
+          description: True when score >= 0.8
+    depends_on: []
+
+  # ── Final summary stage ─────────────────────────────────────────────────────
+  - id: summary
+    role:
+      name: Editor
+      type: worker
+      description: |
+        The iterative refinement loop has completed.
+
+        TOPIC: {{ topic }}
+        FINAL DRAFT: {{ refine_round.draft }}
+        FINAL SCORE: {{ refine_round.score }}
+        APPROVED: {{ refine_round.approved }}
+
+        Write a one-sentence editorial note about whether the draft succeeded
+        and what made it work (or not).
+    output_mode: text
+    depends_on: [refine_round]

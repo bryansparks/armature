@@ -41,6 +41,38 @@ def _extract_quorum_score(role_type: str, result: dict) -> float | None:
     return None
 
 
+def _resolve_dot_path(data: dict, path: str) -> Any:
+    """Resolve a dot-separated path like 'decide_round.report' against a nested dict."""
+    keys = path.split(".")
+    current = data
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+    return current
+
+
+def _set_nested_key(data: dict, path: str, value: Any) -> None:
+    """Set a nested key like 'decide_round.report' in a dict, creating intermediaries."""
+    keys = path.split(".")
+    current = data
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    current[keys[-1]] = value
+
+
+def _merge_carry_forward(target: dict, carry: dict) -> None:
+    """Deep-merge carry-forward dict into target, preserving nested structure."""
+    for key, value in carry.items():
+        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
+            _merge_carry_forward(target[key], value)
+        else:
+            target[key] = value
+
+
 _GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
 
 
@@ -642,6 +674,70 @@ class Harness:
             raise last_exc
         return last_result  # until never satisfied — return best result
 
+    async def _run_with_loop(self, stage: Stage, context: dict[str, Any]) -> Any:
+        """Execute stage with deliberate iteration (not retry-on-failure)."""
+        loop_cfg = stage.loop
+        var_name = loop_cfg.iteration_var
+        result: Any = None
+        iteration_ctx = dict(context)
+
+        for iteration_num in range(1, loop_cfg.max_iterations + 1):
+            is_last = (iteration_num == loop_cfg.max_iterations)
+
+            iteration_info: dict[str, Any] = {
+                "num": iteration_num,
+                "is_first": iteration_num == 1,
+                "is_last": is_last,
+                "carry_forward": {},
+            }
+
+            if result is not None:
+                carry: dict[str, Any] = {}
+                if loop_cfg.carry_forward is not None:
+                    for path in loop_cfg.carry_forward:
+                        value = _resolve_dot_path(result if isinstance(result, dict) else {}, path)
+                        if value is not None:
+                            _set_nested_key(carry, path, value)
+                else:
+                    carry = result if isinstance(result, dict) else {"_result": result}
+                iteration_info["carry_forward"] = carry
+
+            update: dict[str, Any] = {var_name: iteration_info}
+            if isinstance(iteration_info["carry_forward"], dict):
+                _merge_carry_forward(update, iteration_info["carry_forward"])
+            iteration_ctx = {**iteration_ctx, **update}
+
+            result = await self._execute_stage_with_recovery(stage, iteration_ctx)
+
+            until_met = False
+            if loop_cfg.until is not None:
+                try:
+                    until_met = self._eval_until(loop_cfg.until, result, iteration_ctx)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Stage '{stage.id}' loop.until raised an error: {exc}"
+                    ) from exc
+
+            if self._on_event:
+                self._on_event("loop_iteration", {
+                    "stage": stage.id,
+                    "iteration": iteration_num,
+                    "max": loop_cfg.max_iterations,
+                    "until_met": until_met,
+                })
+
+            if until_met:
+                return result
+
+            if not is_last and loop_cfg.backoff_s is not None:
+                delay = min(
+                    loop_cfg.backoff_s * (2 ** (iteration_num - 1)),
+                    loop_cfg.backoff_max_s,
+                )
+                await asyncio.sleep(delay)
+
+        return result
+
     def _effective_output_limit(self, stage: Stage) -> int | None:
         if stage.output_max_chars is not None:
             return stage.output_max_chars
@@ -845,6 +941,8 @@ class Harness:
 
             async def make_handler(stage: Stage):
                 async def handler(ctx):
+                    if stage.loop is not None:
+                        return await self._run_with_loop(stage, ctx)
                     return await self._execute_stage_with_recovery(stage, ctx)
                 return handler
 
