@@ -37,9 +37,13 @@ pip install armature-agents
 With optional extras:
 
 ```bash
-pip install "armature-agents[service]"   # FastAPI HTTP service
+pip install "armature-agents[service]"   # FastAPI HTTP service (armature serve)
 pip install "armature-agents[telemetry]" # OpenTelemetry export
 ```
+
+`[service]` adds FastAPI and uvicorn, needed only if you run `armature serve` to expose workflows as an HTTP API. The core `armature run` command works without it.
+
+`[telemetry]` adds the OpenTelemetry SDK for span export to OTLP backends (Jaeger, Honeycomb, etc.). Without it, `armature.telemetry` degrades silently to no-ops — traces are written to the local SQLite store regardless.
 
 Verify:
 
