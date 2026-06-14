@@ -245,6 +245,355 @@ When a safety rule blocks a tool call, the harness raises `ToolBlocked` and stop
 
 ---
 
+## `loop` — deliberate iteration
+
+`on_fail.loop` retries a stage because something went wrong. `loop` iterates a stage because iteration is the design. The distinction matters: a polling loop, a multi-round research loop, and a negotiation that converges over several turns are not failures — they are expected behavior that happens to involve running the same stage more than once.
+
+`loop` is a top-level stage field. It declares an explicit iteration policy that runs regardless of whether the stage succeeds or fails.
+
+```python
+class IterationConfig(BaseModel):
+    max_iterations: int = 10
+    until: str | None = None
+    carry_forward: list[str] | None = None  # dot-paths into previous result; None = carry all
+    iteration_var: str = "_iteration"
+    backoff_s: float | None = None
+    backoff_max_s: float = 60.0
+```
+
+### Field reference
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `max_iterations` | `int` | `10` | Hard ceiling on the number of iterations, including the first. The stage always runs at least once. |
+| `until` | `str \| null` | `null` | Jinja2 expression evaluated after each iteration. When it renders truthy, iteration stops. If omitted, all `max_iterations` iterations run. |
+| `carry_forward` | `list[str] \| null` | `null` | Dot-paths into the previous iteration's result to extract and carry. `null` carries the entire result. An empty list `[]` carries nothing. |
+| `iteration_var` | `str` | `"_iteration"` | Name of the context variable injected into each iteration. Override when a stage already uses `_iteration` for something else. |
+| `backoff_s` | `float \| null` | `null` | Seconds to wait between iterations. Doubles each time, capped at `backoff_max_s`. Use for rate-limited external services or pacing. |
+| `backoff_max_s` | `float` | `60.0` | Upper bound on per-iteration backoff delay. |
+
+### The `_iteration` context variable
+
+Every iteration receives an `_iteration` dict (or whatever name `iteration_var` specifies) injected into the stage context before the role description is rendered. It is always defined — even on the first iteration:
+
+```python
+{
+    "num": 1,               # 1-based counter; 2 on second iteration, etc.
+    "is_first": True,       # True only when num == 1
+    "is_last": False,       # True only on the final iteration (max reached or until met)
+    "carry_forward": {},    # Empty on iter 1; populated from previous result on iter 2+
+}
+```
+
+`is_last` is set to `True` on whichever iteration is the last one — either because it is iteration `max_iterations`, or because the `until` expression became truthy. This lets the role description change its behavior on the closing pass: ask for a final summary, skip intermediate bookkeeping, or flag the output for downstream stages.
+
+Use `_iteration.num`, `_iteration.is_first`, `_iteration.is_last`, and `_iteration.carry_forward` in Jinja2 templates to make iteration-aware prompts.
+
+### Basic iteration
+
+A market research loop that conducts three rounds of analysis, each building on the previous round's findings:
+
+```yaml
+  - id: research_loop
+    loop:
+      max_iterations: 3
+    role:
+      name: MarketResearcher
+      type: researcher
+      description: |
+        You are conducting iterative market research on: {{ topic }}
+        Round {{ _iteration.num }} of {{ loop.max_iterations }}.
+
+        {% if _iteration.is_first %}
+        This is the opening round. Identify the top 5 market segments,
+        key competitors, and the most important unanswered questions.
+        {% else %}
+        Previous findings:
+        {{ _iteration.carry_forward }}
+
+        Build on those findings. Investigate the highest-priority open
+        question from the last round. Update or refine any conclusions
+        that new evidence has changed.
+        {% endif %}
+
+        {% if _iteration.is_last %}
+        This is the final round. Produce a consolidated summary suitable
+        for the executive briefing. Do not leave open questions unresolved.
+        {% endif %}
+
+        Return {"findings": "...", "open_questions": [...], "confidence": 0.0}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings, open_questions, confidence]
+      properties:
+        findings: {type: string}
+        open_questions: {type: array, items: {type: string}}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+    depends_on: []
+```
+
+All three iterations run regardless of output. The stage result in context after the loop completes is the result of the final iteration.
+
+### Iteration with `until`
+
+`until` is a Jinja2 expression evaluated against the stage result after each iteration. When it renders truthy, the loop stops — even if `max_iterations` has not been reached. The semantics are natural: "stop when done," not "keep going while not done." This is the inverse of how you might write a `while` loop in Python, but it reads cleanly in YAML alongside `skip_if` and `condition`.
+
+A gap-analysis loop that keeps iterating until a researcher declares confidence above a threshold:
+
+```yaml
+  - id: gap_analysis
+    loop:
+      max_iterations: 5
+      until: "{{ gap_analysis.confidence >= 0.85 }}"
+    role:
+      name: GapAnalyst
+      type: researcher
+      description: |
+        Analyse gaps in the literature on: {{ research_question }}
+
+        {% if _iteration.is_first %}
+        Perform an initial scan. Identify known gaps, contested findings,
+        and areas where the evidence base is thin.
+        {% else %}
+        Iteration {{ _iteration.num }}. Current confidence: {{ _iteration.carry_forward.gap_analysis.confidence }}
+
+        Previously identified gaps:
+        {{ _iteration.carry_forward.gap_analysis.gaps }}
+
+        Investigate the weakest areas. Seek contradicting evidence.
+        Update confidence only if new evidence genuinely supports it.
+        {% endif %}
+
+        Return:
+          {
+            "gaps": [...],
+            "confidence": 0.0,
+            "next_priority": "..."
+          }
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [gaps, confidence, next_priority]
+      properties:
+        gaps: {type: array, items: {type: string}}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+        next_priority: {type: string}
+    depends_on: []
+```
+
+If the researcher reaches `confidence >= 0.85` on iteration 2, the loop stops and the remaining 3 iterations never run. If it never reaches the threshold, the loop runs all 5 times and stops at `max_iterations`. Either way, the stage result in context is the last completed iteration's output.
+
+If the `until` expression raises a Jinja2 error — for example, referencing a key that does not exist in the output schema — the loop aborts and the stage is treated as a failure. Use `output_mode: guided_json` with a stable `output_schema` to ensure the fields referenced in `until` are always present.
+
+### `carry_forward` — selective state propagation
+
+By default (`carry_forward: null`), the entire previous iteration's result is merged into `_iteration.carry_forward`. For large outputs this can bloat the context window quickly. `carry_forward` as a list of dot-paths extracts only the fields you actually need between iterations.
+
+Dot-paths use the stage ID as the root, matching the shape of the shared context dict:
+
+```yaml
+carry_forward:
+  - "gap_analysis.confidence"    # → _iteration.carry_forward.gap_analysis.confidence
+  - "gap_analysis.gaps"          # → _iteration.carry_forward.gap_analysis.gaps
+```
+
+The extracted values are available in two ways:
+
+1. **Via `_iteration.carry_forward`**: `{{ _iteration.carry_forward.gap_analysis.confidence }}`
+2. **Merged into top-level context**: `{{ gap_analysis.confidence }}` — the same path works directly, as if the previous iteration's output is still in context under the stage ID
+
+The top-level merge makes it natural to write templates that work identically on iteration 1 (where the upstream stage result is fresh) and on iterations 2+ (where it is carried forward). A downstream stage that `depends_on` the looping stage always sees the final iteration's result.
+
+A negotiation loop that only carries the current proposal and outstanding objections — not the full reasoning transcript — to keep each iteration's context lean:
+
+```yaml
+  - id: negotiate_terms
+    loop:
+      max_iterations: 6
+      until: "{{ negotiate_terms.agreement_reached }}"
+      carry_forward:
+        - "negotiate_terms.current_proposal"
+        - "negotiate_terms.open_objections"
+        - "negotiate_terms.round_number"
+    role:
+      name: Negotiator
+      type: orchestrator
+      description: |
+        Contract negotiation for: {{ contract_id }}
+        {% if _iteration.is_first %}
+        Open with an initial proposal. Establish the key terms and your
+        preferred positions. Leave room to concede on lower-priority items.
+        {% else %}
+        Round {{ _iteration.carry_forward.negotiate_terms.round_number }}.
+        Current proposal: {{ negotiate_terms.current_proposal }}
+        Outstanding objections: {{ negotiate_terms.open_objections }}
+
+        Address the objections. Adjust the proposal where warranted.
+        Hold firm on non-negotiable terms.
+        {% endif %}
+
+        {% if _iteration.is_last %}
+        Final round. Either reach agreement or declare impasse.
+        {% endif %}
+
+        Return:
+          {
+            "current_proposal": {...},
+            "open_objections": [...],
+            "agreement_reached": false,
+            "round_number": 1
+          }
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [current_proposal, open_objections, agreement_reached, round_number]
+      properties:
+        current_proposal: {type: object}
+        open_objections: {type: array, items: {type: string}}
+        agreement_reached: {type: boolean}
+        round_number: {type: integer}
+    depends_on: []
+```
+
+Only `current_proposal`, `open_objections`, and `round_number` travel between iterations. The full reasoning from each round is not carried, keeping the prompt size bounded regardless of how many rounds the negotiation runs.
+
+### `backoff_s` — pacing between iterations
+
+`backoff_s` inserts a wait between iterations. The wait starts at `backoff_s` seconds and doubles each time, capped at `backoff_max_s`. This is useful when the loop is polling an external service or when rate limits require spacing out LLM calls.
+
+```yaml
+  - id: poll_job_status
+    loop:
+      max_iterations: 12
+      until: "{{ poll_job_status.status in ('complete', 'failed') }}"
+      backoff_s: 5.0         # wait 5s before iteration 2, 10s before 3, etc.
+      backoff_max_s: 60.0    # never wait more than 60s between polls
+    tool_call:
+      name: http_get
+      args:
+        url: "https://jobs.example.com/{{ job_id }}/status"
+    depends_on: [submit_job]
+```
+
+Backoff schedule for `backoff_s: 5.0, backoff_max_s: 60.0`:
+
+| Iteration | Wait before this iteration |
+|-----------|--------------------------|
+| 1 | — (no wait before first) |
+| 2 | 5s |
+| 3 | 10s |
+| 4 | 20s |
+| 5 | 40s |
+| 6+ | 60s (capped) |
+
+Note that backoff applies between iterations, not before the first one. The first iteration always fires immediately.
+
+### Custom `iteration_var`
+
+The default injection key is `_iteration`. If that name collides with something already in your context — an upstream stage named `_iteration`, a tool output using that key, or a spec that happens to define an input named `_iteration` — rename it with `iteration_var`:
+
+```yaml
+  - id: refinement_pass
+    loop:
+      max_iterations: 4
+      until: "{{ refinement_pass.quality_score >= 0.9 }}"
+      iteration_var: "_pass"      # use _pass.num, _pass.is_first, etc.
+    role:
+      name: ContentRefiner
+      type: worker
+      description: |
+        Refining content for: {{ brief }}
+        Pass {{ _pass.num }} of 4.
+
+        {% if not _pass.is_first %}
+        Previous quality score: {{ _pass.carry_forward.refinement_pass.quality_score }}
+        Issues flagged: {{ refinement_pass.issues }}
+        Address those issues in this pass.
+        {% endif %}
+        Return {"content": "...", "quality_score": 0.0, "issues": [...]}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [content, quality_score, issues]
+      properties:
+        content: {type: string}
+        quality_score: {type: number}
+        issues: {type: array, items: {type: string}}
+    depends_on: [draft]
+```
+
+### Coexistence with `on_fail`
+
+`loop` and `on_fail` operate at different levels and can both appear on the same stage. `loop` governs planned iteration; `on_fail.loop` governs what happens when an individual iteration fails. They do not conflict:
+
+```yaml
+  - id: iterative_extractor
+    loop:
+      max_iterations: 4
+      until: "{{ iterative_extractor.complete }}"
+      carry_forward:
+        - "iterative_extractor.extracted_so_far"
+        - "iterative_extractor.complete"
+    on_fail:
+      loop:
+        stage: iterative_extractor
+        max: 2
+        backoff_s: 2.0
+    role:
+      name: Extractor
+      type: worker
+      description: |
+        Extract structured data from the document chunk by chunk.
+        {% if _iteration.is_first %}
+        Start from the beginning of the document.
+        {% else %}
+        Continue from where the previous pass left off.
+        Already extracted: {{ iterative_extractor.extracted_so_far }}
+        {% endif %}
+        Return {"extracted_so_far": [...], "complete": false}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [extracted_so_far, complete]
+      properties:
+        extracted_so_far: {type: array}
+        complete: {type: boolean}
+    depends_on: []
+```
+
+In this configuration, each planned iteration can itself retry up to 2 times on failure before the overall loop advances. If iteration 2 fails twice, the stage itself fails (not just that iteration). A `fail_as_value: true` on the stage will catch that at the workflow level.
+
+### Trace events
+
+Iteration activity appears in the run trace as `loop_iteration` events — distinct from the `retry_attempt` events emitted by `on_fail.loop`. This makes it straightforward to distinguish planned iteration from error-driven retry in dashboards and post-run analysis.
+
+`loop_iteration` event fields:
+
+| Field | Value |
+|-------|-------|
+| `stage` | Stage ID |
+| `iteration` | Current iteration number (1-based) |
+| `max` | `max_iterations` value |
+| `until_met` | `true` if the loop stopped because `until` became truthy; `false` if it ran to `max_iterations` |
+
+### Comparison: `loop` vs `on_fail.loop`
+
+| Aspect | `on_fail.loop` | `loop` |
+|--------|----------------|--------|
+| Purpose | Retry on failure | Deliberate iteration |
+| Triggers | Stage exception or unmet `until` | Always — runs regardless of outcome |
+| Iteration variable | `_retry_attempt` (undefined on first run) | `_iteration.num` (always defined, 1-based) |
+| Previous result | `_last_result` = entire previous result | `_iteration.carry_forward` = selected paths |
+| `until` semantics | Stop retrying when truthy (invert for "keep going" loops) | Stop iterating when truthy (natural "done" condition) |
+| Backoff use case | Transient failures, jitter | Rate limiting, pacing, polling |
+| Event type emitted | `retry_attempt` | `loop_iteration` |
+| Coexists with the other | N/A | Yes — both on the same stage |
+
+The rule of thumb: if a repeated run means something went wrong, use `on_fail.loop`. If a repeated run means the workflow is working as designed, use `loop`.
+
+---
+
 ## `timeout_s` — wall-clock limit
 
 `timeout_s` sets a wall-clock deadline in seconds for the entire stage including all retries. When exceeded, `asyncio.wait_for` raises `TimeoutError`, which propagates as a stage failure.

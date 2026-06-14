@@ -8,6 +8,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `loop` configuration on `Stage` for deliberate iteration, distinct from `on_fail.loop` retry
+- `IterationConfig` model: `max_iterations`, `until`, `carry_forward`, `iteration_var`, `backoff_s`, `backoff_max_s`
+- `_iteration` context variable: always defined (1-based), includes `num`, `is_first`, `is_last`, `carry_forward`
+- `carry_forward` for selective state passing between iterations; `null` carries entire previous result
+- `loop_iteration` trace event type and `TraceRecord.loop_iteration` field (distinct from `retry_attempt`)
+- Validator checks for `IterationConfig`: `max_iterations >= 1`, valid Jinja2 `until`, non-empty `carry_forward` paths, valid `iteration_var` identifier, warning when both `loop` and `on_fail.loop` are set
+- Risk scoring: +4 per `loop` stage, +2 per `loop` stage with `max_iterations > 10`
+- Example workflow `examples/11_iterative_refinement.yml` demonstrating the `loop` feature
+
 ### Self-Harness-inspired ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1)
 
 - **Causal 3-tuple failure attribution** — `DiagnosticResult` now carries a `causal_attribution: CausalAttribution` field with three orthogonal dimensions: `terminal_cause` (execution_error / schema_validation / low_confidence / postcondition / prompt_weak), `causal_status` (spec_problem / model_problem / tool_problem), and `mechanism` (timeout / runtime_error / schema_too_strict / model_underpowered / judge_uncertain / tier_insufficient / tool_violation / prompt_missing_instruction). The refiner can target fixes at the mechanism rather than guessing from the surface symptom.

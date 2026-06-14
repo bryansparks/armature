@@ -251,6 +251,7 @@ stages:
         Gather relevant information about: {{ topic }}
     output_mode: text
     depends_on: []
+    # loop:                    # Deliberate iteration (not retry); see IterationConfig
 
   - id: writer
     role:
@@ -497,6 +498,7 @@ Rules:
 | `output_schema` | object | JSON Schema — required for `guided_json` |
 | `depends_on` | list | Stage IDs this stage waits for |
 | `on_fail` | object | Retry configuration (see §10) |
+| `loop` | `IterationConfig` | Deliberate iteration: run this stage up to `max_iterations` times, carrying forward selected state between iterations. Distinct from `on_fail.loop` (retry). |
 | `skip_if` | string | Jinja2 expression — skip this stage when it renders truthy (see §4.6) |
 | `timeout_s` | float | Wall-clock timeout for the whole stage including retries. Raises on expiry. |
 | `fail_as_value` | bool | When `true`, stage failure returns `{"_failed": true, "error": "..."}` instead of raising. Downstream stages can check `{{ stage_id._failed }}`. |
@@ -1083,6 +1085,7 @@ Stages can be configured to retry on failure using `on_fail.loop`.
 On each retry, the context is augmented with:
 - `_retry_attempt`: current attempt number (1-based)
 - `_last_error`: the error message from the previous failure
+- `_iteration`: dict set when the stage has `loop:` — always defined with keys `num` (1-based), `is_first`, `is_last`, and `carry_forward` (empty on iteration 1, populated from prior iterations onward). See [loop section].
 
 The stage's role description can reference these to improve the retry:
 

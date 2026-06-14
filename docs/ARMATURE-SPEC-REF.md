@@ -117,6 +117,15 @@ Every stage requires:
     loop:
       stage: analyst          # stage to retry
       max: 2
+  loop:                       # Deliberate iteration (not retry)
+    max_iterations: 10        # total iterations including first
+    until: "{{ approved }}"   # Jinja2; stop when truthy
+    carry_forward:            # dot-paths to carry; null = carry all
+      - decide_round.report
+      - decide_round.gaps
+    iteration_var: "_iteration"  # context var name (default: _iteration)
+    backoff_s: null           # initial wait (seconds); doubles each iter
+    backoff_max_s: 60.0       # backoff ceiling
   signature:
     input:                    # limit which context keys are visible
       topic: Research topic
@@ -234,6 +243,10 @@ All context is cumulative — every stage sees all prior outputs automatically.
 {{ stage_id.content }}         text field of a text stage
 {{ stage_id.field }}           named field from a guided_json stage
 {{ partition_key.subfield }}   partition variable in a fan-out stage
+{{ _iteration.num }}           1-based iteration number (inside a loop: stage)
+{{ _iteration.is_first }}      True on iteration 1
+{{ _iteration.is_last }}       True on final iteration
+{{ _iteration.carry_forward }} selected state carried from previous iteration
 {% if x is defined and x %}    guard optional / memory values
 {% for item in list %}         loop over a list
 ```

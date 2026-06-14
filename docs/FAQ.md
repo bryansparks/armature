@@ -145,6 +145,84 @@ on_fail:
 
 On each retry, `_retry_attempt`, `_last_error`, and `_last_result` are injected into the stage's context. The role description can reference `{{ _last_result }}` so the model sees its previous attempt and can correct it. See `DECLARATIVE-CONTROL-FLOW.md`.
 
+**When should I use `loop` instead of `on_fail.loop`?**
+
+Use `loop` when iteration is the intent — research deepening, iterative refinement, convergence loops where each pass builds on the previous. Use `on_fail.loop` when the stage failed and you want to retry.
+
+| | `loop` | `on_fail.loop` |
+|---|---|---|
+| Trigger | Always — runs `max` times regardless of success | Only on stage failure or unmet `until` condition |
+| Variable injected | `_iteration` (always defined, even on round 1) | `_retry_attempt`, `_last_error`, `_last_result` |
+| Typical use | Research deepening, deliberative rounds, convergence | Transient LLM errors, quality gates that sometimes fail |
+
+A clear signal that you want `loop` rather than `on_fail.loop`: if you find yourself writing `{% if not _retry_attempt %}` to detect the first attempt so you can skip a "here is what went wrong" preamble — you are using a retry to do deliberate iteration. Switch to `loop` and use `{% if _iteration.round > 1 %}` instead.
+
+Both can coexist on the same stage: `loop` controls how many deliberate iterations run; `on_fail` (with its own nested `loop`) handles failures that occur within each individual iteration.
+
+```yaml
+- id: research_round
+  loop:
+    max: 3
+    until: "{{ research_round.complete }}"
+    carry_forward:
+      - "research_round.findings"
+  on_fail:
+    loop:
+      stage: self
+      max: 2
+      backoff_s: 1.0
+  role: ...
+```
+
+**How does `loop.carry_forward` work?**
+
+`carry_forward` is a list of dot-paths extracted from the previous iteration's result and made available to the next. It is the mechanism for selective state — instead of passing the entire previous result (which can bloat context), you name only the fields you need:
+
+```yaml
+loop:
+  max: 4
+  carry_forward:
+    - "decide_round.report"
+    - "decide_round.gaps"
+```
+
+On iteration 2 and later, each path is extracted from the previous round's stage result and injected in two places simultaneously:
+
+- **Namespaced**: `{{ _iteration.carry_forward.decide_round.report }}` — accessed through the `_iteration` dict, safe to reference even on round 1 (where it will be an empty dict)
+- **Top-level**: `{{ decide_round.report }}` — overwritten in the shared context, so downstream stages and descriptions that already reference the stage output continue to work without changes
+
+On the first iteration, `_iteration.carry_forward` is `{}` — nothing to carry yet. Reference it with `{% if _iteration.carry_forward.decide_round is defined %}` to guard iteration-1 paths.
+
+Omit `carry_forward` entirely (or set it to `null`) to carry the complete previous iteration result as-is. This is simpler but can cause context bloat when the stage output is large — prefer explicit dot-paths for production workflows.
+
+**What fields are available in `_iteration`?**
+
+`_iteration` is injected into every stage that uses `loop`, on every round including the first. It always contains four fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `round` | `int` | Current iteration number, starting at `1`. Use `{{ _iteration.round }}` to tell agents which pass they are on or to guard first-round preamble. |
+| `max` | `int` | The `loop.max` value from the spec. Lets the agent know how many total rounds are planned: `{{ _iteration.round }} of {{ _iteration.max }}`. |
+| `is_last` | `bool` | `true` when `round == max` or when the `until` condition will stop iteration after this round. Useful for telling the agent to produce a final synthesis rather than another exploratory pass. |
+| `carry_forward` | `dict` | Values extracted by `loop.carry_forward` from the previous round's result. Empty dict `{}` on round 1. Keys mirror the dot-paths declared in `carry_forward` — e.g., `_iteration.carry_forward.decide_round.report`. |
+
+A typical role description using all four:
+
+```yaml
+description: |
+  This is research round {{ _iteration.round }} of {{ _iteration.max }}.
+  {% if _iteration.round == 1 %}
+  Begin with a broad survey of the topic.
+  {% else %}
+  Prior findings: {{ _iteration.carry_forward.research_round.findings }}
+  Gaps identified: {{ _iteration.carry_forward.research_round.gaps }}
+  Focus this round on resolving those gaps.
+  {% endif %}
+  {% if _iteration.is_last %}
+  Produce a final synthesis. Mark complete: true in your output.
+  {% endif %}
+```
+
 **What happens when a stage times out?**
 
 Set `timeout_s:` on the stage. If the wall-clock time (including all retries) exceeds the limit, a `TimeoutError` is raised and propagated as a stage failure. Combine with `fail_as_value: true` to catch it as a structured value rather than aborting the run. See `DECLARATIVE-CONTROL-FLOW.md`.

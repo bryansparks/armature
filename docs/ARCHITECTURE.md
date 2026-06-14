@@ -70,6 +70,10 @@ Every stage declares one of four roles. The harness enforces distinct behavioral
 
 The harness automatically escalates: if a worker fails schema validation or produces low-confidence output, it re-routes to the next model tier without workflow author intervention.
 
+### Stage Handler Dispatch
+
+When the `DAGExecutor` resolves a stage for execution, `make_handler` selects one of two paths. If the stage carries a `loop: IterationConfig` field, the handler calls `_run_with_loop`, which drives deliberate multi-iteration execution — carrying selected output fields forward across iterations, injecting an `_iteration` counter, and evaluating an optional `until` condition to determine when to stop. Stages without `loop` continue to use `_execute_stage_with_recovery`, which delegates to `_run_with_retry` for `on_fail.loop` (failure-triggered retry) or falls straight through to a single `_execute_stage` call. `IterationConfig` (deliberate iteration) and `LoopConfig` (`on_fail.loop` retry) are sibling Pydantic models in `armature/spec/models.py`; their separation keeps the intent distinct — one is a designed repetition structure, the other is a recovery mechanism.
+
 ---
 
 ## Workflow Spec Format
@@ -386,6 +390,7 @@ All nine papers and the AGT framework are fully implemented. 1,388 tests.
 | Post-condition verification | `ToolDescriptor.postcondition`, `PostconditionFailed` |
 | Consensus fan-in | `fan_in: "consensus"`, `_consensus_judge()` |
 | Component governance | `_classify_changes()`, `.pending.yaml` staging |
+| Deliberate iteration loop | `IterationConfig`, `_run_with_loop`, `loop:` stage field |
 
 ---
 

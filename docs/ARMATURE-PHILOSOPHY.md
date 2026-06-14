@@ -758,6 +758,8 @@ Stages that repeatedly hit `HIGH_ESCALATION` (calling a higher-tier model via `o
 **Judge criteria enrichment → better quality discrimination**
 When a judge stage's quorum scores cluster near 0.5 (effectively a coin flip), the `LOW_CONFIDENCE` diagnostic fires. The refiner adds explicit evaluation criteria to the judge's role description — specific rubrics, score anchors, tiebreaker logic — that force sharper, more consistent judgment. IHR's quorum component rises as a result.
 
+The distinction between iteration and retry reflects a deeper design principle: the YAML spec should declare *intent*, not *mechanism*. `on_fail.loop` declares "this might fail, try again." `loop` declares "do this repeatedly until a condition is met." Conflating the two forces workflow authors to encode iteration intent in retry semantics — using undefined-on-first-attempt variables and inverted until conditions. Separate declarations make the spec self-documenting and eliminate the semantic gap between what the author means and what the runtime does.
+
 **Structural changes (human-gated)**
 Proposals that add or remove stages, modify safety rules, or substantially rewrite output schemas are written to `{spec}.pending.yaml` rather than applied directly. A human reviews the diff and applies it with `armature improve <spec> --apply-pending` when ready. This governance boundary ensures auto-improvement never restructures a workflow without deliberate approval.
 

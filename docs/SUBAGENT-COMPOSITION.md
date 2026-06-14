@@ -253,6 +253,182 @@ A single failed region never kills the batch.
 
 ---
 
+## Iterative subagent workflows
+
+A stage that combines `subagent_spec` with a `loop` block runs the same child workflow repeatedly, each time carrying selected state forward from the previous iteration. This is iterative deepening: the child workflow is not a fixed unit of work but a recurrence — a research round, a refinement pass, a sampling step — that continues until a stopping condition is met.
+
+### The pattern
+
+```yaml
+- id: research_round
+  subagent_spec: workflows/research-round.yaml
+  depends_on: [decompose_query]
+  loop:
+    max_iterations: 6
+    until: "{{ continue_research == false }}"
+    carry_forward:
+      - decide_round.report
+      - decide_round.gaps
+      - decide_round.urls_fetched
+      - decide_round.queries_used
+```
+
+The `loop` block controls three things: how many times to run (`max_iterations`), when to stop early (`until`), and what state survives across iterations (`carry_forward`).
+
+### IterationConfig fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_iterations` | `int` | `10` | Hard ceiling on iterations |
+| `until` | `str` | `null` | Jinja2 expression; loop stops when it evaluates truthy |
+| `carry_forward` | `list[str]` | `null` | Dot-paths extracted from the previous iteration result; `null` carries everything |
+| `iteration_var` | `str` | `"_iteration"` | Name of the injected iteration context variable |
+| `backoff_s` | `float` | `null` | Fixed delay between iterations (seconds) |
+| `backoff_max_s` | `float` | `60.0` | Cap on backoff delay |
+
+### The `_iteration` variable
+
+Every child workflow invocation receives an `_iteration` variable in its context:
+
+```python
+{
+    "num": 1,              # 1-based iteration counter
+    "is_first": True,      # True only on the first pass
+    "is_last": False,      # True on the final iteration (max reached or until triggered)
+    "carry_forward": {},   # Empty on iteration 1; populated with extracted state on iteration 2+
+}
+```
+
+On the first iteration, `carry_forward` is empty — the child starts from scratch. From iteration two onward, `carry_forward` contains exactly what the previous child run produced, filtered by the dot-paths you declared. Values are available as `_iteration.carry_forward.stage_id.field` and also promoted to the top-level context so existing templates work without modification: `stage_id.field`.
+
+### Child workflow template patterns
+
+The child spec uses `_iteration` to branch between first-pass and follow-up behavior:
+
+```jinja2
+role:
+  description: |
+    {% if _iteration.is_first %}
+    First pass: broad research across all sub-questions.
+    Questions: {{ decompose_query.questions }}
+    {% else %}
+    Iteration {{ _iteration.num }}: fill the gaps identified in the prior round.
+
+    Report so far:
+    {{ _iteration.carry_forward.decide_round.report }}
+
+    Open gaps:
+    {{ _iteration.carry_forward.decide_round.gaps }}
+
+    URLs already fetched (do not re-fetch):
+    {{ _iteration.carry_forward.decide_round.urls_fetched }}
+
+    Queries already issued (do not repeat):
+    {{ _iteration.carry_forward.decide_round.queries_used }}
+    {% endif %}
+```
+
+This pattern gives the child full awareness of prior work without duplicating effort. The child does not need to know it is being looped — it reads `_iteration` and behaves accordingly. The loop semantics live entirely in the parent stage.
+
+### Stopping the loop
+
+The `until` expression is evaluated after each iteration completes, against the merged context (parent context plus the child's result dict). A stage inside the child that sets `continue_research: false` in its output will cause `{{ continue_research == false }}` to evaluate truthy, stopping the loop before the next iteration begins. This lets the child decide whether more iterations are warranted — the judge or decision stage inside the child returns a flag, and the parent loop respects it.
+
+If `until` never triggers, the loop runs exactly `max_iterations` times.
+
+### Context bloat and carry_forward
+
+The most important operational choice is what to carry forward. Three options:
+
+**Explicit dot-paths (recommended).** List only the fields the next iteration actually needs. A research round typically needs the accumulated report, the open gaps, and deduplication lists — not the full transcript of every search result:
+
+```yaml
+carry_forward:
+  - decide_round.report
+  - decide_round.gaps
+  - decide_round.urls_fetched
+  - decide_round.queries_used
+```
+
+Each iteration receives a tight, focused context. Token cost per iteration stays flat regardless of how many rounds have run.
+
+**`null` (carry everything).** Omitting `carry_forward` passes the entire previous child result dict. This is convenient for small workflows but grows the context by one full child result every iteration. By iteration six, the child context may contain five complete result dicts plus the current one. Use this only when you genuinely need every field from the prior run and the child workflow is compact.
+
+**Empty list.** `carry_forward: []` passes nothing — each iteration starts completely fresh with only the original parent context. Useful when iterations are independent draws rather than refinements.
+
+### Use `loop` for deliberate iteration; use `on_fail.loop` for recovery
+
+These two loop mechanisms serve different purposes and should not be confused.
+
+`on_fail.loop` retries a stage when it fails — when a judge rejects output, when a parse error occurs, when a tool call returns an error. It is a recovery mechanism. It runs the same stage again hoping for a better result, and it signals an abnormal path.
+
+`loop` on a subagent stage is deliberate iteration. The first run is expected to succeed. So is the second. Each pass refines or extends the prior work by design. The loop is the intended execution path, not an error handler.
+
+If you find yourself writing `on_fail.loop` on a subagent stage in order to build up a research corpus over multiple calls, switch to `loop`. The semantics are cleaner, the carry_forward filtering is built in, and the iteration variable gives child templates the context they need to avoid redundant work.
+
+### A complete iterative research example
+
+```yaml
+name: iterative-researcher
+version: "1.0"
+description: "Iteratively deepen research until a decision stage signals completion."
+
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+
+contracts:
+  inputs:
+    - name: topic
+
+stages:
+  - id: decompose_query
+    role:
+      name: QueryDecomposer
+      type: orchestrator
+      description: |
+        Break the research topic into sub-questions.
+        Topic: {{ topic }}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [questions]
+      properties:
+        questions: {type: array, items: {type: string}}
+    depends_on: []
+
+  - id: research_round
+    subagent_spec: workflows/research-round.yaml
+    depends_on: [decompose_query]
+    loop:
+      max_iterations: 6
+      until: "{{ continue_research == false }}"
+      carry_forward:
+        - decide_round.report
+        - decide_round.gaps
+        - decide_round.urls_fetched
+        - decide_round.queries_used
+
+  - id: final_synthesis
+    role:
+      name: Synthesizer
+      type: judge
+      description: |
+        Produce the final research report.
+        Accumulated report: {{ research_round.decide_round.report }}
+        Topic: {{ topic }}
+    output_mode: text
+    depends_on: [research_round]
+```
+
+---
+
 ## Key fields
 
 | Field | Type | Description |
