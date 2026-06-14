@@ -1,0 +1,15 @@
+name: loop-child
+version: "1.0"
+model_tiers:
+  small:
+    provider: openai
+    model: gpt-4o-mini
+stages:
+  - id: process
+    role:
+      name: Processor
+      type: worker
+      description: |
+        Iteration {{ _iteration.num }}. Carry: {{ _iteration.carry_forward }}.
+        Return result for iteration {{ _iteration.num }}.
+    depends_on: []

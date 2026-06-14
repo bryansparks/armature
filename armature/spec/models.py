@@ -101,6 +101,15 @@ class OnFailConfig(BaseModel):
     loop: LoopConfig | None = None
 
 
+class IterationConfig(BaseModel):
+    max_iterations: int = 10
+    until: str | None = None
+    carry_forward: list[str] | None = None  # dot-paths to carry; None = carry everything
+    iteration_var: str = "_iteration"
+    backoff_s: float | None = None   # initial wait (seconds); doubles each iteration
+    backoff_max_s: float = 60.0
+
+
 class Adapter(BaseModel):
     name: str
     type: str  # "python" | "script"
@@ -164,6 +173,7 @@ class Stage(BaseModel):
     post_run: bool = False             # when True, stage runs after all normal stages with full transcript + diagnostics
     response_stage: bool = False       # when True, stream tokens to caller in real time
     sandbox_image: str | None = None   # per-stage Docker image override; falls back to sandbox.image
+    loop: IterationConfig | None = None  # deliberate iteration (not retry)
 
 
 class TraceConfig(BaseModel):

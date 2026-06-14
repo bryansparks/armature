@@ -31,6 +31,7 @@ class TraceRecord(BaseModel):
     tools_declared: list[str] = Field(default_factory=list)
     tools_called: list[str] = Field(default_factory=list)
     sandbox_image_digest: str | None = None
+    loop_iteration: int | None = None  # set for stages running inside a loop (1-based)
 
 
 class IhrResult(BaseModel):
@@ -88,6 +89,7 @@ class TraceStore:
                 "tools_declared_json TEXT DEFAULT '[]'",
                 "tools_called_json TEXT DEFAULT '[]'",
                 "sandbox_image_digest TEXT",
+                "loop_iteration INTEGER",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -106,8 +108,8 @@ class TraceStore:
                     error_type, escalation_count, spec_version,
                     inputs_hash, policy_version, inputs_provenance_json,
                     tools_declared_json, tools_called_json,
-                    sandbox_image_digest)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    sandbox_image_digest, loop_iteration)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -121,6 +123,7 @@ class TraceStore:
                     json.dumps(trace.tools_declared),
                     json.dumps(trace.tools_called),
                     trace.sandbox_image_digest,
+                    trace.loop_iteration,
                 ),
             )
             await db.commit()
@@ -185,6 +188,7 @@ class TraceStore:
             tools_declared=json.loads(d.get("tools_declared_json") or "[]"),
             tools_called=json.loads(d.get("tools_called_json") or "[]"),
             sandbox_image_digest=d.get("sandbox_image_digest") or None,
+            loop_iteration=d.get("loop_iteration") or None,
         )
 
     async def latest_run_id(self, workflow_name: str) -> str | None:

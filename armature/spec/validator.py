@@ -303,6 +303,67 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                         stage_id=stage.id,
                     ))
 
+    # ── loop IterationConfig validation ───────────────────────────────────────
+    _RESERVED_CONTEXT_KEYS = frozenset({
+        "_retry_attempt", "_last_result", "_last_error",
+        "run_id", "_transcript", "_diagnostics", "_stale_memory_keys",
+    })
+    for stage in spec.stages:
+        if stage.loop is None:
+            continue
+        lc = stage.loop
+        if lc.max_iterations < 1:
+            errors.append(SpecError(
+                code="LOOP_INVALID_MAX_ITERATIONS",
+                message=f"loop.max_iterations must be >= 1, got {lc.max_iterations}",
+                stage_id=stage.id,
+            ))
+        if lc.until is not None:
+            try:
+                from jinja2 import Environment, BaseLoader
+                Environment(loader=BaseLoader()).parse(lc.until)
+            except Exception as exc:
+                errors.append(SpecError(
+                    code="LOOP_INVALID_UNTIL_EXPR",
+                    message=f"loop.until is not a valid Jinja2 expression: {exc}",
+                    stage_id=stage.id,
+                ))
+        if lc.carry_forward is not None:
+            for path in lc.carry_forward:
+                if not path or not path.strip():
+                    errors.append(SpecError(
+                        code="LOOP_EMPTY_CARRY_FORWARD_PATH",
+                        message="loop.carry_forward entries must be non-empty strings",
+                        stage_id=stage.id,
+                    ))
+        if not lc.iteration_var.isidentifier():
+            errors.append(SpecError(
+                code="LOOP_INVALID_ITERATION_VAR",
+                message=(
+                    f"loop.iteration_var '{lc.iteration_var}' is not a valid Python identifier"
+                ),
+                stage_id=stage.id,
+            ))
+        elif lc.iteration_var in _RESERVED_CONTEXT_KEYS:
+            errors.append(SpecError(
+                code="LOOP_RESERVED_ITERATION_VAR",
+                message=(
+                    f"loop.iteration_var '{lc.iteration_var}' conflicts with a reserved context key"
+                ),
+                stage_id=stage.id,
+            ))
+        if stage.on_fail is not None and stage.on_fail.loop is not None:
+            errors.append(SpecError(
+                code="LOOP_AND_ON_FAIL_LOOP_COEXIST",
+                message=(
+                    "Stage has both loop (deliberate iteration) and on_fail.loop (retry). "
+                    "Both will execute: on_fail.loop handles failures within each iteration, "
+                    "loop controls the outer iteration. Verify this is intentional."
+                ),
+                stage_id=stage.id,
+                severity="warning",
+            ))
+
     # ── Only-tighten safety rule composition (KYA-inspired) ──────────────────
     # An allow rule targeting the same tool as a block rule (or wildcard block)
     # potentially loosens a restriction — flag as a conflict.
