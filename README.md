@@ -60,7 +60,7 @@ Set your LLM provider key:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-# or OPENAI_API_KEY, or configure any litellm-supported provider
+# or OPENAI_API_KEY, OPENROUTER_API_KEY, or any litellm-supported provider
 ```
 
 **No API key?** Armature runs against local models via [Ollama](https://ollama.com) — no key, no cloud, nothing leaves your machine. Pull a model, save the spec below as `hello_ollama.yml`, and run it:
@@ -442,6 +442,8 @@ Armature is the **execution layer** — the first component in a larger system d
 ## Examples
 
 `examples/` — annotated workflows you can copy and modify:
+
+> Most examples run on OpenRouter open models (Qwen / Gemini) — set `OPENROUTER_API_KEY` to run them as-is, or edit the `model_tiers` block to point at any provider you prefer. `00_hello_ollama.yml` needs no key at all (local Ollama); `starter_template.yml` uses Anthropic.
 
 | File | What it demonstrates |
 |---|---|
