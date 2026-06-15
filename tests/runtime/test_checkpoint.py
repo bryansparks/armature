@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from armature.spec.models import (
     Stage, HarnessSpec, ModelTiers, ModelTierConfig, ToolCallConfig,
+    IterationConfig,
 )
 from armature.runtime.engine import Harness
 from armature.runtime.checkpoint import CheckpointStore
@@ -319,3 +320,198 @@ async def test_partial_resume_only_remaining_stages_run(tmp_path):
     assert b_calls == 1
     assert result["stage_a"]["processed"] is True
     assert result["stage_b"]["final"] is True
+
+
+# ── Loop + Checkpoint integration ──────────────────────────────────────────────
+# These tests verify that loop stages with checkpointing enabled execute all
+# iterations, not just the first. The original bug caused _execute_stage_with_recovery
+# to return cached iteration-1 results on iteration 2+, short-circuiting the loop.
+
+async def test_loop_with_checkpoint_executes_all_iterations(tmp_path):
+    """Loop stage with checkpoint=True must execute all iterations, not just the first."""
+    call_count = 0
+
+    async def worker(args):
+        nonlocal call_count
+        call_count += 1
+        return {"iteration": call_count, "done": call_count >= 3}
+
+    stages = [Stage(
+        id="loop_stage",
+        tool_call=ToolCallConfig(name="worker"),
+        loop=IterationConfig(max_iterations=3, until="{{ done }}"),
+        depends_on=[],
+    )]
+
+    harness = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(harness, "worker", worker)
+
+    result = await harness.run({})
+    # All 3 iterations should execute (the bug caused only 1 to run)
+    assert call_count == 3
+    assert result["loop_stage"]["iteration"] == 3
+
+
+async def test_loop_checkpoint_writes_final_result_under_stage_id(tmp_path):
+    """After a loop completes, the checkpoint must contain both iteration-scoped
+    keys and the plain stage.id key for downstream stage references."""
+    async def worker(args):
+        return {"status": "ok"}
+
+    stages = [Stage(
+        id="loop_stage",
+        tool_call=ToolCallConfig(name="worker"),
+        loop=IterationConfig(max_iterations=2),
+        depends_on=[],
+    )]
+
+    harness = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(harness, "worker", worker)
+
+    await harness.run({})
+    data = json.loads((tmp_path / "checkpoint.json").read_text())
+    # Iteration-scoped keys should exist
+    assert "loop_stage__iter_1" in data
+    assert "loop_stage__iter_2" in data
+    # Plain stage.id key must also exist for downstream references
+    assert "loop_stage" in data
+    assert data["loop_stage"]["status"] == "ok"
+
+
+async def test_loop_resume_skips_completed_iterations(tmp_path):
+    """When checkpoint has iteration 1 and 2 results, resume only runs iteration 3+."""
+    # Pre-seed checkpoint with iteration 1 and 2 completed
+    cp = tmp_path / "checkpoint.json"
+    cp.write_text(json.dumps({
+        "loop_stage__iter_1": {"iteration": 1, "done": False},
+        "loop_stage__iter_2": {"iteration": 2, "done": False},
+    }))
+
+    call_count = 0
+
+    async def worker(args):
+        nonlocal call_count
+        call_count += 1
+        return {"iteration": call_count + 2, "done": call_count + 2 >= 3}
+
+    stages = [Stage(
+        id="loop_stage",
+        tool_call=ToolCallConfig(name="worker"),
+        loop=IterationConfig(max_iterations=3, until="{{ done }}"),
+        depends_on=[],
+    )]
+
+    harness = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(harness, "worker", worker)
+
+    result = await harness.run({})
+    # Only iteration 3 should actually execute (iterations 1-2 from checkpoint)
+    assert call_count == 1
+    assert result["loop_stage"]["iteration"] == 3
+
+
+async def test_loop_full_resume_skips_entire_loop(tmp_path):
+    """When checkpoint has the plain stage.id key, the entire loop is skipped."""
+    # Pre-seed checkpoint with full loop completion
+    cp = tmp_path / "checkpoint.json"
+    cp.write_text(json.dumps({
+        "loop_stage__iter_1": {"iteration": 1},
+        "loop_stage__iter_2": {"iteration": 2},
+        "loop_stage": {"iteration": 2, "done": True},
+    }))
+
+    call_count = 0
+
+    async def worker(args):
+        nonlocal call_count
+        call_count += 1
+        return {"iteration": call_count, "done": True}
+
+    stages = [Stage(
+        id="loop_stage",
+        tool_call=ToolCallConfig(name="worker"),
+        loop=IterationConfig(max_iterations=2),
+        depends_on=[],
+    )]
+
+    harness = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(harness, "worker", worker)
+
+    result = await harness.run({})
+    # The loop should not have executed at all — result from checkpoint
+    assert call_count == 0
+    assert result["loop_stage"]["iteration"] == 2
+
+
+async def test_loop_checkpoint_does_not_pollute_context(tmp_path):
+    """Iteration-scoped keys (__iter_N) should not appear as top-level context keys."""
+    # Pre-seed checkpoint with iteration-scoped keys
+    cp = tmp_path / "checkpoint.json"
+    cp.write_text(json.dumps({
+        "loop_stage__iter_1": {"iteration": 1},
+        "loop_stage__iter_2": {"iteration": 2},
+        "loop_stage": {"iteration": 2, "done": True},
+    }))
+
+    received_context_keys = []
+
+    async def downstream(args):
+        # Capture what keys the downstream stage sees
+        # The tool args dict is rendered from context, but we can check
+        # by having the harness context injected via a special mechanism
+        return {"saw_keys": True}
+
+    stages = [
+        Stage(
+            id="loop_stage",
+            tool_call=ToolCallConfig(name="up"),
+            loop=IterationConfig(max_iterations=2),
+            depends_on=[],
+        ),
+        Stage(
+            id="down",
+            tool_call=ToolCallConfig(name="down"),
+            depends_on=["loop_stage"],
+        ),
+    ]
+
+    harness = _make_harness(stages, tmp_path, checkpoint=True)
+
+    async def up_tool(args):
+        return {"iteration": 1}
+
+    _register(harness, "up", up_tool)
+    _register(harness, "down", downstream)
+
+    await harness.run({})
+
+    # Verify the checkpoint file has __iter_ keys but they are NOT
+    # in _checkpoint_prior (which gets merged into context)
+    assert "loop_stage__iter_1" not in harness._checkpoint_prior
+    assert "loop_stage__iter_2" not in harness._checkpoint_prior
+    assert "loop_stage" in harness._checkpoint_prior
+
+
+async def test_non_loop_checkpoint_unchanged_after_loop_fix(tmp_path):
+    """Non-loop stages with checkpoint should behave identically after the loop fix."""
+    call_count = 0
+
+    async def tool(args):
+        nonlocal call_count
+        call_count += 1
+        return {"result": "done"}
+
+    stages = [Stage(id="s", tool_call=ToolCallConfig(name="tool"), depends_on=[])]
+
+    # First run
+    h1 = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(h1, "tool", tool)
+    await h1.run({})
+    assert call_count == 1
+
+    # Second run — should skip from checkpoint
+    h2 = _make_harness(stages, tmp_path, checkpoint=True)
+    _register(h2, "tool", tool)
+    result = await h2.run({})
+    assert call_count == 1  # not called again
+    assert result["s"]["result"] == "done"

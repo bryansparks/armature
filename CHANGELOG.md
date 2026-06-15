@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.3] — 2026-06-15
+
+### Fixed
+
+- **Checkpoint + loop resume bug** — when a `loop` stage was checkpointed, `_execute_stage_with_recovery` would return the cached result from iteration 1 on every subsequent iteration, short-circuiting the loop. Fixed by writing per-iteration checkpoint keys (`stage_id__iter_N`) and loading them into a separate `_checkpoint_loop_iters` dict; completed loops also write the final result under the plain `stage.id` key so downstream stages can reference it. Added 6 new tests in `tests/runtime/test_checkpoint.py` covering full execution, mid-loop resume, and full-loop skip.
+
+---
+
 ## [0.3.2] — 2026-06-15
 
 ### Changed
@@ -206,6 +214,7 @@ Initial public release.
 - `armature dashboard <spec> [--watch] [--format json]` — health dashboard
 - 1,202 tests
 
+[0.3.3]: https://github.com/bryansparks/armature/releases/tag/v0.3.3
 [0.3.0]: https://github.com/bryansparks/armature/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bryansparks/armature/releases/tag/v0.2.0
 [0.1.0]: https://github.com/bryansparks/armature/releases/tag/v0.1.0

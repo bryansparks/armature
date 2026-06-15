@@ -216,6 +216,7 @@ class Harness:
         else:
             self._checkpoint = None
         self._checkpoint_prior: dict[str, Any] = {}
+        self._checkpoint_loop_iters: dict[str, Any] = {}
         self._llm_call_count: int = 0
         self._mcp_sessions: list[Any] = []
 
@@ -676,6 +677,12 @@ class Harness:
 
     async def _run_with_loop(self, stage: Stage, context: dict[str, Any]) -> Any:
         """Execute stage with deliberate iteration (not retry-on-failure)."""
+        # If the entire loop completed in a prior run, return the cached result.
+        if self._checkpoint is not None and stage.id in self._checkpoint_prior:
+            if self._on_event:
+                self._on_event("stage_resumed", {"stage": stage.id})
+            return self._checkpoint_prior[stage.id]
+
         loop_cfg = stage.loop
         var_name = loop_cfg.iteration_var
         result: Any = None
@@ -707,7 +714,9 @@ class Harness:
                 _merge_carry_forward(update, iteration_info["carry_forward"])
             iteration_ctx = {**iteration_ctx, **update}
 
-            result = await self._execute_stage_with_recovery(stage, iteration_ctx)
+            result = await self._execute_stage_with_recovery(
+                stage, iteration_ctx, _loop_iteration=iteration_num
+            )
 
             until_met = False
             if loop_cfg.until is not None:
@@ -727,6 +736,10 @@ class Harness:
                 })
 
             if until_met:
+                # Write final result under the plain stage.id key so downstream
+                # stages and checkpoint resume can find it.
+                if self._checkpoint is not None:
+                    self._checkpoint_write(stage.id, result)
                 return result
 
             if not is_last and loop_cfg.backoff_s is not None:
@@ -736,6 +749,10 @@ class Harness:
                 )
                 await asyncio.sleep(delay)
 
+        # Write final result under the plain stage.id key so downstream stages
+        # can reference it via {{ stage_id.field }} and checkpoint resume works.
+        if self._checkpoint is not None:
+            self._checkpoint_write(stage.id, result)
         return result
 
     def _effective_output_limit(self, stage: Stage) -> int | None:
@@ -750,21 +767,36 @@ class Harness:
         from armature.runtime.truncation import truncate_result
         return truncate_result(result, limit)
 
-    def _checkpoint_write(self, stage_id: str, result: Any) -> None:
+    def _checkpoint_write(
+        self, stage_id: str, result: Any, _loop_iteration: int | None = None
+    ) -> None:
         if self._checkpoint is None:
             return
-        self._checkpoint.write(stage_id, result, self._checkpoint_prior)
-        self._checkpoint_prior[stage_id] = result
+        _cp_key = stage_id if _loop_iteration is None else f"{stage_id}__iter_{_loop_iteration}"
+        combined = {**self._checkpoint_prior, **self._checkpoint_loop_iters}
+        self._checkpoint.write(_cp_key, result, combined)
+        if _loop_iteration is not None:
+            self._checkpoint_loop_iters[_cp_key] = result
+        else:
+            self._checkpoint_prior[stage_id] = result
 
     async def _execute_stage_with_recovery(
-        self, stage: Stage, context: dict[str, Any]
+        self, stage: Stage, context: dict[str, Any],
+        _loop_iteration: int | None = None,
     ) -> Any:
         # Return cached result from a prior run (checkpoint resume).
-        # Skip conditions are not checkpointed — they are re-evaluated each run.
-        if self._checkpoint is not None and stage.id in self._checkpoint_prior:
+        # For loop iterations, use iteration-scoped keys so that iteration N
+        # doesn't short-circuit iteration N+1.
+        _cp_key = stage.id if _loop_iteration is None else f"{stage.id}__iter_{_loop_iteration}"
+        _cp_store = self._checkpoint_loop_iters if _loop_iteration is not None else self._checkpoint_prior
+
+        if self._checkpoint is not None and _cp_key in _cp_store:
             if self._on_event:
-                self._on_event("stage_resumed", {"stage": stage.id})
-            return self._checkpoint_prior[stage.id]
+                event_data: dict[str, Any] = {"stage": stage.id}
+                if _loop_iteration is not None:
+                    event_data["iteration"] = _loop_iteration
+                self._on_event("stage_resumed", event_data)
+            return _cp_store[_cp_key]
 
         # Evaluate skip_if (negative gate) and condition (positive gate).
         # condition is the inverse: stage runs only when truthy, skips when falsy.
@@ -802,11 +834,11 @@ class Harness:
                             "type": type(exc).__name__,
                             "reason": str(exc),
                         })
-                    self._checkpoint_write(stage.id, failed)
+                    self._checkpoint_write(stage.id, failed, _loop_iteration)
                     return failed
                 raise
             result = self._maybe_truncate(stage, result)
-            self._checkpoint_write(stage.id, result)
+            self._checkpoint_write(stage.id, result, _loop_iteration)
             return result
 
         try:
@@ -816,7 +848,7 @@ class Harness:
             else:
                 result = await coro
             result = self._maybe_truncate(stage, result)
-            self._checkpoint_write(stage.id, result)
+            self._checkpoint_write(stage.id, result, _loop_iteration)
             return result
         except asyncio.TimeoutError:
             if stage.fail_as_value:
@@ -831,7 +863,7 @@ class Harness:
                         "type": "TimeoutError",
                         "reason": failed["_failed_reason"],
                     })
-                self._checkpoint_write(stage.id, failed)
+                self._checkpoint_write(stage.id, failed, _loop_iteration)
                 return failed
             raise TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
         except Exception as exc:
@@ -847,7 +879,7 @@ class Harness:
                         "type": type(exc).__name__,
                         "reason": str(exc),
                     })
-                self._checkpoint_write(stage.id, failed)
+                self._checkpoint_write(stage.id, failed, _loop_iteration)
                 return failed
             raise
 
@@ -890,12 +922,23 @@ class Harness:
         self._validate_inputs(context)
         self._provenance: dict[str, str] = {k: "user_input" for k in (inputs or {})}
 
-        # Load prior checkpoint results so downstream stages can reference them
+        # Load prior checkpoint results so downstream stages can reference them.
+        # Split into stage-level keys (for context and n_resumed) and
+        # iteration-scoped keys (for mid-loop resume only).
         if self._checkpoint is not None and not force:
-            self._checkpoint_prior: dict[str, Any] = self._checkpoint.load()
+            raw_checkpoint: dict[str, Any] = self._checkpoint.load()
+            self._checkpoint_prior = {
+                k: v for k, v in raw_checkpoint.items()
+                if "__iter_" not in k
+            }
+            self._checkpoint_loop_iters = {
+                k: v for k, v in raw_checkpoint.items()
+                if "__iter_" in k
+            }
             context.update(self._checkpoint_prior)
         else:
             self._checkpoint_prior = {}
+            self._checkpoint_loop_iters = {}
             if self._checkpoint is not None and force:
                 self._checkpoint.clear()
 
