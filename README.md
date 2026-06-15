@@ -445,9 +445,14 @@ Armature is the **execution layer** — the first component in a larger system d
 
 | File | What it demonstrates |
 |---|---|
+| `00_hello_ollama.yml` | Zero-API-key quickstart — a single stage on a local Ollama model |
 | `01_hello_world.yml` | Minimal single-stage LLM workflow |
-| `02_research_pipeline.yml` | Multi-stage pipeline with dependencies |
-| `03_deliberation_standard.yml` | Judge/evaluator pattern with quality scoring |
+| `02_research_pipeline.yml` | Sequential pipeline (researcher → writer → critic) with a human approval gate |
+| `03_deliberation_standard.yml` | Three-round deliberation — specialist analysts, a challenger, and a synthesizer |
+| `04_fan_out.yml` | Parallel fan-out / fan-in to a single synthesizer |
+| `05_enterprise_slm_tiers.yml` | Multi-tier cost pattern — local SLM workers with a frontier judge |
+| `06_human_in_the_loop.yml` | Confidence-gated human escalation (HITL) |
+| `11_iterative_refinement.yml` | Deliberate iteration with `loop:` and an `until:` stop condition |
 | `starter_template.yml` | **Full-featured reference** — every section documented inline, showing model tiers, context filtering, cross-run memory, safety rules, guided JSON, and a human gate |
 
 ## Templates
