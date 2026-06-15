@@ -34,7 +34,7 @@ from armature.spec.models import HarnessSpec, EditableSurface
 from armature.spec.loader import load_spec
 from armature.spec.validator import validate_spec, SpecValidationError
 from armature.state.diagnostics import DiagnosticAnalyzer, DiagnosticResult
-from armature.state.traces import TraceStore, IhrResult, TraceRecord
+from armature.state.traces import TraceStore, HqsResult, TraceRecord
 
 
 async def llm_completion(**kwargs) -> Any:
@@ -49,7 +49,7 @@ You are an expert at refining Armature workflow specs to address performance iss
 You will receive:
 1. The current YAML spec
 2. Diagnostic failure signatures (stage IDs + failure codes + causal attribution)
-3. IHR (Implicit Harness Rating) breakdown — output validity, success rate, quorum score
+3. HQS (Harness Quality Score) breakdown — output validity, success rate, quorum score
 4. Optionally: improvement suggestions from a post-run analysis stage
 
 Your task: produce a revised YAML that addresses the diagnosed issues.
@@ -131,7 +131,7 @@ class SpecRefiner:
         self,
         spec_yaml: str,
         diagnostics: list[DiagnosticResult],
-        ihr: "IhrResult | None",
+        hqs: "HqsResult | None",
         refiner_suggestions: str | None = None,
         editable_surfaces: list[str] | None = None,
         diversity_hint: str | None = None,
@@ -147,20 +147,20 @@ class SpecRefiner:
             for d in diagnostics
         ) or "  (none)"
 
-        if ihr:
-            ihr_lines = (
-                f"  IHR: {ihr.ihr:.2f}  "
-                f"(output_valid={ihr.output_valid_rate:.0%}, "
-                f"success={ihr.success_rate:.0%}, "
-                f"avg_quorum={ihr.avg_quorum_score:.2f})"
+        if hqs:
+            hqs_lines = (
+                f"  HQS: {hqs.hqs:.2f}  "
+                f"(output_valid={hqs.output_valid_rate:.0%}, "
+                f"success={hqs.success_rate:.0%}, "
+                f"avg_quorum={hqs.avg_quorum_score:.2f})"
             )
         else:
-            ihr_lines = "  IHR: unavailable"
+            hqs_lines = "  HQS: unavailable"
 
         user_content = (
             f"Current spec:\n```yaml\n{spec_yaml}\n```\n\n"
             f"Failure signatures:\n{diag_lines}\n\n"
-            f"Quality metrics:\n{ihr_lines}"
+            f"Quality metrics:\n{hqs_lines}"
         )
         if refiner_suggestions:
             user_content += f"\n\nPost-run analysis suggestions:\n{refiner_suggestions}"
@@ -229,7 +229,7 @@ class SpecRefiner:
         self,
         spec_yaml: str,
         diagnostics: list[DiagnosticResult],
-        ihr: "IhrResult | None",
+        hqs: "HqsResult | None",
         refiner_suggestions: str | None = None,
         editable_surfaces: list[str] | None = None,
         n_proposals: int = 3,
@@ -239,7 +239,7 @@ class SpecRefiner:
             self.refine(
                 spec_yaml=spec_yaml,
                 diagnostics=diagnostics,
-                ihr=ihr,
+                hqs=hqs,
                 refiner_suggestions=refiner_suggestions,
                 editable_surfaces=editable_surfaces,
                 diversity_hint=_DIVERSITY_HINTS[i % len(_DIVERSITY_HINTS)],
@@ -296,7 +296,7 @@ class ImprovementReport:
     workflow_name: str
     spec_path: Path
     n_traces: int
-    ihr_before: float | None
+    hqs_before: float | None
     needs_improvement: bool
     applied: bool
     diagnostics: list[DiagnosticResult]
@@ -395,10 +395,10 @@ class SelfImproveRunner:
     Flow:
         1. Load last log entry to retrieve previous cycle's predictions
         2. Load traces for the workflow from the trace DB
-        3. Compute rolling IHR across all loaded traces
+        3. Compute rolling HQS across all loaded traces
         4. Run DiagnosticAnalyzer to identify failure signatures
         5. Verify previous predictions against current diagnostic state
-        6. If IHR < target_ihr AND n_traces >= min_traces:
+        6. If HQS < target_hqs AND n_traces >= min_traces:
            a. Call SpecRefiner with current spec + diagnostics
            b. If refiner returns a valid revised spec:
               - Apply if auto_apply=True (overwrite spec file)
@@ -413,7 +413,7 @@ class SelfImproveRunner:
         trace_db: Path | str | None = None,
         *,
         model: str = "claude-sonnet-4-6",
-        target_ihr: float = 0.90,
+        target_hqs: float = 0.90,
         min_traces: int = 3,
         auto_apply: bool = True,
         log_path: Path | str | None = None,
@@ -425,7 +425,7 @@ class SelfImproveRunner:
         else:
             self._trace_db = Path("~/.armature/traces.db").expanduser()
         self._model = model
-        self._target_ihr = target_ihr
+        self._target_hqs = target_hqs
         self._min_traces = min_traces
         self._auto_apply = auto_apply
         if log_path:
@@ -445,7 +445,7 @@ class SelfImproveRunner:
         traces = await store.query(workflow_name=spec.name, limit=200)
         n = len(traces)
 
-        ihr_before: float | None = None
+        hqs_before: float | None = None
         diagnostics: list[DiagnosticResult] = []
         needs_improvement = False
         applied = False
@@ -459,10 +459,10 @@ class SelfImproveRunner:
         regression_risk_count = 0
 
         if n > 0:
-            ihr_result = self._compute_ihr(traces)
-            ihr_before = ihr_result.ihr
+            hqs_result = self._compute_hqs(traces)
+            hqs_before = hqs_result.hqs
             diagnostics = DiagnosticAnalyzer(traces).analyze()
-            needs_improvement = n >= self._min_traces and ihr_before < self._target_ihr
+            needs_improvement = n >= self._min_traces and hqs_before < self._target_hqs
 
         # Compute verification against previous cycle's predictions
         curr_diag_keys = self._diag_keys(diagnostics)
@@ -482,14 +482,14 @@ class SelfImproveRunner:
         if needs_improvement:
             refiner = SpecRefiner(self._model)
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
-            ihr_obj = self._compute_ihr(traces) if traces else None
+            hqs_obj = self._compute_hqs(traces) if traces else None
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
 
             if self._n_proposals > 1:
                 candidates = await refiner.refine_many(
                     spec_yaml=spec_yaml,
                     diagnostics=diagnostics,
-                    ihr=ihr_obj,
+                    hqs=hqs_obj,
                     refiner_suggestions=None,
                     editable_surfaces=editable_surfaces,
                     n_proposals=self._n_proposals,
@@ -506,7 +506,7 @@ class SelfImproveRunner:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
                     diagnostics=diagnostics,
-                    ihr=ihr_obj,
+                    hqs=hqs_obj,
                     editable_surfaces=editable_surfaces,
                 )
                 n_proposals_generated = 1 if result is not None else 0
@@ -540,7 +540,7 @@ class SelfImproveRunner:
         self._write_log(
             workflow_name=spec.name,
             n_traces=n,
-            ihr_before=ihr_before,
+            hqs_before=hqs_before,
             diagnostics=diagnostics,
             diagnostics_keys=sorted(curr_diag_keys),
             needs_improvement=needs_improvement,
@@ -559,7 +559,7 @@ class SelfImproveRunner:
             workflow_name=spec.name,
             spec_path=self._spec_path,
             n_traces=n,
-            ihr_before=ihr_before,
+            hqs_before=hqs_before,
             needs_improvement=needs_improvement,
             applied=applied,
             diagnostics=diagnostics,
@@ -618,8 +618,8 @@ class SelfImproveRunner:
             return None
 
     @staticmethod
-    def _compute_ihr(traces: list) -> IhrResult:
-        from armature.state.traces import IhrResult
+    def _compute_hqs(traces: list) -> HqsResult:
+        from armature.state.traces import HqsResult
         n = len(traces)
         output_valid_rate = sum(1 for t in traces if t.output_valid) / n
         success_rate = sum(1 for t in traces if t.success) / n
@@ -628,16 +628,16 @@ class SelfImproveRunner:
         avg_latency = sum(t.latency_ms for t in traces) / n
         latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
         hfr = sum(1 for t in traces if t.escalation_count == 0) / n
-        ihr = (
+        hqs = (
             0.35 * output_valid_rate
             + 0.25 * success_rate
             + 0.20 * avg_quorum
             + 0.10 * latency_score
             + 0.10 * hfr
         )
-        return IhrResult(
+        return HqsResult(
             run_id="rolling",
-            ihr=ihr,
+            hqs=hqs,
             output_valid_rate=output_valid_rate,
             success_rate=success_rate,
             avg_quorum_score=avg_quorum,
@@ -660,7 +660,7 @@ class SelfImproveRunner:
         *,
         workflow_name: str,
         n_traces: int,
-        ihr_before: float | None,
+        hqs_before: float | None,
         diagnostics: list[DiagnosticResult],
         diagnostics_keys: list[str],
         needs_improvement: bool,
@@ -679,8 +679,8 @@ class SelfImproveRunner:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "workflow_name": workflow_name,
             "n_traces": n_traces,
-            "ihr_before": ihr_before,
-            "target_ihr": self._target_ihr,
+            "hqs_before": hqs_before,
+            "target_hqs": self._target_hqs,
             "needs_improvement": needs_improvement,
             "applied": applied,
             "diagnostics": [

@@ -54,7 +54,7 @@ role_type_defaults:
 The `type: judge` designation also triggers two harness behaviors:
 
 1. The system prompt prefix for the stage is set to an evaluation-oriented framing: "You are evaluating output quality. Assess carefully, score objectively, and identify specific issues."
-2. The engine auto-extracts a `confidence`, `score`, or `quality_score` field from the judge's JSON output and records it as the `quorum_score` on the trace. This feeds IHR metrics, the self-improvement loop, and the bootstrap few-shot selector.
+2. The engine auto-extracts a `confidence`, `score`, or `quality_score` field from the judge's JSON output and records it as the `quorum_score` on the trace. This feeds HQS metrics, the self-improvement loop, and the bootstrap few-shot selector.
 
 ---
 

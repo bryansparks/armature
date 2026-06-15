@@ -27,7 +27,7 @@ _QUORUM_SCORE_KEYS = ("score", "quality_score", "confidence")
 
 
 def _extract_quorum_score(role_type: str, result: dict) -> float | None:
-    """Extract a 0–1 quality score from a judge stage's output for IHR tracking.
+    """Extract a 0–1 quality score from a judge stage's output for HQS tracking.
 
     Scans result for score/quality_score/confidence (in that priority).
     Only judge stages produce quorum scores; all other role types return None.

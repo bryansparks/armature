@@ -26,7 +26,7 @@ def render(renderable) -> str:
 
 
 def make_dashboard(
-    ihr_trend=None,
+    hqs_trend=None,
     stage_stats=None,
     improvement_cycles=None,
     total_runs=10,
@@ -39,7 +39,7 @@ def make_dashboard(
         stage_stats=stage_stats or {},
         improvement_cycles=improvement_cycles or [],
         safety_stats=load_safety_stats([]),
-        ihr_trend=ihr_trend or [0.75, 0.80],
+        hqs_trend=hqs_trend or [0.75, 0.80],
         last_run_id="abc123",
     )
 
@@ -52,10 +52,10 @@ class TestHealthStrip:
         out = render(health_strip(data))
         assert "my-workflow" in out
 
-    def test_renders_ihr_value(self):
-        data = make_dashboard(ihr_trend=[0.83])
+    def test_renders_hqs_value(self):
+        data = make_dashboard(hqs_trend=[0.83])
         out = render(health_strip(data))
-        assert "0.8" in out  # IHR value present
+        assert "0.8" in out  # HQS value present
 
     def test_renders_run_count(self):
         data = make_dashboard(total_runs=42)
@@ -64,7 +64,7 @@ class TestHealthStrip:
 
     def test_renders_sparkline_characters(self):
         blocks = "▁▂▃▄▅▆▇█"
-        data = make_dashboard(ihr_trend=[0.6, 0.7, 0.8, 0.75])
+        data = make_dashboard(hqs_trend=[0.6, 0.7, 0.8, 0.75])
         out = render(health_strip(data))
         assert any(ch in out for ch in blocks)
 
@@ -128,12 +128,12 @@ class TestImprovementTimeline:
         out = render(improvement_timeline(data))
         assert out  # renders something
 
-    def test_renders_cycle_ihr(self):
+    def test_renders_cycle_hqs(self):
         cycles = [
             ImprovementCycle(
                 cycle_number=1,
                 timestamp="2026-05-26T10:00:00Z",
-                ihr_before=0.72,
+                hqs_before=0.72,
                 drift_score=0.0,
                 applied=True,
                 requires_review=False,
@@ -153,7 +153,7 @@ class TestImprovementTimeline:
             ImprovementCycle(
                 cycle_number=2,
                 timestamp="2026-05-26T10:00:00Z",
-                ihr_before=0.65,
+                hqs_before=0.65,
                 drift_score=0.0,
                 applied=False,
                 requires_review=True,
@@ -174,7 +174,7 @@ class TestImprovementTimeline:
             ImprovementCycle(
                 cycle_number=1,
                 timestamp="2026-05-26T00:00:00Z",
-                ihr_before=0.60,
+                hqs_before=0.60,
                 drift_score=0.75,
                 applied=True,
                 requires_review=False,
@@ -208,7 +208,7 @@ class TestSafetyGovernance:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=safety,
-            ihr_trend=[0.80],
+            hqs_trend=[0.80],
             last_run_id="r1",
         )
         out = render(safety_governance(data))
@@ -228,7 +228,7 @@ class TestSafetyGovernance:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=safety,
-            ihr_trend=[0.80],
+            hqs_trend=[0.80],
             last_run_id="r1",
         )
         out = render(safety_governance(data))
@@ -248,7 +248,7 @@ class TestSafetyGovernance:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=safety,
-            ihr_trend=[0.80],
+            hqs_trend=[0.80],
             last_run_id="r1",
         )
         out = render(safety_governance(data))
@@ -264,7 +264,7 @@ class TestSafetyGovernance:
         )
         data = DashboardData(
             workflow_name="wf", total_runs=3, traces=[], stage_stats={},
-            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+            improvement_cycles=[], safety_stats=safety, hqs_trend=[0.80], last_run_id="r1",
         )
         out = render(safety_governance(data))
         assert "3" in out  # approval count visible
@@ -279,7 +279,7 @@ class TestSafetyGovernance:
         )
         data = DashboardData(
             workflow_name="wf", total_runs=1, traces=[], stage_stats={},
-            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+            improvement_cycles=[], safety_stats=safety, hqs_trend=[0.80], last_run_id="r1",
         )
         out = render(safety_governance(data))
         # Should NOT show "0 warn" or "0 block" as if they're real tracked values
@@ -296,7 +296,7 @@ class TestSafetyGovernance:
         )
         data = DashboardData(
             workflow_name="wf", total_runs=1, traces=[], stage_stats={},
-            improvement_cycles=[], safety_stats=safety, ihr_trend=[0.80], last_run_id="r1",
+            improvement_cycles=[], safety_stats=safety, hqs_trend=[0.80], last_run_id="r1",
         )
         out = render(safety_governance(data))
         assert "stale" not in out.lower()
@@ -408,7 +408,7 @@ class TestImprovementTimelineAllCyclesVisible:
             ImprovementCycle(
                 cycle_number=i + 1,
                 timestamp=f"2026-05-{i + 1:02d}T10:00:00Z",
-                ihr_before=0.72, drift_score=0.0, applied=True,
+                hqs_before=0.72, drift_score=0.0, applied=True,
                 requires_review=False, verified_fixes=0,
                 missed_predictions=0, unexpected_regressions=0,
                 predicted_fixes=[], predicted_regressions=[],

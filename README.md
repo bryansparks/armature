@@ -158,7 +158,7 @@ armature run my_workflow.yml --input text="Your content here..."
 ```bash
 armature run <spec>                           # execute a workflow
 armature run <spec> --no-cache               # run without LLM response cache
-armature run <spec> --auto-improve           # run then auto-apply spec improvements when IHR < 0.75
+armature run <spec> --auto-improve           # run then auto-apply spec improvements when HQS < 0.75
 armature validate <spec>                      # validate spec + show KYA-inspired risk score (LOW/MEDIUM/HIGH/CRITICAL)
 armature new [output]                         # interactive spec creation wizard
 armature doctor                               # environment health check
@@ -337,7 +337,7 @@ Governance layer operating at definition-time (static risk scoring), runtime-tru
 | AutoHarness | Harness-as-verifier, NL-to-spec synthesis (`SpecDrafter`), `AutoHarness` loop | ✅ |
 | AgentSpec | Pre/post-tool hooks, declarative safety DSL (6 operators, 5 actions) | ✅ |
 | Continual Harness | Diagnostic failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
-| Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th IHR component, SLR `low_skill_activation` diagnostic | ✅ |
+| Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th HQS component, SLR `low_skill_activation` diagnostic | ✅ |
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
@@ -361,14 +361,14 @@ Armature is the **execution layer** — the first component in a larger system d
   │  • DAG executor  │        spec improvements     └──────────┬──────────┘
   │  • Role routing  │                                         │
   │  • Safety hooks  │                              ┌──────────▼──────────┐
-  │  • IHR scoring   │                              │  Loop 1:            │
+  │  • HQS scoring   │                              │  Loop 1:            │
   │  • Session log   │                              │  Harness Optimizer  │
   └──────────────────┘                              │                     │
                                                     │  Reads traces +     │
                                                     │  proposal history   │
                                                     │  → proposes YAML    │
                                                     │  spec improvements  │
-                                                    │  → A/B tests by IHR │
+                                                    │  → A/B tests by HQS │
                                                     └──────────┬──────────┘
                                                                │ accepted diffs
                                                     ┌──────────▼──────────┐
@@ -433,7 +433,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Response stage** | Mark one text-mode LLM stage as `response_stage: true` to enable token streaming; the HTTP service forwards each token to the SSE stream immediately and fires a `response_stage_complete` event so clients can render the answer before background stages finish |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
-| **IHR** | Implicit Harness Rating — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
+| **HQS** | Harness Quality Score — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
@@ -521,7 +521,7 @@ docs/               # Full documentation (see index below)
 | [CHECKPOINT-AND-RESUME](docs/CHECKPOINT-AND-RESUME.md) | Execution state persistence and resumption |
 | [CHATBOT-AND-STREAMING](docs/CHATBOT-AND-STREAMING.md) | Chat applications and streaming responses |
 | [HUMAN-IN-THE-LOOP](docs/HUMAN-IN-THE-LOOP.md) | Approval gates and human decision points |
-| [IHR-AND-SELF-IMPROVEMENT](docs/IHR-AND-SELF-IMPROVEMENT.md) | The IHR formula and self-improvement loop |
+| [HQS-AND-SELF-IMPROVEMENT](docs/HQS-AND-SELF-IMPROVEMENT.md) | The HQS formula and self-improvement loop |
 
 ### Operations & safety
 

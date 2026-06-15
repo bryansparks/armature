@@ -1476,7 +1476,7 @@ The `objective` variable is available in every stage because all context is accu
 The Synthesizer is a `type: judge` stage. This does two things:
 
 1. **Model tier:** Judge stages default to the `frontier` tier (see [Role type defaults](#role-type-defaults)). The decision-maker always gets your strongest model unless overridden.
-2. **Quorum score:** The engine auto-extracts a `confidence`, `score`, or `quality_score` field from the judge's output and records it as the `quorum_score` on the trace. This feeds the IHR metric, the self-improvement loop, and the bootstrap few-shot selector.
+2. **Quorum score:** The engine auto-extracts a `confidence`, `score`, or `quality_score` field from the judge's output and records it as the `quorum_score` on the trace. This feeds the HQS metric, the self-improvement loop, and the bootstrap few-shot selector.
 
 ```yaml
 - id: synthesizer
@@ -1781,7 +1781,7 @@ armature run my_workflow.yml \
 | `--quiet` / `-q` | Suppress live progress output |
 | `--force` | Ignore checkpoint and rerun all stages from scratch |
 | `--no-cache` | Bypass the LLM response cache; every LLM call goes to the provider |
-| `--auto-improve` | After the run, if IHR < 0.75 automatically apply spec improvements |
+| `--auto-improve` | After the run, if HQS < 0.75 automatically apply spec improvements |
 
 ---
 
@@ -1813,7 +1813,7 @@ Without `--apply`, the proposed diff is printed for review. With `--apply`, it i
 
 #### `armature report`
 
-Print a human-readable diagnostic report for a completed run, including stage-by-stage metrics, IHR score, and failure signatures.
+Print a human-readable diagnostic report for a completed run, including stage-by-stage metrics, HQS score, and failure signatures.
 
 ```bash
 armature report --run-id abc123
@@ -1830,7 +1830,7 @@ Display a recorded run stage-by-stage from the TraceStore. Useful for post-morte
 armature replay abc123-def456-...
 ```
 
-Output: a Rich-formatted table showing stage id, role, model, latency, success/fail, quorum score, and IHR contribution for every stage in the run, followed by a run summary with the overall IHR and total latency.
+Output: a Rich-formatted table showing stage id, role, model, latency, success/fail, quorum score, and HQS contribution for every stage in the run, followed by a run summary with the overall HQS and total latency.
 
 See §27 for full details.
 
@@ -1838,7 +1838,7 @@ See §27 for full details.
 
 #### `armature dashboard`
 
-Rich 4-panel aggregate health dashboard. Shows IHR trend, per-stage metrics, improvement cycle history, and safety/governance summary across all runs of a workflow.
+Rich 4-panel aggregate health dashboard. Shows HQS trend, per-stage metrics, improvement cycle history, and safety/governance summary across all runs of a workflow.
 
 ```bash
 armature dashboard my_workflow.yml           # snapshot
@@ -1852,12 +1852,12 @@ See §25 for full panel descriptions and all flags.
 
 #### `armature improve`
 
-Closed-loop self-improvement: loads traces, computes the Implicit Harness Rating (IHR), diagnoses failure signatures, and calls an LLM to produce a revised spec. If IHR is below the target and enough traces exist, the revised spec is auto-applied.
+Closed-loop self-improvement: loads traces, computes the Harness Quality Score (HQS), diagnoses failure signatures, and calls an LLM to produce a revised spec. If HQS is below the target and enough traces exist, the revised spec is auto-applied.
 
 ```bash
 armature improve my_workflow.yml
 armature improve my_workflow.yml --no-apply     # propose but don't write
-armature improve my_workflow.yml --target-ihr 0.85 --min-traces 10
+armature improve my_workflow.yml --target-hqs 0.85 --min-traces 10
 armature improve my_workflow.yml --model claude-opus-4-7
 ```
 
@@ -1865,7 +1865,7 @@ armature improve my_workflow.yml --model claude-opus-4-7
 |------|---------|-------------|
 | `--traces path` | `~/.armature/traces.db` | Path to trace database |
 | `--model name` | `claude-sonnet-4-6` | LLM used by the spec refiner |
-| `--target-ihr float` | `0.90` | IHR threshold; improvement triggered when below this |
+| `--target-hqs float` | `0.90` | HQS threshold; improvement triggered when below this |
 | `--min-traces int` | `3` | Minimum traces required before analysis |
 | `--apply / --no-apply` | apply | Auto-apply the proposed spec |
 | `--log path` | `<spec>.improve_log.jsonl` | Path to the improvement audit log |
@@ -2279,8 +2279,8 @@ Armature includes a closed-loop self-improvement system that analyzes workflow t
 The `armature improve` command runs one analysis cycle:
 
 1. **Load traces** for the workflow from the trace database (default: `~/.armature/traces.db`)
-2. **Compute rolling IHR** (Implicit Harness Rating) across the loaded traces ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1):
-   - IHR = `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score + 0.10 × hfr`
+2. **Compute rolling HQS** (Harness Quality Score) across the loaded traces ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1):
+   - HQS = `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum + 0.10 × latency_score + 0.10 × hfr`
    - **HFR** (Harness-Following Rate) = fraction of traces where `escalation_count == 0`; models that consistently need to escalate to a stronger tier are not truly following harness instructions
 3. **Run DiagnosticAnalyzer** to identify failure signatures — which stages are failing and how:
    - `stage_failed` — the stage raised an exception
@@ -2292,7 +2292,7 @@ The `armature improve` command runs one analysis cycle:
 
    Each diagnostic carries a **causal 3-tuple** `(terminal_cause, causal_status, mechanism)` — inspired by Self-Harness ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1) — distinguishing *what* broke (execution error, schema validation, low confidence) from *whose fault it is* (spec problem, model problem, or tool problem) and *how* (timeout, underpowered model, missing instruction). This attribution lets the refiner propose structurally different fixes rather than generic prompt rewrites.
 4. **Verify previous cycle's predictions** — compare the current diagnostic state against what the prior cycle predicted would be fixed
-5. **If IHR < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) with the current spec + diagnostics + quality metrics. Three additional mechanisms (from [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1) govern this step:
+5. **If HQS < target and traces ≥ minimum**, call `SpecRefiner` (medium-tier LLM — frontier models are not needed for spec evolution, per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) with the current spec + diagnostics + quality metrics. Three additional mechanisms (from [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1) govern this step:
    - **Editable surfaces**: the refiner is restricted to spec fields declared in `self_improvement.editable_surfaces`; everything else is locked against modification.
    - **K-proposal diversity**: `n_proposals` parallel candidates are generated with rotating diversity hints (minimize changes, fix output format, adjust model tier, tighten schema); the candidate whose `predicted_fixes` best covers the active diagnostic codes is selected.
    - **Regression gating**: proposals that modify stages with no current diagnostics (healthy stages) are filtered as regression risks; if all candidates are risky, the best of the risky set is used as a fallback.
@@ -2315,14 +2315,14 @@ This record accumulates in the JSONL log file alongside each run. Over multiple 
 ### Usage
 
 ```bash
-# Analyze and apply if IHR < 0.90 (default)
+# Analyze and apply if HQS < 0.90 (default)
 armature improve my_workflow.yml
 
 # Propose only — do not write the spec
 armature improve my_workflow.yml --no-apply
 
 # Stricter threshold, more data required
-armature improve my_workflow.yml --target-ihr 0.95 --min-traces 20
+armature improve my_workflow.yml --target-hqs 0.95 --min-traces 20
 
 # Use a more capable model for refinement
 armature improve my_workflow.yml --model claude-opus-4-7
@@ -2335,7 +2335,7 @@ The improvement log is written to `<spec_stem>.improve_log.jsonl` by default. Ea
   "timestamp": "2026-05-15T10:00:00Z",
   "workflow_name": "campaign-concept-gen",
   "n_traces": 47,
-  "ihr_before": 0.71,
+  "hqs_before": 0.71,
   "needs_improvement": true,
   "applied": true,
   "n_proposals_generated": 3,
@@ -2362,7 +2362,7 @@ runner = SelfImproveRunner(
     "my_workflow.yml",
     "~/.armature/traces.db",
     model="claude-sonnet-4-6",
-    target_ihr=0.90,
+    target_hqs=0.90,
     min_traces=10,
     auto_apply=True,
     n_proposals=3,       # generate 3 diverse candidates, pick best coverage
@@ -2370,7 +2370,7 @@ runner = SelfImproveRunner(
 
 report = await runner.analyze()
 
-print(f"IHR: {report.ihr_before:.3f}")
+print(f"HQS: {report.hqs_before:.3f}")
 print(f"Needs improvement: {report.needs_improvement}")
 print(f"Applied: {report.applied}")
 print(f"Proposals generated: {report.n_proposals_generated}")
@@ -2813,11 +2813,11 @@ armature dashboard my_workflow.yml --format json
 
 The dashboard renders four panels:
 
-**Health strip** (top, full width) — IHR gauge, delta arrow vs. prior run, and a Unicode sparkline showing IHR trend across the last 50 runs. Color: green ≥ 0.85, yellow 0.70–0.84, red < 0.70.
+**Health strip** (top, full width) — HQS gauge, delta arrow vs. prior run, and a Unicode sparkline showing HQS trend across the last 50 runs. Color: green ≥ 0.85, yellow 0.70–0.84, red < 0.70.
 
 **Stage breakdown** (left) — Per-stage table showing failure rate, average latency, quorum score, and escalation rate. Rows colored by health: red for ≥ 20% failure or quorum < 0.50, yellow for borderline, green for healthy. Post-run stages are rendered dim.
 
-**Improvement cycles** (right top) — Improvement log history, newest first. Shows per-cycle IHR, drift score, applied/pending status, and prediction verification counts. High drift (> 0.5) and pending reviews are highlighted.
+**Improvement cycles** (right top) — Improvement log history, newest first. Shows per-cycle HQS, drift score, applied/pending status, and prediction verification counts. High drift (> 0.5) and pending reviews are highlighted.
 
 **Safety & governance** (right bottom) — Policy version stability, rule hit counts by action type, post-condition failure count, and stale memory key count.
 
@@ -2840,10 +2840,10 @@ When `--format json`, the dashboard emits a structured dict:
 {
   "workflow_name": "research-pipeline",
   "total_runs": 47,
-  "current_ihr": 0.82,
+  "current_hqs": 0.82,
   "health_color": "yellow",
-  "ihr_delta": 0.03,
-  "ihr_trend": [0.70, 0.74, 0.79, 0.82],
+  "hqs_delta": 0.03,
+  "hqs_trend": [0.70, 0.74, 0.79, 0.82],
   "stage_stats": {
     "researcher": {"run_count": 47, "failure_rate": 0.02, "avg_latency_ms": 1200, ...}
   },
@@ -2858,9 +2858,9 @@ When `--format json`, the dashboard emits a structured dict:
 This is suitable for ingestion into monitoring systems, Grafana dashboards, or CI health checks:
 
 ```bash
-# Fail CI if workflow IHR drops below 0.80
-ihr=$(armature dashboard my_workflow.yml --format json | jq '.current_ihr')
-python -c "import sys; sys.exit(0 if $ihr >= 0.80 else 1)"
+# Fail CI if workflow HQS drops below 0.80
+hqs=$(armature dashboard my_workflow.yml --format json | jq '.current_hqs')
+python -c "import sys; sys.exit(0 if $hqs >= 0.80 else 1)"
 ```
 
 ---
@@ -2949,7 +2949,7 @@ Run: abc123-def456  (my-research-pipeline)
  analyst         worker      claude-haiku-4-5     892ms    ✓   0.87
  judge           judge       claude-sonnet-4-6    1,103ms  ✓   0.94
 ────────────────────────────────────────────────────────────────────────
- IHR: 0.88   Total latency: 3,236ms   Stages: 3   Failed: 0
+ HQS: 0.88   Total latency: 3,236ms   Stages: 3   Failed: 0
 ```
 
 Each row also shows the truncated inputs and outputs (200 characters) when `--verbose` is passed.
@@ -2972,7 +2972,7 @@ Every stage in every run is recorded automatically — no configuration required
 
 ## 28. Trace-triggered behaviors
 
-<!-- AI-AGENT-NOTE: BehaviorRule and BehaviorRegistry allow post-run reactive logic tied to trace history patterns. An agent building workflows should know that the ihr_feedback behavior fires automatically after low-quality runs, and that custom rules can trigger any arbitrary handler (alerting, escalation, auto-export, etc.). -->
+<!-- AI-AGENT-NOTE: BehaviorRule and BehaviorRegistry allow post-run reactive logic tied to trace history patterns. An agent building workflows should know that the hqs_feedback behavior fires automatically after low-quality runs, and that custom rules can trigger any arbitrary handler (alerting, escalation, auto-export, etc.). -->
 
 The `BehaviorRegistry` lets you register rules that fire after a run completes, based on patterns in the recent trace history. This is how Armature reacts to observed quality trends rather than individual run events.
 
@@ -2984,8 +2984,8 @@ from armature.hooks.lifecycle import BehaviorRule, BehaviorRegistry
 rule = BehaviorRule(
     name="my_rule",
     description="Fire when something happens",
-    pattern=lambda traces: len(traces) > 0 and traces[-1].ihr < 0.5,
-    handler=lambda traces: print("IHR critically low — investigate"),
+    pattern=lambda traces: len(traces) > 0 and traces[-1].hqs < 0.5,
+    handler=lambda traces: print("HQS critically low — investigate"),
 )
 ```
 
@@ -3008,12 +3008,12 @@ registry.evaluate(traces)
 
 Rules are evaluated in registration order. All matching rules fire; there is no short-circuit.
 
-### Built-in: `ihr_feedback`
+### Built-in: `hqs_feedback`
 
-The `ihr_feedback` behavior is registered automatically when the harness initializes its default registry. Pattern: rolling IHR below 0.75 over the last 10 traces (minimum 3 required to avoid false alerts on first run). Handler: prints a Rich-formatted hint suggesting `armature improve <spec>`.
+The `hqs_feedback` behavior is registered automatically when the harness initializes its default registry. Pattern: rolling HQS below 0.75 over the last 10 traces (minimum 3 required to avoid false alerts on first run). Handler: prints a Rich-formatted hint suggesting `armature improve <spec>`.
 
 ```
-IHR hint: quality below 0.75 — consider running `armature improve my_workflow.yml`
+HQS hint: quality below 0.75 — consider running `armature improve my_workflow.yml`
 ```
 
 This fires after the run summary, before the CLI exits.
@@ -3049,7 +3049,7 @@ Handlers receive the full trace list and can:
 - Export traces for fine-tuning when quality is high
 - Update a dashboard or monitoring metric
 
-Handlers are synchronous and run after the run summary is emitted. They do not affect the run result or IHR score.
+Handlers are synchronous and run after the run summary is emitted. They do not affect the run result or HQS score.
 
 ---
 
@@ -3057,7 +3057,7 @@ Handlers are synchronous and run after the run summary is emitted. They do not a
 
 <!-- AI-AGENT-NOTE: --auto-improve on `armature run` connects the execution loop to the self-improvement loop automatically. An agent deploying Armature workflows in production should understand when auto-improve fires, what it does, and how to review pending proposals. -->
 
-`--auto-improve` on `armature run` connects the execution loop to the self-improvement loop automatically. If IHR drops below 0.75 after a run, Armature calls `SelfImproveRunner.analyze()` without requiring a separate `armature improve` invocation.
+`--auto-improve` on `armature run` connects the execution loop to the self-improvement loop automatically. If HQS drops below 0.75 after a run, Armature calls `SelfImproveRunner.analyze()` without requiring a separate `armature improve` invocation.
 
 ### Usage
 
@@ -3068,9 +3068,9 @@ armature run my_workflow.yml --input topic="AI safety" --auto-improve
 ### What happens
 
 1. The workflow executes normally.
-2. After the run summary is printed, Armature checks the IHR.
-3. If IHR ≥ 0.75: `Auto-improve: workflow is healthy — no improvement needed.`
-4. If IHR < 0.75: `SelfImproveRunner.analyze()` runs.
+2. After the run summary is printed, Armature checks the HQS.
+3. If HQS ≥ 0.75: `Auto-improve: workflow is healthy — no improvement needed.`
+4. If HQS < 0.75: `SelfImproveRunner.analyze()` runs.
    - **Safe changes** (prompt wording, temperature, retry count): applied directly to the spec file. `Auto-improve: spec updated → my_workflow.yml`
    - **Structural changes** (adding/removing stages, changing DAG topology): written to `my_workflow.pending.yaml` for human review. `Auto-improve: structural changes require review → my_workflow.pending.yaml`
    - **No valid revision found**: `Auto-improve: refiner could not produce a valid revision.`
@@ -3099,8 +3099,8 @@ Cross-run memory, safety rules, and DAG topology are classified as structural ch
 ### Relationship to `armature improve`
 
 `--auto-improve` calls the same `SelfImproveRunner` that `armature improve` calls. The difference is timing and trigger:
-- `armature improve` is a manual, on-demand command that always runs regardless of IHR
-- `--auto-improve` is automatic and only fires when IHR drops below 0.75
+- `armature improve` is a manual, on-demand command that always runs regardless of HQS
+- `--auto-improve` is automatic and only fires when HQS drops below 0.75
 
 For development workflows where you want to catch regressions immediately, `--auto-improve` is the right choice. For production workflows where you want control over when the spec changes, use `armature improve` on a schedule.
 
@@ -3197,7 +3197,7 @@ Each of these increments the `rogue_signals` counter by 1. Warnings and log-only
 **CLI run output:**
 
 ```
-Run complete  IHR: 0.83  stages: 4  time: 3.2s  [2 blocked]
+Run complete  HQS: 0.83  stages: 4  time: 3.2s  [2 blocked]
 ```
 
 The `[N blocked]` suffix appears only when `rogue_signals > 0`.
@@ -3208,7 +3208,7 @@ The `[N blocked]` suffix appears only when `rogue_signals > 0`.
 {
   "event": "run_summary",
   "run_id": "abc123",
-  "ihr": 0.83,
+  "hqs": 0.83,
   "rogue_signals": 2,
   ...
 }
@@ -4005,6 +4005,6 @@ See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry
 
 *Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
 
-*Academic influences: [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 (IHR metric, Skill-Load Rate, spec refinement without frontier models); [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
+*Academic influences: [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 (HQS metric, Skill-Load Rate, spec refinement without frontier models); [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
 
 *For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*

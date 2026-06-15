@@ -489,7 +489,7 @@ def run(
     output_file: Path = typer.Option(None, "--output", "-o", help="Write result JSON to file"),
     force: bool = typer.Option(False, "--force", help="Ignore checkpoint and rerun all stages"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable LLM response cache"),
-    auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when IHR < 0.75"),
+    auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when HQS < 0.75"),
 ):
     """Run a workflow from a YAML spec file."""
     if not spec.exists():
@@ -571,7 +571,7 @@ def run(
             typer.echo("\nAuto-improve: analyzing traces...")
 
         async def _improve():
-            improve_runner = SelfImproveRunner(spec, target_ihr=0.75)
+            improve_runner = SelfImproveRunner(spec, target_hqs=0.75)
             return await improve_runner.analyze()
 
         report = asyncio.run(_improve())
@@ -760,10 +760,10 @@ def replay(
         store = TraceStore(resolved_traces)
         await store.init()
         records = await store.query_by_run(run_id)
-        ihr_result = await store.compute_ihr(run_id) if records else None
-        return records, ihr_result
+        hqs_result = await store.compute_hqs(run_id) if records else None
+        return records, hqs_result
 
-    records, ihr_result = asyncio.run(_load())
+    records, hqs_result = asyncio.run(_load())
 
     if not records:
         typer.echo(f"No traces found for run_id='{run_id}' in {resolved_traces}", err=True)
@@ -789,12 +789,12 @@ def replay(
     console.print(f"\n[bold]Replay[/bold]: run [cyan]{run_id}[/cyan]  ({len(records)} stages)\n")
     console.print(t)
 
-    if ihr_result:
+    if hqs_result:
         console.print(
-            f"\n[bold]IHR[/bold]: [cyan]{ihr_result.ihr:.3f}[/cyan]  "
-            f"(valid={ihr_result.output_valid_rate:.0%}  "
-            f"success={ihr_result.success_rate:.0%}  "
-            f"n={ihr_result.n_traces})\n"
+            f"\n[bold]HQS[/bold]: [cyan]{hqs_result.hqs:.3f}[/cyan]  "
+            f"(valid={hqs_result.output_valid_rate:.0%}  "
+            f"success={hqs_result.success_rate:.0%}  "
+            f"n={hqs_result.n_traces})\n"
         )
 
 
@@ -866,7 +866,7 @@ def improve(
         None, "--traces", help="Path to traces database (default: ~/.armature/traces.db)"
     ),
     model: str = typer.Option("claude-sonnet-4-6", "--model", help="LLM used by SpecRefiner"),
-    target_ihr: float = typer.Option(0.90, "--target-ihr", help="IHR threshold below which improvement is triggered"),
+    target_hqs: float = typer.Option(0.90, "--target-hqs", help="HQS threshold below which improvement is triggered"),
     min_traces: int = typer.Option(3, "--min-traces", help="Minimum traces required before analysis"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
     log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL (default: <spec>.improve_log.jsonl)"),
@@ -885,7 +885,7 @@ def improve(
             spec,
             db_path,
             model=model,
-            target_ihr=target_ihr,
+            target_hqs=target_hqs,
             min_traces=min_traces,
             auto_apply=apply,
             log_path=log,
@@ -895,7 +895,7 @@ def improve(
     typer.echo(f"Analyzing: {spec.name}")
     report = asyncio.run(_run())
 
-    typer.echo(f"  traces: {report.n_traces}  IHR: {f'{report.ihr_before:.3f}' if report.ihr_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}")
+    typer.echo(f"  traces: {report.n_traces}  HQS: {f'{report.hqs_before:.3f}' if report.hqs_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}")
 
     if report.n_traces == 0:
         typer.echo("No traces found — run the workflow first.")

@@ -1,4 +1,4 @@
-# IHR and Self-Improvement in Armature
+# HQS and Self-Improvement in Armature
 
 Quality measurement and trace-driven spec evolution — no manual tuning required.
 
@@ -6,18 +6,18 @@ Quality measurement and trace-driven spec evolution — no manual tuning require
 
 Most agentic systems fail silently. A stage starts returning invalid JSON, a judge loses confidence, escalations pile up — and you find out weeks later when a human notices something looks off. There's no error rate, no p99 latency, no signal to watch. You're flying blind.
 
-Armature's answer is IHR: the **Implicit Harness Rating**. It's a single composite score, computed over accumulated trace data, that reflects how well your workflow is actually performing. And when IHR falls below a target threshold, `armature improve` closes the loop automatically — loading the traces, diagnosing what broke, calling a language model to propose targeted YAML revisions, and applying the safe changes without human intervention.
+Armature's answer is HQS: the **Harness Quality Score**. It's a single composite score, computed over accumulated trace data, that reflects how well your workflow is actually performing. And when HQS falls below a target threshold, `armature improve` closes the loop automatically — loading the traces, diagnosing what broke, calling a language model to propose targeted YAML revisions, and applying the safe changes without human intervention.
 
 Every run makes the next run better. That's the design.
 
 ---
 
-## IHR — the metric
+## HQS — the metric
 
-IHR is a weighted composite of five observable signals, all derived from traces recorded during normal workflow execution:
+HQS is a weighted composite of five observable signals, all derived from traces recorded during normal workflow execution:
 
 ```
-IHR = 0.35 × output_valid_rate
+HQS = 0.35 × output_valid_rate
     + 0.25 × success_rate
     + 0.20 × avg_quorum_score
     + 0.10 × latency_score
@@ -38,9 +38,9 @@ The weights reflect what matters most. Structural output validity (0.35) dominat
 
 **`happy_path_rate`** — fraction of individual stage executions that required zero escalations. A stage that always hits `on_fail.loop` before succeeding still counts as a success but degrades this score. It's a proxy for workflow confidence: a well-written spec shouldn't need to retry constantly.
 
-### What a good IHR looks like
+### What a good HQS looks like
 
-| IHR | Interpretation |
+| HQS | Interpretation |
 |-----|----------------|
 | 0.95+ | Production-grade. Rare failures, clean output, fast, no escalations. |
 | 0.90–0.95 | Healthy. Minor issues in one or two dimensions — worth monitoring. |
@@ -51,7 +51,7 @@ The weights reflect what matters most. Structural output validity (0.35) dominat
 
 ## Trace capture — the foundation
 
-IHR is meaningless without data. Every stage execution records a `TraceRecord`:
+HQS is meaningless without data. Every stage execution records a `TraceRecord`:
 
 ```python
 TraceRecord(
@@ -70,7 +70,7 @@ TraceRecord(
 )
 ```
 
-Traces accumulate in a SQLite database at `~/.armature/traces.db` (or a path you configure). Each run appends records for every stage. The `compute_ihr` method on `TraceStore` rolls up any set of traces into an `IhrResult` — per-run or across all accumulated runs.
+Traces accumulate in a SQLite database at `~/.armature/traces.db` (or a path you configure). Each run appends records for every stage. The `compute_hqs` method on `TraceStore` rolls up any set of traces into an `HqsResult` — per-run or across all accumulated runs.
 
 This is the fundamental unit of signal. Without traces, you have a workflow. With traces, you have a system that can reason about itself.
 
@@ -81,7 +81,7 @@ This is the fundamental unit of signal. Without traces, you have a workflow. Wit
 ```bash
 armature improve myworkflow.yaml                        # analyze + auto-apply if safe
 armature improve myworkflow.yaml --dry-run              # show proposed changes, don't apply
-armature improve myworkflow.yaml --target-ihr 0.95      # stricter quality target
+armature improve myworkflow.yaml --target-hqs 0.95      # stricter quality target
 armature improve myworkflow.yaml --min-traces 10        # require more evidence before acting
 ```
 
@@ -100,7 +100,7 @@ The default target is 0.90. The default minimum trace count is 3. You need at le
          │
          ▼
   ┌──────────────────┐
-  │  compute_ihr()   │  rolling IHR across all runs
+  │  compute_hqs()   │  rolling HQS across all runs
   └──────┬───────────┘
          │
          ▼
@@ -109,13 +109,13 @@ The default target is 0.90. The default minimum trace count is 3. You need at le
   │  .analyze()         │  per stage, per run
   └──────┬──────────────┘
          │
-    IHR < 0.90
+    HQS < 0.90
     AND ≥ 3 traces?
          │ yes
          ▼
   ┌──────────────────┐
   │   SpecRefiner    │  LLM call (medium-tier model)
-  │   .refine()      │  receives: YAML + diagnostics + IHR breakdown
+  │   .refine()      │  receives: YAML + diagnostics + HQS breakdown
   └──────┬───────────┘
          │
          ▼
@@ -180,7 +180,7 @@ A `stage_failed` with `mechanism=timeout` → add `timeout_s`. The same code wit
 
 ## What SpecRefiner does with the diagnosis
 
-SpecRefiner receives three inputs: the current YAML, the list of failure signatures, and the IHR breakdown. It's a medium-tier LLM call — not frontier. Research ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) found that medium-tier models achieve equivalent spec-evolution quality to frontier models with at most 3.1 percentage points difference at substantially lower cost. The optimizer uses a cheaper model to make itself better.
+SpecRefiner receives three inputs: the current YAML, the list of failure signatures, and the HQS breakdown. It's a medium-tier LLM call — not frontier. Research ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) found that medium-tier models achieve equivalent spec-evolution quality to frontier models with at most 3.1 percentage points difference at substantially lower cost. The optimizer uses a cheaper model to make itself better.
 
 The refiner's instructions are specific:
 
@@ -271,8 +271,8 @@ Every cycle appends a JSONL entry to `myworkflow.improve_log.jsonl`, whether or 
   "timestamp": "2025-03-14T09:15:42Z",
   "workflow_name": "compliance-review",
   "n_traces": 47,
-  "ihr_before": 0.83,
-  "target_ihr": 0.90,
+  "hqs_before": 0.83,
+  "target_hqs": 0.90,
   "needs_improvement": true,
   "applied": true,
   "n_proposals_generated": 3,
@@ -296,7 +296,7 @@ This log is both an audit trail and the input to the next verification cycle. It
 
 ## `evaluate:` — stage-level acceptance criteria
 
-IHR measures structural quality across all stages. `evaluate:` criteria measure semantic correctness for individual stages. They're complementary:
+HQS measures structural quality across all stages. `evaluate:` criteria measure semantic correctness for individual stages. They're complementary:
 
 ```yaml
 stages:
@@ -314,7 +314,7 @@ stages:
       - "No recommendations are contradicted by the data"
 ```
 
-After each run, `EvaluationRunner` calls a language model to score each criterion as pass or fail. These are acceptance tests for the stage — think of them as assertions in a test suite. Failed evaluations show up in the run report and contribute to IHR diagnostics in subsequent cycles.
+After each run, `EvaluationRunner` calls a language model to score each criterion as pass or fail. These are acceptance tests for the stage — think of them as assertions in a test suite. Failed evaluations show up in the run report and contribute to HQS diagnostics in subsequent cycles.
 
 `evaluate:` criteria are where you encode domain knowledge that can't be captured in a JSON schema. "No recommendations are contradicted by the data" is not something `output_schema` can express. An LLM can assess it.
 
@@ -325,15 +325,15 @@ After each run, `EvaluationRunner` calls a language model to score each criterio
 Here's why this matters over time:
 
 ```
-Run 1  → traces → IHR = 0.81 → optimizer proposes: fix analyst output_schema
-Run 2  → better traces → IHR = 0.88 → optimizer proposes: enrich reviewer description
-Run 3  → better traces → IHR = 0.92 → IHR above target, no changes needed
-Run N  → stable → IHR = 0.94 → workflow has converged
+Run 1  → traces → HQS = 0.81 → optimizer proposes: fix analyst output_schema
+Run 2  → better traces → HQS = 0.88 → optimizer proposes: enrich reviewer description
+Run 3  → better traces → HQS = 0.92 → HQS above target, no changes needed
+Run N  → stable → HQS = 0.94 → workflow has converged
 ```
 
-Each improvement cycle has more evidence than the last. The signal gets cleaner. The fixes get more targeted. Eventually the workflow stabilizes at a high-quality equilibrium — and if something in the environment changes (the model behavior shifts, input data changes shape, a new edge case appears), IHR will drop and the loop will activate again.
+Each improvement cycle has more evidence than the last. The signal gets cleaner. The fixes get more targeted. Eventually the workflow stabilizes at a high-quality equilibrium — and if something in the environment changes (the model behavior shifts, input data changes shape, a new edge case appears), HQS will drop and the loop will activate again.
 
-This is the fundamental difference between agentic systems that drift and ones that improve. Traditional software has error rates and dashboards. Agentic workflows have IHR and `armature improve`. The mechanism is different; the purpose is the same: **a number that tells you the system is working, and a loop that fixes it when it isn't.**
+This is the fundamental difference between agentic systems that drift and ones that improve. Traditional software has error rates and dashboards. Agentic workflows have HQS and `armature improve`. The mechanism is different; the purpose is the same: **a number that tells you the system is working, and a loop that fixes it when it isn't.**
 
 ---
 
@@ -424,4 +424,4 @@ The workflow author wrote the initial YAML. Armature maintains it.
 
 ---
 
-*IHR is the signal. Traces are the evidence. The self-improvement loop is the mechanism. Together they close the gap between "we deployed a workflow" and "we operate a system."*
+*HQS is the signal. Traces are the evidence. The self-improvement loop is the mechanism. Together they close the gap between "we deployed a workflow" and "we operate a system."*

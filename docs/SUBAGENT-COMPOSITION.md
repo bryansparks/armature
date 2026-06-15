@@ -124,7 +124,7 @@ parent workflow
                                           returned as per_region_analysis value
 ```
 
-Each child run gets its own session directory — `child_0/`, `child_1/`, and so on — under the parent's session directory. Traces, artifacts, and IHR scores are captured per child, per stage. You get full observability into every level of the hierarchy.
+Each child run gets its own session directory — `child_0/`, `child_1/`, and so on — under the parent's session directory. Traces, artifacts, and HQS scores are captured per child, per stage. You get full observability into every level of the hierarchy.
 
 ---
 
@@ -204,7 +204,7 @@ This means you can develop and debug a child workflow without constructing the f
 
 ### Independent self-improvement
 
-The IHR (Iterative Harness Refinement) loop in Armature operates on workflow specs. A child workflow accumulates its own traces — per stage, per run — and can be improved independently:
+The HQS (Iterative Harness Refinement) loop in Armature operates on workflow specs. A child workflow accumulates its own traces — per stage, per run — and can be improved independently:
 
 ```bash
 armature improve workflows/deep-analysis.yaml
@@ -233,7 +233,7 @@ sessions/
     └── stage_global_summary.json
 ```
 
-Each child's traces are self-contained. IHR scoring sees the full tree. `armature improve` on a child spec uses its own `child_N/` trace data, not the parent's.
+Each child's traces are self-contained. HQS scoring sees the full tree. `armature improve` on a child spec uses its own `child_N/` trace data, not the parent's.
 
 ---
 

@@ -522,7 +522,7 @@ After 3+ runs, check the workflow's health:
 armature improve research.yml
 ```
 
-This computes the IHR (Implicit Harness Rating) from your trace history, diagnoses failure signatures (low quality scores, schema errors, slow stages), and proposes targeted spec revisions. If the IHR is below 0.90, it rewrites the weak prompts and applies the change automatically.
+This computes the HQS (Harness Quality Score) from your trace history, diagnoses failure signatures (low quality scores, schema errors, slow stages), and proposes targeted spec revisions. If the HQS is below 0.90, it rewrites the weak prompts and applies the change automatically.
 
 ---
 

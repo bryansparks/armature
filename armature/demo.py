@@ -40,7 +40,7 @@ SUBSYSTEMS: list[Subsystem] = [
     Subsystem("runtime",     "Runtime Engine",       "DAG execution, context, retries, fan-in, loops",          "green",   ["tests/runtime"]),
     Subsystem("nodes",       "Node Types",           "LLM, script, tool-call, gate, subagent nodes",            "blue",    ["tests/nodes"]),
     Subsystem("state",       "State & Memory",       "Traces, memory, diagnostics, artifacts, evaluation",      "magenta", ["tests/state"]),
-    Subsystem("synthesis",   "Self-Improvement",     "IHR-driven SpecRefiner, optimizer, AutoHarness",          "yellow",  ["tests/synthesis", "tests/optimizer"]),
+    Subsystem("synthesis",   "Self-Improvement",     "HQS-driven SpecRefiner, optimizer, AutoHarness",          "yellow",  ["tests/synthesis", "tests/optimizer"]),
     Subsystem("registry",    "Tool Registry",        "Built-in tools, permissions, reversibility",              "cyan",    ["tests/registry", "tests/permissions"]),
     Subsystem("hooks",       "Lifecycle Hooks",      "Safety rules, pre/post-stage and pre/post-tool hooks",    "red",     ["tests/hooks"]),
     Subsystem("report",      "Reporting Dashboard",  "Sparklines, panels, aggregator, Rich dashboard",          "blue",    ["tests/report"]),
@@ -88,7 +88,7 @@ stages:
 
 self_improve:
   enabled: true
-  target_ihr: 0.85
+  target_hqs: 0.85
 """
 
 # ── helpers ────────────────────────────────────────────────────────────────────

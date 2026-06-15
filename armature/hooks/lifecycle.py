@@ -191,9 +191,9 @@ class BehaviorRegistry:
                 rule.handler(traces)
 
 
-# ── IHR feedback built-in behavior ────────────────────────────────────────────
+# ── HQS feedback built-in behavior ────────────────────────────────────────────
 
-def _compute_simple_ihr(traces: "list[TraceRecord]") -> float:
+def _compute_simple_hqs(traces: "list[TraceRecord]") -> float:
     n = len(traces)
     if n == 0:
         return 1.0
@@ -204,29 +204,29 @@ def _compute_simple_ihr(traces: "list[TraceRecord]") -> float:
     return 0.40 * output_valid_rate + 0.30 * success_rate + 0.20 * 0.5 + 0.10 * latency_score
 
 
-def _ihr_feedback_pattern(traces: "list[TraceRecord]") -> bool:
+def _hqs_feedback_pattern(traces: "list[TraceRecord]") -> bool:
     recent = traces[-10:]
     if len(recent) < 3:
         return False
-    return _compute_simple_ihr(recent) < 0.75
+    return _compute_simple_hqs(recent) < 0.75
 
 
-def _ihr_feedback_handler(traces: "list[TraceRecord]") -> None:
+def _hqs_feedback_handler(traces: "list[TraceRecord]") -> None:
     import sys
     print(
-        "\n[armature] IHR hint: quality below 0.75 over recent traces — "
+        "\n[armature] HQS hint: quality below 0.75 over recent traces — "
         "consider running `armature improve <spec>`",
         file=sys.stderr,
     )
 
 
 def make_default_behavior_registry() -> BehaviorRegistry:
-    """Return a BehaviorRegistry pre-loaded with the ihr_feedback built-in."""
+    """Return a BehaviorRegistry pre-loaded with the hqs_feedback built-in."""
     registry = BehaviorRegistry()
     registry.register(BehaviorRule(
-        name="ihr_feedback",
-        description="Suggest improvement when IHR drops below 0.75",
-        pattern=_ihr_feedback_pattern,
-        handler=_ihr_feedback_handler,
+        name="hqs_feedback",
+        description="Suggest improvement when HQS drops below 0.75",
+        pattern=_hqs_feedback_pattern,
+        handler=_hqs_feedback_handler,
     ))
     return registry

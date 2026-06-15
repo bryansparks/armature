@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from armature.state.traces import TraceStore, TraceRecord, IhrResult
+from armature.state.traces import TraceStore, TraceRecord, HqsResult
 
 
 @pytest.fixture
@@ -70,32 +70,32 @@ async def _populate_run(store, run_id: str, n: int, **kwargs) -> None:
         ))
 
 
-async def test_compute_ihr_perfect(store):
+async def test_compute_hqs_perfect(store):
     await _populate_run(store, "r1", 4,
         latency_ms=0.0, success=True, output_valid=True, quorum_score=1.0)
-    result = await store.compute_ihr("r1")
-    assert isinstance(result, IhrResult)
+    result = await store.compute_hqs("r1")
+    assert isinstance(result, HqsResult)
     assert result.run_id == "r1"
-    assert result.ihr == pytest.approx(1.0, abs=1e-6)
+    assert result.hqs == pytest.approx(1.0, abs=1e-6)
 
 
-async def test_compute_ihr_no_quorum_defaults_half(store):
+async def test_compute_hqs_no_quorum_defaults_half(store):
     await _populate_run(store, "r2", 2,
         latency_ms=0.0, success=True, output_valid=True, quorum_score=None)
-    result = await store.compute_ihr("r2")
+    result = await store.compute_hqs("r2")
     # latency_score=1.0, output_valid_rate=1.0, success_rate=1.0, quorum=0.5
     expected = 0.40 * 1.0 + 0.30 * 1.0 + 0.20 * 0.5 + 0.10 * 1.0
-    assert result.ihr == pytest.approx(expected, abs=1e-6)
+    assert result.hqs == pytest.approx(expected, abs=1e-6)
 
 
-async def test_compute_ihr_partial_failures(store):
+async def test_compute_hqs_partial_failures(store):
     await store.record(TraceRecord(
         run_id="r3", workflow_name="wf", stage_id="s1", role_type="worker",
         model="m", latency_ms=1000.0, success=True, output_valid=True, quorum_score=0.8))
     await store.record(TraceRecord(
         run_id="r3", workflow_name="wf", stage_id="s2", role_type="worker",
         model="m", latency_ms=3000.0, success=False, output_valid=False, quorum_score=0.4))
-    result = await store.compute_ihr("r3")
+    result = await store.compute_hqs("r3")
     avg_latency = 2000.0
     latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
     hfr = 1.0  # both traces have escalation_count=0
@@ -104,12 +104,12 @@ async def test_compute_ihr_partial_failures(store):
               + 0.20 * 0.6    # avg_quorum: (0.8+0.4)/2
               + 0.10 * latency_score
               + 0.10 * hfr)   # hfr: arXiv:2605.30621v1
-    assert result.ihr == pytest.approx(expected, abs=1e-6)
+    assert result.hqs == pytest.approx(expected, abs=1e-6)
     assert result.n_traces == 2
 
 
-async def test_compute_ihr_unknown_run_returns_none(store):
-    result = await store.compute_ihr("nonexistent")
+async def test_compute_hqs_unknown_run_returns_none(store):
+    result = await store.compute_hqs("nonexistent")
     assert result is None
 
 
@@ -121,7 +121,7 @@ async def test_query_by_run_returns_only_that_run(store):
     assert all(r.run_id == "runA" for r in records)
 
 
-async def test_compute_ihr_mixed_quorum_ignores_none_traces(store):
+async def test_compute_hqs_mixed_quorum_ignores_none_traces(store):
     # 2 traces with quorum, 1 without — None is excluded from average
     await store.record(TraceRecord(
         run_id="r4", workflow_name="wf", stage_id="s1", role_type="worker",
@@ -132,10 +132,10 @@ async def test_compute_ihr_mixed_quorum_ignores_none_traces(store):
     await store.record(TraceRecord(
         run_id="r4", workflow_name="wf", stage_id="s3", role_type="worker",
         model="m", latency_ms=0.0, success=True, output_valid=True, quorum_score=None))
-    result = await store.compute_ihr("r4")
+    result = await store.compute_hqs("r4")
     # avg_quorum = (0.9 + 0.7) / 2 = 0.8  (None trace excluded)
     expected = 0.40 * 1.0 + 0.30 * 1.0 + 0.20 * 0.8 + 0.10 * 1.0
-    assert result.ihr == pytest.approx(expected, abs=1e-6)
+    assert result.hqs == pytest.approx(expected, abs=1e-6)
     assert result.avg_quorum_score == pytest.approx(0.8, abs=1e-6)
 
 
@@ -149,14 +149,14 @@ async def test_error_type_stored_and_retrieved(store):
     assert results[0].error_type == "RateLimitError"
 
 
-async def test_escalation_count_in_ihr(store):
+async def test_escalation_count_in_hqs(store):
     for i in range(3):
         await store.record(TraceRecord(
             run_id="r6", workflow_name="wf", stage_id=f"s{i}", role_type="worker",
             model="m", latency_ms=0.0, success=True, output_valid=True,
             escalation_count=i,  # 0, 1, 2
         ))
-    result = await store.compute_ihr("r6")
+    result = await store.compute_hqs("r6")
     assert result.avg_escalation_count == pytest.approx(1.0)  # (0+1+2)/3
 
 

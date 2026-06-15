@@ -24,7 +24,7 @@ def _make_empty_dashboard(name: str = "test-wf") -> DashboardData:
         stage_stats={},
         improvement_cycles=[],
         safety_stats=load_safety_stats([]),
-        ihr_trend=[],
+        hqs_trend=[],
         last_run_id=None,
     )
 
@@ -46,7 +46,7 @@ class TestDashboardCommand:
         assert result.exit_code == 0, result.output
         parsed = json.loads(result.output)
         assert parsed["workflow_name"] == "test-wf"
-        assert "current_ihr" in parsed
+        assert "current_hqs" in parsed
         assert "stage_stats" in parsed
         assert "improvement_cycles" in parsed
         assert "safety" in parsed
@@ -63,7 +63,7 @@ class TestDashboardCommand:
         result = runner.invoke(app, ["dashboard", str(tmp_path / "ghost.yaml")])
         assert result.exit_code != 0
 
-    def test_json_output_includes_ihr_trend(self, tmp_path):
+    def test_json_output_includes_hqs_trend(self, tmp_path):
         spec_file = tmp_path / "wf.yaml"
         spec_file.write_text(
             "name: trend-wf\nversion: '1.0'\nstages:\n  - id: s1\n    role:\n"
@@ -76,16 +76,16 @@ class TestDashboardCommand:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[0.70, 0.75, 0.80],
+            hqs_trend=[0.70, 0.75, 0.80],
             last_run_id="r3",
         )
         with patch("armature.report.loader.load_dashboard_data", new=AsyncMock(return_value=mock_data)):
             result = runner.invoke(app, ["dashboard", str(spec_file), "--format", "json"])
         assert result.exit_code == 0
         parsed = json.loads(result.output)
-        assert parsed["ihr_trend"] == [0.70, 0.75, 0.80]
-        assert parsed["current_ihr"] == pytest.approx(0.80)
-        assert parsed["ihr_delta"] == pytest.approx(0.05)
+        assert parsed["hqs_trend"] == [0.70, 0.75, 0.80]
+        assert parsed["current_hqs"] == pytest.approx(0.80)
+        assert parsed["hqs_delta"] == pytest.approx(0.05)
 
 
 class TestRenderTerminalLayout:
@@ -101,7 +101,7 @@ class TestRenderTerminalLayout:
         return DashboardData(
             workflow_name="test-wf", total_runs=5, traces=[], stage_stats=stats,
             improvement_cycles=[], safety_stats=load_safety_stats([]),
-            ihr_trend=[0.80], last_run_id="r1",
+            hqs_trend=[0.80], last_run_id="r1",
         )
 
     def test_render_terminal_does_not_fill_terminal_height(self):

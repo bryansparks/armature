@@ -80,7 +80,7 @@ async def test_analyze_returns_improvement_report(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.92)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False)
     report = await runner.analyze()
     assert isinstance(report, ImprovementReport)
 
@@ -92,7 +92,7 @@ async def test_analyze_report_has_correct_workflow_name(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace()])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False)
     report = await runner.analyze()
     assert report.workflow_name == "test-wf"
 
@@ -104,14 +104,14 @@ async def test_analyze_healthy_workflow_does_not_need_improvement(tmp_path):
     spec_file.write_text(_MINIMAL_SPEC_YAML)
     db = tmp_path / "traces.db"
     store = TraceStore(db)
-    # IHR will be high — all success, high quorum
+    # HQS will be high — all success, high quorum
     await seed_store(store, [
         make_trace(run_id="r1", quorum_score=0.95),
         make_trace(run_id="r2", quorum_score=0.92),
         make_trace(run_id="r3", quorum_score=0.91),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.85, auto_apply=False)
     report = await runner.analyze()
     assert report.needs_improvement is False
 
@@ -124,7 +124,7 @@ async def test_analyze_healthy_does_not_apply_changes(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(run_id="r1", quorum_score=0.95)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.85, auto_apply=True)
     await runner.analyze()
     assert spec_file.read_text() == original_content
 
@@ -160,7 +160,7 @@ async def test_analyze_no_traces_returns_report(tmp_path):
 
 # ── low quality — improvement needed ─────────────────────────────────────────
 
-async def test_analyze_low_ihr_needs_improvement(tmp_path):
+async def test_analyze_low_hqs_needs_improvement(tmp_path):
     spec_file = tmp_path / "wf.yaml"
     spec_file.write_text(_MINIMAL_SPEC_YAML)
     db = tmp_path / "traces.db"
@@ -171,7 +171,7 @@ async def test_analyze_low_ihr_needs_improvement(tmp_path):
         make_trace(run_id="r3", quorum_score=0.18),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, min_traces=1, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.85, min_traces=1, auto_apply=False)
     with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
         report = await runner.analyze()
     assert report.needs_improvement is True
@@ -188,7 +188,7 @@ async def test_analyze_has_diagnostics_when_improvement_needed(tmp_path):
         make_trace(run_id="r3", quorum_score=0.15, role_type="judge"),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, min_traces=1, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.85, min_traces=1, auto_apply=False)
     with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
         report = await runner.analyze()
     assert len(report.diagnostics) > 0
@@ -209,7 +209,7 @@ async def test_auto_apply_true_writes_revised_spec(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
@@ -230,7 +230,7 @@ async def test_auto_apply_false_does_not_write_spec(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
@@ -251,7 +251,7 @@ async def test_report_proposed_spec_available_when_not_applied(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
@@ -271,7 +271,7 @@ async def test_analyze_writes_log_file(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.92)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     assert log_file.exists()
 
@@ -284,17 +284,17 @@ async def test_log_entry_is_valid_json(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.95)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
     assert "timestamp" in entry
     assert "workflow_name" in entry
-    assert "ihr_before" in entry
+    assert "hqs_before" in entry
     assert "needs_improvement" in entry
     assert "applied" in entry
 
 
-async def test_log_entry_records_ihr_before(tmp_path):
+async def test_log_entry_records_hqs_before(tmp_path):
     spec_file = tmp_path / "wf.yaml"
     spec_file.write_text(_MINIMAL_SPEC_YAML)
     db = tmp_path / "traces.db"
@@ -305,11 +305,11 @@ async def test_log_entry_records_ihr_before(tmp_path):
         make_trace(run_id="r2", quorum_score=0.90),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
-    assert entry["ihr_before"] is not None
-    assert 0.0 < entry["ihr_before"] <= 1.0
+    assert entry["hqs_before"] is not None
+    assert 0.0 < entry["hqs_before"] <= 1.0
 
 
 async def test_log_appends_across_multiple_analyze_calls(tmp_path):
@@ -320,7 +320,7 @@ async def test_log_appends_across_multiple_analyze_calls(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.95)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     await runner.analyze()
     lines = [l for l in log_file.read_text().splitlines() if l.strip()]
@@ -343,7 +343,7 @@ async def test_spec_refiner_calls_llm_with_current_spec(tmp_path):
         await refiner.refine(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
         )
 
     combined = " ".join(m["content"] for m in captured_messages)
@@ -364,7 +364,7 @@ async def test_spec_refiner_includes_diagnostic_codes_in_prompt(tmp_path):
         DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst", details="TimeoutError"),
     ]
     with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
-        await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=diags, ihr=None)
+        await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=diags, hqs=None)
 
     combined = " ".join(m["content"] for m in captured_messages)
     assert "stage_failed" in combined
@@ -376,7 +376,7 @@ async def test_spec_refiner_returns_none_on_unparseable_yaml():
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response("this is not yaml: [[[")
-        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], hqs=None)
 
     assert result is None
 
@@ -386,7 +386,7 @@ async def test_spec_refiner_returns_harness_spec_on_valid_yaml():
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
-        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], hqs=None)
 
     assert result is not None
     assert result.spec.name == "test-wf"
@@ -399,7 +399,7 @@ async def test_spec_refiner_strips_invalid_changes():
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(bad_yaml)
-        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], hqs=None)
 
     assert result is None
 
@@ -430,7 +430,7 @@ async def test_refiner_result_has_spec_and_yaml_text():
     refiner = SpecRefiner(model="claude-sonnet-4-6")
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
-        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+        result = await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], hqs=None)
     assert result is not None
     assert isinstance(result, RefinerResult)
     assert result.spec.name == "test-wf"
@@ -509,7 +509,7 @@ async def test_report_predicted_fixes_populated_from_refiner(tmp_path):
         make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
         report = await runner.analyze()
@@ -524,7 +524,7 @@ async def test_first_cycle_verification_fields_are_empty(tmp_path):
     log_file = tmp_path / "improve.log.jsonl"
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.92)])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     report = await runner.analyze()
     assert report.verified_fixes == []
     assert report.missed_predictions == []
@@ -546,7 +546,7 @@ async def test_second_cycle_computes_verified_fixes(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
     runner1 = SelfImproveRunner(
-        spec_file, db1, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+        spec_file, db1, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file
     )
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
@@ -561,7 +561,7 @@ async def test_second_cycle_computes_verified_fixes(tmp_path):
         make_trace(run_id="g3", quorum_score=0.95, output_valid=True),
     ])
     runner2 = SelfImproveRunner(
-        spec_file, db2, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+        spec_file, db2, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file
     )
     with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
         report2 = await runner2.analyze()
@@ -582,7 +582,7 @@ async def test_second_cycle_computes_missed_predictions(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
     runner = SelfImproveRunner(
-        spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, log_path=log_file
+        spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file
     )
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML_WITH_PREDICTIONS)
@@ -604,7 +604,7 @@ async def test_log_entry_includes_predicted_fixes_field(tmp_path):
     log_file = tmp_path / "improve.log.jsonl"
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.92)])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
     assert "predicted_fixes" in entry
@@ -618,7 +618,7 @@ async def test_log_entry_includes_verification_fields(tmp_path):
     log_file = tmp_path / "improve.log.jsonl"
     store = TraceStore(db)
     await seed_store(store, [make_trace(quorum_score=0.92)])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, auto_apply=False, log_path=log_file)
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
     assert "verified_fixes" in entry
@@ -639,7 +639,7 @@ async def test_spec_history_written_before_auto_apply(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
@@ -661,7 +661,7 @@ async def test_spec_history_not_written_when_no_improvement(tmp_path):
     store = TraceStore(db)
     await seed_store(store, [make_trace(run_id="r1", quorum_score=0.95)])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.85, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.85, auto_apply=True)
     await runner.analyze()
 
     history_file = tmp_path / "wf.spec_history.jsonl"
@@ -679,7 +679,7 @@ async def test_spec_history_appends_across_multiple_apply_cycles(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
@@ -711,7 +711,7 @@ def _make_llm_response(content: str):
 async def test_drift_score_field_defaults_to_zero():
     report = ImprovementReport(
         workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
-        n_traces=1, ihr_before=0.8, needs_improvement=False,
+        n_traces=1, hqs_before=0.8, needs_improvement=False,
         applied=False, diagnostics=[],
     )
     assert report.drift_score == 0.0
@@ -755,7 +755,7 @@ async def test_drift_score_zero_when_no_regressions(tmp_path):
     log_file.write_text(json.dumps({"verified_fixes": ["stage_failed:other_stage"]}) + "\n")
     store = TraceStore(db)
     await seed_store(store, [make_trace(run_id="r1", quorum_score=0.92)])  # healthy
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.99, auto_apply=False, log_path=log_file)
     report = await runner.analyze()
     assert report.drift_score == 0.0
 
@@ -773,7 +773,7 @@ async def test_drift_score_nonzero_when_previously_fixed_issue_regresses(tmp_pat
         make_trace(run_id="r2", output_valid=False),
         make_trace(run_id="r3", output_valid=False),
     ])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.99, auto_apply=False, log_path=log_file)
     with patch("armature.synthesis.improve.SpecRefiner.refine", _NO_REFINE):
         report = await runner.analyze()
     assert report.drift_score > 0.0
@@ -786,7 +786,7 @@ async def test_drift_score_logged_to_jsonl(tmp_path):
     log_file = tmp_path / "improve.log.jsonl"
     store = TraceStore(db)
     await seed_store(store, [make_trace(run_id="r1", quorum_score=0.92)])
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.99, auto_apply=False, log_path=log_file)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.99, auto_apply=False, log_path=log_file)
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
     assert "drift_score" in entry
@@ -872,7 +872,7 @@ stages:
 async def test_requires_review_flag_on_improvement_report():
     report = ImprovementReport(
         workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
-        n_traces=1, ihr_before=0.8, needs_improvement=False,
+        n_traces=1, hqs_before=0.8, needs_improvement=False,
         applied=False, diagnostics=[],
     )
     assert report.requires_review is False
@@ -906,7 +906,7 @@ stages:
       type: worker
       description: Write the findings.
 """
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_WITH_NEW_STAGE)
@@ -944,7 +944,7 @@ stages:
       type: worker
       description: Write the findings.
 """
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=True)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
 
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_REVISED_WITH_NEW_STAGE)
@@ -968,7 +968,7 @@ async def test_spec_refiner_includes_editable_surfaces_in_prompt():
         await refiner.refine(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
             editable_surfaces=["descriptions", "retry_counts"],
         )
 
@@ -989,7 +989,7 @@ async def test_spec_refiner_lists_locked_surfaces_as_do_not_modify():
         await refiner.refine(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
             editable_surfaces=["descriptions"],
         )
 
@@ -1009,7 +1009,7 @@ async def test_spec_refiner_no_surface_restriction_when_surfaces_is_none():
         return _make_llm_response(_REVISED_SPEC_YAML)
 
     with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
-        await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], ihr=None)
+        await refiner.refine(spec_yaml=_MINIMAL_SPEC_YAML, diagnostics=[], hqs=None)
 
     system_content = next(m["content"] for m in captured_messages if m["role"] == "system")
     assert "DO NOT modify" not in system_content
@@ -1030,7 +1030,7 @@ async def test_refine_many_returns_n_valid_results():
         results = await refiner.refine_many(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
             n_proposals=3,
         )
 
@@ -1054,7 +1054,7 @@ async def test_refine_many_filters_none_results():
         results = await refiner.refine_many(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
             n_proposals=3,
         )
 
@@ -1075,7 +1075,7 @@ async def test_refine_many_uses_diversity_hints():
         await refiner.refine_many(
             spec_yaml=_MINIMAL_SPEC_YAML,
             diagnostics=[],
-            ihr=None,
+            hqs=None,
             n_proposals=3,
         )
 
@@ -1127,7 +1127,7 @@ async def test_runner_generates_k_proposals_when_configured(tmp_path):
         make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
     ])
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=3)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, n_proposals=3)
 
     llm_call_count = 0
 
@@ -1288,7 +1288,7 @@ stages:
       description: Write the summary.
 """
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=1)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, n_proposals=1)
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_SAFE_PROPOSAL)
         report = await runner.analyze()
@@ -1342,7 +1342,7 @@ stages:
       description: Write the summary with extended detail.
 """
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=1)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, n_proposals=1)
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_RISKY_PROPOSAL)
         report = await runner.analyze()
@@ -1396,7 +1396,7 @@ stages:
       description: Write the summary with extended detail.
 """
 
-    runner = SelfImproveRunner(spec_file, db, target_ihr=0.90, min_traces=1, auto_apply=False, n_proposals=2)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, n_proposals=2)
     with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
         mock_llm.return_value = _make_llm_response(_RISKY_PROPOSAL)
         report = await runner.analyze()

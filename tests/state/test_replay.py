@@ -45,19 +45,19 @@ async def test_query_by_run_returns_traces_in_asc_order(tmp_path):
     assert results[1].stage_id == "stage-2"
 
 
-async def test_compute_ihr_matches_formula(tmp_path):
+async def test_compute_hqs_matches_formula(tmp_path):
     store = TraceStore(tmp_path / "traces.db")
     await store.init()
     t1 = make_trace("run-xyz", "stage-a", success=True)
     t2 = make_trace("run-xyz", "stage-b", success=True)
     await store.record(t1)
     await store.record(t2)
-    ihr_result = await store.compute_ihr("run-xyz")
-    assert ihr_result is not None
-    assert ihr_result.n_traces == 2
-    assert ihr_result.success_rate == 1.0
-    assert ihr_result.output_valid_rate == 1.0
-    assert 0.0 <= ihr_result.ihr <= 1.0
+    hqs_result = await store.compute_hqs("run-xyz")
+    assert hqs_result is not None
+    assert hqs_result.n_traces == 2
+    assert hqs_result.success_rate == 1.0
+    assert hqs_result.output_valid_rate == 1.0
+    assert 0.0 <= hqs_result.hqs <= 1.0
 
 
 # ── replay CLI command ─────────────────────────────────────────────────────────

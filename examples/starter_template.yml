@@ -295,7 +295,7 @@ stages:
   # Judge stages evaluate output quality. The engine extracts
   # a quorum_score automatically from the output by scanning for
   # a field named: score, quality_score, or confidence (in order).
-  # This score feeds into the IHR (Implicit Harness Rating) and
+  # This score feeds into the HQS (Harness Quality Score) and
   # guides the Meta-Harness optimizer.
   #
   # Judge stages default to the "frontier" tier (best reasoning)

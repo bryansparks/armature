@@ -70,12 +70,12 @@ def _header_panel(data: ReportData) -> Panel:
     ts = _fmt_ts(traces[0].timestamp) if traces else "—"
     run_short = data.run_id[:8]
 
-    ihr = data.ihr
-    if ihr:
-        ihr_val = ihr.ihr
-        health_color = "bright_green" if ihr_val >= 0.85 else ("yellow" if ihr_val >= 0.70 else "red1")
+    hqs = data.hqs
+    if hqs:
+        hqs_val = hqs.hqs
+        health_color = "bright_green" if hqs_val >= 0.85 else ("yellow" if hqs_val >= 0.70 else "red1")
     else:
-        ihr_val = None
+        hqs_val = None
         health_color = "dim"
 
     failures = [t for t in traces if not t.success or not t.output_valid]
@@ -84,8 +84,8 @@ def _header_panel(data: ReportData) -> Panel:
         status_text.append(f"⚠  {len(failures)} failure{'s' if len(failures) != 1 else ''}", style="bold red1")
     else:
         status_text.append("✓  All stages passed", style="bold bright_green")
-    if ihr_val is not None:
-        status_text.append(f"   IHR {ihr_val:.2f}", style=f"bold {health_color}")
+    if hqs_val is not None:
+        status_text.append(f"   HQS {hqs_val:.2f}", style=f"bold {health_color}")
 
     meta = Text()
     meta.append(f"{n} stage{'s' if n != 1 else ''}", style="dim")
@@ -149,7 +149,7 @@ def _quality_panel(decision_traces: list[TraceRecord]) -> Panel | None:
             style = "bold bright_green" if ready else "bold red1"
             content.append(f"  {verdict}", style=style)
 
-        # IHR / confidence / score
+        # HQS / confidence / score
         for key in ("confidence", "score"):
             if key in out and out[key] is not None:
                 content.append(f"  {key}={float(out[key]):.2f}", style="dim")
@@ -262,8 +262,8 @@ def render_run_report_markdown(data: ReportData) -> str:
     ts = _fmt_ts(traces[0].timestamp) if traces else "—"
     run_short = data.run_id[:8]
 
-    ihr = data.ihr
-    ihr_str = f"IHR {ihr.ihr:.2f}" if ihr else ""
+    hqs = data.hqs
+    hqs_str = f"HQS {hqs.hqs:.2f}" if hqs else ""
 
     failures = [t for t in traces if not t.success or not t.output_valid]
     status = "✓ All stages passed" if not failures else f"⚠ {len(failures)} failure(s)"
@@ -274,7 +274,7 @@ def render_run_report_markdown(data: ReportData) -> str:
         f"**Run:** `{run_short}`  **Date:** {ts}  ",
         f"**Stages:** {n}  **Duration:** {_fmt_latency(total_ms)}  "
         f"**Tokens:** {total_tokens:,}  ",
-        f"**Status:** {status}  {ihr_str}",
+        f"**Status:** {status}  {hqs_str}",
         "",
         "---",
         "",

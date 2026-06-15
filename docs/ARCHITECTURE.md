@@ -23,7 +23,7 @@ Armature synthesizes nine academic papers published between February and June 20
 
 | Source | Key Contribution |
 |--------|-----------------|
-| **NLAH** — Tsinghua, [arXiv:2603.25723](https://arxiv.org/abs/2603.25723) | 7-component NL spec format; IHR metric; 47.2% vs 30.4% on OSWorld vs. code harnesses |
+| **NLAH** — Tsinghua, [arXiv:2603.25723](https://arxiv.org/abs/2603.25723) | 7-component NL spec format; HQS metric; 47.2% vs 30.4% on OSWorld vs. code harnesses |
 | **Meta-Harness** — Stanford, [arXiv:2603.28052](https://arxiv.org/abs/2603.28052) | Trace-based outer optimization loop; causal reasoning over proposal history |
 | **AutoHarness** — [arXiv:2603.03329](https://arxiv.org/abs/2603.03329) | NL-to-spec synthesis; harness-as-verifier (judge role ancestry) |
 | **AgentSpec** — [arXiv:2503.18666](https://arxiv.org/abs/2503.18666) | Declarative runtime safety rules; pre/post-tool hook architecture |
@@ -197,7 +197,7 @@ This is the strategic differentiator. Each loop compounds the others.
 │  Inner Loop (in-run)  │          │  Outer Loop (cross-run)      │
 │  post_run stage runs  │          │  armature improve <spec>     │
 │  after DAG completes  │          │  1. Load 200 recent traces   │
-│  — receives           │          │  2. Compute rolling IHR      │
+│  — receives           │          │  2. Compute rolling HQS      │
 │    _transcript +      │          │  3. DiagnosticAnalyzer       │
 │    _diagnostics       │          │  4. SpecRefiner (LLM) →      │
 │  — proposes immediate │          │     revised YAML             │
@@ -262,7 +262,7 @@ Every run writes structured, tamper-evident trace records:
 
 `TraceStore.get_run_outputs(run_id)` returns the named outputs for any completed run; the `continuation:` spec block calls this at run start to inject prior-run values into every stage's context.
 
-**IHR (Implicit Harness Rating):** `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum_score + 0.10 × latency_score + 0.10 × happy_path_rate`. A well-tuned workflow should score above 0.80.
+**HQS (Harness Quality Score):** `0.35 × output_valid_rate + 0.25 × success_rate + 0.20 × avg_quorum_score + 0.10 × latency_score + 0.10 × happy_path_rate`. A well-tuned workflow should score above 0.80.
 
 ```bash
 armature report --run-id <id>          # per-run text report
@@ -367,7 +367,7 @@ All nine papers and the AGT framework are fully implemented. 1,388 tests.
 | NLAH 7-component spec | YAML spec + Pydantic models |
 | Four role types + model routing | Role enum + model tier escalation |
 | Parallel fan-out / fan-in | `SubagentNode`, `asyncio.gather`, 4 strategies |
-| IHR quality metric | `compute_ihr()`, rolling IHR in `SelfImproveRunner` |
+| HQS quality metric | `compute_hqs()`, rolling HQS in `SelfImproveRunner` |
 | Structured trace collection | `TraceStore` (SQLite), per-stage records |
 | Outer optimization loop | `OptimizerRunner`, `ProposalStore`, `run_loop()` |
 | NL-to-spec synthesis | `SpecDrafter`, `AutoHarness` |

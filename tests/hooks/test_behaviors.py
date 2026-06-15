@@ -60,22 +60,22 @@ def test_multiple_rules_evaluated_independently():
     assert results == ["a", "c"]
 
 
-# ── ihr_feedback built-in behavior ────────────────────────────────────────────
+# ── hqs_feedback built-in behavior ────────────────────────────────────────────
 
-def test_ihr_feedback_pattern_fires_below_threshold():
-    from armature.hooks.lifecycle import _ihr_feedback_pattern
+def test_hqs_feedback_pattern_fires_below_threshold():
+    from armature.hooks.lifecycle import _hqs_feedback_pattern
     bad_traces = [make_trace(success=False, output_valid=False, latency_ms=9000.0) for _ in range(5)]
-    assert _ihr_feedback_pattern(bad_traces) is True
+    assert _hqs_feedback_pattern(bad_traces) is True
 
 
-def test_ihr_feedback_pattern_skips_above_threshold():
-    from armature.hooks.lifecycle import _ihr_feedback_pattern
+def test_hqs_feedback_pattern_skips_above_threshold():
+    from armature.hooks.lifecycle import _hqs_feedback_pattern
     good_traces = [make_trace(success=True, output_valid=True, latency_ms=50.0) for _ in range(5)]
-    assert _ihr_feedback_pattern(good_traces) is False
+    assert _hqs_feedback_pattern(good_traces) is False
 
 
-def test_ihr_feedback_pattern_requires_min_traces():
-    from armature.hooks.lifecycle import _ihr_feedback_pattern
+def test_hqs_feedback_pattern_requires_min_traces():
+    from armature.hooks.lifecycle import _hqs_feedback_pattern
     # Fewer than 3 traces → False regardless of quality
     bad_traces = [make_trace(success=False, output_valid=False) for _ in range(2)]
-    assert _ihr_feedback_pattern(bad_traces) is False
+    assert _hqs_feedback_pattern(bad_traces) is False

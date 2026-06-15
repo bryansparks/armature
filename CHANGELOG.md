@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.2] — 2026-06-15
+
+### Changed
+
+- **Renamed the run-quality metric from IHR (Implicit Harness Rating) to HQS (Harness Quality Score)** throughout the codebase, CLI/dashboard output, and documentation. The formula and components are unchanged — only the name. This removes an acronym collision with the unrelated "Intelligent Harness Runtime (IHR)" from the NLAH paper, since Armature's metric is its own composite quality score and was never derived from that work. Public symbols renamed: `IhrResult` → `HqsResult`, `compute_ihr` → `compute_hqs`, the `ihr` field → `hqs`; the `--auto-improve` threshold is now described as "HQS < 0.75".
+
+---
+
 ## [0.3.1] — 2026-06-15
 
 ### Changed
@@ -53,9 +61,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### ActiveGraph-inspired ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
 
 - **LLM response caching** — `LLMCache` stores responses by SHA-256 content hash (model + messages + kwargs); `--no-cache` flag on `armature run` bypasses the cache for a clean run. Subsequent runs with identical prompts are instant and free.
-- **`armature replay <run_id>`** — reads TraceStore records and renders a stage-by-stage execution table (stage id, role, model, latency, success, quorum score, IHR contribution) with a per-run IHR summary. Enables post-mortem debugging of any historical run without re-executing.
-- **`BehaviorRule` / `BehaviorRegistry`** — trace-triggered reactive hooks. Registered rules receive the recent trace list and fire a handler when their pattern matches. Built-in `ihr_feedback` behavior: after runs where rolling IHR drops below 0.75, the engine prints a Rich-formatted hint suggesting `armature improve`.
-- **`--auto-improve` flag on `armature run`** — after execution, if IHR < 0.75, automatically calls `SelfImproveRunner.analyze()`. Safe changes are applied in-place to the spec; structural proposals that require review go to `{spec}.pending.yaml`.
+- **`armature replay <run_id>`** — reads TraceStore records and renders a stage-by-stage execution table (stage id, role, model, latency, success, quorum score, HQS contribution) with a per-run HQS summary. Enables post-mortem debugging of any historical run without re-executing.
+- **`BehaviorRule` / `BehaviorRegistry`** — trace-triggered reactive hooks. Registered rules receive the recent trace list and fire a handler when their pattern matches. Built-in `hqs_feedback` behavior: after runs where rolling HQS drops below 0.75, the engine prints a Rich-formatted hint suggesting `armature improve`.
+- **`--auto-improve` flag on `armature run`** — after execution, if HQS < 0.75, automatically calls `SelfImproveRunner.analyze()`. Safe changes are applied in-place to the spec; structural proposals that require review go to `{spec}.pending.yaml`.
 
 ### KYA-inspired ([arXiv:2605.25376](https://arxiv.org/abs/2605.25376), Veldt Labs)
 
@@ -91,7 +99,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Research-backed improvements ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1)
 
 - **Cheap-evolver for `SelfImproveRunner`** — spec refinement now explicitly uses a medium-tier model (not the frontier). [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 shows ≤3.1pp quality difference between frontier and medium-tier evolvers; the cost savings are substantial. `SpecRefiner`'s docstring updated to reflect this intentional design choice.
-- **Harness-Following Rate (HFR)** added as a fifth IHR component (10% weight). HFR = fraction of trajectories where the model adheres to harness instructions on the first attempt (`escalation_count == 0`). IHR formula updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr). Both `TraceStore.compute_ihr` and `SelfImproveRunner._compute_ihr` updated.
+- **Harness-Following Rate (HFR)** added as a fifth HQS component (10% weight). HFR = fraction of trajectories where the model adheres to harness instructions on the first attempt (`escalation_count == 0`). HQS formula updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr). Both `TraceStore.compute_hqs` and `SelfImproveRunner._compute_hqs` updated.
 - **Skill-Load Rate (SLR) diagnostic** — new `low_skill_activation` `DiagnosticCode` fires when a stage declares tools in `role.tools` but the model never invokes any. `TraceRecord` gains `tools_declared` and `tools_called` fields; `LLMNode` collects called tool names during the ReAct loop and passes them to the engine for trace recording. `SpecRefiner` system prompt updated to advise strengthening role descriptions when `low_skill_activation` is detected.
 
 ### Tests
@@ -130,7 +138,7 @@ Initial public release.
 - `TraceStore` (SQLite) — structured per-stage trace records
 - `SessionLog` (JSONL) — append-only event log, crash-safe
 - `ArtifactStore` — file-backed output persistence
-- IHR (Implicit Harness Rating) — 4-component quality metric
+- HQS (Harness Quality Score) — 4-component quality metric
 - `TraceRecord.inputs_hash` — SHA-256 fingerprint of stage inputs (tamper-evident)
 - `TraceRecord.policy_version` — SHA-256 of active safety rules
 - `TraceRecord.inputs_provenance` — per-key origin labels for every context value

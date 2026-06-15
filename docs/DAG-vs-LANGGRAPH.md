@@ -63,7 +63,7 @@ agent = graph.compile()
 | **Parallelism** | Automatic (`asyncio.gather` per ready wave) | Manual — you control when to fan out |
 | **State model** | Shared context dict, accumulated per wave | `TypedDict` with per-key reducer functions |
 | **Authoring surface** | YAML spec, readable by non-engineers | Python code, requires LangGraph mental model |
-| **Observability** | TraceStore, IHR, dashboards, `armature report` | Bring your own |
+| **Observability** | TraceStore, HQS, dashboards, `armature report` | Bring your own |
 | **Safety rules** | Declarative `safety_rules:` with strict mode | Bring your own |
 | **Self-improvement** | Optimizer reads traces, proposes YAML diffs | None built in |
 | **Loop control** | `on_fail.loop` with backoff declared in spec | Conditional edges in Python |

@@ -34,9 +34,9 @@ class TraceRecord(BaseModel):
     loop_iteration: int | None = None  # set for stages running inside a loop (1-based)
 
 
-class IhrResult(BaseModel):
+class HqsResult(BaseModel):
     run_id: str
-    ihr: float
+    hqs: float
     output_valid_rate: float
     success_rate: float
     avg_quorum_score: float
@@ -215,7 +215,7 @@ class TraceStore:
             rows = await cursor.fetchall()
         return [self._row_to_trace(r) for r in rows]
 
-    async def compute_ihr(self, run_id: str) -> "IhrResult | None":
+    async def compute_hqs(self, run_id: str) -> "HqsResult | None":
         traces = await self.query_by_run(run_id)
         if not traces:
             return None
@@ -230,16 +230,16 @@ class TraceStore:
         avg_escalation_count = sum(t.escalation_count for t in traces) / n
         hfr = sum(1 for t in traces if t.escalation_count == 0) / n
 
-        ihr = (
+        hqs = (
             0.35 * output_valid_rate
             + 0.25 * success_rate
             + 0.20 * avg_quorum_score
             + 0.10 * latency_score
             + 0.10 * hfr
         )
-        return IhrResult(
+        return HqsResult(
             run_id=run_id,
-            ihr=ihr,
+            hqs=hqs,
             output_valid_rate=output_valid_rate,
             success_rate=success_rate,
             avg_quorum_score=avg_quorum_score,

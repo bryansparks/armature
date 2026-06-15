@@ -17,9 +17,9 @@ from armature.report.sparkline import sparkline
 _HEALTH_COLORS = {"green": "bright_green", "yellow": "yellow", "red": "red1", "dim": "dim"}
 
 
-def _ihr_bar(ihr: float, width: int = 20) -> Text:
-    filled = max(0, min(width, round(ihr * width)))
-    color = _HEALTH_COLORS.get("green" if ihr >= 0.85 else ("yellow" if ihr >= 0.70 else "red"), "red1")
+def _hqs_bar(hqs: float, width: int = 20) -> Text:
+    filled = max(0, min(width, round(hqs * width)))
+    color = _HEALTH_COLORS.get("green" if hqs >= 0.85 else ("yellow" if hqs >= 0.70 else "red"), "red1")
     bar = Text()
     bar.append("█" * filled, style=color)
     bar.append("░" * (width - filled), style="dim")
@@ -37,20 +37,20 @@ def _delta_text(delta: float | None) -> str:
 
 def health_strip(data: DashboardData) -> Panel:
     """Full-width workflow health summary strip."""
-    ihr = data.current_ihr or 0.0
-    delta = data.ihr_delta
+    hqs = data.current_hqs or 0.0
+    delta = data.hqs_delta
     color = data.health_color
     rich_color = _HEALTH_COLORS.get(color, "white")
 
     line1 = Text()
-    line1.append("IHR", style="bold")
+    line1.append("HQS", style="bold")
     line1.append("  Instruction-Harness Rate — composite quality score (0–1)  ", style="dim")
-    line1.append(_ihr_bar(ihr))
-    line1.append(f"  {ihr:.2f}", style=f"bold {rich_color}")
+    line1.append(_hqs_bar(hqs))
+    line1.append(f"  {hqs:.2f}", style=f"bold {rich_color}")
     if delta is not None:
         line1.append(f"  {_delta_text(delta)}", style="bold green" if delta >= 0 else "bold red")
 
-    spark = sparkline(data.ihr_trend) if data.ihr_trend else "—"
+    spark = sparkline(data.hqs_trend) if data.hqs_trend else "—"
     line2 = Text(spark + "  trend across runs", style="dim")
 
     content = Text()
@@ -141,7 +141,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
     t = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold dim")
     t.add_column("#", justify="right", style="dim", width=3)
     t.add_column("Date", no_wrap=True, width=10)
-    t.add_column("IHR", justify="right", width=5)
+    t.add_column("HQS", justify="right", width=5)
     t.add_column("Drift", justify="right", width=5)
     t.add_column("Applied", justify="center", width=10)
     t.add_column("✓Fix", justify="right", width=4)
@@ -178,7 +178,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
             t.add_row(
                 str(c.cycle_number),
                 date,
-                f"{c.ihr_before:.2f}",
+                f"{c.hqs_before:.2f}",
                 drift_text,
                 applied_text,
                 str(c.verified_fixes),

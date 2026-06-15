@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from armature.state.traces import TraceStore
 
 if TYPE_CHECKING:
-    from armature.state.traces import IhrResult
+    from armature.state.traces import HqsResult
 
 
 class OptimizationResult(BaseModel):
@@ -23,8 +23,8 @@ class OptimizationResult(BaseModel):
 
 
 class ABTestResult(BaseModel):
-    original_ihr: float
-    proposed_ihr: float
+    original_hqs: float
+    proposed_hqs: float
     delta: float
     winner: Literal["original", "proposed", "tie"]
     n_runs: int
@@ -146,7 +146,7 @@ class OptimizerRunner:
 
     async def _run_one_and_score(
         self, spec_path: Path, inputs: dict[str, Any]
-    ) -> "IhrResult | None":
+    ) -> "HqsResult | None":
         from armature.runtime.engine import Harness
         from armature.spec.loader import load_spec
 
@@ -155,7 +155,7 @@ class OptimizerRunner:
             harness = Harness(spec=spec, session_dir=Path(tmp_dir))
             await harness.run(inputs)
             store = TraceStore(harness._traces._path)
-            return await store.compute_ihr(harness._run_id)
+            return await store.compute_hqs(harness._run_id)
 
     async def a_b_test(
         self,
@@ -169,17 +169,17 @@ class OptimizerRunner:
             scores: list[float] = []
             for _ in range(n_runs):
                 for inp in inputs_sample:
-                    ihr = await self._run_one_and_score(spec_path, inp)
-                    if ihr is not None:
-                        scores.append(ihr.ihr)
+                    hqs = await self._run_one_and_score(spec_path, inp)
+                    if hqs is not None:
+                        scores.append(hqs.hqs)
             return scores
 
         original_scores = await score_spec(self._target_spec_path)
         proposed_scores = await score_spec(proposed_spec_path)
 
-        original_ihr = sum(original_scores) / len(original_scores) if original_scores else 0.0
-        proposed_ihr = sum(proposed_scores) / len(proposed_scores) if proposed_scores else 0.0
-        delta = proposed_ihr - original_ihr
+        original_hqs = sum(original_scores) / len(original_scores) if original_scores else 0.0
+        proposed_hqs = sum(proposed_scores) / len(proposed_scores) if proposed_scores else 0.0
+        delta = proposed_hqs - original_hqs
 
         if delta > 0.01:
             winner = "proposed"
@@ -189,8 +189,8 @@ class OptimizerRunner:
             winner = "tie"
 
         return ABTestResult(
-            original_ihr=original_ihr,
-            proposed_ihr=proposed_ihr,
+            original_hqs=original_hqs,
+            proposed_hqs=proposed_hqs,
             delta=delta,
             winner=winner,
             n_runs=n_runs,

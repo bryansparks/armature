@@ -9,7 +9,7 @@ from armature.state.diagnostics import DiagnosticResult
 from armature.state.evaluator import EvaluationResult
 from armature.state.knowledge import KnowledgeRecord
 from armature.state.session import SessionEvent
-from armature.state.traces import IhrResult, TraceRecord
+from armature.state.traces import HqsResult, TraceRecord
 
 _WIDE = 72
 _SEP = "═" * _WIDE
@@ -27,7 +27,7 @@ class ReportData:
     evaluations: list[EvaluationResult] = field(default_factory=list)
     knowledge: list[KnowledgeRecord] = field(default_factory=list)
     diagnostics: list[DiagnosticResult] = field(default_factory=list)
-    ihr: IhrResult | None = None
+    hqs: HqsResult | None = None
 
 
 class ReportBuilder:
@@ -38,7 +38,7 @@ class ReportBuilder:
         parts: list[str] = [self._header()]
 
         failures = [t for t in self._d.traces if not t.success or not t.output_valid]
-        if failures or self._d.ihr:
+        if failures or self._d.hqs:
             parts += ["", self._health(failures)]
 
         if failures:
@@ -81,9 +81,9 @@ class ReportBuilder:
         ok = len(d.traces) - len(failures)
         status = "✓ OK" if not failures else f"⚠ {len(failures)} failure{'s' if len(failures) > 1 else ''}"
         parts = [f"  {status}  ·  {ok}/{len(d.traces)} stages succeeded"]
-        if d.ihr:
-            r = d.ihr
-            parts[0] += f"  ·  IHR {r.ihr:.2f}"
+        if d.hqs:
+            r = d.hqs
+            parts[0] += f"  ·  HQS {r.hqs:.2f}"
         return "\n".join(parts)
 
     def _issues(self, failures: list[TraceRecord]) -> str:
@@ -306,7 +306,7 @@ async def load_report_data(
         return None
 
     workflow_name = traces[0].workflow_name
-    ihr = await store.compute_ihr(run_id)
+    hqs = await store.compute_hqs(run_id)
 
     evaluations: list[EvaluationResult] = []
     if evals_db:
@@ -344,5 +344,5 @@ async def load_report_data(
         evaluations=evaluations,
         knowledge=knowledge,
         diagnostics=diagnostics,
-        ihr=ihr,
+        hqs=hqs,
     )

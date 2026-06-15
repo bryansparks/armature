@@ -3,7 +3,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from armature.optimizer.runner import OptimizerRunner, OptimizationResult, ABTestResult
-from armature.state.traces import IhrResult
+from armature.state.traces import HqsResult
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -65,13 +65,13 @@ async def test_optimizer_no_traces_returns_none(tmp_path):
     assert result is None  # Not enough trace data
 
 
-def make_ihr(run_id: str, ihr: float) -> IhrResult:
-    return IhrResult(
+def make_hqs(run_id: str, hqs: float) -> HqsResult:
+    return HqsResult(
         run_id=run_id,
-        ihr=ihr,
+        hqs=hqs,
         output_valid_rate=1.0,
         success_rate=1.0,
-        avg_quorum_score=ihr,
+        avg_quorum_score=hqs,
         latency_score=1.0,
         n_traces=3,
     )
@@ -84,10 +84,10 @@ async def test_ab_test_proposed_wins(tmp_path):
         trace_db_path=tmp_path / "traces.db",
     )
     # original scores ~0.70, proposed ~0.90
-    original_ihrs = [make_ihr(f"r{i}", 0.70) for i in range(3)]
-    proposed_ihrs = [make_ihr(f"p{i}", 0.90) for i in range(3)]
+    original_hqss = [make_hqs(f"r{i}", 0.70) for i in range(3)]
+    proposed_hqss = [make_hqs(f"p{i}", 0.90) for i in range(3)]
     with patch.object(runner, "_run_one_and_score", new_callable=AsyncMock) as mock_score:
-        mock_score.side_effect = original_ihrs + proposed_ihrs
+        mock_score.side_effect = original_hqss + proposed_hqss
         result = await runner.a_b_test(
             proposed_spec_path=fixtures / "echo-workflow.yaml",
             inputs_sample=[{"x": 1}, {"x": 2}, {"x": 3}],
@@ -104,9 +104,9 @@ async def test_ab_test_tie(tmp_path):
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
     )
-    all_ihrs = [make_ihr(f"r{i}", 0.80) for i in range(6)]
+    all_hqss = [make_hqs(f"r{i}", 0.80) for i in range(6)]
     with patch.object(runner, "_run_one_and_score", new_callable=AsyncMock) as mock_score:
-        mock_score.side_effect = all_ihrs
+        mock_score.side_effect = all_hqss
         result = await runner.a_b_test(
             proposed_spec_path=fixtures / "echo-workflow.yaml",
             inputs_sample=[{"x": 1}, {"x": 2}, {"x": 3}],
@@ -121,10 +121,10 @@ async def test_ab_test_original_wins(tmp_path):
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
     )
-    original_ihrs = [make_ihr(f"r{i}", 0.85) for i in range(3)]
-    proposed_ihrs = [make_ihr(f"p{i}", 0.60) for i in range(3)]
+    original_hqss = [make_hqs(f"r{i}", 0.85) for i in range(3)]
+    proposed_hqss = [make_hqs(f"p{i}", 0.60) for i in range(3)]
     with patch.object(runner, "_run_one_and_score", new_callable=AsyncMock) as mock_score:
-        mock_score.side_effect = original_ihrs + proposed_ihrs
+        mock_score.side_effect = original_hqss + proposed_hqss
         result = await runner.a_b_test(
             proposed_spec_path=fixtures / "echo-workflow.yaml",
             inputs_sample=[{"x": 1}, {"x": 2}, {"x": 3}],
@@ -149,8 +149,8 @@ async def test_ab_test_all_none_scores_returns_tie(tmp_path):
         )
     assert result.winner == "tie"
     assert result.delta == pytest.approx(0.0, abs=1e-6)
-    assert result.original_ihr == pytest.approx(0.0, abs=1e-6)
-    assert result.proposed_ihr == pytest.approx(0.0, abs=1e-6)
+    assert result.original_hqs == pytest.approx(0.0, abs=1e-6)
+    assert result.proposed_hqs == pytest.approx(0.0, abs=1e-6)
 
 
 async def test_ab_test_empty_inputs_returns_tie(tmp_path):

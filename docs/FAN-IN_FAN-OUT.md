@@ -244,7 +244,7 @@ stages:
     depends_on: [review_each]
 ```
 
-100 documents → 10-at-a-time parallel reviews → optional escalation check (skipped if nothing flagged) → final report. The author wrote four stages in YAML; the harness handled all the parallelism, per-item error isolation, trace capture, and IHR scoring.
+100 documents → 10-at-a-time parallel reviews → optional escalation check (skipped if nothing flagged) → final report. The author wrote four stages in YAML; the harness handled all the parallelism, per-item error isolation, trace capture, and HQS scoring.
 
 ---
 
@@ -286,7 +286,7 @@ The rest of the batch completes normally. Downstream stages can filter `_fan_out
 Fan-out/fan-in composes naturally with every other harness capability:
 
 - **Safety rules** apply to every individual fan-out execution
-- **Trace capture** records each item's LLM call separately — you get full IHR scoring per item
+- **Trace capture** records each item's LLM call separately — you get full HQS scoring per item
 - **`on_fail.loop`** retries individual items, not the whole batch
 - **`mission:`** is injected into every worker's system prompt
 - **`continuation:`** can carry a fan-out result list forward to the next workflow activation

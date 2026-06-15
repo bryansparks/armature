@@ -6,7 +6,7 @@ When every harness primitive is wired together, the whole is greater than the su
 
 Most agentic frameworks hand you a set of primitives and leave the wiring to you. Safety is a middleware you bolt on. Fault tolerance is a try/except you write. Quality measurement is a dashboard you build separately, in a different system, maintained by a different team.
 
-Armature's design premise is different. The primitives are already wired together. Safety rules compose with fan-out automatically. Checkpoint and continuation work across any stage topology. IHR reads from the same traces that governance rules write to. You do not integrate these features — you declare them in one YAML file and the harness does the integration.
+Armature's design premise is different. The primitives are already wired together. Safety rules compose with fan-out automatically. Checkpoint and continuation work across any stage topology. HQS reads from the same traces that governance rules write to. You do not integrate these features — you declare them in one YAML file and the harness does the integration.
 
 The value of a harness is not any individual feature. The value is what happens when the features compound.
 
@@ -25,7 +25,7 @@ This document describes three production stacks — each one a natural compositi
 │  │  Enterprise         │  │  Reliable            │  │  Self-Improving │ │
 │  │  Governance         │  │  Long-Running        │  │  Quality Loop   │ │
 │  │                     │  │  Pipelines           │  │                 │ │
-│  │  safety_rules       │  │  checkpoint          │  │  IHR            │ │
+│  │  safety_rules       │  │  checkpoint          │  │  HQS            │ │
 │  │  safety_mode:strict │  │  continuation        │  │  traces         │ │
 │  │  gate: human        │  │  fan_out             │  │  evaluate:      │ │
 │  │  rogue_signals      │  │  model_tiers         │  │  judge pattern  │ │
@@ -263,15 +263,15 @@ stages:
 
 ## Stack 3: Self-Improving Quality Loop
 
-**Features:** IHR + traces + evaluate criteria + judge pattern + quorum scoring + armature improve
+**Features:** HQS + traces + evaluate criteria + judge pattern + quorum scoring + armature improve
 
 ---
 
-The hardest problem in production AI is degradation — workflows that work well on day one but silently drift as edge cases accumulate, model behavior shifts, or input data changes shape. Traditional software has error rates. Agentic workflows have IHR.
+The hardest problem in production AI is degradation — workflows that work well on day one but silently drift as edge cases accumulate, model behavior shifts, or input data changes shape. Traditional software has error rates. Agentic workflows have HQS.
 
-IHR — the Implicit Harness Rating — is a composite quality score computed over accumulated trace data. It aggregates five signals: output validity, success rate, quorum consensus from judge stages, latency, and escalation-free execution. It answers the question that matters: is this workflow actually working?
+HQS — the Harness Quality Score — is a composite quality score computed over accumulated trace data. It aggregates five signals: output validity, success rate, quorum consensus from judge stages, latency, and escalation-free execution. It answers the question that matters: is this workflow actually working?
 
-The quality loop closes the feedback cycle automatically. Every run produces traces. Judges emit confidence scores (quorum scores) that the harness extracts and records. `evaluate:` criteria on individual stages run LLM-powered assertions after each execution — semantic acceptance tests that catch failures `output_schema` cannot express. When IHR falls below a target, `armature improve` reads the failure signatures, diagnoses which stages are degrading and why, and proposes targeted YAML revisions. Safe changes (description enrichment, model tier upgrades, retry config) are applied automatically. Structural changes (adding stages, modifying safety rules) are written to a `.pending.yaml` file for human review.
+The quality loop closes the feedback cycle automatically. Every run produces traces. Judges emit confidence scores (quorum scores) that the harness extracts and records. `evaluate:` criteria on individual stages run LLM-powered assertions after each execution — semantic acceptance tests that catch failures `output_schema` cannot express. When HQS falls below a target, `armature improve` reads the failure signatures, diagnoses which stages are degrading and why, and proposes targeted YAML revisions. Safe changes (description enrichment, model tier upgrades, retry config) are applied automatically. Structural changes (adding stages, modifying safety rules) are written to a `.pending.yaml` file for human review.
 
 The optimizer is accountable. Every revision it proposes comes with a falsifiable prediction: which failure signatures it expects to resolve. The next cycle verifies those predictions. If the optimizer consistently misses its targets, that is visible in the improvement log — a rising drift score signals that the system is oscillating rather than converging.
 
@@ -372,9 +372,9 @@ After ten runs, the quality loop activates:
 armature improve contract-risk-assessment.yaml
 ```
 
-The optimizer reads the accumulated traces. If `analyst` has been returning outputs that fail `evaluate:` criteria, it enriches the description with more explicit formatting instructions. If `quality_judge` quorum scores are consistently low, it adds specific evaluation dimensions to the judge's description. If `analyst` is hitting its retry loop on most runs, it upgrades the model tier or relaxes the `until:` threshold. The spec file is updated in place. The next run starts from the improved spec. The cycle continues until IHR stabilizes above target.
+The optimizer reads the accumulated traces. If `analyst` has been returning outputs that fail `evaluate:` criteria, it enriches the description with more explicit formatting instructions. If `quality_judge` quorum scores are consistently low, it adds specific evaluation dimensions to the judge's description. If `analyst` is hitting its retry loop on most runs, it upgrades the model tier or relaxes the `until:` threshold. The spec file is updated in place. The next run starts from the improved spec. The cycle continues until HQS stabilizes above target.
 
-**What you get:** A workflow that improves itself. The quality team can read `evaluate:` criteria in the spec and understand exactly what semantic properties are being tested. They can watch `armature report contract-risk-assessment.yaml` and see IHR trend upward over time. The improvement log answers, for every revision, what changed, when, why, and whether it worked.
+**What you get:** A workflow that improves itself. The quality team can read `evaluate:` criteria in the spec and understand exactly what semantic properties are being tested. They can watch `armature report contract-risk-assessment.yaml` and see HQS trend upward over time. The improvement log answers, for every revision, what changed, when, why, and whether it worked.
 
 ---
 
@@ -388,7 +388,7 @@ Reliability stack    →  ensures the workflow runs to completion at scale
 Quality stack        →  ensures the output is worth running at all
 ```
 
-These compose without configuration. Safety rules apply inside fan-out executions automatically — each parallel worker is individually governed. Traces capture every stage in the pipeline, including each of the 500 fan-out workers, giving IHR a full evidence base. Human gates can appear anywhere in the DAG: after a reliability stage's fan-in, before the final report, or conditionally when quality judge confidence is low. Checkpoint and continuation work regardless of whether IHR is healthy or degraded.
+These compose without configuration. Safety rules apply inside fan-out executions automatically — each parallel worker is individually governed. Traces capture every stage in the pipeline, including each of the 500 fan-out workers, giving HQS a full evidence base. Human gates can appear anywhere in the DAG: after a reliability stage's fan-in, before the final report, or conditionally when quality judge confidence is low. Checkpoint and continuation work regardless of whether HQS is healthy or degraded.
 
 The integration is not accidental. It is the consequence of building a harness rather than a library. When all the primitives share a common execution model — the same context dict, the same lifecycle hooks, the same trace capture path — features compose for free. You do not wire them together. You declare what you want and the harness handles the rest.
 
@@ -402,7 +402,7 @@ The security team reviews `safety_rules:` and `safety_mode:` in a PR. They can t
 
 The operations team reads `checkpoint: true` and `on_fail.loop`. They know that a failed run can be restarted, that transient API failures will be retried with backoff, and that individual fan-out failures will not abort the batch. Fault tolerance is visible in the spec, not buried in exception handling.
 
-The quality team reads `evaluate:` criteria and watches IHR in the improvement log. They can see, for every stage, what semantic properties are being tested, and they can watch the optimizer's revision history to understand what broke and what fixed it.
+The quality team reads `evaluate:` criteria and watches HQS in the improvement log. They can see, for every stage, what semantic properties are being tested, and they can watch the optimizer's revision history to understand what broke and what fixed it.
 
 Non-engineers — product managers, compliance officers, legal reviewers — can read the workflow spec and understand what the system does. `gate: human` tells them where humans are in the loop. `skip_if:` tells them when stages are conditional. The DAG structure from `depends_on:` tells them the execution order. They may not understand every Jinja2 expression, but the structure of the workflow — the governance, the checkpoints, the quality gates — is plain to read.
 

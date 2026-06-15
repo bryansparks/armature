@@ -27,7 +27,7 @@ class StageStats:
 class ImprovementCycle:
     cycle_number: int
     timestamp: str
-    ihr_before: float
+    hqs_before: float
     drift_score: float
     applied: bool
     requires_review: bool
@@ -56,30 +56,30 @@ class DashboardData:
     stage_stats: dict[str, StageStats]
     improvement_cycles: list[ImprovementCycle]
     safety_stats: SafetyStats
-    ihr_trend: list[float]  # ordered oldest → newest
+    hqs_trend: list[float]  # ordered oldest → newest
     last_run_id: str | None
     last_run_at: str | None = None
 
     @property
-    def current_ihr(self) -> float | None:
-        return self.ihr_trend[-1] if self.ihr_trend else None
+    def current_hqs(self) -> float | None:
+        return self.hqs_trend[-1] if self.hqs_trend else None
 
     @property
     def health_color(self) -> str:
-        ihr = self.current_ihr
-        if ihr is None:
+        hqs = self.current_hqs
+        if hqs is None:
             return "dim"
-        if ihr >= 0.85:
+        if hqs >= 0.85:
             return "green"
-        if ihr >= 0.70:
+        if hqs >= 0.70:
             return "yellow"
         return "red"
 
     @property
-    def ihr_delta(self) -> float | None:
-        if len(self.ihr_trend) < 2:
+    def hqs_delta(self) -> float | None:
+        if len(self.hqs_trend) < 2:
             return None
-        return self.ihr_trend[-1] - self.ihr_trend[-2]
+        return self.hqs_trend[-1] - self.hqs_trend[-2]
 
 
 # ── builders ──────────────────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ def load_improvement_cycles(log_path: Path) -> list[ImprovementCycle]:
         cycles.append(ImprovementCycle(
             cycle_number=i + 1,
             timestamp=entry.get("timestamp", ""),
-            ihr_before=float(entry.get("ihr_before", 0.0)),
+            hqs_before=float(entry.get("hqs_before", 0.0)),
             drift_score=float(entry.get("drift_score", 0.0)),
             applied=bool(entry.get("applied", False)),
             requires_review=bool(entry.get("requires_review", False)),

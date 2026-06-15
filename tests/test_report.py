@@ -8,7 +8,7 @@ from typer.testing import CliRunner
 
 from armature.cli import app
 from armature.reporting import ReportBuilder, ReportData
-from armature.state.traces import TraceRecord, IhrResult
+from armature.state.traces import TraceRecord, HqsResult
 from armature.state.session import SessionEvent
 from armature.state.evaluator import EvaluationResult
 from armature.state.knowledge import KnowledgeRecord
@@ -71,10 +71,10 @@ def make_knowledge(fact: str, entity: str = "domain", confidence: float = 0.88) 
     )
 
 
-def make_ihr(ihr: float = 0.91) -> IhrResult:
-    return IhrResult(
+def make_hqs(hqs: float = 0.91) -> HqsResult:
+    return HqsResult(
         run_id="abc123",
-        ihr=ihr,
+        hqs=hqs,
         output_valid_rate=1.0,
         success_rate=1.0,
         avg_quorum_score=0.90,
@@ -92,7 +92,7 @@ def minimal_data(**overrides) -> ReportData:
         events=[],
         evaluations=[],
         knowledge=[],
-        ihr=None,
+        hqs=None,
     )
     defaults.update(overrides)
     return ReportData(**defaults)
@@ -131,14 +131,14 @@ def test_report_no_issues_section_when_all_ok():
     assert "Issues" not in report and "ISSUE" not in report.upper()
 
 
-def test_report_ihr_shown_in_health_when_present():
-    data = minimal_data(ihr=make_ihr(0.91))
+def test_report_hqs_shown_in_health_when_present():
+    data = minimal_data(hqs=make_hqs(0.91))
     assert "0.91" in ReportBuilder(data).build()
 
 
-def test_report_no_ihr_when_absent():
-    data = minimal_data(ihr=None)
-    assert "IHR" not in ReportBuilder(data).build()
+def test_report_no_hqs_when_absent():
+    data = minimal_data(hqs=None)
+    assert "HQS" not in ReportBuilder(data).build()
 
 
 # ── stage timeline ────────────────────────────────────────────────────────────

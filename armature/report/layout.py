@@ -71,10 +71,10 @@ def render_json(data: DashboardData) -> dict[str, Any]:
     return {
         "workflow_name": data.workflow_name,
         "total_runs": data.total_runs,
-        "current_ihr": data.current_ihr,
+        "current_hqs": data.current_hqs,
         "health_color": data.health_color,
-        "ihr_delta": data.ihr_delta,
-        "ihr_trend": data.ihr_trend,
+        "hqs_delta": data.hqs_delta,
+        "hqs_trend": data.hqs_trend,
         "stage_stats": {
             sid: {
                 "run_count": s.run_count,
@@ -90,7 +90,7 @@ def render_json(data: DashboardData) -> dict[str, Any]:
             {
                 "cycle_number": c.cycle_number,
                 "timestamp": c.timestamp,
-                "ihr_before": c.ihr_before,
+                "hqs_before": c.hqs_before,
                 "drift_score": c.drift_score,
                 "applied": c.applied,
                 "requires_review": c.requires_review,

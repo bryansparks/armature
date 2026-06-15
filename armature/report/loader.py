@@ -28,8 +28,8 @@ async def load_dashboard_data(
     else:
         traces = []
 
-    # IHR trend: compute per-run IHR, ordered oldest to newest
-    ihr_trend: list[float] = []
+    # HQS trend: compute per-run HQS, ordered oldest to newest
+    hqs_trend: list[float] = []
     run_ids_seen: list[str] = []
     for t in traces:
         if t.run_id not in run_ids_seen:
@@ -45,13 +45,13 @@ async def load_dashboard_data(
             latencies = [t.latency_ms for t in run_traces]
             max_lat = max(latencies) if latencies else 1.0
             latency_score = max(0.0, 1.0 - max_lat / 60_000)
-            ihr = (
+            hqs = (
                 0.40 * valid_rate
                 + 0.30 * success_rate
                 + 0.20 * avg_quorum
                 + 0.10 * latency_score
             )
-            ihr_trend.append(round(ihr, 4))
+            hqs_trend.append(round(hqs, 4))
 
     last_run_id = run_ids_seen[-1] if run_ids_seen else None
 
@@ -78,7 +78,7 @@ async def load_dashboard_data(
         stage_stats=stage_stats,
         improvement_cycles=cycles,
         safety_stats=safety_stats,
-        ihr_trend=ihr_trend,
+        hqs_trend=hqs_trend,
         last_run_id=last_run_id,
         last_run_at=last_run_at,
     )

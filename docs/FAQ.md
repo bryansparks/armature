@@ -231,23 +231,23 @@ Set `timeout_s:` on the stage. If the wall-clock time (including all retries) ex
 
 ## Quality and Observability
 
-**What is IHR?**
+**What is HQS?**
 
-Implicit Harness Rating — a composite quality metric (0.0–1.0) computed over accumulated traces:
+Harness Quality Score — a composite quality metric (0.0–1.0) computed over accumulated traces:
 
 ```
-IHR = 0.35 × output_valid_rate
+HQS = 0.35 × output_valid_rate
     + 0.25 × success_rate
     + 0.20 × avg_quorum_score
     + 0.10 × latency_score
     + 0.10 × happy_path_rate
 ```
 
-It gives you a single number to track across runs — the equivalent of error rate for traditional software. See `IHR-AND-SELF-IMPROVEMENT.md`.
+It gives you a single number to track across runs — the equivalent of error rate for traditional software. See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 **What are traces and what do they record?**
 
-Every stage execution writes a `TraceRecord` to SQLite: stage ID, run ID, workflow name, inputs, outputs (truncated at 200 chars by default, 2000 for continuation stages), latency, success flag, output validity, quorum score, and escalation count. Traces persist across runs and are the input to self-improvement. See `IHR-AND-SELF-IMPROVEMENT.md`.
+Every stage execution writes a `TraceRecord` to SQLite: stage ID, run ID, workflow name, inputs, outputs (truncated at 200 chars by default, 2000 for continuation stages), latency, success flag, output validity, quorum score, and escalation count. Traces persist across runs and are the input to self-improvement. See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 **How do I view traces and quality reports?**
 
@@ -267,7 +267,7 @@ evaluate:
   - "No recommendations contradict the cited data"
 ```
 
-After the run, `EvaluationRunner` scores each criterion using an LLM evaluator and records pass/fail + score (0.0–1.0) to the evaluation store. Think of these as acceptance tests for individual stages. See `IHR-AND-SELF-IMPROVEMENT.md`.
+After the run, `EvaluationRunner` scores each criterion using an LLM evaluator and records pass/fail + score (0.0–1.0) to the evaluation store. Think of these as acceptance tests for individual stages. See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 **What is the Judge pattern?**
 
@@ -282,20 +282,20 @@ Using one LLM to evaluate the output of another. In Armature, a `judge` role typ
 After enough runs accumulate:
 
 1. `armature improve myworkflow.yaml` loads all traces for the workflow
-2. Computes rolling IHR and runs `DiagnosticAnalyzer` to identify failure signatures (`output_invalid`, `stage_failed`, `low_confidence`, `high_escalation`, `low_skill_activation`)
-3. If IHR < target (default 0.90) and ≥ 3 traces exist, `SpecRefiner` (an LLM call to a medium-tier model) proposes targeted YAML changes
+2. Computes rolling HQS and runs `DiagnosticAnalyzer` to identify failure signatures (`output_invalid`, `stage_failed`, `low_confidence`, `high_escalation`, `low_skill_activation`)
+3. If HQS < target (default 0.90) and ≥ 3 traces exist, `SpecRefiner` (an LLM call to a medium-tier model) proposes targeted YAML changes
 4. Safe changes (descriptions, retries, model tier upgrades) auto-apply; risky changes (stage additions/removals, schema changes, safety rule modifications) go to `.pending.yaml` for human review
 5. The refiner declares falsifiable predictions about what it expects to fix; the next cycle verifies those predictions
 
-See `IHR-AND-SELF-IMPROVEMENT.md`.
+See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 **Is it safe to auto-apply spec improvements?**
 
-The harness classifies every proposed change. Changes to `role.description`, `on_fail`, `model_tier`, and `timeout_s` auto-apply. Changes that add or remove stages, modify `output_schema`, or alter safety rules are written to a `.pending.yaml` file and require explicit human approval. You can also run with `--dry-run` to preview changes without applying. See `IHR-AND-SELF-IMPROVEMENT.md` for the full governance model.
+The harness classifies every proposed change. Changes to `role.description`, `on_fail`, `model_tier`, and `timeout_s` auto-apply. Changes that add or remove stages, modify `output_schema`, or alter safety rules are written to a `.pending.yaml` file and require explicit human approval. You can also run with `--dry-run` to preview changes without applying. See `HQS-AND-SELF-IMPROVEMENT.md` for the full governance model.
 
 **How many runs before self-improvement activates?**
 
-By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement cycle only fires if IHR is also below `target_ihr` (default 0.90). See `IHR-AND-SELF-IMPROVEMENT.md`.
+By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement cycle only fires if HQS is also below `target_hqs` (default 0.90). See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 **Can I run self-improvement automatically after every run?**
 
@@ -303,7 +303,7 @@ By default, `min_traces: 3`. Configurable via `--min-traces N`. The improvement 
 armature run myworkflow.yaml --auto-improve
 ```
 
-This runs the improvement cycle immediately after the workflow completes. See `IHR-AND-SELF-IMPROVEMENT.md`.
+This runs the improvement cycle immediately after the workflow completes. See `HQS-AND-SELF-IMPROVEMENT.md`.
 
 ---
 
@@ -368,13 +368,13 @@ Use `subagent_spec: path/to/child.yaml` on a stage. The harness loads the child 
 
 Set `isolated: true` on the stage and declare `signature.input` with the keys the stage needs. The harness filters the context to only those keys before passing it to the stage or child workflow. This prevents sensitive data from leaking into workers, creates a typed interface between pipeline sections, and makes stage behavior more predictable (LLMs are influenced by everything they see). See `CONTEXT-ISOLATION.md`.
 
-**What is quorum scoring and how is it different from IHR?**
+**What is quorum scoring and how is it different from HQS?**
 
-Quorum score is a per-execution confidence value extracted from `judge` stage outputs — specifically the `score`, `quality_score`, or `confidence` field (searched in that order). It represents how certain the judge is about its own output. IHR uses `avg_quorum_score` (weighted at 20%) across all traces for the workflow. Consistently low quorum scores (near 0.5) trigger the `LOW_CONFIDENCE` diagnostic and drive the self-improvement loop to enrich the judge's description. See `QUORUM-SCORING.md`.
+Quorum score is a per-execution confidence value extracted from `judge` stage outputs — specifically the `score`, `quality_score`, or `confidence` field (searched in that order). It represents how certain the judge is about its own output. HQS uses `avg_quorum_score` (weighted at 20%) across all traces for the workflow. Consistently low quorum scores (near 0.5) trigger the `LOW_CONFIDENCE` diagnostic and drive the self-improvement loop to enrich the judge's description. See `QUORUM-SCORING.md`.
 
 **How do all these features work together in a production deployment?**
 
-They compose. The governance stack (safety rules + human gates + strict mode) defines what agents can do. The reliability stack (checkpoint + continuation + model tiers + on_fail.loop) ensures the workflow completes at scale. The quality stack (IHR + traces + judge pattern + self-improvement) ensures the output is worth running at all. No other framework combines all three in a single declarative spec. See `ARMATURE-IN-PRODUCTION.md` for the full combinatorial story.
+They compose. The governance stack (safety rules + human gates + strict mode) defines what agents can do. The reliability stack (checkpoint + continuation + model tiers + on_fail.loop) ensures the workflow completes at scale. The quality stack (HQS + traces + judge pattern + self-improvement) ensures the output is worth running at all. No other framework combines all three in a single declarative spec. See `ARMATURE-IN-PRODUCTION.md` for the full combinatorial story.
 
 ---
 
@@ -447,7 +447,7 @@ For structured reasoning behind a chat interface — yes. For open-ended free-fo
 
 LangGraph is a graph-construction library built around **cycles** — the core primitive is a stateful loop (`think → act → observe → think`). You write Python to construct the graph explicitly. Observability, safety, quality scoring, and APIs are left to you.
 
-Armature is a finished harness built around **directed pipelines**. The DAG is implicit from `depends_on:` declarations in YAML. Observability, safety, IHR scoring, self-improvement, and a REST API are built in. The tradeoff: no cycles, but everything production requires is already there.
+Armature is a finished harness built around **directed pipelines**. The DAG is implicit from `depends_on:` declarations in YAML. Observability, safety, HQS scoring, self-improvement, and a REST API are built in. The tradeoff: no cycles, but everything production requires is already there.
 
 They compose: a LangGraph ReAct agent can be one tool that an Armature worker stage calls via HTTP. See `DAG-vs-LANGGRAPH.md`.
 
@@ -847,7 +847,7 @@ The practical benefit: different providers and models in the same workflow. Your
 
 **What happens when `guided_json` fails on a small model?**
 
-The engine automatically escalates to the next tier. If `small` produces invalid JSON for a stage with `output_mode: guided_json`, the engine retries with `medium`, then `large` if needed. This escalation is logged and tracked in IHR as the Harness-Following Rate (HFR) component. Armature also emits a validator warning (`GUIDED_JSON_LOW_TIER_RISK`) if you declare a `guided_json` stage on a small/tiny tier at spec-write time. See `MODEL-TIERS.md`.
+The engine automatically escalates to the next tier. If `small` produces invalid JSON for a stage with `output_mode: guided_json`, the engine retries with `medium`, then `large` if needed. This escalation is logged and tracked in HQS as the Harness-Following Rate (HFR) component. Armature also emits a validator warning (`GUIDED_JSON_LOW_TIER_RISK`) if you declare a `guided_json` stage on a small/tiny tier at spec-write time. See `MODEL-TIERS.md`.
 
 ---
 
@@ -884,7 +884,7 @@ When `accept` is false, `on_fail.loop` restarts the `analyst` stage with the jud
 
 **What is quorum scoring?**
 
-Quorum scoring is the fan-in strategy `fan_in: "consensus"`. When multiple parallel stages produce conflicting outputs, an LLM judge synthesizes them into a single result. Each parallel result gets a `quorum_score` (0–1) reflecting its alignment with the synthesized consensus. Quorum scores feed into IHR's quorum component.
+Quorum scoring is the fan-in strategy `fan_in: "consensus"`. When multiple parallel stages produce conflicting outputs, an LLM judge synthesizes them into a single result. Each parallel result gets a `quorum_score` (0–1) reflecting its alignment with the synthesized consensus. Quorum scores feed into HQS's quorum component.
 
 Use it for: parallel research where agents disagree on facts, parallel code reviews where different reviewers flag different issues, or any fan-out where "what did most agents agree on?" is more reliable than any single output. See `QUORUM-SCORING.md`.
 
@@ -1020,7 +1020,7 @@ Use it for daily monitors, weekly analysis workflows, or any workflow that needs
 | Quorum scoring | `QUORUM-SCORING.md` |
 | Mission context | `MISSION-AS-CONTEXT.md` |
 | Declarative control flow | `DECLARATIVE-CONTROL-FLOW.md` |
-| IHR and self-improvement | `IHR-AND-SELF-IMPROVEMENT.md` |
+| HQS and self-improvement | `HQS-AND-SELF-IMPROVEMENT.md` |
 | Safety and governance | `SAFETY-AND-GOVERNANCE.md` |
 | Sandbox and container isolation | `SANDBOX-AND-ISOLATION.md` |
 | Human-in-the-loop gates | `HUMAN-IN-THE-LOOP.md` |

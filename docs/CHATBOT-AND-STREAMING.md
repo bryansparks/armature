@@ -370,7 +370,7 @@ Armature is ideal when the AI work behind a chat turn involves:
 - **Multiple steps**: classify → retrieve → draft → validate
 - **Quality gates**: a judge stage that checks the response before it goes to the user
 - **Cost control**: tiny models for classification, frontier only for the user-visible response
-- **Observability**: every turn is a traced run — IHR, quorum scores, latency all recorded
+- **Observability**: every turn is a traced run — HQS, quorum scores, latency all recorded
 - **Auditability**: compliance teams can inspect every decision, every token
 
 Examples: customer support assistants, legal Q&A tools, technical documentation search, code review feedback, structured report generation.
@@ -482,7 +482,7 @@ This workflow:
 - Maintains conversation context across turns via `continuation:`
 - Escalates automatically when the classifier detects an out-of-scope query
 - Streams tokens to the chat UI as they arrive
-- Records a full trace for every turn — IHR-scored, latency-tracked, inspectable
+- Records a full trace for every turn — HQS-scored, latency-tracked, inspectable
 
 The chat frontend handles only UI. All AI logic is in the YAML spec.
 

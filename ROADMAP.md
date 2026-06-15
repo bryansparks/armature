@@ -8,7 +8,7 @@ Features below are directional — no committed dates or release targets.
 
 All v1 scope is implemented. 1,388 tests passing.
 
-The v1 harness delivers: YAML-declarative workflow execution, four role types, DAG orchestration with automatic parallelism, fan-out/fan-in, IHR quality scoring, self-improvement loop (inner + outer), prediction-verification accountability, declarative safety rules with strict mode, human-in-the-loop gates, checkpoint/resume, four memory layers (mission context, continuation, MemoryStore, KnowledgeStore), model tiers, a REST API with SSE streaming, the `armature watch` trigger daemon, and a Rich terminal dashboard.
+The v1 harness delivers: YAML-declarative workflow execution, four role types, DAG orchestration with automatic parallelism, fan-out/fan-in, HQS quality scoring, self-improvement loop (inner + outer), prediction-verification accountability, declarative safety rules with strict mode, human-in-the-loop gates, checkpoint/resume, four memory layers (mission context, continuation, MemoryStore, KnowledgeStore), model tiers, a REST API with SSE streaming, the `armature watch` trigger daemon, and a Rich terminal dashboard.
 
 The `armature export-traces` command is also shipped — it produces LoRA-ready SFT and DPO training data from accumulated traces, quality-filtered by judge quorum score. The infrastructure for fine-tuning is in place. Executing the fine-tuning pipeline itself is the v2 story below.
 
@@ -38,8 +38,8 @@ The practical result: over time, frontier models earn their own obsolescence for
 
 This is why the fine-tuning loop is categorically important, not just a cost optimization:
 
-- **Axis 1 (current):** `armature improve` refines the *spec* — stage descriptions, retry limits, output schemas. IHR goes up because the instructions get clearer.
-- **Axis 2 (v2):** The fine-tuning loop refines the *model* — the worker and researcher stages become more capable on the specific domain. IHR goes up because the executor gets better.
+- **Axis 1 (current):** `armature improve` refines the *spec* — stage descriptions, retry limits, output schemas. HQS goes up because the instructions get clearer.
+- **Axis 2 (v2):** The fine-tuning loop refines the *model* — the worker and researcher stages become more capable on the specific domain. HQS goes up because the executor gets better.
 
 Both axes are available. They are orthogonal and they reinforce each other: a better spec produces better traces, which produces better fine-tuning data, which produces a better model, which produces better traces, which drives better spec improvements.
 
@@ -126,23 +126,23 @@ Browser-based DAG editor that reads and writes YAML specs. Drag stages, wire dep
 
 ## Near-term (reward signals and trace intelligence)
 
-### Why IHR is not a reward signal
+### Why HQS is not a reward signal
 
-This distinction is worth stating clearly because it's easy to conflate the two. IHR is an excellent *health metric* — a composite number that tells you whether your workflow is trending better or worse across runs. It is a poor *reward signal* for training or optimization for three reasons:
+This distinction is worth stating clearly because it's easy to conflate the two. HQS is an excellent *health metric* — a composite number that tells you whether your workflow is trending better or worse across runs. It is a poor *reward signal* for training or optimization for three reasons:
 
-**Sparse.** One value per completed run. You cannot use it to credit individual stage decisions — by the time you have IHR, the entire run has already executed and been paid for.
+**Sparse.** One value per completed run. You cannot use it to credit individual stage decisions — by the time you have HQS, the entire run has already executed and been paid for.
 
-**Lagging.** IHR is a consequence of what stages did, not a signal you can act on during execution. It tells you how the run went, not which specific decisions caused the outcome.
+**Lagging.** HQS is a consequence of what stages did, not a signal you can act on during execution. It tells you how the run went, not which specific decisions caused the outcome.
 
-**Non-causal.** A high IHR doesn't tell you *why* stage 3 succeeded. It tells you the whole run went well. Credit assignment — attributing the outcome back to specific stage behaviors — is invisible from IHR alone.
+**Non-causal.** A high HQS doesn't tell you *why* stage 3 succeeded. It tells you the whole run went well. Credit assignment — attributing the outcome back to specific stage behaviors — is invisible from HQS alone.
 
-This is the classic sparse terminal reward problem in reinforcement learning. The field's answer is **process reward models (PRMs)**: instead of rewarding only the final outcome, reward each step of the process. Armature already collects exactly the data needed for this — per-stage success, quorum scores, retry sequences, escalation patterns, and final IHR — it just isn't analyzed as a causal structure yet.
+This is the classic sparse terminal reward problem in reinforcement learning. The field's answer is **process reward models (PRMs)**: instead of rewarding only the final outcome, reward each step of the process. Armature already collects exactly the data needed for this — per-stage success, quorum scores, retry sequences, escalation patterns, and final HQS — it just isn't analyzed as a causal structure yet.
 
 ---
 
 **Stage credit attribution (near-term)**
 
-Analyze accumulated traces to identify which stages are most predictive of final IHR — the "leverage stages" that, when they go well, pull the whole run up with them. Not all stages are equally important to final quality; in most workflows there are 1–2 stages whose quorum score has high correlation with IHR and several that are relatively independent noise.
+Analyze accumulated traces to identify which stages are most predictive of final HQS — the "leverage stages" that, when they go well, pull the whole run up with them. Not all stages are equally important to final quality; in most workflows there are 1–2 stages whose quorum score has high correlation with HQS and several that are relatively independent noise.
 
 Beyond leverage identification, trace analysis surfaces several distinct pattern types:
 
@@ -154,7 +154,7 @@ Beyond leverage identification, trace analysis surfaces several distinct pattern
 
 - **Escalation ROI** — when `on_fail.loop` escalates to a higher model tier, does the upgraded model succeed? Or does it also fail? Escalation that reliably succeeds signals a model capability boundary (right fix: upgrade the base tier). Escalation that also fails signals a spec problem (right fix: rewrite the prompt, not raise retry limits).
 
-What this enables: `SelfImproveRunner` currently proposes changes without knowing which stages are highest-leverage. With credit attribution, the optimizer targets the stages that will produce the largest IHR improvement first — instead of treating a low-impact stage the same as a high-impact one.
+What this enables: `SelfImproveRunner` currently proposes changes without knowing which stages are highest-leverage. With credit attribution, the optimizer targets the stages that will produce the largest HQS improvement first — instead of treating a low-impact stage the same as a high-impact one.
 
 Surface this in `armature dashboard` as a per-stage leverage heatmap, and incorporate leverage weights into the `DiagnosticAnalyzer` prioritization.
 
@@ -164,17 +164,17 @@ Surface this in `armature dashboard` as a per-stage leverage heatmap, and incorp
 
 **Trajectory-level process reward model**
 
-The stage credit attribution above is still a run-level analysis — it tells you which stages matter more, but it doesn't learn to *predict* final IHR from partial run state. A process reward model goes further: it is a learned function that takes the execution state at any point mid-run and predicts the probability of reaching a high-IHR outcome.
+The stage credit attribution above is still a run-level analysis — it tells you which stages matter more, but it doesn't learn to *predict* final HQS from partial run state. A process reward model goes further: it is a learned function that takes the execution state at any point mid-run and predicts the probability of reaching a high-HQS outcome.
 
-The data to train this already accumulates in the TraceStore: partial-run traces as inputs, final IHR as the label. A lightweight model (gradient-boosted trees or a small neural net) can learn this mapping from a few hundred completed runs.
+The data to train this already accumulates in the TraceStore: partial-run traces as inputs, final HQS as the label. A lightweight model (gradient-boosted trees or a small neural net) can learn this mapping from a few hundred completed runs.
 
 Once the PRM exists, it enables three things that aren't possible today:
 
-**Early-exit on doomed runs.** If the first two stages produce patterns associated with low IHR outcomes, abort the run before the expensive downstream stages execute. This is meaningful cost savings for long, multi-stage workflows — you pay for a failed classification, not for the full 45-minute pipeline that was going to fail anyway.
+**Early-exit on doomed runs.** If the first two stages produce patterns associated with low HQS outcomes, abort the run before the expensive downstream stages execute. This is meaningful cost savings for long, multi-stage workflows — you pay for a failed classification, not for the full 45-minute pipeline that was going to fail anyway.
 
 **Early human escalation.** Rather than waiting for a judge to flag low confidence at the end, surface a warning when early-stage patterns predict quality problems. A human can review and redirect before irreversible downstream work happens.
 
-**Downstream-weighted fine-tuning.** This is the connection back to the SLM fine-tuning loop. Current trace export filters by per-stage quorum score: a stage output that scored 0.85 is included in training data. With a PRM, you can weight training examples by their *downstream impact* — a stage-A output that scored 0.85 and led to a final IHR of 0.93 is a more valuable training example than one that also scored 0.85 but was followed by IHR 0.61. The first example was load-bearing; the second may have been good in isolation but didn't actually carry the run. Downstream-weighted DPO pairs are categorically richer training data than per-stage-filtered SFT data.
+**Downstream-weighted fine-tuning.** This is the connection back to the SLM fine-tuning loop. Current trace export filters by per-stage quorum score: a stage output that scored 0.85 is included in training data. With a PRM, you can weight training examples by their *downstream impact* — a stage-A output that scored 0.85 and led to a final HQS of 0.93 is a more valuable training example than one that also scored 0.85 but was followed by HQS 0.61. The first example was load-bearing; the second may have been good in isolation but didn't actually carry the run. Downstream-weighted DPO pairs are categorically richer training data than per-stage-filtered SFT data.
 
 The compounding effect: a PRM trained on traces improves fine-tuning data quality, which produces better SLMs, which produce better traces, which produce a better PRM. This is a genuine second-order flywheel on top of the spec improvement loop.
 
@@ -199,7 +199,7 @@ Offline multi-pass spec optimization before deployment, similar to DSPy's compil
 
 These were considered and deferred pending evidence they address real user pain:
 
-- **Reinforcement learning from IHR** — originally framed as using IHR directly as a reward signal for automated prompt evolution. Superseded by the process reward model approach above, which recognizes that IHR is a useful health metric but a poor training signal (sparse, lagging, non-causal). The PRM approach addresses these limitations properly; this item is deferred pending the trace volume and benchmark environment the PRM approach requires.
+- **Reinforcement learning from HQS** — originally framed as using HQS directly as a reward signal for automated prompt evolution. Superseded by the process reward model approach above, which recognizes that HQS is a useful health metric but a poor training signal (sparse, lagging, non-causal). The PRM approach addresses these limitations properly; this item is deferred pending the trace volume and benchmark environment the PRM approach requires.
 - **Cross-workflow memory federation** — share memory stores across workflow specs (raises governance questions not yet resolved)
 - **Spec versioning and migration** — automatically migrate older specs when the schema changes (deferred until the schema stabilizes across several releases)
 

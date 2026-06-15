@@ -265,7 +265,7 @@ The practical consequence for teams: when a provider releases a better model, or
 Tiers support an iterative improvement workflow:
 
 1. **Start conservative.** Define `small` everywhere, including for judges and orchestrators. Run the workflow on real data.
-2. **Observe quality in traces.** Armature records every LLM call with IHR (Intent-Honoring Rate) scoring. If the orchestrator's output quality is low, that shows up in the trace.
+2. **Observe quality in traces.** Armature records every LLM call with HQS (Intent-Honoring Rate) scoring. If the orchestrator's output quality is low, that shows up in the trace.
 3. **Upgrade individual tiers.** Move the offending stage or role type to a higher tier. Re-run. Compare quality and cost.
 4. **Stabilize.** Once quality meets the bar, the tier configuration is the documented, reproducible statement of how the workflow is resourced.
 

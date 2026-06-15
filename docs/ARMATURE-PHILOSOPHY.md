@@ -34,11 +34,11 @@ Armature synthesizes nine academic papers published between February and June 20
 
 The paper that defines the architectural model. NLAH establishes that workflows defined in structured natural language outperform equivalent code-based harnesses on complex benchmark tasks (47.2% vs. 30.4% on OSWorld). The key finding: when the harness is readable and editable text, the entire system — including an optimizer — can reason about it.
 
-NLAH specifies seven harness components: Contracts, Roles, Stages, Adapters, State, Failure Taxonomy, and File-backed State. Armature implements all seven. The paper also defines IHR (Implicit Harness Rating), a composite quality metric used to score run quality objectively.
+NLAH specifies seven harness components: Contracts, Roles, Stages, Adapters, State, Failure Taxonomy, and File-backed State. Armature implements all seven. The paper also defines HQS (Harness Quality Score), a composite quality metric used to score run quality objectively.
 
 NLAH also specifies parallel fan-out as a core orchestration primitive — dispatching N child harnesses simultaneously then recombining their outputs — which is fully implemented in Armature.
 
-**Armature contributions from this paper:** YAML spec format, four role types, DAG executor, IHR computation, parallel fan-out/fan-in with configurable partition and merge strategies.
+**Armature contributions from this paper:** YAML spec format, four role types, DAG executor, HQS computation, parallel fan-out/fan-in with configurable partition and merge strategies.
 
 ### Paper 2: Meta-Harness — Automated Optimization End-to-End
 **Stanford University, March 2026** — [arXiv:2603.28052](https://arxiv.org/abs/2603.28052)
@@ -47,7 +47,7 @@ The paper behind Armature's optimizer. Meta-Harness introduces an outer optimiza
 
 The paper's key insight on multi-iteration optimization: giving the optimizer access to the full history of prior proposals — what was tried, whether it was accepted, and what the score was — enables causal reasoning that avoids re-proposing failed changes and compounds on successful ones.
 
-**Armature contributions:** `OptimizerRunner` (3-stage: analyze → propose → evaluate), A/B spec testing by IHR comparison, `ProposalStore` (SQLite-backed proposal history), `run_loop()` for N-iteration optimization with causal reasoning.
+**Armature contributions:** `OptimizerRunner` (3-stage: analyze → propose → evaluate), A/B spec testing by HQS comparison, `ProposalStore` (SQLite-backed proposal history), `run_loop()` for N-iteration optimization with causal reasoning.
 
 ### Paper 3: AutoHarness — LLM-Synthesized Harnesses
 **February 2026** — [arXiv:2603.03329](https://arxiv.org/abs/2603.03329)
@@ -83,7 +83,7 @@ Finally, the paper argues that high-quality execution traces from frontier model
 - `DiagnosticAnalyzer` — extracts the four failure signatures from `TraceRecord` sets; used by the report builder and the self-improvement runner
 - `MemoryConfig.fresh: bool` — skip loading prior cross-run memories for a clean-slate run; persistent is the default
 - `Stage.post_run: bool` — marks a stage as an in-run refiner; runs after all normal stages complete with `_transcript` + `_diagnostics` injected into context
-- `SelfImproveRunner` — the outer self-improvement loop: load traces → compute rolling IHR → run `DiagnosticAnalyzer` → call `SpecRefiner` (frontier LLM rewrites targeted YAML sections) → auto-apply revised spec → write audit log (`armature improve <spec>` CLI command)
+- `SelfImproveRunner` — the outer self-improvement loop: load traces → compute rolling HQS → run `DiagnosticAnalyzer` → call `SpecRefiner` (frontier LLM rewrites targeted YAML sections) → auto-apply revised spec → write audit log (`armature improve <spec>` CLI command)
 - `TraceExporter` — the fine-tuning bridge: export high-quality traces (by quorum score) as SFT training data (chat/alpaca/sharegpt formats) or DPO preference pairs (chosen/rejected matched by stage) for LoRA fine-tuning smaller models (`armature export-traces` CLI command)
 - Failure signatures section in `armature report` output — makes diagnostic analysis human-readable
 
@@ -158,19 +158,19 @@ Finally, the paper addresses governance: not all spec changes should be auto-app
 
 The paper that answered the most practical question about the self-improvement loop: does the model proposing spec changes need to be as powerful as the model executing them? The answer is no — and the margin is surprisingly small. Across benchmarks, medium-tier evolvers achieved within 3.1 percentage points of frontier-tier evolvers at substantially lower cost. This validated using a cheaper model for `SpecRefiner` without sacrificing improvement quality.
 
-The paper also introduced two new harness quality metrics that fill gaps in the original IHR formula:
+The paper also introduced two new harness quality metrics that fill gaps in the original HQS formula:
 
 **Skill-Load Rate (SLR)** measures whether declared tools and skills are actually invoked during execution. A stage that declares `web_search` in its role configuration but never calls it has a role description that fails to prompt tool use — a detectable and fixable problem. SLR = 0 on a stage that always no-ops its declared skills is a distinct failure mode from `output_invalid` or `stage_failed`, requiring a specific fix (rewrite the description to explicitly name the tool and the condition under which it should be called).
 
 **Harness-Following Rate (HFR)** measures whether models adhere to harness instructions on the first attempt. A stage that always hits `on_fail.loop` before succeeding still counts as a success — but it reveals that the base-tier model needed extra prodding, which is a quality signal worth tracking. HFR is the fraction of stage executions that required zero escalations.
 
-Both metrics are now components of IHR, updating the formula from a 4-component weighted sum to a 5-component sum.
+Both metrics are now components of HQS, updating the formula from a 4-component weighted sum to a 5-component sum.
 
 **Armature contributions from this paper:**
 - `SpecRefiner` explicitly uses a medium-tier model by default; docstring updated to reflect the intentional cost-quality trade-off
 - `low_skill_activation` added to `DiagnosticCode` — fires when a stage's `TraceRecord.tools_declared` is non-empty but `tools_called` is empty across a run; `SpecRefiner` system prompt updated to advise rewriting the description to prompt tool use
 - `TraceRecord.tools_declared` and `tools_called` fields — populated by `LLMNode` from the stage's declared tools and the tool names actually invoked during the ReAct loop
-- HFR (Harness-Following Rate) added as the fifth IHR component; weights updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr); both `TraceStore.compute_ihr` and `SelfImproveRunner._compute_ihr` updated
+- HFR (Harness-Following Rate) added as the fifth HQS component; weights updated from `0.40/0.30/0.20/0.10` to `0.35/0.25/0.20/0.10/0.10` (output_valid / success / quorum / latency / hfr); both `TraceStore.compute_hqs` and `SelfImproveRunner._compute_hqs` updated
 
 ### Paper 9: Self-Harness — Safer and Smarter Spec Evolution
 **June 2026** — [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1
@@ -391,7 +391,7 @@ This is the strategic differentiator. Each loop makes the others more effective.
    │  Inner Loop (in-run)  │          │  Outer Loop (cross-run)      │
    │  post_run stage runs  │          │  armature improve <spec>     │
    │  after DAG completes  │          │  1. Load 200 recent traces   │
-   │  — sees _transcript   │          │  2. Compute rolling IHR      │
+   │  — sees _transcript   │          │  2. Compute rolling HQS      │
    │  — sees _diagnostics  │          │  3. DiagnosticAnalyzer       │
    │  — proposes immediate │          │  4. SpecRefiner (frontier    │
    │    refinements        │          │     LLM) → revised YAML      │
@@ -451,9 +451,9 @@ All planned phases are complete. 1,388 tests, passing.
 | Session log (JSONL append) | ✅ Done | Full event history per run |
 | Artifact store | ✅ Done | File-backed output persistence |
 | TraceStore (SQLite) | ✅ Done | Structured per-stage trace records |
-| IHR computation | ✅ Done | 4-component quality metric: output validity, success rate, quorum, latency |
+| HQS computation | ✅ Done | 4-component quality metric: output validity, success rate, quorum, latency |
 | Harness optimizer workflow | ✅ Done | 3-stage: analyze → propose → evaluate |
-| A/B spec testing | ✅ Done | IHR-based comparison |
+| A/B spec testing | ✅ Done | HQS-based comparison |
 | Multi-iteration optimizer (`run_loop`) | ✅ Done | `ProposalStore` SQLite history; causal reasoning |
 | Lifecycle hooks — pre/post stage and tool | ✅ Done | `HookDecision.BLOCK` / `ALLOW` / `REQUIRE_APPROVAL` |
 | Declarative safety rules (YAML) | ✅ Done | `ToolSafetyRule` + `SafetyCondition`; 6 operators; 5 actions: block/warn/log/require_approval/allow |
@@ -471,13 +471,13 @@ All planned phases are complete. 1,388 tests, passing.
 | Declarative evaluation (eval stages) | ✅ Done | Inline scoring/comparison stages in spec |
 | Prompt bootstrapping | ✅ Done | `PromptBootstrapper` injects high-quality trace examples as few-shot prompts |
 | AutoHarness synthesis loop | ✅ Done | NL → spec → run → evaluate → refine; iterates to threshold |
-| `armature report` command | ✅ Done | Human-readable run report: IHR, stage results, failure signatures |
+| `armature report` command | ✅ Done | Human-readable run report: HQS, stage results, failure signatures |
 | `DiagnosticAnalyzer` | ✅ Done | 4-code failure signature taxonomy extracted from trace records |
 | `MemoryConfig.fresh` | ✅ Done | Skip loading prior memories for a clean-slate run |
 | `Stage.post_run` | ✅ Done | In-run refiner stage: receives `_transcript` + `_diagnostics` after DAG completes |
 | `TraceExporter` | ✅ Done | Export traces as SFT (chat/alpaca/sharegpt) or DPO pairs; `armature export-traces` |
 | `SelfImproveRunner` | ✅ Done | Outer self-improvement loop; auto-applies revised spec; `armature improve` |
-| Improvement audit log | ✅ Done | JSONL log of every analysis cycle (IHR, diagnostics, applied flag) |
+| Improvement audit log | ✅ Done | JSONL log of every analysis cycle (HQS, diagnostics, applied flag) |
 | Prediction-verification loop | ✅ Done | `RefinerResult` carries `predicted_fixes`/`predicted_regressions`; each cycle verifies prior predictions against observed diagnostic shift |
 | Memory staleness detection | ✅ Done | `MemoryStore.staleness_threshold_days` (default 30 days); stale entries surface as `set[tuple]`; `_stale_memory_keys` injected into run context |
 | Context provenance tracking | ✅ Done | `TraceRecord.inputs_provenance: dict[str, str]`; every context key labelled `"user_input"`, `"stage:{id}"`, `"memory"`, or `"stale_memory"`; persisted to SQLite |
@@ -487,9 +487,9 @@ All planned phases are complete. 1,388 tests, passing.
 | Component governance | ✅ Done | `_classify_changes()` auto-applies safe changes; writes `{spec}.pending.yaml` for structural changes; `ImprovementReport.requires_review` + `pending_path` |
 | Rich dashboard (`armature dashboard`) | ✅ Done | 4-panel Rich terminal dashboard: health strip + sparkline, stage breakdown table, improvement timeline, safety & governance audit; `--watch`, `--format json`, `--last N` |
 | LLM response caching | ✅ Done | `LLMCache` SQLite-backed, content-addressed by SHA-256(model + messages + output_mode); `Harness` creates at `~/.armature/llm_cache.sqlite`; `--no-cache` flag on `armature run` |
-| Audit replay (`armature replay`) | ✅ Done | Reads TraceStore records for any `run_id`; displays Rich stage table + aggregate IHR; `--traces` flag for custom DB |
-| Trace-triggered behaviors | ✅ Done | `BehaviorRule` / `BehaviorRegistry`; `make_default_behavior_registry()` pre-loads `ihr_feedback` (fires when IHR < 0.75); evaluated post-run inside `Harness.run()` |
-| Auto self-improvement (`--auto-improve`) | ✅ Done | `armature run <spec> --auto-improve`: after every run, checks rolling IHR against 0.75 threshold; if below, calls `SelfImproveRunner.analyze()` and auto-applies safe revisions or stages structural changes to `{spec}.pending.yaml` for review |
+| Audit replay (`armature replay`) | ✅ Done | Reads TraceStore records for any `run_id`; displays Rich stage table + aggregate HQS; `--traces` flag for custom DB |
+| Trace-triggered behaviors | ✅ Done | `BehaviorRule` / `BehaviorRegistry`; `make_default_behavior_registry()` pre-loads `hqs_feedback` (fires when HQS < 0.75); evaluated post-run inside `Harness.run()` |
+| Auto self-improvement (`--auto-improve`) | ✅ Done | `armature run <spec> --auto-improve`: after every run, checks rolling HQS against 0.75 threshold; if below, calls `SelfImproveRunner.analyze()` and auto-applies safe revisions or stages structural changes to `{spec}.pending.yaml` for review |
 | Static spec risk score (KYA-inspired) | ✅ Done | `armature validate` now computes a [0–100] risk score per spec: +4/tool-call stage, +15/no judge, +8/require_approval rule, +6/fan-out stage, −10/strict mode; tier LOW/MEDIUM/HIGH/CRITICAL surfaced with factor breakdown |
 | Rogue signal counter (KYA-inspired) | ✅ Done | `RogueSignalCounter` passed to `SafetyHookBuilder`; incremented on every `ToolBlocked` or `require_approval` refusal; `run_summary` event includes `rogue_signals` count; CLI prints `N blocked` when non-zero |
 | Only-tighten safety rule validation (KYA-inspired) | ✅ Done | `validate_spec()` now flags `CONFLICTING_SAFETY_RULES` when an `allow` rule targets the same tool as a `block` rule (or wildcard block) — enforces the only-tighten composition principle |
@@ -499,7 +499,7 @@ All planned phases are complete. 1,388 tests, passing.
 ```bash
 armature run <spec>                  # execute a workflow from YAML
 armature run <spec> --no-cache       # run without LLM response cache
-armature run <spec> --auto-improve   # run then auto-apply spec improvements if IHR < 0.75
+armature run <spec> --auto-improve   # run then auto-apply spec improvements if HQS < 0.75
 armature validate <spec>             # validate spec without running
 armature new [output]                # interactive spec creation wizard
 armature serve                       # start HTTP service
@@ -580,10 +580,10 @@ safety_rules:
 Every harness run automatically writes to the `TraceStore`. After a handful of runs:
 
 ```bash
-armature report --run-id <id>    # human-readable; shows IHR + failure signatures
+armature report --run-id <id>    # human-readable; shows HQS + failure signatures
 ```
 
-IHR is a 0–1 composite: 40% output validity, 30% stage success rate, 20% quorum score, 10% latency score. A well-tuned workflow should score above 0.80.
+HQS is a 0–1 composite: 40% output validity, 30% stage success rate, 20% quorum score, 10% latency score. A well-tuned workflow should score above 0.80.
 
 ### Step 6: Run the Self-Improvement Loop
 
@@ -600,7 +600,7 @@ cat my-workflow.improve_log.jsonl | jq .
 armature improve my-workflow.yaml --no-apply
 ```
 
-The runner computes rolling IHR across your last 200 traces. If IHR is below target (default: 0.90), it calls `DiagnosticAnalyzer` to identify the dominant failure signature, then invokes a frontier LLM (`SpecRefiner`) to produce a targeted YAML revision — enriching stage descriptions, relaxing output schemas, or increasing retry limits based on the specific failure code. The revised spec is auto-applied and the original is overwritten in place.
+The runner computes rolling HQS across your last 200 traces. If HQS is below target (default: 0.90), it calls `DiagnosticAnalyzer` to identify the dominant failure signature, then invokes a frontier LLM (`SpecRefiner`) to produce a targeted YAML revision — enriching stage descriptions, relaxing output schemas, or increasing retry limits based on the specific failure code. The revised spec is auto-applied and the original is overwritten in place.
 
 For a richer optimizer experience (multi-iteration with causal history):
 
@@ -649,13 +649,13 @@ The pipeline: frontier Opus runs as judge → high-quality traces accumulate →
 | NLAH 7-component spec format | Fully implemented | ✅ |
 | Four role types with model routing | Fully implemented | ✅ |
 | `on_fail` recovery loops | Fully implemented | ✅ |
-| IHR quality metric | `compute_ihr` + rolling IHR in `SelfImproveRunner` | ✅ |
+| HQS quality metric | `compute_hqs` + rolling HQS in `SelfImproveRunner` | ✅ |
 | Trace collection | Structured, queryable `TraceStore` | ✅ |
 | Parallel fan-out / fan-in | `fan_out`, `fan_in`, `partition_key` | ✅ |
 | Cross-stage typed signatures | Spec-parse-time enforcement | ✅ |
 | **Paper 2 — Meta-Harness** | | |
 | Outer optimization loop (single-shot) | `OptimizerRunner.optimize()` | ✅ |
-| A/B spec testing | IHR-based comparison | ✅ |
+| A/B spec testing | HQS-based comparison | ✅ |
 | Metric-driven optimization | Caller-supplied `metric_fn` | ✅ |
 | Multi-iteration optimizer with history | `run_loop()` + `ProposalStore` | ✅ |
 | Prompt bootstrapping from traces | `PromptBootstrapper` | ✅ |
@@ -698,7 +698,7 @@ The pipeline: frontier Opus runs as judge → high-quality traces accumulate →
 | **ActiveGraph — Event-Sourced Execution ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))** | | |
 | LLM response caching | `LLMCache`; SHA-256 keyed; `--no-cache` flag | ✅ |
 | Audit replay | `armature replay <run_id>`; reads `TraceStore.query_by_run()`; Rich stage table | ✅ |
-| Trace-triggered behaviors | `BehaviorRule` / `BehaviorRegistry`; `ihr_feedback` built-in | ✅ |
+| Trace-triggered behaviors | `BehaviorRule` / `BehaviorRegistry`; `hqs_feedback` built-in | ✅ |
 | Auto self-improvement | `--auto-improve` on `armature run`; closes behavior → improve loop | ✅ |
 | Fork-and-diff | Branch at historical stage; diff downstream outputs | 📋 Roadmap |
 | True re-execution replay | Reconstruct + re-run from LLM cache | 📋 Roadmap |
@@ -724,10 +724,10 @@ Three of these concepts are now implemented in Armature. Two (fork-and-diff, ful
 
 **Armature contributions from this project:**
 - `LLMCache` (`armature/cache/llm_cache.py`) — content-addressed SQLite cache keyed by SHA-256 of (model, messages, output_mode); `Harness` creates one at `~/.armature/llm_cache.sqlite` by default; `--no-cache` flag on `armature run` disables it
-- `armature replay <run_id>` — CLI command that reads all traces for a historical run via `TraceStore.query_by_run()`, displays a Rich stage-by-stage table, and prints the aggregate IHR; `--traces` flag for custom DB path
+- `armature replay <run_id>` — CLI command that reads all traces for a historical run via `TraceStore.query_by_run()`, displays a Rich stage-by-stage table, and prints the aggregate HQS; `--traces` flag for custom DB path
 - `BehaviorRule` / `BehaviorRegistry` — reactive pattern-matching layer on top of trace history; a `BehaviorRule` carries a `pattern: Callable[[list[TraceRecord]], bool]` and a `handler`; `BehaviorRegistry.evaluate()` fires matching handlers after each run; built into `Harness.run()` post-run
-- `_ihr_feedback_pattern` built-in behavior — fires when rolling IHR over recent traces falls below 0.75 and trace count ≥ 3; prints a suggestion to run `armature improve`; registered by default via `make_default_behavior_registry()`
-- `--auto-improve` flag on `armature run` — closes the reactive loop: after each run, Armature checks rolling IHR; if below 0.75, calls `SelfImproveRunner.analyze()` automatically, applies safe revisions in-place, or writes structural proposals to `{spec}.pending.yaml` for human review before applying
+- `_hqs_feedback_pattern` built-in behavior — fires when rolling HQS over recent traces falls below 0.75 and trace count ≥ 3; prints a suggestion to run `armature improve`; registered by default via `make_default_behavior_registry()`
+- `--auto-improve` flag on `armature run` — closes the reactive loop: after each run, Armature checks rolling HQS; if below 0.75, calls `SelfImproveRunner.analyze()` automatically, applies safe revisions in-place, or writes structural proposals to `{spec}.pending.yaml` for human review before applying
 
 ### Open-Source Project: KYA — Know Your Agents (Trust Layer for Autonomous Systems)
 **Kolawole Quadri (Veldt Labs), May 2026** — [arXiv:2605.25376](https://arxiv.org/abs/2605.25376) / `veldt-kya` on PyPI — Apache 2.0
@@ -756,7 +756,7 @@ Stages that repeatedly hit `HIGH_ESCALATION` (calling a higher-tier model via `o
 `STAGE_FAILED` diagnostics on a stage indicate the current `on_fail.loop.max` isn't high enough. The refiner increases it, adding retry budget where statistically needed. Stages that never use retries get trimmed to reduce unnecessary latency.
 
 **Judge criteria enrichment → better quality discrimination**
-When a judge stage's quorum scores cluster near 0.5 (effectively a coin flip), the `LOW_CONFIDENCE` diagnostic fires. The refiner adds explicit evaluation criteria to the judge's role description — specific rubrics, score anchors, tiebreaker logic — that force sharper, more consistent judgment. IHR's quorum component rises as a result.
+When a judge stage's quorum scores cluster near 0.5 (effectively a coin flip), the `LOW_CONFIDENCE` diagnostic fires. The refiner adds explicit evaluation criteria to the judge's role description — specific rubrics, score anchors, tiebreaker logic — that force sharper, more consistent judgment. HQS's quorum component rises as a result.
 
 The distinction between iteration and retry reflects a deeper design principle: the YAML spec should declare *intent*, not *mechanism*. `on_fail.loop` declares "this might fail, try again." `loop` declares "do this repeatedly until a condition is met." Conflating the two forces workflow authors to encode iteration intent in retry semantics — using undefined-on-first-attempt variables and inverted until conditions. Separate declarations make the spec self-documenting and eliminate the semantic gap between what the author means and what the runtime does.
 
@@ -833,13 +833,13 @@ The async HTTP service and LangGraph sidecar pattern complete the integration st
 
 With all nine papers and the AGT framework implemented, the harness now has:
 - **Execution**: DAG orchestration, four role types, parallel fan-out (including consensus synthesis), guided JSON output, model-tier auto-escalation
-- **Quality**: IHR metric, consensus deliberation, output schema validation, declarative evaluation stages, post-condition verification
+- **Quality**: HQS metric, consensus deliberation, output schema validation, declarative evaluation stages, post-condition verification
 - **Safety**: fail-closed strict mode, five rule actions including human approval, reversibility-based blocking, `ToolBlocked` non-retryable exception
 - **Observability**: tamper-evident trace records with inputs hash, policy version, and per-key provenance; OpenTelemetry; run reports with failure signatures; drift score for regression detection
 - **Memory**: cross-run persistence, staleness detection, `_stale_memory_keys` warnings, knowledge extraction
 - **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, causal 3-tuple attribution, declared editable surfaces, K-proposal diversity with regression gating, prediction-verification accounting, component governance, SFT/DPO trace export
 
-The eighth paper ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1, "Harness Updating Is Not Harness Benefit") addressed a key question about the improvement loop itself: does the evolver need to be as powerful as the executor? The answer is no. The paper shows ≤3.1pp quality difference between frontier and medium-tier evolvers, meaning the `SpecRefiner` can run at medium-tier without quality loss. The paper also introduced two new metrics: Skill-Load Rate (SLR), which measures whether declared tools/skills are actually invoked during execution, and Harness-Following Rate (HFR), which measures whether models adhere to harness instructions on the first attempt. Both are now tracked: `low_skill_activation` is a new `DiagnosticCode` fired when SLR is zero (tools declared but never called), and HFR is the fifth component of the IHR formula (updated weights: `0.35/0.25/0.20/0.10/0.10`).
+The eighth paper ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1, "Harness Updating Is Not Harness Benefit") addressed a key question about the improvement loop itself: does the evolver need to be as powerful as the executor? The answer is no. The paper shows ≤3.1pp quality difference between frontier and medium-tier evolvers, meaning the `SpecRefiner` can run at medium-tier without quality loss. The paper also introduced two new metrics: Skill-Load Rate (SLR), which measures whether declared tools/skills are actually invoked during execution, and Harness-Following Rate (HFR), which measures whether models adhere to harness instructions on the first attempt. Both are now tracked: `low_skill_activation` is a new `DiagnosticCode` fired when SLR is zero (tools declared but never called), and HFR is the fifth component of the HQS formula (updated weights: `0.35/0.25/0.20/0.10/0.10`).
 
 The ninth paper ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1, "Self-Harness") asked a different question: given that we can diagnose and propose spec changes, how do we make the proposal process *safer and smarter*? Self-Harness introduces four mechanisms that Armature adopted directly. First, causal 3-tuple failure attribution — each diagnostic now carries a `(terminal_cause, causal_status, mechanism)` triple that distinguishes *what* broke from *whose fault it is* from *how it happened*, giving the refiner enough signal to propose structurally targeted fixes rather than generic prompt rewrites. Second, declared editable surfaces — a `self_improvement.editable_surfaces` spec field that bounds what the refiner is allowed to change; surfaces outside the declared set are named in the system prompt as explicitly locked, reducing hallucinated structural modifications. Third, K-proposal diversity — the refiner generates multiple candidates in parallel, each steered by a different diversity hint, and the candidate whose predicted fixes most overlap the active diagnostics is selected; ensemble generation consistently finds better proposals than single-shot refinement. Fourth, held-out trace-split regression gating — stages that have no current diagnostics are treated as a held-out set; proposals that touch those healthy stages are filtered as regression risks before selection, a practical adaptation of the Self-Harness held-in/held-out acceptance criterion to the Armature trace-based setting.
 

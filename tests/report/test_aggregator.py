@@ -185,7 +185,7 @@ class TestLoadImprovementCycles:
             "timestamp": "2026-05-26T10:00:00Z",
             "workflow_name": "wf",
             "n_traces": 20,
-            "ihr_before": 0.72,
+            "hqs_before": 0.72,
             "needs_improvement": True,
             "applied": True,
             "requires_review": False,
@@ -201,7 +201,7 @@ class TestLoadImprovementCycles:
         cycles = load_improvement_cycles(log)
         assert len(cycles) == 1
         c = cycles[0]
-        assert c.ihr_before == pytest.approx(0.72)
+        assert c.hqs_before == pytest.approx(0.72)
         assert c.applied is True
         assert c.requires_review is False
         assert c.drift_score == pytest.approx(0.1)
@@ -210,12 +210,12 @@ class TestLoadImprovementCycles:
     def test_multiple_cycles_ordered_newest_first(self, tmp_path):
         log = tmp_path / "wf.improve_log.jsonl"
         entries = [
-            {"timestamp": "2026-05-24T00:00:00Z", "ihr_before": 0.60, "applied": False,
+            {"timestamp": "2026-05-24T00:00:00Z", "hqs_before": 0.60, "applied": False,
              "requires_review": False, "drift_score": 0.0, "needs_improvement": True,
              "n_traces": 5, "diagnostics": [], "predicted_fixes": [],
              "predicted_regressions": [], "verified_fixes": [], "missed_predictions": [],
              "unexpected_regressions": [], "workflow_name": "wf"},
-            {"timestamp": "2026-05-26T00:00:00Z", "ihr_before": 0.80, "applied": True,
+            {"timestamp": "2026-05-26T00:00:00Z", "hqs_before": 0.80, "applied": True,
              "requires_review": False, "drift_score": 0.0, "needs_improvement": True,
              "n_traces": 10, "diagnostics": [], "predicted_fixes": [],
              "predicted_regressions": [], "verified_fixes": [], "missed_predictions": [],
@@ -224,14 +224,14 @@ class TestLoadImprovementCycles:
         log.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
         cycles = load_improvement_cycles(log)
         # Newest first
-        assert cycles[0].ihr_before > cycles[1].ihr_before
+        assert cycles[0].hqs_before > cycles[1].hqs_before
 
     def test_requires_review_cycle_detected(self, tmp_path):
         log = tmp_path / "wf.improve_log.jsonl"
         entry = {
             "timestamp": "2026-05-26T00:00:00Z",
             "workflow_name": "wf", "n_traces": 5,
-            "ihr_before": 0.65, "needs_improvement": True,
+            "hqs_before": 0.65, "needs_improvement": True,
             "applied": False, "requires_review": True,
             "drift_score": 0.0, "diagnostics": [],
             "predicted_fixes": [], "predicted_regressions": [],
@@ -309,7 +309,7 @@ class TestLoadSafetyStats:
 # ── DashboardData ─────────────────────────────────────────────────────────────
 
 class TestDashboardData:
-    def test_ihr_trend_empty_when_no_cycles(self):
+    def test_hqs_trend_empty_when_no_cycles(self):
         data = DashboardData(
             workflow_name="wf",
             total_runs=0,
@@ -317,10 +317,10 @@ class TestDashboardData:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[],
+            hqs_trend=[],
             last_run_id=None,
         )
-        assert data.ihr_trend == []
+        assert data.hqs_trend == []
 
     def test_health_status_green_above_085(self):
         data = DashboardData(
@@ -330,10 +330,10 @@ class TestDashboardData:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[0.90],
+            hqs_trend=[0.90],
             last_run_id="r1",
         )
-        assert data.current_ihr == pytest.approx(0.90)
+        assert data.current_hqs == pytest.approx(0.90)
         assert data.health_color == "green"
 
     def test_health_status_yellow_between_070_085(self):
@@ -344,7 +344,7 @@ class TestDashboardData:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[0.75],
+            hqs_trend=[0.75],
             last_run_id="r1",
         )
         assert data.health_color == "yellow"
@@ -357,12 +357,12 @@ class TestDashboardData:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[0.55],
+            hqs_trend=[0.55],
             last_run_id="r1",
         )
         assert data.health_color == "red"
 
-    def test_ihr_delta_computed_from_last_two_cycles(self):
+    def test_hqs_delta_computed_from_last_two_cycles(self):
         data = DashboardData(
             workflow_name="wf",
             total_runs=10,
@@ -370,7 +370,7 @@ class TestDashboardData:
             stage_stats={},
             improvement_cycles=[],
             safety_stats=load_safety_stats([]),
-            ihr_trend=[0.70, 0.75],  # [older, newer]
+            hqs_trend=[0.70, 0.75],  # [older, newer]
             last_run_id="r1",
         )
-        assert data.ihr_delta == pytest.approx(0.05, abs=0.001)
+        assert data.hqs_delta == pytest.approx(0.05, abs=0.001)

@@ -1,12 +1,12 @@
 # Quorum Scoring in Armature
 
-A judge's self-reported confidence — per-stage signal for IHR and the self-improvement loop.
+A judge's self-reported confidence — per-stage signal for HQS and the self-improvement loop.
 
 ---
 
 Quorum score is a number between 0.0 and 1.0 that a judge stage emits alongside its primary output. It answers the question: *how confident is this judge in what it just said?* A score of 0.95 means the evaluation is well-supported and the output can be trusted. A score of 0.5 means the judge is effectively guessing — the input is ambiguous, the evidence is thin, or the criteria are insufficiently defined.
 
-The harness extracts this number automatically from the judge's output and records it as a field on the `TraceRecord`. It flows into IHR, into the `DiagnosticAnalyzer`, and — when low enough — into the self-improvement loop. The workflow author does not wire any of this up; declaring `type: judge` and returning a `confidence` field is sufficient.
+The harness extracts this number automatically from the judge's output and records it as a field on the `TraceRecord`. It flows into HQS, into the `DiagnosticAnalyzer`, and — when low enough — into the self-improvement loop. The workflow author does not wire any of this up; declaring `type: judge` and returning a `confidence` field is sufficient.
 
 ---
 
@@ -80,12 +80,12 @@ The calibration guidance is not decoration — it teaches the judge how to disti
 
 ---
 
-## The connection to IHR
+## The connection to HQS
 
-IHR is a weighted composite of five signals derived from trace data:
+HQS is a weighted composite of five signals derived from trace data:
 
 ```
-IHR = 0.35 × output_valid_rate
+HQS = 0.35 × output_valid_rate
     + 0.25 × success_rate
     + 0.20 × avg_quorum_score
     + 0.10 × latency_score
@@ -94,9 +94,9 @@ IHR = 0.35 × output_valid_rate
 
 `avg_quorum_score` is the mean quorum score across all judge stage traces for the workflow. Stages without a quorum score (non-judge stages, or judge stages that returned no recognized confidence field) contribute `0.5` to this average — the noise floor, treated as neither confident nor completely uncertain.
 
-A workflow with three judge stages that consistently score `0.9`, `0.85`, and `0.88` contributes roughly `0.88` to the `avg_quorum_score` component — a healthy contribution to IHR. A workflow whose judges consistently score `0.5–0.55` is contributing near-zero signal quality on a component that carries 20% of the total weight.
+A workflow with three judge stages that consistently score `0.9`, `0.85`, and `0.88` contributes roughly `0.88` to the `avg_quorum_score` component — a healthy contribution to HQS. A workflow whose judges consistently score `0.5–0.55` is contributing near-zero signal quality on a component that carries 20% of the total weight.
 
-Quorum score is a per-run, per-stage value. `avg_quorum_score` is the aggregate across all judge traces accumulated for the workflow. A single ambiguous run does not drag IHR down; a pattern of low-confidence runs does.
+Quorum score is a per-run, per-stage value. `avg_quorum_score` is the aggregate across all judge traces accumulated for the workflow. A single ambiguous run does not drag HQS down; a pattern of low-confidence runs does.
 
 ---
 
@@ -120,7 +120,7 @@ A judge that returns `"confidence": 0.5` on every run is not broken. It is telli
 
 **The judge description lacks evaluation criteria.** The most common cause. The judge has been given a task but no rubric for how to assess it. Fix: add explicit criteria to the role description (see the calibration guidance example above). The self-improvement loop will propose this automatically when it detects the pattern — but you can also fix it directly in the YAML without waiting for a loop cycle.
 
-**The upstream worker is not producing enough evidence.** The judge is confident in its uncertainty — the analyst's output is thin, missing key fields, or too vague for the judge to work from. Look at the `output_valid_rate` for the upstream worker stage in the same IHR breakdown. If the worker is also degraded, fix the worker first. A better-described worker gives the judge more material; quorum scores often recover without any change to the judge itself.
+**The upstream worker is not producing enough evidence.** The judge is confident in its uncertainty — the analyst's output is thin, missing key fields, or too vague for the judge to work from. Look at the `output_valid_rate` for the upstream worker stage in the same HQS breakdown. If the worker is also degraded, fix the worker first. A better-described worker gives the judge more material; quorum scores often recover without any change to the judge itself.
 
 **The task is genuinely ambiguous.** Some inputs have no clear answer. A contract that falls exactly on the line between medium and high risk, a customer message that is simultaneously positive and negative — these are real cases. A persistent `0.55–0.65` quorum score on genuinely hard inputs is not a prompt engineering failure; it is an honest signal. The right response here is to route low-confidence judge outputs to a human review queue rather than trying to prompt-engineer certainty out of the model.
 
@@ -159,7 +159,7 @@ Both contribute to quality assessment, but they answer different questions:
 | Granularity | Per-judge-trace | Per-fan-out-stage |
 | Requires | `type: judge` + confidence field | `fan_in: consensus` |
 | Measures | Model's epistemic confidence | Run-to-run consistency |
-| IHR component | `avg_quorum_score` | `avg_quorum_score` |
+| HQS component | `avg_quorum_score` | `avg_quorum_score` |
 
 A judge stage with `fan_in: consensus` produces both: the harness aggregates N judge runs into one consensus output, and the resulting output includes the judge's declared confidence in that consensus. Both are recorded.
 
@@ -184,7 +184,7 @@ TraceRecord(
 )
 ```
 
-If the judge returns no recognized numeric field in `[0.0, 1.0]`, `quorum_score` is `None` and that trace contributes `0.5` to `avg_quorum_score` — the noise-floor default. A judge that never emits a confidence field is indistinguishable from a consistently uncertain judge from the IHR perspective.
+If the judge returns no recognized numeric field in `[0.0, 1.0]`, `quorum_score` is `None` and that trace contributes `0.5` to `avg_quorum_score` — the noise-floor default. A judge that never emits a confidence field is indistinguishable from a consistently uncertain judge from the HQS perspective.
 
 ---
 

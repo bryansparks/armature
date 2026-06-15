@@ -418,7 +418,7 @@ def _make_improve_report(*, applied=False, needs_improvement=True, requires_revi
         workflow_name="echo-workflow",
         spec_path=ECHO,
         n_traces=5,
-        ihr_before=0.65,
+        hqs_before=0.65,
         needs_improvement=needs_improvement,
         applied=applied,
         requires_review=requires_review,
@@ -458,7 +458,7 @@ def test_auto_improve_prints_applied_message():
 
 
 def test_auto_improve_prints_healthy_when_no_improvement_needed():
-    """When IHR is fine, output says workflow is healthy."""
+    """When HQS is fine, output says workflow is healthy."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     report = _make_improve_report(needs_improvement=False, applied=False)
