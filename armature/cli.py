@@ -430,6 +430,56 @@ def validate(
     raise typer.Exit(1)
 
 
+def _print_provider_error(exc: Exception) -> bool:
+    """Translate common LLM-provider failures into a concise, actionable message.
+
+    Returns True if the error was recognized and a friendly message printed
+    (caller should exit non-zero); False if the caller should re-raise so genuine
+    bugs still surface a full traceback.
+    """
+    try:
+        import litellm
+    except Exception:  # pragma: no cover - litellm always present at runtime
+        litellm = None  # type: ignore
+
+    name = type(exc).__name__
+    msg = str(exc) or ""
+    first_line = next((ln for ln in msg.splitlines() if ln.strip()), name)
+
+    def _types(*attrs):
+        if litellm is None:
+            return tuple()
+        return tuple(t for t in (getattr(litellm, a, None) for a in attrs) if isinstance(t, type))
+
+    auth_types = _types("AuthenticationError", "PermissionDeniedError")
+    if (auth_types and isinstance(exc, auth_types)) or "api key" in msg.lower() or "api_key" in msg.lower():
+        typer.echo(
+            "\n✗ No valid API key for the model provider.\n"
+            "  Set the key that matches your spec's model_tiers provider, e.g.:\n"
+            "      export ANTHROPIC_API_KEY=sk-...     # or OPENAI_API_KEY / GEMINI_API_KEY\n"
+            "  No key? Run entirely locally with Ollama — see the “No API key?” section in the README.",
+            err=True,
+        )
+        return True
+
+    conn_types = _types("APIConnectionError", "Timeout", "APITimeoutError", "ServiceUnavailableError")
+    if conn_types and isinstance(exc, conn_types):
+        typer.echo(
+            f"\n✗ Could not reach the model provider ({name}).\n"
+            f"  {first_line}\n"
+            "  If you're using Ollama, make sure it's running (`ollama serve`) and the model is pulled.",
+            err=True,
+        )
+        return True
+
+    rate_types = _types("RateLimitError")
+    if rate_types and isinstance(exc, rate_types):
+        typer.echo(f"\n✗ Provider rate limit reached. {first_line}", err=True)
+        return True
+
+    return False
+
+
 @app.command()
 def run(
     spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
@@ -483,7 +533,14 @@ def run(
         harness._on_event = _make_on_event(quiet, fan_out_ids=fan_out_ids)
         return await harness.run(parsed_inputs, force=force)
 
-    result = asyncio.run(_run())
+    try:
+        result = asyncio.run(_run())
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if _print_provider_error(exc):
+            raise typer.Exit(1)
+        raise
 
     _show_primary_output(harness._spec, result, quiet)
     _save_last_result(harness._spec.name, result)

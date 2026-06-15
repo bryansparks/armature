@@ -41,11 +41,14 @@ With optional extras:
 ```bash
 pip install "armature-agents[service]"   # FastAPI HTTP service (armature serve)
 pip install "armature-agents[telemetry]" # OpenTelemetry export
+pip install "armature-agents[wizard]"    # interactive spec wizard (armature new)
 ```
 
 `[service]` adds FastAPI and uvicorn, needed only if you run `armature serve` to expose workflows as an HTTP API. The core `armature run` command works without it.
 
 `[telemetry]` adds the OpenTelemetry SDK for span export to OTLP backends (Jaeger, Honeycomb, etc.). Without it, `armature.telemetry` degrades silently to no-ops — traces are written to the local SQLite store regardless.
+
+`[wizard]` adds `questionary` for the interactive `armature new` spec-creation wizard. Without it, the other commands work normally and `armature new` will tell you to install the extra.
 
 Verify:
 
@@ -60,21 +63,39 @@ export ANTHROPIC_API_KEY=sk-...
 # or OPENAI_API_KEY, or configure any litellm-supported provider
 ```
 
-**No API key?** Armature runs against local models via [Ollama](https://ollama.com) — no key, no cloud, nothing leaves your machine:
+**No API key?** Armature runs against local models via [Ollama](https://ollama.com) — no key, no cloud, nothing leaves your machine. Pull a model, save the spec below as `hello_ollama.yml`, and run it:
 
 ```bash
-ollama pull llama3.2
-armature run examples/00_hello_ollama.yml --input topic="what a DAG is"
+ollama pull llama3.2        # any model from `ollama list` works
 ```
 
-The only difference is the model tier in the spec:
-
 ```yaml
+# hello_ollama.yml
+name: hello_world_local
+version: "1.0"
+
 model_tiers:
   local:
     provider: ollama
-    model: llama3.2        # any model from `ollama list`
+    model: llama3.2
+
+stages:
+  - id: explainer
+    role:
+      name: Explainer
+      type: worker
+      model_tier: local
+      description: |
+        Explain the following topic clearly and concisely in 3-5 sentences.
+    output_mode: text
+    depends_on: []
 ```
+
+```bash
+armature run hello_ollama.yml --input topic="what a DAG is"
+```
+
+> This same spec ships as `examples/00_hello_ollama.yml` once you clone the repo.
 
 ---
 
@@ -128,6 +149,8 @@ asyncio.run(main())
 armature run my_workflow.yml --input text="Your content here..."
 ```
 
+> This spec uses Anthropic (`ANTHROPIC_API_KEY`). To run on OpenAI or a local model instead, change the `model_tiers` block — see **No API key?** above for the Ollama version.
+
 ---
 
 ## CLI
@@ -142,8 +165,8 @@ armature doctor                               # environment health check
 armature serve                                # start HTTP service (requires armature[service])
 armature serve --specs-dir ./specs/          # serve with named workflow registry (/workflows API)
 armature optimize <spec>                      # single-shot meta-harness optimizer
-armature improve <spec>                       # analyze traces, auto-apply spec improvements
-armature improve <spec> --apply-pending       # promote a staged pending.yaml revision
+armature improve <spec>                       # analyze traces, propose + auto-apply a spec improvement
+armature improve <spec> --no-apply            # propose only; review the diff before applying
 armature report --run-id <id>                 # per-run text report with failure signatures
 armature replay <run_id>                      # display a recorded run stage-by-stage
 armature dashboard <spec>                     # Rich 4-panel aggregate health dashboard
@@ -265,11 +288,11 @@ Armature is built from nine academic papers, one industry governance framework, 
 
 **[NLAH] Natural-Language Agent Harnesses** — Tsinghua University, March 2026 ([arXiv:2603.25723](https://arxiv.org/abs/2603.25723))
 
-Establishes the architectural model. NLAH defines seven mandatory harness components (Contracts, Roles, Stages, Adapters, State, Failure Taxonomy, File-backed State) and shows that workflows defined in structured natural language outperform code-based equivalents on complex benchmark tasks (47.2% vs. 30.4% on OSWorld). It also defines IHR (Implicit Harness Rating), a composite quality metric for scoring run quality objectively, and specifies parallel fan-out as a core orchestration primitive.
+Establishes the architectural model. NLAH defines six core harness components (contracts, roles, stage structure, adapters/scripts, state semantics, and a failure taxonomy) and shows that workflows defined in structured natural language outperform code-based equivalents on complex benchmark tasks (47.2 vs. 30.4 on OSWorld). It also specifies parallel fan-out as a core orchestration primitive.
 
 **[Meta-Harness] Automated Optimization End-to-End** — Stanford University, March 2026 ([arXiv:2603.28052](https://arxiv.org/abs/2603.28052))
 
-The paper behind the optimizer. Meta-Harness introduces an outer optimization loop where a frontier model reads execution traces and proposes improvements to the harness spec itself. Key finding: giving the optimizer access to the *history* of prior proposals — what was tried, whether it was accepted, and what score it achieved — improves accuracy from 41% to 57% by enabling causal reasoning. Implemented in `ProposalStore` and `run_loop()`.
+The paper behind the optimizer. Meta-Harness introduces an outer optimization loop where a frontier model reads execution traces and proposes improvements to the harness spec itself. Key finding: giving the optimizer access to full execution traces — not just pass/fail scores — raises best-run accuracy from 41.3% to 56.7% by enabling causal reasoning about why runs failed. Armature keeps a `ProposalStore` of prior proposals and re-runs the loop via `run_loop()`.
 
 **[AutoHarness] LLM-Synthesized Harnesses** — February 2026 ([arXiv:2603.03329](https://arxiv.org/abs/2603.03329))
 
@@ -277,11 +300,11 @@ Demonstrates that LLMs can iteratively write their own harness code and produce 
 
 **[AgentSpec] Runtime Enforcement for Safe Agents** — March 2025 ([arXiv:2503.18666](https://arxiv.org/abs/2503.18666))
 
-Introduces a declarative rule language for constraining agent behavior at runtime. Rules are composable, lightweight (sub-millisecond evaluation), and LLM-generatable. Armature implements the full enforcement architecture: pre/post-tool hooks wired into the engine and a declarative condition DSL (`ToolSafetyRule` + `SafetyCondition`) written directly in YAML.
+Introduces a declarative rule language for constraining agent behavior at runtime. Rules are composable, lightweight (millisecond-scale evaluation), and LLM-generatable. Armature implements the full enforcement architecture: pre/post-tool hooks wired into the engine and a declarative condition DSL (`ToolSafetyRule` + `SafetyCondition`) written directly in YAML.
 
 **[Continual Harness] Reset-Free Self-Improvement** — May 2026 ([arXiv:2605.09998](https://arxiv.org/abs/2605.09998))
 
-Formalizes the two-loop self-improvement design: an inner loop (a `post_run` refiner stage that sees the full transcript after the DAG completes) and an outer loop (`SelfImproveRunner` — load traces → diagnose → propose YAML revision → auto-apply). Introduces the 4-code failure taxonomy (`stage_failed`, `output_invalid`, `low_confidence`, `high_escalation`) and the fine-tuning bridge: high-quality judge traces exported as SFT/DPO training data.
+Formalizes the two-loop self-improvement design: an inner loop (a `post_run` refiner stage that sees the full transcript after the DAG completes) and an outer loop (`SelfImproveRunner` — load traces → diagnose → propose YAML revision → auto-apply). Its emphasis on recurring failure signatures informs Armature's own diagnostic taxonomy (`stage_failed`, `output_invalid`, `low_confidence`, `high_escalation`, `low_skill_activation`), and its fine-tuning bridge — high-quality judge traces exported as SFT/DPO training data — is implemented directly.
 
 **[AHE] Agentic Harness Engineering** — April 2026 ([arXiv:2604.25850](https://arxiv.org/abs/2604.25850))
 
@@ -289,15 +312,15 @@ The accountability paper. AHE introduces the prediction-verification loop: every
 
 **[System Scaling] From Model Scaling to System Scaling** — May 2026 ([arXiv:2605.26112](https://arxiv.org/abs/2605.26112))
 
-Identifies three system-level failure modes: stale memory reaching LLMs without warning, context values flowing between stages without provenance, and tool side effects going unverified. Adds drift score (regression detection across improvement cycles) and component governance (auto-apply vs. human-review classification for spec changes).
+Identifies three system-level failure modes — which it terms "exposure without access," "stale-but-confident," and "confident-but-unchecked": memory that is present but unreachable, aging memory trusted without warning, and tool side effects assumed rather than verified. Armature answers with staleness penalties, context provenance tracking, post-condition verification, its own drift score (regression detection across improvement cycles), and component governance (auto-apply vs. human-review classification for spec changes).
 
 **[AGT] Microsoft Agent Governance Toolkit** — 2025
 
 Five governance primitives borrowed directly: reversibility classification for every tool call (`FULL / PARTIAL / NONE`), tamper-evident SHA-256 hashing of trace inputs and the governing policy, a `require_approval` gate wired into the tool-call path, and `safety_mode: strict` (fail-closed — deny on no-match).
 
-**[ActiveGraph]** — yoheinakajima, May 2026 ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
+**[The Log is the Agent]** — Yohei Nakajima, May 2026 ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
 
-Graph-memory agent architecture introducing content-addressed caching of LLM responses and event-triggered reactive behaviors. Adopted concepts: SHA-256 cache keying by model + messages + kwargs (`LLMCache`), audit replay from the trace store (`armature replay`), and the `BehaviorRule`/`BehaviorRegistry` hook layer for pattern-triggered post-run behaviors.
+Event-sourced, graph-memory agent architecture with content-addressed caching of LLM responses and event-triggered reactive behaviors. Adopted concepts: SHA-256 cache keying by model + messages + kwargs (`LLMCache`), audit replay from the trace store (`armature replay`), and the `BehaviorRule`/`BehaviorRegistry` hook layer for pattern-triggered post-run behaviors.
 
 **[KYA] Know Your Agents** — Veldt Labs, May 2026 ([arXiv:2605.25376](https://arxiv.org/abs/2605.25376))
 
@@ -309,16 +332,16 @@ Governance layer operating at definition-time (static risk scoring), runtime-tru
 
 | Source | Concept | Status |
 |---|---|---|
-| NLAH | 7-component spec, four role types, IHR, fan-out/fan-in | ✅ |
+| NLAH | Declarative NL spec, four role types, fan-out/fan-in | ✅ |
 | Meta-Harness | Single-shot + multi-iteration optimizer, proposal history, prompt bootstrapping | ✅ |
 | AutoHarness | Harness-as-verifier, NL-to-spec synthesis (`SpecDrafter`), `AutoHarness` loop | ✅ |
 | AgentSpec | Pre/post-tool hooks, declarative safety DSL (6 operators, 5 actions) | ✅ |
-| Continual Harness | 4-code failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
+| Continual Harness | Diagnostic failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
 | Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th IHR component, SLR `low_skill_activation` diagnostic | ✅ |
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
-| ActiveGraph | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
+| The Log is the Agent | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
 | KYA | Static spec risk score, rogue signal counter, only-tighten safety rule validation | ✅ |
 
 ---
@@ -410,7 +433,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Response stage** | Mark one text-mode LLM stage as `response_stage: true` to enable token streaming; the HTTP service forwards each token to the SSE stream immediately and fires a `response_stage_complete` event so clients can render the answer before background stages finish |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
-| **IHR** | Implicit Harness Rating — 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, per [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
+| **IHR** | Implicit Harness Rating — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
@@ -517,3 +540,7 @@ docs/               # Full documentation (see index below)
 | [CHANGELOG](CHANGELOG.md) | Release history |
 | [ROADMAP](ROADMAP.md) | Where Armature is headed |
 | [SECURITY](SECURITY.md) | Reporting vulnerabilities |
+
+---
+
+**Learn more:** full docs, examples, and the story behind Armature live at **[armature.now](https://armature.now)**.

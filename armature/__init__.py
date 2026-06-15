@@ -5,5 +5,5 @@ litellm.set_verbose = False
 from armature.runtime.engine import Harness
 from armature.spec.models import HarnessSpec
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = ["Harness", "HarnessSpec"]

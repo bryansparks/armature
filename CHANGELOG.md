@@ -10,6 +10,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.1] — 2026-06-15
+
+### Changed
+
+- `armature run` now translates common LLM-provider failures (missing/invalid API key, unreachable provider, rate limit) into a concise, actionable one-line message instead of dumping a raw multi-hundred-line litellm traceback. Unexpected errors still surface a full traceback.
+
+### Docs
+
+- README: documented the `[wizard]` extra (required by `armature new`); corrected the `armature improve` flags (`--apply`/`--no-apply`); made the no-API-key Ollama quickstart self-contained so it works for pip-only installs; added a provider-key note to the Quick start.
+
+---
+
 ## [0.3.0] — 2026-06-13
 
 ### Added
