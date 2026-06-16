@@ -467,6 +467,20 @@ Ready-to-use deliberation patterns in `armature/templates/`:
 
 ---
 
+## Built with Armature
+
+Open-source applications built on Armature — reference implementations you can clone, run, and adapt:
+
+| Project | What it does | Key Armature features |
+|---------|-------------|----------------------|
+| [Research](https://github.com/bryansparks/armature-research) | Given any topic, plans search queries, fetches web/Reddit/YouTube sources in parallel via a looping child workflow, and produces a structured Markdown research briefing. Supports iterative deepening across multiple runs. | `subagent_spec` (child workflow loop), multiple fan-out stages, tool call stages, continuation, checkpoint, strict safety mode |
+| [Argus](https://github.com/bryansparks/argus) | Scans a code repository for security vulnerabilities and ISO/IEC 25010 quality issues, analyzing up to 40 source files in parallel and producing prioritized hardening and improvement reports. | Fan-out (up to 40 parallel file scans), `skip_if`, continuation, checkpoint, two independent workflow types |
+| [Sentinel](https://github.com/bryansparks/armature-sentinel) | Weekly Python dependency digest — scans a project manifest, fetches PyPI data for all dependencies in parallel, classifies each update by severity (security / breaking / feature / patch), and writes a prioritized Markdown report. | Fan-out/fan-in, strict safety mode, continuation, `skip_if`, direct tool call stages |
+
+Each repo is a self-contained reference implementation: a YAML workflow spec, Python tool modules, and a CLI runner. Use them as starting points for your own Armature-based applications.
+
+---
+
 ## Project layout
 
 ```
