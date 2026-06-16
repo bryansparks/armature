@@ -282,7 +282,7 @@ Each use case is a YAML workflow spec + a small set of Python tool modules. The 
 
 ## Research foundation
 
-Armature is built from nine academic papers, one industry governance framework, and one open-source agent architecture project, all published between February and June 2026. Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
+Armature is built from nine academic papers, one industry governance framework, and one open-source agent architecture project — all but one published this year (each paper's date is listed below). Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
 
 ### The papers
 
