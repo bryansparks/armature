@@ -574,7 +574,14 @@ def run(
             improve_runner = SelfImproveRunner(spec, target_hqs=0.75)
             return await improve_runner.analyze()
 
-        report = asyncio.run(_improve())
+        try:
+            report = asyncio.run(_improve())
+        except Exception as exc:
+            if _print_provider_error(exc):
+                typer.echo("Auto-improve skipped — spec unchanged.", err=True)
+            else:
+                typer.echo(f"Auto-improve error: {exc}", err=True)
+            return
 
         if not report.needs_improvement:
             typer.echo("Auto-improve: workflow is healthy — no improvement needed.")
@@ -623,6 +630,7 @@ def optimize(
         help="Path to trace database",
     ),
     apply: bool = typer.Option(False, "--apply", help="Apply the proposed diff if accepted"),
+    model: str = typer.Option(None, "--model", help="LLM for the optimizer (default: anthropic/claude-opus-4-7; override with ARMATURE_REFINER_MODEL env var)"),
 ):
     """Run the Meta-Harness optimizer on a workflow spec."""
     if not spec.exists():
@@ -632,11 +640,18 @@ def optimize(
     from armature.optimizer.runner import OptimizerRunner
 
     async def _run():
-        runner = OptimizerRunner(target_spec_path=spec, trace_db_path=trace_db)
+        runner = OptimizerRunner(target_spec_path=spec, trace_db_path=trace_db, model_override=model)
         return await runner.optimize()
 
     typer.echo(f"Analyzing traces for: {spec.name}")
-    result = asyncio.run(_run())
+    try:
+        result = asyncio.run(_run())
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if _print_provider_error(exc):
+            raise typer.Exit(1)
+        raise
 
     if result is None:
         typer.echo("Not enough trace data to optimize. Run more workflows first.")
@@ -865,7 +880,7 @@ def improve(
     trace_db: Path = typer.Option(
         None, "--traces", help="Path to traces database (default: ~/.armature/traces.db)"
     ),
-    model: str = typer.Option("claude-sonnet-4-6", "--model", help="LLM used by SpecRefiner"),
+    model: str = typer.Option(None, "--model", help="LLM for the SpecRefiner (default: auto-detected from the spec's top tier; override with ARMATURE_REFINER_MODEL env var)"),
     target_hqs: float = typer.Option(0.90, "--target-hqs", help="HQS threshold below which improvement is triggered"),
     min_traces: int = typer.Option(3, "--min-traces", help="Minimum traces required before analysis"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
@@ -893,7 +908,14 @@ def improve(
         return await runner.analyze()
 
     typer.echo(f"Analyzing: {spec.name}")
-    report = asyncio.run(_run())
+    try:
+        report = asyncio.run(_run())
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if _print_provider_error(exc):
+            raise typer.Exit(1)
+        raise
 
     typer.echo(f"  traces: {report.n_traces}  HQS: {f'{report.hqs_before:.3f}' if report.hqs_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}")
 

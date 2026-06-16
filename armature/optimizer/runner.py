@@ -47,6 +47,7 @@ class OptimizerRunner:
         optimizer_spec_path: Path | str | None = None,
         metric_fn: Callable[[dict[str, Any]], float] | None = None,
         proposal_db_path: Path | str | None = None,
+        model_override: str | None = None,
     ):
         self._target_spec_path = Path(target_spec_path)
         self._trace_db_path = Path(trace_db_path)
@@ -55,6 +56,7 @@ class OptimizerRunner:
         )
         self._metric_fn = metric_fn
         self._proposal_db_path = Path(proposal_db_path) if proposal_db_path else None
+        self._model_override = model_override
 
     async def optimize(self) -> OptimizationResult | None:
         traces = await self._load_traces()
@@ -138,9 +140,17 @@ class OptimizerRunner:
         return await store.query(workflow_name=workflow_name, limit=20)
 
     async def _run_optimizer_workflow(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        import os
         from armature.runtime.engine import Harness
         from armature.spec.loader import load_spec
+        from armature.spec.models import ModelTierConfig
         spec = load_spec(self._optimizer_spec_path)
+        # Allow callers or ARMATURE_REFINER_MODEL env var to override the optimizer model
+        model_str = self._model_override or os.environ.get("ARMATURE_REFINER_MODEL")
+        if model_str:
+            parts = model_str.split("/", 1)
+            provider, model = (parts[0], parts[1]) if len(parts) == 2 else ("anthropic", model_str)
+            spec.model_tiers.frontier = ModelTierConfig(provider=provider, model=model)
         harness = Harness(spec=spec)
         return await harness.run(inputs)
 

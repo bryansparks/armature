@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,39 @@ from armature.state.traces import TraceStore, HqsResult, TraceRecord
 
 async def llm_completion(**kwargs) -> Any:
     return await litellm.acompletion(**kwargs)
+
+
+# ── Refiner model resolution ──────────────────────────────────────────────────
+# Priority: ARMATURE_REFINER_MODEL env var → spec's top tier → fallback
+
+_REFINER_ENV_VAR = "ARMATURE_REFINER_MODEL"
+_TIER_PRIORITY = ("frontier", "large", "medium", "small", "tiny")
+
+
+def _resolve_refiner_model(spec: HarnessSpec) -> str:
+    """Return the litellm model string to use for the SpecRefiner.
+
+    Checks ARMATURE_REFINER_MODEL env var first, then falls back to the spec's
+    highest available tier so improve/optimize work with whatever provider the
+    user already configured (OpenRouter, OpenAI, Ollama, etc.).
+    """
+    env_val = os.environ.get(_REFINER_ENV_VAR)
+    if env_val:
+        return env_val
+
+    tiers = spec.model_tiers
+    cfg = None
+    for name in _TIER_PRIORITY:
+        cfg = getattr(tiers, name, None)
+        if cfg is not None:
+            break
+    if cfg is None and tiers.__pydantic_extra__:
+        cfg = next(iter(tiers.__pydantic_extra__.values()), None)
+
+    if cfg is None:
+        return "claude-sonnet-4-6"  # last-resort fallback
+
+    return f"{cfg.provider}/{cfg.model}" if cfg.provider else cfg.model
 
 
 # ── SpecRefiner ───────────────────────────────────────────────────────────────
@@ -412,7 +446,7 @@ class SelfImproveRunner:
         spec_path: Path | str,
         trace_db: Path | str | None = None,
         *,
-        model: str = "claude-sonnet-4-6",
+        model: str | None = None,
         target_hqs: float = 0.90,
         min_traces: int = 3,
         auto_apply: bool = True,
@@ -424,7 +458,7 @@ class SelfImproveRunner:
             self._trace_db = Path(trace_db)
         else:
             self._trace_db = Path("~/.armature/traces.db").expanduser()
-        self._model = model
+        self._model = model  # None → resolved from spec + env in analyze()
         self._target_hqs = target_hqs
         self._min_traces = min_traces
         self._auto_apply = auto_apply
@@ -440,6 +474,8 @@ class SelfImproveRunner:
         prev_entry = self._load_last_log_entry()
 
         spec = load_spec(self._spec_path)
+        # Resolve refiner model lazily so it picks up the spec's own provider/model
+        _model = self._model or _resolve_refiner_model(spec)
         store = TraceStore(self._trace_db)
 
         traces = await store.query(workflow_name=spec.name, limit=200)
@@ -480,7 +516,7 @@ class SelfImproveRunner:
         )
 
         if needs_improvement:
-            refiner = SpecRefiner(self._model)
+            refiner = SpecRefiner(_model)
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
             hqs_obj = self._compute_hqs(traces) if traces else None
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]

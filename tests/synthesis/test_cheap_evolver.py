@@ -8,14 +8,23 @@ from armature.synthesis.improve import SpecRefiner, SelfImproveRunner
 
 
 def test_self_improve_runner_default_model_is_not_frontier(tmp_path):
-    """SelfImproveRunner's default model must NOT be the frontier (Opus) model."""
+    """SelfImproveRunner must resolve a non-frontier (non-Opus) model by default.
+
+    Per arXiv:2605.30621v1, medium-tier models suffice for spec evolution.
+    When the spec has no model tiers, the resolver falls back to claude-sonnet-4-6,
+    not the frontier Opus model.
+    """
+    from armature.synthesis.improve import _resolve_refiner_model
+    from armature.spec.loader import load_spec
+
     spec_file = tmp_path / "wf.yaml"
     spec_file.write_text(
         "name: test-wf\nversion: '1.0'\nstages:\n  - id: s1\n    role:\n      name: W\n      type: worker\n      description: do it\n"
     )
-    runner = SelfImproveRunner(spec_file)
-    assert "opus" not in runner._model.lower(), (
-        f"Default model '{runner._model}' appears to be frontier (Opus); "
+    spec = load_spec(spec_file)
+    resolved = _resolve_refiner_model(spec)
+    assert "opus" not in resolved.lower(), (
+        f"Resolved model '{resolved}' appears to be frontier (Opus); "
         "per arXiv:2605.30621v1, medium-tier suffices for spec evolution"
     )
 
