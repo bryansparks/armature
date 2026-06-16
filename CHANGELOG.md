@@ -10,6 +10,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.4] — 2026-06-15
+
+### Fixed
+
+- **`armature improve` / `armature optimize` crashed for non-Anthropic users** — both commands hardcoded `claude-sonnet-4-6` as the refiner model, raising an auth error for anyone without `ANTHROPIC_API_KEY`. `SelfImproveRunner` now resolves the refiner model lazily from the spec's own top tier (`frontier` → `large` → `medium` → `small` → `tiny` → first custom tier), so improvement runs on whatever provider the workflow already uses. The `ARMATURE_REFINER_MODEL` env var overrides this for users who want a dedicated refiner model. `OptimizerRunner` receives the same treatment via an `ARMATURE_REFINER_MODEL` env var that patches the optimizer's internal spec at runtime. Both commands also gain `--model` CLI flags for explicit override.
+- **Missing friendly-error handling on `improve` / `optimize` / `--auto-improve`** — auth and connectivity failures in these commands emitted a raw traceback instead of the friendly `✗ No valid API key` message that `armature run` already showed. All three paths now route through `_print_provider_error`.
+
+---
+
 ## [0.3.3] — 2026-06-15
 
 ### Fixed
