@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.5] — 2026-06-17
+
+### Added
+
+- **`agent_library` + `Stage.agent`** — specs can now reference pre-built agent bundles instead of inlining a role. Declare bundles in `agent_library` (each entry points to an `agent.yaml` file with a `role` and optional `skill_library`); stages reference them via `agent: <key>`. At load time, `loader._resolve_agent_references` copies the bundle's role onto the stage, merges bundle skills into `spec.skill_library` (existing keys win), normalises skill paths to absolute, and clears `stage.agent`. Zero engine changes — the resolved spec is indistinguishable from a hand-authored one. This is the first building block for Armature Cabinet, a future registry of shareable, versioned agent definitions.
+
+---
+
 ## [0.3.4] — 2026-06-15
 
 ### Fixed
