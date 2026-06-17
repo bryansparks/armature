@@ -1,0 +1,14 @@
+role:
+  name: Echo
+  type: worker
+  description: |
+    Repeat the input topic back clearly and concisely.
+    Topic: {{ topic }}
+
+skill_library:
+  plain_language:
+    id: plain_language
+    description: Write in plain language — short sentences, active voice, no jargon.
+    content: |
+      Use clear, simple language. Prefer active voice and short sentences.
+      Avoid jargon unless the audience expects it.

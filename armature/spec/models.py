@@ -78,6 +78,8 @@ class Signature(BaseModel):
 
 
 class Role(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     name: str
     type: RoleType
     description: str
@@ -174,6 +176,7 @@ class Stage(BaseModel):
     response_stage: bool = False       # when True, stream tokens to caller in real time
     sandbox_image: str | None = None   # per-stage Docker image override; falls back to sandbox.image
     loop: IterationConfig | None = None  # deliberate iteration (not retry)
+    agent: str | None = None            # agent_library key; resolved to role at load time, then cleared
 
 
 class TraceConfig(BaseModel):
@@ -208,6 +211,8 @@ class ToolCallConfig(BaseModel):
 
 
 class SkillDef(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     id: str
     description: str
     content: str | None = None   # inline skill text
@@ -216,6 +221,24 @@ class SkillDef(BaseModel):
     def model_post_init(self, __context: Any) -> None:
         if self.content is None and self.path is None:
             raise ValueError(f"SkillDef '{self.id}' must have either 'content' or 'path'")
+
+
+class AgentRef(BaseModel):
+    """Reference to a compiled agent bundle in the agent_library section."""
+    model_config = ConfigDict(extra="allow")
+
+    path: str                  # path to agent.yaml relative to the spec file
+    version: str | None = None  # optional semver constraint; informational only
+
+
+class CompiledAgent(BaseModel):
+    """Contents of an agent bundle file (agent.yaml).
+
+    Defines a reusable role and an optional set of skills that are merged
+    into the referencing spec's skill_library when the agent is resolved.
+    """
+    role: Role
+    skill_library: dict[str, SkillDef] = Field(default_factory=dict)
 
 
 class MCPServerConfig(BaseModel):
@@ -316,6 +339,7 @@ class HarnessSpec(BaseModel):
     triggers: list[TriggerConfig] = Field(default_factory=list)
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
+    agent_library: dict[str, AgentRef] = Field(default_factory=dict)
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)
