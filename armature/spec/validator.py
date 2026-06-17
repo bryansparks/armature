@@ -82,11 +82,12 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             stage.adapter is not None,
             stage.gate is not None,
             stage.subagent_spec is not None,
+            stage.agent is not None,  # resolved to role at load time; valid before resolution
         ])
         if not has_exec:
             errors.append(SpecError(
                 code="NO_EXECUTION_TYPE",
-                message="Stage has no role, tool_call, adapter, gate, or subagent_spec — it will never execute",
+                message="Stage has no role, tool_call, adapter, gate, subagent_spec, or agent — it will never execute",
                 stage_id=stage.id,
             ))
 
