@@ -984,6 +984,7 @@ def watch(
     port: int = typer.Option(8081, "--port", "-p", help="Port for webhook triggers"),
     traces: Path = typer.Option(None, "--traces", help="Path to traces SQLite database"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress run output"),
+    tune: bool = typer.Option(False, "--tune", help="Run tune daemon that optimizes the spec between triggers (skeleton)"),
 ):
     """Run trigger listeners for a spec. Blocks until Ctrl-C."""
     if not spec.exists():
@@ -1002,6 +1003,11 @@ def watch(
     if not loaded.triggers:
         typer.echo("No triggers defined in spec — nothing to watch.", err=True)
         raise typer.Exit(1)
+
+    if tune:
+        # Skeleton: tune daemon would periodically improve the spec from traces.
+        typer.echo("Tune daemon mode is a skeleton — full implementation pending.")
+        raise typer.Exit(0)
 
     async def _run_fn(payload: dict) -> None:
         harness = Harness(spec=loaded, traces_db=traces)
@@ -1533,6 +1539,86 @@ def adapter_promote(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
     typer.echo(f"Promoted {name}@{version} to latest")
+
+
+@adapter_app.command("merge")
+def adapter_merge(
+    refs: list[str] = typer.Argument(..., help="Source adapters as name@version"),
+    name: str = typer.Option(..., "--name", "-n", help="Name for the merged adapter"),
+    base_model: str | None = typer.Option(None, "--base-model", help="Base model (defaults to first source adapter's base model)"),
+    rank: int = typer.Option(16, "--rank", help="LoRA rank"),
+    alpha: int = typer.Option(32, "--alpha", help="LoRA alpha"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Merge multiple registered adapters into a single artifact."""
+    from armature.adapters.backends.merge import MergedAdapterFactory
+    from armature.adapters.factory import AdapterRequest
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+
+    if len(refs) < 2:
+        typer.echo("At least two source adapters are required", err=True)
+        raise typer.Exit(code=1)
+
+    resolved_base = base_model
+    if resolved_base is None:
+        first_name, first_version = refs[0].split("@", 1)
+        resolved_base = registry.get(first_name, first_version).metadata.base_model
+
+    factory = MergedAdapterFactory(registry=registry)
+    request = AdapterRequest(
+        name=name,
+        base_model=resolved_base,
+        rank=rank,
+        alpha=alpha,
+        target_modules=["q_proj", "v_proj"],
+        extra={"adapter_refs": refs},
+    )
+
+    try:
+        job = asyncio.run(_poll_adapter_job(factory, request))
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Merged adapter {job.metadata.name}@{job.metadata.version} "
+        f"at {job.artifact_path}"
+    )
+
+
+@adapter_app.command("eval")
+def adapter_eval(
+    name: str = typer.Argument(..., help="Adapter name"),
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    version: str | None = typer.Option(None, "--version", "-v", help="Adapter version (defaults to latest)"),
+    stage_id: str | None = typer.Option(None, "--stage-id", help="Stage to score (defaults to first judge/leaf)"),
+    input_kv: list[str] = typer.Option([], "--input", help="Runtime inputs as key=value"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Evaluate an adapter by comparing workflow runs with and without it."""
+    from armature.adapters.eval import evaluate_adapter
+    from armature.adapters.registry import AdapterRegistry
+
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(code=1)
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    inputs = parse_inputs(input_kv)
+
+    try:
+        result = asyncio.run(evaluate_adapter(registry, name, version, spec, inputs, stage_id))
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Evaluated {result.adapter_name}@{result.adapter_version}: "
+        f"with={result.with_adapter_score}, without={result.without_adapter_score}, "
+        f"delta={result.delta}"
+    )
 
 
 if __name__ == "__main__":

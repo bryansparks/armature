@@ -407,7 +407,7 @@ Armature is the **execution layer** — the first component in a larger system d
                                                     └─────────────────────┘
 
   ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,432 tests passing.
+  All four loops are implemented. 1,512 tests passing.
 ```
 
 **The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.

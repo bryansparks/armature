@@ -176,3 +176,144 @@ def test_adapter_list_and_promote(tmp_path):
     lst = runner.invoke(app, ["adapter", "list", "--registry", str(adapters_dir)])
     assert lst.exit_code == 0, lst.output
     assert "tdd@3" in lst.output
+
+
+def test_adapter_merge_command(tmp_path):
+    adapters_dir = tmp_path / "adapters"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "adapter_config.json").write_text("{}")
+    (artifact_dir / "adapter.safetensors").write_bytes(b"X")
+
+    reg1 = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "skill-a", "1", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg1.exit_code == 0, reg1.output
+
+    reg2 = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "skill-b", "1", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg2.exit_code == 0, reg2.output
+
+    merge = runner.invoke(
+        app,
+        [
+            "adapter", "merge",
+            "skill-a@1", "skill-b@1",
+            "--name", "combo",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert merge.exit_code == 0, merge.output
+    assert "Merged adapter combo@1" in merge.output
+
+
+def test_adapter_merge_requires_two_sources(tmp_path):
+    adapters_dir = tmp_path / "adapters"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "adapter_config.json").write_text("{}")
+    (artifact_dir / "adapter.safetensors").write_bytes(b"X")
+
+    reg = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "skill-a", "1", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg.exit_code == 0, reg.output
+
+    merge = runner.invoke(
+        app,
+        ["adapter", "merge", "skill-a@1", "--name", "combo", "--registry", str(adapters_dir)],
+    )
+    assert merge.exit_code == 1
+    assert "At least two source adapters" in merge.output
+
+
+def test_adapter_eval_command(tmp_path):
+    adapters_dir = tmp_path / "adapters"
+    spec = tmp_path / "wf.yaml"
+    spec.write_text(
+        "name: wf\n"
+        "model_tiers:\n"
+        "  small:\n"
+        "    provider: openai\n"
+        "    model: gpt-4o-mini\n"
+        "contracts:\n"
+        "  inputs:\n"
+        "    - name: topic\n"
+        "stages:\n"
+        "  - id: worker\n"
+        "    depends_on: []\n"
+        "    output_mode: text\n"
+        "    role:\n"
+        "      name: W\n"
+        "      type: worker\n"
+        "      description: Write about {{ topic }}\n"
+    )
+
+    # Register a mock adapter so the eval can resolve it.
+    artifact_dir = tmp_path / "src-tdd-1"
+    artifact_dir.mkdir()
+    (artifact_dir / "adapter_config.json").write_text("{}")
+    reg = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "tdd", "1", str(artifact_dir),
+            "--base-model", "gpt-4o-mini",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg.exit_code == 0, reg.output
+
+    call_count = [0]
+
+    def _mock_response(content: str):
+        from unittest.mock import MagicMock
+        r = MagicMock()
+        r.choices = [MagicMock()]
+        r.choices[0].message.content = content
+        r.choices[0].message.tool_calls = None
+        r.usage = MagicMock()
+        r.usage.prompt_tokens = 5
+        r.usage.completion_tokens = 5
+        return r
+
+    import json
+    from unittest.mock import patch
+
+    async def fake_completion(**kwargs):
+        call_count[0] += 1
+        return _mock_response(json.dumps({"content": f"response-{call_count[0]}"}))
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=fake_completion):
+        result = runner.invoke(
+            app,
+            [
+                "adapter", "eval",
+                "tdd", str(spec),
+                "--registry", str(adapters_dir),
+                "--input", "topic=test",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Evaluated tdd@1" in result.output
+    assert call_count[0] == 2
