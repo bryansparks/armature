@@ -105,13 +105,17 @@ def _print_run_header(
     # ── last run timing ──────────────────────────────────────────────────
     if last_run:
         def _fmt_ago(s: float) -> str:
-            if s < 60:   return f"{int(s)}s ago"
-            if s < 3600: return f"{int(s / 60)}m ago"
-            if s < 86400: return f"{int(s / 3600)}h ago"
+            if s < 60:
+                return f"{int(s)}s ago"
+            if s < 3600:
+                return f"{int(s / 60)}m ago"
+            if s < 86400:
+                return f"{int(s / 3600)}h ago"
             return f"{int(s / 86400)}d ago"
 
         def _fmt_dur(s: float) -> str:
-            if s < 60: return f"{s:.0f}s"
+            if s < 60:
+                return f"{s:.0f}s"
             m, sec = divmod(int(s), 60)
             return f"{m}m {sec}s"
 
@@ -395,7 +399,7 @@ def validate(
         raise typer.Exit(1)
 
     from armature.spec.loader import load_spec
-    from armature.spec.validator import validate_spec, SpecValidationError
+    from armature.spec.validator import validate_spec
 
     try:
         loaded = load_spec(spec)
@@ -764,7 +768,6 @@ def replay(
     """Display a recorded run stage-by-stage from the TraceStore."""
     from rich.console import Console
     from rich.table import Table
-    from rich.text import Text
 
     console = Console()
     resolved_traces = traces or Path("~/.armature/traces.db").expanduser()
@@ -1346,6 +1349,89 @@ def dashboard(
     else:
         data = asyncio.run(_load())
         render_terminal(data, console=console)
+
+
+adapter_app = typer.Typer(name="adapter", help="Create and manage LoRA adapters")
+app.add_typer(adapter_app, name="adapter")
+
+
+@adapter_app.command("create")
+def adapter_create(
+    spec: Path = typer.Option(..., "--spec", help="Path to workflow spec YAML"),
+    skill: str = typer.Option(..., "--skill", "-s", help="Skill ID to convert to an adapter"),
+    name: str | None = typer.Option(None, "--name", "-n", help="Adapter name (defaults to skill ID)"),
+    backend: str | None = typer.Option(None, "--backend", "-b", help="Adapter backend to use"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Create a LoRA adapter from a skill document in the spec."""
+    from armature.adapters.backends.mock import MockAdapterFactory
+    from armature.adapters.backends.s2l import S2LSkillAdapterFactory
+    from armature.adapters.factory import AdapterRequest
+    from armature.adapters.registry import AdapterRegistry
+    from armature.spec.loader import load_spec
+
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(code=1)
+
+    harness_spec = load_spec(spec)
+    if skill not in harness_spec.skill_library:
+        typer.echo(f"Skill '{skill}' not found in spec.skill_library", err=True)
+        raise typer.Exit(code=1)
+
+    skill_def = harness_spec.skill_library[skill]
+    factory_cfg = harness_spec.adapter_factory
+    chosen_backend = backend or (factory_cfg.backend if factory_cfg else "mock")
+    base_model = _resolve_adapter_base_model(harness_spec)
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    if chosen_backend == "mock":
+        factory = MockAdapterFactory(registry=registry)
+    elif chosen_backend == "s2l":
+        factory = S2LSkillAdapterFactory(registry=registry)
+    else:
+        typer.echo(f"Unsupported adapter backend '{chosen_backend}'", err=True)
+        raise typer.Exit(code=1)
+
+    request = AdapterRequest(
+        name=name or skill,
+        base_model=base_model,
+        skill=skill_def,
+        rank=factory_cfg.rank if factory_cfg else 16,
+        alpha=factory_cfg.alpha if factory_cfg else 32,
+        target_modules=list(factory_cfg.target_modules if factory_cfg else ["q_proj", "v_proj"]),
+    )
+
+    try:
+        job = asyncio.run(_poll_adapter_job(factory, request))
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Created adapter {job.metadata.name}@{job.metadata.version} "
+        f"at {job.artifact_path}"
+    )
+
+
+async def _poll_adapter_job(factory, request):
+    job = await factory.submit(request)
+    while job.status not in ("done", "failed"):
+        await asyncio.sleep(0.05)
+        job = await factory.poll(job)
+    if job.status == "failed":
+        raise RuntimeError("Adapter creation failed:\n" + "\n".join(job.logs))
+    return job
+
+
+def _resolve_adapter_base_model(harness_spec) -> str:
+    if harness_spec.adapter_factory and harness_spec.adapter_factory.base_model:
+        return harness_spec.adapter_factory.base_model
+    for tier_name in ("small", "medium", "large", "frontier", "tiny"):
+        tier_cfg = getattr(harness_spec.model_tiers, tier_name, None)
+        if tier_cfg is not None and tier_cfg.model:
+            return tier_cfg.model
+    raise typer.BadParameter("No adapter_factory.base_model configured and no model tiers defined")
 
 
 if __name__ == "__main__":
