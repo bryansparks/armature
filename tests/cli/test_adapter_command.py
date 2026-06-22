@@ -136,3 +136,43 @@ def test_adapter_create_requires_skill_or_traces(tmp_path):
     result = runner.invoke(app, ["adapter", "create", "--spec", str(spec)])
     assert result.exit_code == 1
     assert "Either --skill or --traces is required" in result.output
+
+
+def test_adapter_list_and_promote(tmp_path):
+    adapters_dir = tmp_path / "adapters"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "adapter_config.json").write_text("{}")
+    (artifact_dir / "adapter.safetensors").write_bytes(b"X")
+
+    reg = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "tdd", "2", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg.exit_code == 0, reg.output
+
+    reg2 = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "tdd", "3", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg2.exit_code == 0, reg2.output
+
+    promote = runner.invoke(
+        app, ["adapter", "promote", "tdd", "3", "--registry", str(adapters_dir)]
+    )
+    assert promote.exit_code == 0, promote.output
+    assert "Promoted tdd@3" in promote.output
+
+    lst = runner.invoke(app, ["adapter", "list", "--registry", str(adapters_dir)])
+    assert lst.exit_code == 0, lst.output
+    assert "tdd@3" in lst.output

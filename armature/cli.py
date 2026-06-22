@@ -1468,5 +1468,72 @@ def _resolve_adapter_base_model(harness_spec) -> str:
     raise typer.BadParameter("No adapter_factory.base_model configured and no model tiers defined")
 
 
+@adapter_app.command("list")
+def adapter_list(
+    name: str | None = typer.Option(None, "--name", "-n", help="Filter by adapter name"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """List registered adapters and their versions."""
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    rows = list(registry.list(name))
+    if not rows:
+        typer.echo("No adapters found.")
+        return
+    for metadata, artifact_dir in rows:
+        typer.echo(f"{metadata.name}@{metadata.version}  {metadata.base_model}  {artifact_dir}")
+
+
+@adapter_app.command("register")
+def adapter_register(
+    name: str = typer.Argument(..., help="Adapter name"),
+    version: str = typer.Argument(..., help="Adapter version"),
+    path: Path = typer.Argument(..., help="Path to adapter artifact directory"),
+    base_model: str = typer.Option(..., "--base-model", help="Base model the adapter was trained on"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+    rank: int = typer.Option(16, "--rank", help="LoRA rank"),
+    alpha: int = typer.Option(32, "--alpha", help="LoRA alpha"),
+    backend: str = typer.Option("manual", "--backend", help="Backend that produced the adapter"),
+):
+    """Register a pre-trained adapter artifact in the local registry."""
+    from armature.adapters.manifest import AdapterMetadata
+    from armature.adapters.registry import AdapterRegistry
+
+    if not path.exists() or not path.is_dir():
+        typer.echo(f"Artifact directory not found: {path}", err=True)
+        raise typer.Exit(code=1)
+
+    metadata = AdapterMetadata(
+        name=name,
+        version=version,
+        base_model=base_model,
+        rank=rank,
+        alpha=alpha,
+        backend=backend,
+    )
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    registry.register(metadata, path)
+    typer.echo(f"Registered {name}@{version}")
+
+
+@adapter_app.command("promote")
+def adapter_promote(
+    name: str = typer.Argument(..., help="Adapter name"),
+    version: str = typer.Argument(..., help="Version to promote to latest"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Promote an adapter version to `latest`."""
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    try:
+        registry.promote(name, version)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Promoted {name}@{version} to latest")
+
+
 if __name__ == "__main__":
     app()
