@@ -14,11 +14,12 @@ This guide covers everything you need to build agentic workflows with Armature: 
    - [Role type defaults](#role-type-defaults)
 4. [Stage types](#4-stage-types)
    - [LLM stage](#41-llm-stage)
-   - [Script/adapter stage](#42-scriptadapter-stage)
-   - [Human gate](#43-human-gate)
-   - [Direct tool call stage](#44-direct-tool-call-stage)
-   - [Subagent stage](#45-subagent-stage)
-   - [Conditional execution (skip_if)](#46-conditional-stage-execution-skip_if)
+   - [LoRA adapter-backed skills](#42-lora-adapter-backed-skills)
+   - [Script/adapter stage](#43-scriptadapter-stage)
+   - [Human gate](#44-human-gate)
+   - [Direct tool call stage](#45-direct-tool-call-stage)
+   - [Subagent stage](#46-subagent-stage)
+   - [Conditional execution (skip_if)](#47-conditional-stage-execution-skip_if)
 5. [Role types](#5-role-types)
 6. [Output modes](#6-output-modes)
 7. [Context and data flow](#7-context-and-data-flow)
@@ -279,6 +280,8 @@ stages:
 | `role_type_defaults` | object | no | Default tier per role type — workers, judges, etc. (see §3) |
 | `contracts` | object | no | Input/output declarations and run-level limits (see below) |
 | `adapters` | object | no | Script/command adapters (see §4.2) |
+| `skill_library` | object | no | Named skills that can be attached to roles, optionally backed by LoRA adapters |
+| `adapter_factory` | object | no | Configuration for the pluggable LoRA adapter factory |
 | `safety_rules` | list | no | Declarative tool safety rules (see §11) |
 | `safety_mode` | string | no | `"permissive"` (default) or `"strict"` — controls default when no rule matches (see §11) |
 | `memory` | object | no | Cross-run memory capture and injection (see §8) |
@@ -386,6 +389,8 @@ model_tiers:
 | `temperature` | float | Default sampling temperature for this tier. Can be overridden at the role level. |
 | `max_tokens` | int | Default max output tokens for this tier. Can be overridden at the role level. |
 | `tool_calling` | bool | `true` to force native tool injection; `false` to disable it; omit to auto-detect by provider. |
+| `adapter_support` | `dynamic` \| `none` | `dynamic` loads LoRA adapters from the registry and passes them to the provider per request; `none` disables adapter loading (default: `none`) |
+| `adapter_path_template` | string | Optional path template for locating LoRA artifacts served by this tier. Supports `{adapter_name}` and `{adapter_version}` placeholders. |
 
 **Providers:** Any provider supported by [litellm](https://github.com/BerriAI/litellm) works — Anthropic, OpenAI, OpenRouter, Ollama, Azure, Bedrock, and more.
 
@@ -396,6 +401,8 @@ model_tiers:
 **Provider-aware structured output:** Providers that support native structured output (OpenAI, Anthropic) receive a `response_format` kwarg enforcing the output schema. Providers that do not (Ollama) fall back to prompt-guided JSON with automatic extraction. This is re-evaluated per escalation tier, so switching providers mid-escalation uses the right strategy automatically.
 
 **Per-tier tool calling override:** By default the engine injects native tool specs for OpenAI/Anthropic providers and uses prompt-based tool descriptions for Ollama. Set `tool_calling: true` on any Ollama tier running a model that supports tool calling (e.g. Llama 3.1+, Qwen 2.5) to enable native dispatch. Set `tool_calling: false` to disable it for any provider.
+
+**LoRA adapter support:** Set `adapter_support: dynamic` on a tier to enable skill-backed LoRA adapters. The engine resolves `skill.adapter` references from the local adapter registry and passes the artifact path to the provider via provider-specific kwargs (e.g. `extra_body.lora_request` for vLLM, `options.adapter` for Ollama). When a skill's adapter is active, the original skill text is omitted from the prompt to save context window; when the adapter cannot be loaded, the skill's `fallback` policy controls behavior (`text`, `none`, or `fail`).
 
 ### Role type defaults
 
@@ -465,7 +472,34 @@ An LLM stage calls a language model. It requires a `role`.
 | `temperature` | float | no | Sampling temperature — overrides the tier-level default |
 | `max_tokens` | int | no | Max output tokens — overrides the tier-level default |
 | `tools` | list | no | Tool names this stage may call — filters the registry to only these names; empty means no tool access |
-| `skills` | list | no | Skill names |
+| `skills` | list | no | Skill names from `skill_library:` |
+
+**Skills**
+
+A role can reference skills by name. Skills are declared in the top-level
+`skill_library:` block and contain domain instructions that are injected into
+the system prompt. A skill may be:
+
+- **Text-backed** — inline `content:` (or a `path:` to a file) is rendered into
+  the prompt under `## Skills`.
+- **Adapter-backed** — a `skill.adapter` reference loads a LoRA adapter from the
+  local registry. When the tier supports `adapter_support: dynamic`, the adapter
+  is passed to the provider and the skill text is omitted to save context.
+
+```yaml
+skill_library:
+  tdd:
+    id: tdd
+    description: Test-driven development
+    content: |
+      Write a failing test first, then the minimal implementation.
+    adapter:
+      name: tdd
+      version: latest
+      fallback: text
+```
+
+Attach it to a role with `skills: [tdd]`.
 
 **Tool calling**
 
@@ -574,7 +608,90 @@ Post-run stages see `_transcript` (full conversation log) and `_diagnostics` (fa
 
 ---
 
-### 4.2 Script/adapter stage
+### 4.2 LoRA adapter-backed skills
+
+Armature can replace skill text at runtime with a fine-tuned LoRA adapter.
+This is the runtime half of the fine-tuning flywheel: export high-quality
+traces, train a small specialist, register it, and reference it from a skill.
+
+```yaml
+model_tiers:
+  small:
+    provider: vllm
+    model: qwen/qwen2.5-7b
+    adapter_support: dynamic   # required for adapter loading
+    api_base: http://localhost:8000
+
+skill_library:
+  tdd:
+    id: tdd
+    description: Test-driven development workflow
+    content: |
+      Follow test-driven development:
+      1. Write a failing test.
+      2. Write the minimal implementation.
+      3. Refactor.
+    adapter:
+      name: tdd
+      version: latest
+      fallback: text             # text | none | fail
+      inject_metadata: false
+
+stages:
+  - id: coder
+    role:
+      name: TDD Coder
+      type: worker
+      skills: [tdd]
+      description: Implement {{ feature }} using the attached TDD skill.
+    depends_on: []
+```
+
+**How it works:**
+
+1. At runtime, the engine resolves `skill.adapter.name` from the local adapter
+   registry (`~/.armature/adapters`).
+2. If the tier has `adapter_support: dynamic`, the adapter artifact path is
+   passed to the provider in provider-specific kwargs (vLLM uses
+   `extra_body.lora_request`, Ollama uses `options.adapter`).
+3. The original skill `content` is omitted from the prompt when the adapter is
+   active, freeing context window. Set `inject_metadata: true` to keep a short
+   "Active via adapter ..." note.
+4. If the adapter cannot be resolved:
+   - `fallback: text` keeps the original skill text.
+   - `fallback: none` omits the skill.
+   - `fallback: fail` raises a runtime error.
+
+**CLI workflow:**
+
+```bash
+# 1. Train an adapter from a skill document (mock backend = instant placeholder)
+armature adapter create --spec workflow.yml --skill tdd --backend mock
+
+# 2. Train from exported high-quality traces
+armature export-traces --workflow my-wf --output training.jsonl --min-score 0.85
+armature adapter create --spec workflow.yml --traces training.jsonl --backend trace
+
+# 3. Promote the new adapter to latest
+armature adapter promote tdd 2
+
+# 4. Merge two adapters into one artifact
+armature adapter merge tdd@2 security@1 --name tdd-security
+
+# 5. Evaluate whether the adapter improves a target stage
+armature adapter eval tdd workflow.yml --input feature="login" --stage-id judge
+```
+
+**Registry directory:** Adapters are stored under `~/.armature/adapters` by
+default. Override with `--registry /path/to/adapters` on any `armature adapter`
+subcommand, or pass `--registry` to `armature run` to use a custom registry for a
+single run.
+
+See `examples/07_lora_adapter.yml` for a complete runnable spec.
+
+---
+
+### 4.3 Script/adapter stage
 
 A script stage runs a Python function or shell command. It requires an `adapter` defined at the top level and referenced by name.
 

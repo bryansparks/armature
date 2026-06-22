@@ -1,0 +1,147 @@
+# LoRA adapter skill replacement pattern.
+#
+# Demonstrates: skill_library, adapter-backed skills, adapter_support tiers, and
+# the `armature adapter` CLI workflow. The skill text is *replaced* at runtime by
+# a registered LoRA adapter when the tier supports dynamic adapter loading.
+#
+# This example uses the `mock` adapter backend so it validates and runs without
+# a GPU or remote training provider. In production you would:
+#   1. Export high-quality traces:   armature export-traces --workflow my-wf ...
+#   2. Train an adapter:             armature adapter create --spec my-wf.yml \
+#                                      --skill tdd --backend local
+#   3. Register or promote it:       armature adapter promote tdd <version>
+#   4. Run the workflow on a tier with adapter_support: dynamic
+#
+# Pattern:
+#   planner (frontier) → worker (small + tdd adapter) → judge (frontier)
+#
+# The worker stage references a skill (`tdd`) that is backed by an adapter. When
+# the `small` tier has `adapter_support: dynamic`, Armature loads the adapter
+# from the local registry and passes it to the provider (e.g. vLLM, Ollama) via
+# provider-specific kwargs. The original skill text is omitted from the prompt
+# to save context window. If the adapter cannot be resolved, the fallback policy
+# controls behavior: `text` keeps the skill text, `none` omits the skill, `fail`
+# raises an error.
+#
+# Usage:
+#   armature validate examples/07_lora_adapter.yml
+#   armature run examples/07_lora_adapter.yml --input feature="add login"
+#
+# Python:
+#   harness = Harness.from_spec("examples/07_lora_adapter.yml")
+#   result = await harness.run({"feature": "add login"})
+#   print(result["worker"]["content"])
+
+name: lora_skill_adapter
+version: "1.0"
+description: Worker stage uses a LoRA adapter that replaces a skill's text
+
+model_tiers:
+  # `adapter_support: dynamic` tells Armature to resolve skill.adapter refs from
+  # the local registry and pass the artifact path to the provider per request.
+  # Use `none` for tiers that cannot load adapters (the skill text is used, or
+  # the configured fallback policy is applied).
+  small:
+    provider: vllm
+    model: qwen/qwen2.5-7b
+    adapter_support: dynamic
+    api_base: http://localhost:8000
+
+  frontier:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+
+role_type_defaults:
+  worker: small
+  orchestrator: frontier
+  judge: frontier
+  researcher: large
+
+# `adapter_factory` configures how `armature adapter create` trains adapters.
+# `backend: mock` is used here so the example spec validates without a trainer.
+adapter_factory:
+  backend: mock
+  base_model: qwen/qwen2.5-7b
+  rank: 16
+  alpha: 32
+  target_modules: [q_proj, v_proj]
+
+skill_library:
+  tdd:
+    id: tdd
+    description: Test-driven development workflow
+    # Inline content is the fallback text used when the adapter is unavailable
+    # or when the tier has adapter_support: none. It is omitted when the
+    # adapter is active and inject_metadata is false.
+    content: |
+      Follow test-driven development:
+      1. Write a failing test that defines the desired behavior.
+      2. Write the minimal implementation that makes the test pass.
+      3. Refactor while keeping tests green.
+      4. Repeat until the feature is complete.
+    adapter:
+      name: tdd
+      version: latest          # resolves the `latest` pointer in the registry
+      fallback: text             # use content above if the adapter is missing
+      inject_metadata: false     # true → append "Active via adapter ..." note
+
+contracts:
+  inputs:
+    - name: feature
+      type: string
+      description: Feature to implement using the TDD skill
+
+stages:
+  - id: planner
+    role:
+      name: Planner
+      type: orchestrator
+      description: |
+        Plan a small implementation for the feature: {{ feature }}.
+        Return a concise ordered list of implementation steps.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [steps]
+      properties:
+        steps:
+          type: array
+          items:
+            type: string
+          description: Ordered implementation steps
+    depends_on: []
+
+  - id: worker
+    role:
+      name: TDD Worker
+      type: worker
+      description: |
+        Implement the feature "{{ feature }}" following the attached TDD skill.
+        Use the plan: {{ planner.steps }}
+
+        Produce a short design summary plus a list of test cases that should be
+        written before implementation.
+      skills: [tdd]
+    output_mode: text
+    depends_on: [planner]
+
+  - id: judge
+    role:
+      name: Quality Judge
+      type: judge
+      description: |
+        Review the worker's TDD-style plan for {{ feature }}.
+        Score whether the plan actually follows test-first development.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [follows_tdd, confidence]
+      properties:
+        follows_tdd:
+          type: boolean
+        confidence:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+    depends_on: [worker]

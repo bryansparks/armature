@@ -493,6 +493,7 @@ def run(
     output_file: Path = typer.Option(None, "--output", "-o", help="Write result JSON to file"),
     force: bool = typer.Option(False, "--force", help="Ignore checkpoint and rerun all stages"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable LLM response cache"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
     auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when HQS < 0.75"),
 ):
     """Run a workflow from a YAML spec file."""
@@ -503,8 +504,15 @@ def run(
     parsed_inputs = parse_inputs(inputs)
 
     from armature.spec.validator import SpecValidationError
+    from armature.adapters.registry import AdapterRegistry
+
     try:
-        harness = Harness.from_spec(spec, vars=parsed_inputs, use_cache=not no_cache)
+        harness = Harness.from_spec(
+            spec,
+            vars=parsed_inputs,
+            use_cache=not no_cache,
+            adapter_registry=AdapterRegistry(base_dir=registry_dir) if registry_dir else None,
+        )
     except SpecValidationError as exc:
         typer.echo(f"Spec validation failed:\n{exc}", err=True)
         raise typer.Exit(1)

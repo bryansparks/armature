@@ -275,9 +275,15 @@ class Harness:
         return self._spec.name
 
     @classmethod
-    def from_spec(cls, path: Path | str, vars: dict | None = None, use_cache: bool = True) -> "Harness":
+    def from_spec(
+        cls,
+        path: Path | str,
+        vars: dict | None = None,
+        use_cache: bool = True,
+        adapter_registry=None,
+    ) -> "Harness":
         spec = load_spec(path, vars=vars)
-        return cls(spec=spec, use_cache=use_cache)
+        return cls(spec=spec, use_cache=use_cache, adapter_registry=adapter_registry)
 
     async def _ensure_traces(self) -> None:
         if not hasattr(self, "_traces_initialized"):

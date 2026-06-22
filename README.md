@@ -435,6 +435,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
 | **HQS** | Harness Quality Score — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
+| **LoRA adapter skills** | `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter replaces the skill text at runtime; on `none` tiers the skill text is used or the configured `fallback` policy is applied |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
 ---
@@ -454,6 +455,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | `04_fan_out.yml` | Parallel fan-out / fan-in to a single synthesizer |
 | `05_enterprise_slm_tiers.yml` | Multi-tier cost pattern — local SLM workers with a frontier judge |
 | `06_human_in_the_loop.yml` | Confidence-gated human escalation (HITL) |
+| `07_lora_adapter.yml` | **LoRA adapter skills** — replace skill text with a fine-tuned adapter at runtime |
 | `11_iterative_refinement.yml` | Deliberate iteration with `loop:` and an `until:` stop condition |
 | `starter_template.yml` | **Full-featured reference** — every section documented inline, showing model tiers, context filtering, cross-run memory, safety rules, guided JSON, and a human gate |
 
