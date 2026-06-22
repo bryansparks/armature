@@ -18,8 +18,10 @@ class CapturingTrainer:
     def available(self) -> bool:
         return True
 
-    async def train(self, dataset, request, work_dir):
+    async def train(self, dataset, request, work_dir, *, prior_artifact_dir=None):
         self.datasets.append(dataset)
+        self.prior_dirs = getattr(self, "prior_dirs", [])
+        self.prior_dirs.append(prior_artifact_dir)
         self.calls += 1
         (work_dir / "adapter_config.json").write_text("{}")
         (work_dir / "adapter.safetensors").write_bytes(b"MOCK")
@@ -128,3 +130,221 @@ async def test_dpo_format(factory, tmp_path):
     dataset = trainer.datasets[0]
     assert len(dataset.examples) == 1
     assert dataset.examples[0].messages[-1]["content"] == "good"
+
+
+async def test_poll_continual_learning_passes_prior_artifact(factory, tmp_path):
+    f, trainer = factory
+    traces = tmp_path / "traces.jsonl"
+    _write_chat_jsonl(
+        traces,
+        [
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "metadata": {"role_type": "worker", "stage_id": "s1", "score": 0.9},
+            }
+        ],
+    )
+    job = await f.submit(
+        AdapterRequest(name="worker-lora", base_model="m", traces_path=traces)
+    )
+    while job.status != "done":
+        job = await f.poll(job)
+    v1_dir = f._registry.get("worker-lora", "1").artifact_dir
+
+    job2 = await f.submit(
+        AdapterRequest(
+            name="worker-lora",
+            base_model="m",
+            traces_path=traces,
+            continual_learning=True,
+            prior_adapter_version="1",
+        )
+    )
+    while job2.status != "done":
+        job2 = await f.poll(job2)
+    assert job2.status == "done"
+    assert trainer.prior_dirs[-1] == v1_dir
+
+
+async def test_poll_continual_learning_auto_resolves_latest(factory, tmp_path):
+    f, trainer = factory
+    traces = tmp_path / "traces.jsonl"
+    _write_chat_jsonl(
+        traces,
+        [
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "metadata": {"role_type": "worker", "stage_id": "s1", "score": 0.9},
+            }
+        ],
+    )
+    job = await f.submit(
+        AdapterRequest(name="worker-lora", base_model="m", traces_path=traces)
+    )
+    while job.status != "done":
+        job = await f.poll(job)
+    v1_dir = f._registry.get("worker-lora", "1").artifact_dir
+
+    job2 = await f.submit(
+        AdapterRequest(
+            name="worker-lora",
+            base_model="m",
+            traces_path=traces,
+            continual_learning=True,
+        )
+    )
+    while job2.status != "done":
+        job2 = await f.poll(job2)
+    assert job2.status == "done"
+    assert trainer.prior_dirs[-1] == v1_dir
+
+
+async def test_poll_continual_learning_incompatible_prior(factory, tmp_path):
+    f, trainer = factory
+    from armature.adapters.manifest import AdapterMetadata
+
+    prior_dir = tmp_path / "prior"
+    prior_dir.mkdir()
+    (prior_dir / "adapter_config.json").write_text("{}")
+    (prior_dir / "adapter.safetensors").write_bytes(b"MOCK")
+    f._registry.register(
+        AdapterMetadata(
+            name="worker-lora",
+            version="1",
+            base_model="different-model",
+            rank=4,
+            alpha=8,
+            target_modules=["q_proj"],
+            use_dora=False,
+            backend="mock",
+            job_id="prior",
+        ),
+        prior_dir,
+    )
+
+    traces = tmp_path / "traces.jsonl"
+    _write_chat_jsonl(
+        traces,
+        [
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "metadata": {"role_type": "worker", "stage_id": "s1", "score": 0.9},
+            }
+        ],
+    )
+    job = await f.submit(
+        AdapterRequest(
+            name="worker-lora",
+            base_model="m",
+            traces_path=traces,
+            continual_learning=True,
+            prior_adapter_version="1",
+        )
+    )
+    while job.status != "failed":
+        job = await f.poll(job)
+    assert job.status == "failed"
+    assert "incompatible" in "\n".join(job.logs).lower()
+
+
+async def test_preprocess_deduplicates_and_limits(factory, tmp_path):
+    f, trainer = factory
+    traces = tmp_path / "traces.jsonl"
+    _write_chat_jsonl(
+        traces,
+        [
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "metadata": {"role_type": "worker", "score": 0.9},
+            },
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "hi"},
+                ],
+                "metadata": {"role_type": "worker", "score": 0.9},
+            },
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "bye"},
+                    {"role": "assistant", "content": "goodbye"},
+                ],
+                "metadata": {"role_type": "worker", "score": 0.5},
+            },
+        ],
+    )
+    job = await f.submit(
+        AdapterRequest(
+            name="worker-lora",
+            base_model="m",
+            traces_path=traces,
+            extra={
+                "preprocess": {
+                    "min_score": 0.6,
+                    "max_examples": 10,
+                    "deduplicate": True,
+                }
+            },
+        )
+    )
+    while job.status != "done":
+        job = await f.poll(job)
+    dataset = trainer.datasets[-1]
+    assert len(dataset.examples) == 1
+
+
+async def test_preprocess_filters_by_length(factory, tmp_path):
+    f, trainer = factory
+    traces = tmp_path / "traces.jsonl"
+    _write_chat_jsonl(
+        traces,
+        [
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "short"},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "metadata": {"score": 0.9},
+            },
+            {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "a" * 1000},
+                    {"role": "assistant", "content": "b" * 1000},
+                ],
+                "metadata": {"score": 0.9},
+            },
+        ],
+    )
+    job = await f.submit(
+        AdapterRequest(
+            name="worker-lora",
+            base_model="m",
+            traces_path=traces,
+            extra={"preprocess": {"max_total_length": 100}},
+        )
+    )
+    while job.status != "done":
+        job = await f.poll(job)
+    dataset = trainer.datasets[-1]
+    assert len(dataset.examples) == 1
+    assert dataset.examples[0].messages[1]["content"] == "short"

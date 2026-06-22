@@ -215,6 +215,8 @@ This produces SFT training examples from stages whose outputs scored well.
 
 ### 6.2 Train a new adapter version from traces
 
+For a one-shot training job:
+
 ```bash
 armature adapter create \
   --spec my_team.yml \
@@ -224,6 +226,18 @@ armature adapter create \
 ```
 
 The registry creates version `2` for `tdd`. Version `1` remains available.
+
+For a continual update that starts from the prior `latest` version, evaluates the new version, and only promotes it if it passes a policy:
+
+```bash
+armature adapter update tdd training.jsonl \
+  --eval-spec my_team.yml \
+  --eval-input feature="add login" \
+  --eval-stage judge \
+  --min-score 0.05
+```
+
+This derives the adapter hyperparameters from the current `latest` version, trains a new version, runs `armature adapter eval`, and promotes the new version only when the eval delta is at least `0.05`.
 
 ### 6.3 Evaluate before promoting
 
@@ -237,11 +251,37 @@ This runs the workflow twice — once with the candidate adapter and once withou
 
 ### 6.4 Promote the winner
 
+Manual promotion:
+
 ```bash
 armature adapter promote tdd 2
 ```
 
+Policy-gated promotion (only promote if `validation_score >= 0.75`):
+
+```bash
+armature adapter promote tdd 2 --min-score 0.75
+```
+
+Bypass the policy with `--force`:
+
+```bash
+armature adapter promote tdd 2 --force
+```
+
 Now `tdd@latest` points to version `2`. The next `armature run` picks it up automatically.
+
+### 6.5 Merge multiple skill adapters into one
+
+When several skills each have their own adapter, you can merge them into a single artifact that preserves all of their low-rank updates:
+
+```bash
+armature adapter merge skill-a@latest skill-b@latest \
+  --name combined \
+  --base-model qwen/qwen2.5-7b
+```
+
+`MergedAdapterFactory` loads the source `adapter.safetensors` files and adds the corresponding `lora_A`/`lora_B` tensors (and DoRA magnitude vectors if present). The sources must share the same base model, rank, alpha, target modules, and DoRA setting.
 
 ---
 
@@ -274,22 +314,15 @@ armature export-traces \
   --output training.jsonl \
   --min-score 0.85
 
-# 2. Continually update the adapter from the prior latest version
-armature adapter create \
-  --spec my_team.yml \
-  --traces training.jsonl \
-  --name tdd
-
-# 3. Evaluate the new version against the current latest
-armature adapter eval tdd my_team.yml \
-  --input feature="add login" \
-  --version latest          # new version
-
-# 4. Promote if it wins
-armature adapter promote tdd <new_version>
+# 2. Continually update, evaluate, and conditionally promote in one command
+armature adapter update tdd training.jsonl \
+  --eval-spec my_team.yml \
+  --eval-input feature="add login" \
+  --eval-stage judge \
+  --min-score 0.05
 ```
 
-With `continual_learning.enabled: true`, the trainer loads the weights from `prior_version` (default `latest`), freezes the old routing matrix `R_old`, and trains a near-zero `R_delta` for the new trace batch. This reduces catastrophic forgetting when the team accumulates new examples over time.
+With `continual_learning.enabled: true`, the trainer resolves the prior `latest` version, validates that it is compatible, and uses it as a warm start. A production implementation loads the prior LoRA weights, freezes the old routing matrix `R_old`, and trains a near-zero `R_delta` for the new trace batch while regularizing with `λ ||A^T · R_delta||_F²`. This reduces catastrophic forgetting when the team accumulates new examples over time.
 
 ---
 
@@ -476,11 +509,21 @@ armature adapter create --spec tdd_team.yml --skill tdd --backend s2l
 # Run the team
 armature run tdd_team.yml --input feature="add login"
 
-# Weekly retrain from high-quality traces
+# Weekly retrain, evaluate, and conditionally promote from high-quality traces
 armature export-traces --workflow tdd_team --output tdd_training.jsonl --min-score 0.85
+armature adapter update tdd tdd_training.jsonl \
+  --eval-spec tdd_team.yml \
+  --eval-input feature="add login" \
+  --eval-stage judge \
+  --min-score 0.05
+
+# Or do it manually
 armature adapter create --spec tdd_team.yml --traces tdd_training.jsonl --name tdd
 armature adapter eval tdd tdd_team.yml --input feature="add login" --stage-id judge
-armature adapter promote tdd <new_version>
+armature adapter promote tdd <new_version> --min-score 0.05
+
+# Merge skill adapters when several skills back one stage
+armature adapter merge tdd@latest security@latest --name combined
 ```
 
 ---

@@ -1,8 +1,7 @@
 """Tests for the local adapter registry."""
 import pytest
-from pathlib import Path
 
-from armature.adapters.registry import AdapterRegistry, ResolvedAdapter
+from armature.adapters.registry import AdapterRegistry
 from armature.adapters.manifest import AdapterMetadata
 
 
@@ -77,3 +76,57 @@ def test_registry_list_all(tmp_path):
 
     results = list(reg.list())
     assert {r[0].name for r in results} == {"a", "b"}
+
+
+def test_registry_threshold_policy_blocks_promotion(tmp_path):
+    from armature.adapters.policy import ThresholdPromotionPolicy
+
+    reg = AdapterRegistry(base_dir=tmp_path)
+    d1 = tmp_path / "v1"
+    d1.mkdir()
+    reg.register(AdapterMetadata(name="skill", version="1", base_model="m", validation_score=0.9), d1)
+
+    d2 = tmp_path / "v2"
+    d2.mkdir()
+    reg.register(
+        AdapterMetadata(name="skill", version="2", base_model="m", validation_score=0.4),
+        d2,
+        policy=ThresholdPromotionPolicy(min_score=0.7),
+    )
+
+    assert reg.get("skill").metadata.version == "1"
+
+
+def test_registry_threshold_policy_allows_promotion(tmp_path):
+    from armature.adapters.policy import ThresholdPromotionPolicy
+
+    reg = AdapterRegistry(base_dir=tmp_path)
+    d1 = tmp_path / "v1"
+    d1.mkdir()
+    reg.register(AdapterMetadata(name="skill", version="1", base_model="m", validation_score=0.9), d1)
+
+    d2 = tmp_path / "v2"
+    d2.mkdir()
+    reg.register(
+        AdapterMetadata(name="skill", version="2", base_model="m", validation_score=0.8),
+        d2,
+        policy=ThresholdPromotionPolicy(min_score=0.7),
+    )
+
+    assert reg.get("skill").metadata.version == "2"
+
+
+def test_registry_promote_with_policy(tmp_path):
+    from armature.adapters.policy import ThresholdPromotionPolicy
+
+    reg = AdapterRegistry(base_dir=tmp_path)
+    for v, score in [("1", 0.9), ("2", 0.4)]:
+        d = tmp_path / f"v{v}"
+        d.mkdir()
+        reg.register(AdapterMetadata(name="skill", version=v, base_model="m", validation_score=score), d)
+
+    with pytest.raises(ValueError, match="Promotion policy rejected"):
+        reg.promote("skill", "2", policy=ThresholdPromotionPolicy(min_score=0.7))
+
+    reg.promote("skill", "2", force=True)
+    assert reg.get("skill").metadata.version == "2"

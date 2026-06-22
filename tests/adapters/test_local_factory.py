@@ -17,8 +17,10 @@ class CapturingTrainer:
     def available(self) -> bool:
         return True
 
-    async def train(self, dataset, request, work_dir):
+    async def train(self, dataset, request, work_dir, *, prior_artifact_dir=None):
         self.datasets.append(dataset)
+        self.prior_dirs = getattr(self, "prior_dirs", [])
+        self.prior_dirs.append(prior_artifact_dir)
         self.calls += 1
         (work_dir / "adapter_config.json").write_text("{}")
         (work_dir / "adapter.safetensors").write_bytes(b"LOCAL")

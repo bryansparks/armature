@@ -70,10 +70,19 @@ class TraceAdapterFactory(AdapterFactory):
             job.logs.append("invalid job state")
             return job
         try:
+            from armature.adapters.backends.continual import resolve_prior_artifact_dir
+
             dataset = _load_trace_dataset(job.request)
+            prior_artifact_dir = resolve_prior_artifact_dir(self._registry, job.request)
             work_dir = Path(tempfile.mkdtemp(prefix="armature-trace-"))
-            artifact_dir = await self._trainer.train(dataset, job.request, work_dir)
-            self._registry.register(job.metadata, artifact_dir)
+            artifact_dir = await self._trainer.train(
+                dataset,
+                job.request,
+                work_dir,
+                prior_artifact_dir=prior_artifact_dir,
+            )
+            promote = job.request.extra.get("promote", True)
+            self._registry.register(job.metadata, artifact_dir, promote=promote)
             job.artifact_path = self._registry.get(
                 job.metadata.name, job.metadata.version
             ).artifact_dir
@@ -90,6 +99,8 @@ class TraceAdapterFactory(AdapterFactory):
 
 def _load_trace_dataset(request: AdapterRequest) -> TrainingDataset:
     """Read SFT/DPO JSONL and convert to TrainingExample objects."""
+    from armature.adapters.preprocess import PreprocessConfig, preprocess_examples
+
     path = request.traces_path
     role_type_filter = request.extra.get("role_type")
     stage_id_filter = request.extra.get("stage_id")
@@ -144,6 +155,11 @@ def _load_trace_dataset(request: AdapterRequest) -> TrainingDataset:
                     score=record_score,
                 )
             )
+
+    preprocess = request.extra.get("preprocess")
+    if isinstance(preprocess, dict):
+        config = PreprocessConfig(**preprocess)
+        examples = preprocess_examples(examples, config)
 
     return TrainingDataset(
         examples=examples,

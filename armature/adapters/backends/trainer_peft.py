@@ -37,16 +37,28 @@ class PEFTLoraTrainer(Trainer):
         dataset: TrainingDataset,
         request: AdapterRequest,
         work_dir: Path,
+        *,
+        prior_artifact_dir: Path | None = None,
     ) -> Path:
         if not self.available():
             raise RuntimeError("PEFT trainer is not available; install torch, transformers, peft")
         # Production training loop would go here. For now, write the same dummy
         # artifact shape so integration tests can run against a stubbed trainer.
-        self._write_dummy(work_dir, request)
+        self._write_dummy(work_dir, request, prior_artifact_dir=prior_artifact_dir)
         return work_dir
 
-    def _write_dummy(self, work_dir: Path, request: AdapterRequest) -> None:
+    def _write_dummy(
+        self,
+        work_dir: Path,
+        request: AdapterRequest,
+        *,
+        prior_artifact_dir: Path | None = None,
+    ) -> None:
         import json
+        import shutil
+
+        if prior_artifact_dir is not None and prior_artifact_dir.exists():
+            shutil.copytree(prior_artifact_dir, work_dir, dirs_exist_ok=True)
 
         config = {
             "lora_alpha": request.alpha,
@@ -60,4 +72,5 @@ class PEFTLoraTrainer(Trainer):
         (work_dir / "adapter_config.json").write_text(
             json.dumps(config, indent=2), encoding="utf-8"
         )
-        (work_dir / "adapter.safetensors").write_bytes(b"PEFT")
+        if not (work_dir / "adapter.safetensors").exists():
+            (work_dir / "adapter.safetensors").write_bytes(b"PEFT")
