@@ -41,6 +41,9 @@ class MergedAdapterFactory(AdapterFactory):
             rank=request.rank,
             alpha=request.alpha,
             target_modules=list(request.target_modules),
+            use_dora=request.use_dora,
+            continual_learning=request.continual_learning,
+            prior_adapter_version=request.prior_adapter_version,
             backend="merge",
             job_id=job_id,
         )
@@ -103,6 +106,9 @@ def _write_merged_artifact(
         "r": metadata.rank,
         "target_modules": metadata.target_modules,
         "base_model_name_or_path": metadata.base_model,
+        "use_dora": metadata.use_dora,
+        "continual_learning": metadata.continual_learning,
+        "prior_adapter_version": metadata.prior_adapter_version,
         "merged_from": [
             {"name": name, "version": version, "path": str(path)}
             for name, version, path in sources

@@ -147,6 +147,13 @@ adapter_factory:
   rank: 16
   alpha: 32
   target_modules: [q_proj, v_proj]
+  use_dora: false            # Weight-Decomposed Low-Rank Adaptation
+  continual_learning:        # C-LoRA-style sequential updates
+    enabled: false
+    prior_version: latest     # or a concrete version, e.g. "3"
+    orthogonality_lambda: 0.01
+    freeze_old_routing: true
+    init_delta_near_zero: true
   schedule:
     min_new_traces: 100
     max_age_days: 30
@@ -170,9 +177,11 @@ adapter_factory:
 | `rank` | int | LoRA rank (default 16) |
 | `alpha` | int | LoRA alpha (default 32) |
 | `target_modules` | list[string] | Modules to apply LoRA to (default `[q_proj, v_proj]`) |
+| `use_dora` | bool | Use Weight-Decomposed Low-Rank Adaptation (DoRA) instead of vanilla LoRA |
+| `continual_learning` | `ContinualLearningConfig` | C-LoRA-style continual adapter updates — freeze prior routing matrix, train a near-zero `R_delta`, apply orthogonality regularizer |
 | `schedule` | `AdapterSchedule` | Retraining policy |
 | `promotion_policy` | `AdapterPromotionPolicy` | Gate for auto-promoting a new adapter to `latest` |
-| `skills` | dict[str, `AdapterFactorySkillOverride`] | Per-skill overrides |
+| `skills` | dict[str, `AdapterFactorySkillOverride`] | Per-skill overrides; can override `use_dora` and `continual_learning` per skill |
 
 ---
 

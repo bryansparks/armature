@@ -22,6 +22,9 @@ class AdapterMetadata:
     rank: int = 16
     alpha: int = 32
     target_modules: list[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
+    use_dora: bool = False
+    continual_learning: bool = False
+    prior_adapter_version: str | None = None
     training_data_hash: str | None = None
     validation_score: float | None = None
     created_at: str | None = None

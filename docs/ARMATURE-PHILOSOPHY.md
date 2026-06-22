@@ -27,7 +27,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes ten academic papers published between February and June 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes eleven academic papers published between February 2025 and June 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
 
 ### Paper 1: Natural-Language Agent Harnesses (NLAH)
 **Tsinghua University, March 2026** — [arXiv:2603.25723](https://arxiv.org/abs/2603.25723)
@@ -216,6 +216,25 @@ Armature's implementation matches the paper directly:
 - `model_tiers.*.adapter_support` (`dynamic` | `none`) and `adapter_path_template`
 - `MergedAdapterFactory` for parameter-space merging of registered adapters
 - CLI: `armature adapter create/promote/merge/eval`
+
+### Paper 11: C-LoRA — Continual Low-Rank Adaptation for Pre-trained Models
+**Shanxi University / University of Manchester, February 2025** — [arXiv:2502.17920](https://arxiv.org/abs/2502.17920)
+
+C-LoRA addresses a problem that appears immediately when adapter-backed skills are deployed in production: skills and trace batches arrive sequentially, but standard LoRA is trained once per dataset. The existing choices are either to keep a separate adapter per version (parameter growth, inference-time routing) or to retrain from scratch each time (catastrophic forgetting). C-LoRA proposes a single-adapter continual-learning approach: keep shared low-rank matrices `A` and `B`, and insert a learnable routing matrix `R` between them so that
+
+```
+W_t = W_0 + A · R · B
+```
+
+`R` is split into a frozen `R_old` (preserving prior-task knowledge) and a trainable near-zero `R_delta` for the new task. New updates are regularized away from old subspaces via `L = L_ce + λ ||A^T · R_delta||_F²` with `λ = 0.01`. The result is a single adapter that accumulates knowledge across sequential skill/trace updates without the memory or routing overhead of multiple adapters.
+
+This maps directly to Armature's adapter registry, where each skill already versions adapters. C-LoRA turns version `N+1` into a continual update from version `N` rather than a fresh training run.
+
+**Armature contributions from this paper:**
+- `AdapterFactoryConfig.use_dora` — Weight-Decomposed Low-Rank Adaptation (DoRA) option for richer adapter representations.
+- `AdapterFactoryConfig.continual_learning` — `ContinualLearningConfig` with `enabled`, `prior_version`, `orthogonality_lambda`, `freeze_old_routing`, and `init_delta_near_zero`.
+- `AdapterRequest.use_dora`, `continual_learning`, and `prior_adapter_version` — propagated through every backend (mock, s2l, trace, local, remote, merge) and into `AdapterMetadata`.
+- Trainer stubs persist `use_dora`, `continual_learning`, and `prior_adapter_version` in `adapter_config.json` so production trainer implementations can read the flags and execute the actual C-LoRA math.
 
 ---
 
@@ -842,7 +861,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=... # optional: send traces to Jaeger/Grafana
 
 ## Summary
 
-Armature is a production-grade agent harness synthesized from ten academic papers spanning February–June 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
+Armature is a production-grade agent harness synthesized from eleven academic papers spanning February 2025–June 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
 
 The sixth paper, AHE ([arXiv:2604.25850](https://arxiv.org/abs/2604.25850)), added accountability to the improvement loop: every spec revision now carries a falsifiable contract, and each subsequent run verifies whether the predicted fixes actually materialized. The harness does not just improve — it explains itself as it does, cycle by cycle.
 
@@ -852,12 +871,13 @@ The AGT governance layer added five capabilities the academic papers left open: 
 
 The async HTTP service and LangGraph sidecar pattern complete the integration story: Armature is clearly positioned as a **batch-oriented multi-stage work engine**, not a conversational loop. LangGraph owns the conversation; Armature owns the heavy lifting inside each turn. The SSE event stream and latency acknowledgement pattern let chatbot users see progress immediately while multi-stage work runs in the background.
 
-With all ten papers and the AGT framework implemented, the harness now has:
+With all eleven papers and the AGT framework implemented, the harness now has:
 - **Execution**: DAG orchestration, four role types, parallel fan-out (including consensus synthesis), guided JSON output, model-tier auto-escalation
 - **Quality**: HQS metric, consensus deliberation, output schema validation, declarative evaluation stages, post-condition verification
 - **Safety**: fail-closed strict mode, five rule actions including human approval, reversibility-based blocking, `ToolBlocked` non-retryable exception
 - **Observability**: tamper-evident trace records with inputs hash, policy version, and per-key provenance; OpenTelemetry; run reports with failure signatures; drift score for regression detection
 - **Skill execution**: LoRA adapter-backed skills via `skill_library.adapter`, `adapter_support: dynamic`, and the pluggable adapter factory — the Skill-to-LoRA pattern ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769))
+- **Continual skill learning**: C-LoRA-style adapter updates via `adapter_factory.continual_learning` to reduce forgetting when new skills or trace batches arrive ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920))
 - **Memory**: cross-run persistence, staleness detection, `_stale_memory_keys` warnings, knowledge extraction
 - **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, causal 3-tuple attribution, declared editable surfaces, K-proposal diversity with regression gating, prediction-verification accounting, component governance, SFT/DPO trace export
 
@@ -865,7 +885,7 @@ The eighth paper ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1, "Harne
 
 The ninth paper ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1, "Self-Harness") asked a different question: given that we can diagnose and propose spec changes, how do we make the proposal process *safer and smarter*? Self-Harness introduces four mechanisms that Armature adopted directly. First, causal 3-tuple failure attribution — each diagnostic now carries a `(terminal_cause, causal_status, mechanism)` triple that distinguishes *what* broke from *whose fault it is* from *how it happened*, giving the refiner enough signal to propose structurally targeted fixes rather than generic prompt rewrites. Second, declared editable surfaces — a `self_improvement.editable_surfaces` spec field that bounds what the refiner is allowed to change; surfaces outside the declared set are named in the system prompt as explicitly locked, reducing hallucinated structural modifications. Third, K-proposal diversity — the refiner generates multiple candidates in parallel, each steered by a different diversity hint, and the candidate whose predicted fixes most overlap the active diagnostics is selected; ensemble generation consistently finds better proposals than single-shot refinement. Fourth, held-out trace-split regression gating — stages that have no current diagnostics are treated as a held-out set; proposals that touch those healthy stages are filtered as regression risks before selection, a practical adaptation of the Self-Harness held-in/held-out acceptance criterion to the Armature trace-based setting.
 
-1,388 tests. All research and industry-framework gaps closed. ActiveGraph event-architecture concepts adopted (LLM caching, audit replay, trace-triggered behaviors); fork-and-diff and full event sourcing deferred to roadmap.
+All research and industry-framework gaps closed. ActiveGraph event-architecture concepts adopted (LLM caching, audit replay, trace-triggered behaviors); fork-and-diff and full event sourcing deferred to roadmap.
 
 ---
 

@@ -1406,6 +1406,10 @@ def adapter_create(
     rank = factory_cfg.rank if factory_cfg else 16
     alpha = factory_cfg.alpha if factory_cfg else 32
     target_modules = list(factory_cfg.target_modules if factory_cfg else ["q_proj", "v_proj"])
+    use_dora = factory_cfg.use_dora if factory_cfg else False
+    cl_cfg = factory_cfg.continual_learning if factory_cfg else None
+    continual_learning = cl_cfg.enabled if cl_cfg else False
+    prior_adapter_version = cl_cfg.prior_version if cl_cfg else None
 
     registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
     if chosen_backend == "mock":
@@ -1430,6 +1434,9 @@ def adapter_create(
             rank=rank,
             alpha=alpha,
             target_modules=target_modules,
+            use_dora=use_dora,
+            continual_learning=continual_learning,
+            prior_adapter_version=prior_adapter_version,
         )
     else:
         if not traces.exists():
@@ -1447,6 +1454,9 @@ def adapter_create(
             rank=rank,
             alpha=alpha,
             target_modules=target_modules,
+            use_dora=use_dora,
+            continual_learning=continual_learning,
+            prior_adapter_version=prior_adapter_version,
             extra=extra,
         )
 
@@ -1581,6 +1591,9 @@ def adapter_merge(
         rank=rank,
         alpha=alpha,
         target_modules=["q_proj", "v_proj"],
+        use_dora=False,
+        continual_learning=False,
+        prior_adapter_version=None,
         extra={"adapter_refs": refs},
     )
 

@@ -66,6 +66,13 @@ adapter_factory:
   rank: 16
   alpha: 32
   target_modules: [q_proj, v_proj]
+  use_dora: false
+  continual_learning:
+    enabled: false
+    prior_version: latest
+    orthogonality_lambda: 0.01
+    freeze_old_routing: true
+    init_delta_near_zero: true
 
 skill_library:
   tdd:

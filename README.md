@@ -282,7 +282,7 @@ Each use case is a YAML workflow spec + a small set of Python tool modules. The 
 
 ## Research foundation
 
-Armature is built from ten academic papers, one industry governance framework, and one open-source agent architecture project — all but one published this year (each paper's date is listed below). Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
+Armature is built from eleven academic papers, one industry governance framework, and one open-source agent architecture project — all but one published this year (each paper's date is listed below). Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
 
 ### The papers
 
@@ -330,6 +330,10 @@ Governance layer operating at definition-time (static risk scoring), runtime-tru
 
 The paper behind LoRA adapter skills. S2L shows that agent skills expressed as SKILL.md procedural documents can be distilled into lightweight, task-specific LoRA adapters, then plugged in at runtime instead of injecting the full skill text into the prompt. Armature's `skill_library.adapter` references, `adapter_support: dynamic` tiers, and the pluggable adapter factory implement this pattern directly: skill text is omitted when the adapter loads, cutting prefill tokens while preserving behavior. The `s2l` backend trains adapters from skill documents; the `trace` backend trains from exported high-quality traces.
 
+**[C-LoRA] Continual Low-Rank Adaptation for Pre-trained Models** — Shanxi University / University of Manchester, February 2025 ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920))
+
+The paper behind continual adapter learning. C-LoRA keeps a single LoRA adapter and updates it sequentially from new tasks by splitting the routing matrix into a frozen `R_old` (preserving prior knowledge) and a trainable near-zero `R_delta` for the new task, regularized by `λ ||A^T · R_delta||_F²`. This maps directly to Armature's versioned adapter registry: new skill/trace batches can update the prior adapter instead of training a fresh one or keeping a growing set of per-version adapters. `adapter_factory.continual_learning` exposes the C-LoRA settings; `adapter_factory.use_dora` enables DoRA for richer adapter representations.
+
 ---
 
 ### What's implemented
@@ -348,6 +352,8 @@ The paper behind LoRA adapter skills. S2L shows that agent skills expressed as S
 | The Log is the Agent | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
 | KYA | Static spec risk score, rogue signal counter, only-tighten safety rule validation | ✅ |
 | Skill-to-LoRA ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)) | LoRA adapter skills: `skill_library.adapter`, `adapter_support: dynamic`, adapter factory | ✅ |
+| C-LoRA ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)) | Continual adapter updates via `adapter_factory.continual_learning` | ✅ |
+| DoRA | `adapter_factory.use_dora` — Weight-Decomposed Low-Rank Adaptation | ✅ |
 
 ---
 
@@ -440,7 +446,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
 | **HQS** | Harness Quality Score — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
-| **LoRA adapter skills** | `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter replaces the skill text at runtime; on `none` tiers the skill text is used or the configured `fallback` policy is applied. Developed from the Skill-to-LoRA paper ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)) |
+| **LoRA adapter skills** | `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter replaces the skill text at runtime; on `none` tiers the skill text is used or the configured `fallback` policy is applied. Developed from the Skill-to-LoRA paper ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)); continual updates follow C-LoRA ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)) |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |
 
 ---

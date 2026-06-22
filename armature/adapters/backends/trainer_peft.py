@@ -53,6 +53,9 @@ class PEFTLoraTrainer(Trainer):
             "r": request.rank,
             "target_modules": request.target_modules,
             "base_model_name_or_path": request.base_model,
+            "use_dora": request.use_dora,
+            "continual_learning": request.continual_learning,
+            "prior_adapter_version": request.prior_adapter_version,
         }
         (work_dir / "adapter_config.json").write_text(
             json.dumps(config, indent=2), encoding="utf-8"

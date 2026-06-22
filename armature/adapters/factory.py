@@ -27,6 +27,9 @@ class AdapterRequest:
     rank: int = 16
     alpha: int = 32
     target_modules: list[str] = field(default_factory=lambda: ["q_proj", "v_proj"])
+    use_dora: bool = False
+    continual_learning: bool = False
+    prior_adapter_version: str | None = None
     max_tokens_per_example: int = 32768
     output_max_tokens: int = 4096
     extra: dict[str, Any] = field(default_factory=dict)

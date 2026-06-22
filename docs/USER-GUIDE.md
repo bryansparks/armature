@@ -687,6 +687,11 @@ armature adapter merge tdd@2 security@1 --name tdd-security
 armature adapter eval tdd workflow.yml --input feature="login" --stage-id judge
 ```
 
+**Advanced training options:**
+
+- `use_dora: true` — use Weight-Decomposed Low-Rank Adaptation (DoRA) instead of vanilla LoRA.
+- `continual_learning.enabled: true` — C-LoRA-style sequential updates. The trainer loads the prior version's weights, freezes the old routing matrix `R_old`, and trains a near-zero `R_delta` for the new skill/trace batch, regularized by `λ ||A^T · R_delta||_F²` to reduce catastrophic forgetting. See Zhang et al., *C-LoRA: Continual Low-Rank Adaptation for Pre-trained Models* ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)).
+
 **Registry directory:** Adapters are stored under `~/.armature/adapters` by
 default. Override with `--registry /path/to/adapters` on any `armature adapter`
 subcommand, or pass `--registry` to `armature run` to use a custom registry for a

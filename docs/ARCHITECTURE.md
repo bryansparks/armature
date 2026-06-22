@@ -34,6 +34,7 @@ Armature synthesizes ten academic papers published between February and June 202
 | **ActiveGraph** — [arXiv:2605.21997](https://arxiv.org/abs/2605.21997) | LLM response caching by content hash; trace-triggered behavior rules; `--auto-improve` gate |
 | **Self-Harness** — [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
 | **Skill-to-LoRA** — CUHK, [arXiv:2606.16769](https://arxiv.org/abs/2606.16769) | Distill textual skills into plug-and-play LoRA adapters loaded at runtime; cuts skill prefill tokens while preserving behavior |
+| **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 
 The benchmarked insight from NLAH: when workflows are defined in readable, editable natural language rather than code, both humans and optimizers can reason about them causally. A YAML diff is meaningful; a Python AST diff is opaque.
@@ -393,6 +394,8 @@ All ten papers and the AGT framework are fully implemented.
 | Component governance | `_classify_changes()`, `.pending.yaml` staging |
 | Deliberate iteration loop | `IterationConfig`, `_run_with_loop`, `loop:` stage field |
 | LoRA adapter skills | `skill_library.adapter`, `adapter_support: dynamic`, pluggable adapter factory — Skill-to-LoRA ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)) |
+| DoRA adapter training | `adapter_factory.use_dora` — Weight-Decomposed Low-Rank Adaptation |
+| Continual adapter updates | `adapter_factory.continual_learning` — C-LoRA-style frozen `R_old` + `R_delta` with orthogonality regularizer ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)) |
 
 ---
 

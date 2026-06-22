@@ -280,7 +280,26 @@ class AdapterFactorySkillOverride(BaseModel):
     rank: int | None = None
     alpha: int | None = None
     target_modules: list[str] | None = None
+    use_dora: bool | None = None
+    continual_learning: ContinualLearningConfig | None = None
     schedule: AdapterSchedule | None = None
+
+
+class ContinualLearningConfig(BaseModel):
+    """C-LoRA-style continual learning settings for adapter updates.
+
+    When enabled, new adapter versions are trained from the prior version's
+    weights instead of from scratch, using a learnable routing matrix split into
+    a frozen `R_old` (preserving previously learned behavior) and a trainable
+    near-zero `R_delta` for the new skill/trace batch. See C-LoRA (Zhang et al.,
+    arXiv:2502.17920).
+    """
+
+    enabled: bool = False
+    prior_version: str | None = None             # "latest" or a concrete version
+    orthogonality_lambda: float = 0.01           # λ for ||A^T · R_delta||_F² regularizer
+    freeze_old_routing: bool = True              # freeze R_old during training
+    init_delta_near_zero: bool = True            # initialize R_delta near zero per session
 
 
 class AdapterFactoryConfig(BaseModel):
@@ -291,6 +310,8 @@ class AdapterFactoryConfig(BaseModel):
     rank: int = 16
     alpha: int = 32
     target_modules: list[str] = Field(default_factory=lambda: ["q_proj", "v_proj"])
+    use_dora: bool = False                       # use Weight-Decomposed Low-Rank Adaptation
+    continual_learning: ContinualLearningConfig = Field(default_factory=ContinualLearningConfig)
     max_tokens_per_example: int = 32768
     output_max_tokens: int = 4096
     schedule: AdapterSchedule = Field(default_factory=AdapterSchedule)
