@@ -1358,14 +1358,18 @@ app.add_typer(adapter_app, name="adapter")
 @adapter_app.command("create")
 def adapter_create(
     spec: Path = typer.Option(..., "--spec", help="Path to workflow spec YAML"),
-    skill: str = typer.Option(..., "--skill", "-s", help="Skill ID to convert to an adapter"),
-    name: str | None = typer.Option(None, "--name", "-n", help="Adapter name (defaults to skill ID)"),
+    skill: str | None = typer.Option(None, "--skill", "-s", help="Skill ID to convert to an adapter"),
+    traces: Path | None = typer.Option(None, "--traces", "-t", help="Path to exported trace JSONL"),
+    name: str | None = typer.Option(None, "--name", "-n", help="Adapter name (defaults to skill ID or traces stem)"),
     backend: str | None = typer.Option(None, "--backend", "-b", help="Adapter backend to use"),
     registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+    role_type: str | None = typer.Option(None, "--role-type", help="Filter trace examples by role type"),
+    stage_id: str | None = typer.Option(None, "--stage-id", help="Filter trace examples by stage ID"),
 ):
-    """Create a LoRA adapter from a skill document in the spec."""
+    """Create a LoRA adapter from a skill document or exported traces."""
     from armature.adapters.backends.mock import MockAdapterFactory
     from armature.adapters.backends.s2l import S2LSkillAdapterFactory
+    from armature.adapters.backends.trace import TraceAdapterFactory
     from armature.adapters.factory import AdapterRequest
     from armature.adapters.registry import AdapterRegistry
     from armature.spec.loader import load_spec
@@ -1374,33 +1378,63 @@ def adapter_create(
         typer.echo(f"Spec file not found: {spec}", err=True)
         raise typer.Exit(code=1)
 
-    harness_spec = load_spec(spec)
-    if skill not in harness_spec.skill_library:
-        typer.echo(f"Skill '{skill}' not found in spec.skill_library", err=True)
+    if skill is None and traces is None:
+        typer.echo("Either --skill or --traces is required", err=True)
+        raise typer.Exit(code=1)
+    if skill is not None and traces is not None:
+        typer.echo("Use only one of --skill or --traces", err=True)
         raise typer.Exit(code=1)
 
-    skill_def = harness_spec.skill_library[skill]
+    harness_spec = load_spec(spec)
     factory_cfg = harness_spec.adapter_factory
     chosen_backend = backend or (factory_cfg.backend if factory_cfg else "mock")
     base_model = _resolve_adapter_base_model(harness_spec)
+    rank = factory_cfg.rank if factory_cfg else 16
+    alpha = factory_cfg.alpha if factory_cfg else 32
+    target_modules = list(factory_cfg.target_modules if factory_cfg else ["q_proj", "v_proj"])
 
     registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
     if chosen_backend == "mock":
         factory = MockAdapterFactory(registry=registry)
     elif chosen_backend == "s2l":
         factory = S2LSkillAdapterFactory(registry=registry)
+    elif chosen_backend == "trace":
+        factory = TraceAdapterFactory(registry=registry)
     else:
         typer.echo(f"Unsupported adapter backend '{chosen_backend}'", err=True)
         raise typer.Exit(code=1)
 
-    request = AdapterRequest(
-        name=name or skill,
-        base_model=base_model,
-        skill=skill_def,
-        rank=factory_cfg.rank if factory_cfg else 16,
-        alpha=factory_cfg.alpha if factory_cfg else 32,
-        target_modules=list(factory_cfg.target_modules if factory_cfg else ["q_proj", "v_proj"]),
-    )
+    if skill is not None:
+        if skill not in harness_spec.skill_library:
+            typer.echo(f"Skill '{skill}' not found in spec.skill_library", err=True)
+            raise typer.Exit(code=1)
+        skill_def = harness_spec.skill_library[skill]
+        request = AdapterRequest(
+            name=name or skill,
+            base_model=base_model,
+            skill=skill_def,
+            rank=rank,
+            alpha=alpha,
+            target_modules=target_modules,
+        )
+    else:
+        if not traces.exists():
+            typer.echo(f"Traces file not found: {traces}", err=True)
+            raise typer.Exit(code=1)
+        extra = {}
+        if role_type:
+            extra["role_type"] = role_type
+        if stage_id:
+            extra["stage_id"] = stage_id
+        request = AdapterRequest(
+            name=name or traces.stem,
+            base_model=base_model,
+            traces_path=traces,
+            rank=rank,
+            alpha=alpha,
+            target_modules=target_modules,
+            extra=extra,
+        )
 
     try:
         job = asyncio.run(_poll_adapter_job(factory, request))
