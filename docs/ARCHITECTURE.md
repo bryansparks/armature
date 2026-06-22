@@ -19,7 +19,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes ten academic papers published between February and June 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes eleven academic papers published between February 2025 and June 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
 
 | Source | Key Contribution |
 |--------|-----------------|
@@ -34,6 +34,8 @@ Armature synthesizes ten academic papers published between February and June 202
 | **ActiveGraph** — [arXiv:2605.21997](https://arxiv.org/abs/2605.21997) | LLM response caching by content hash; trace-triggered behavior rules; `--auto-improve` gate |
 | **Self-Harness** — [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
 | **Skill-to-LoRA** — CUHK, [arXiv:2606.16769](https://arxiv.org/abs/2606.16769) | Distill textual skills into plug-and-play LoRA adapters loaded at runtime; cuts skill prefill tokens while preserving behavior |
+| **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
+| **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 | **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 

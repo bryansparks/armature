@@ -18,6 +18,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Docs
 
 - README, `docs/USER-GUIDE.md`, `docs/ARMATURE-SPEC-REF.md`, `docs/ARCHITECTURE.md`, and `docs/ARMATURE-PHILOSOPHY.md` now cite the Skill-to-LoRA and C-LoRA papers as the research foundation for adapter-backed skills and continual adapter learning.
+- New guide `docs/ADAPTER-POWERED-TEAMS.md` explains end-to-end how to set up candidate SLM tiers, declare adapter-backed skills, create adapters, and run periodic/continual retraining from traces.
 
 ---
 

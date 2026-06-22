@@ -528,6 +528,7 @@ docs/               # Full documentation (see index below)
 | [BUILD_FIRST_WORKFLOW](docs/BUILD_FIRST_WORKFLOW.md) | Hands-on tutorial — build a working workflow from scratch |
 | [USER-GUIDE](docs/USER-GUIDE.md) | Full spec reference — every field, every option, worked examples |
 | [ARMATURE-SPEC-REF](docs/ARMATURE-SPEC-REF.md) | All spec fields and valid values on one page |
+| [ADAPTER-POWERED-TEAMS](docs/ADAPTER-POWERED-TEAMS.md) | How to set up, train, and continually refresh LoRA adapter-backed skills |
 | [FAQ](docs/FAQ.md) | Common questions — positioning, capabilities, comparisons |
 
 ### Design & philosophy

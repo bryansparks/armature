@@ -446,3 +446,7 @@ armature adapter create --spec spec.yml --skill tdd --backend local
 armature adapter merge skill-a@1 skill-b@1 --name combo
 armature adapter eval tdd spec.yml --input topic="..."
 ```
+
+See `docs/ADAPTER-POWERED-TEAMS.md` for the full end-to-end workflow: choosing
+candidate SLM tiers, declaring adapter-backed skills, creating adapters,
+periodic retraining from traces, and promotion.

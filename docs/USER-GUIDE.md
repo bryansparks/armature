@@ -697,7 +697,9 @@ default. Override with `--registry /path/to/adapters` on any `armature adapter`
 subcommand, or pass `--registry` to `armature run` to use a custom registry for a
 single run.
 
-See `examples/07_lora_adapter.yml` for a complete runnable spec.
+See `examples/07_lora_adapter.yml` for a complete runnable spec, and
+`docs/ADAPTER-POWERED-TEAMS.md` for the full operational workflow (model tier
+selection, adapter creation, periodic retraining from traces, and promotion).
 
 ---
 
