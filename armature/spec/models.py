@@ -25,6 +25,10 @@ class ModelTierConfig(BaseModel):
     temperature: float | None = None  # default temperature for calls on this tier
     max_tokens: int | None = None     # default max output tokens for this tier
     tool_calling: bool | None = None  # None → auto-detect by provider; True/False → explicit override
+    adapter_support: Literal["dynamic", "static", "none"] = "none"
+    # Path template for locating LoRA artifacts served by this tier.
+    # Uses {adapter_name} and {adapter_version} placeholders.
+    adapter_path_template: str | None = None
 
 # Alias for convenience
 ModelTier = ModelTierConfig
@@ -210,17 +214,28 @@ class ToolCallConfig(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)  # args; string values are Jinja2-rendered against context
 
 
+class SkillAdapterRef(BaseModel):
+    """Reference to a LoRA adapter that replaces runtime skill text."""
+
+    name: str
+    version: str | None = None          # None → use registry latest
+    fallback: Literal["text", "none", "fail"] = "text"
+    inject_metadata: bool = False
+
+
 class SkillDef(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
     description: str
-    content: str | None = None   # inline skill text
-    path: str | None = None      # path to a file containing the skill text
+    content: str | None = None           # inline skill text
+    path: str | None = None              # path to a file containing the skill text
+    adapter: SkillAdapterRef | None = None
 
     def model_post_init(self, __context: Any) -> None:
-        if self.content is None and self.path is None:
-            raise ValueError(f"SkillDef '{self.id}' must have either 'content' or 'path'")
+        has_source = self.content is not None or self.path is not None
+        if self.adapter is None and not has_source:
+            raise ValueError(f"SkillDef '{self.id}' must have either 'content', 'path', or 'adapter'")
 
 
 class AgentRef(BaseModel):
@@ -239,6 +254,48 @@ class CompiledAgent(BaseModel):
     """
     role: Role
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
+
+
+class AdapterSchedule(BaseModel):
+    """Policy for when to retrain/update an adapter."""
+
+    min_new_traces: int = 100
+    max_age_days: int = 30
+    quality_drift_threshold: float = 0.05
+
+
+class AdapterPromotionPolicy(BaseModel):
+    """Gate for promoting a newly trained adapter to `latest`."""
+
+    min_cng: float = 0.10
+    min_hqs_delta: float = 0.02
+    require_manual_review: bool = False
+
+
+class AdapterFactorySkillOverride(BaseModel):
+    """Per-skill override inside adapter_factory.skills."""
+
+    backend: str | None = None
+    base_model: str | None = None
+    rank: int | None = None
+    alpha: int | None = None
+    target_modules: list[str] | None = None
+    schedule: AdapterSchedule | None = None
+
+
+class AdapterFactoryConfig(BaseModel):
+    """Top-level configuration for the pluggable adapter factory."""
+
+    backend: str = "mock"                       # modal | local | together | runpod | replicate | mock
+    base_model: str | None = None
+    rank: int = 16
+    alpha: int = 32
+    target_modules: list[str] = Field(default_factory=lambda: ["q_proj", "v_proj"])
+    max_tokens_per_example: int = 32768
+    output_max_tokens: int = 4096
+    schedule: AdapterSchedule = Field(default_factory=AdapterSchedule)
+    promotion_policy: AdapterPromotionPolicy = Field(default_factory=AdapterPromotionPolicy)
+    skills: dict[str, AdapterFactorySkillOverride] = Field(default_factory=dict)
 
 
 class MCPServerConfig(BaseModel):
@@ -340,6 +397,7 @@ class HarnessSpec(BaseModel):
     tools: list[ToolModule] = Field(default_factory=list)
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
     agent_library: dict[str, AgentRef] = Field(default_factory=dict)
+    adapter_factory: AdapterFactoryConfig | None = None
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)
