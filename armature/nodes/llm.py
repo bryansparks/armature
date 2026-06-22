@@ -5,8 +5,9 @@ import os
 import random
 from typing import TYPE_CHECKING, Any
 import litellm
+from armature.adapters.registry import AdapterRegistry, ResolvedAdapter
 from armature.nodes.base import BaseNode
-from armature.spec.models import Stage, ModelTiers, RoleType, RoleTypeDefaults, SkillDef
+from armature.spec.models import Stage, ModelTiers, RoleTypeDefaults, SkillDef
 from armature.runtime.prompt import PromptAssembler
 
 if TYPE_CHECKING:
@@ -127,6 +128,7 @@ class LLMNode(BaseNode):
         cache: "LLMCache | None" = None,
         mission_context: str = "",
         on_token=None,
+        adapter_registry: AdapterRegistry | None = None,
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -143,6 +145,7 @@ class LLMNode(BaseNode):
         self._cache = cache
         self._mission_context = mission_context
         self._on_token = on_token  # async (chunk: str) -> None; enables token streaming
+        self._adapter_registry = adapter_registry
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
@@ -153,6 +156,102 @@ class LLMNode(BaseNode):
             for sid in (self._stage.role.skills or [])
             if sid in self._skill_library
         ]
+
+    def _resolve_active_adapters(
+        self, tier_config
+    ) -> dict[str, ResolvedAdapter]:
+        """Return skill_id -> resolved adapter for skills whose LoRA can be used.
+
+        An adapter is considered active only when:
+          - the skill declares an adapter reference,
+          - the registry contains the requested adapter/version,
+          - and the target tier supports LoRA adapters.
+        """
+        active: dict[str, ResolvedAdapter] = {}
+        if self._adapter_registry is None or tier_config is None:
+            return active
+        if tier_config.adapter_support == "none":
+            return active
+        for skill in self._resolve_skills():
+            if skill.adapter is None:
+                continue
+            try:
+                resolved = self._adapter_registry.get(
+                    skill.adapter.name, skill.adapter.version
+                )
+            except ValueError:
+                continue
+            active[skill.id] = resolved
+        return active
+
+    def _apply_adapter_fallback(
+        self, active_adapters: dict[str, ResolvedAdapter], tier_config
+    ) -> set[str]:
+        """Return skill IDs that should be omitted from the prompt entirely.
+
+        Raises when a skill's adapter cannot be used and fallback is ``fail``.
+        A fallback of ``none`` omits the skill; ``text`` keeps the original text.
+        """
+        omitted: set[str] = set()
+        if tier_config is not None and tier_config.adapter_support == "none":
+            # Every adapter-backed skill is inactive on a no-adapter tier.
+            for skill in self._resolve_skills():
+                if skill.adapter is None:
+                    continue
+                if skill.adapter.fallback == "fail":
+                    raise RuntimeError(
+                        f"Skill '{skill.id}' adapter cannot be loaded: "
+                        f"tier '{tier_config.model}' has adapter_support='none'"
+                    )
+                if skill.adapter.fallback == "none":
+                    omitted.add(skill.id)
+            return omitted
+
+        active_ids = set(active_adapters)
+        for skill in self._resolve_skills():
+            if skill.adapter is None or skill.id in active_ids:
+                continue
+            if skill.adapter.fallback == "fail":
+                raise RuntimeError(
+                    f"Skill '{skill.id}' adapter '{skill.adapter.name}' "
+                    f"could not be resolved from registry"
+                )
+            if skill.adapter.fallback == "none":
+                omitted.add(skill.id)
+        return omitted
+
+    def _adapter_kwargs(
+        self, tier_config, active_adapters: dict[str, ResolvedAdapter]
+    ) -> dict[str, Any]:
+        """Build provider-specific litellm kwargs for the active LoRA adapter."""
+        if not active_adapters or tier_config is None:
+            return {}
+        if tier_config.adapter_support != "dynamic":
+            return {}
+        # Most dynamic backends can load a single LoRA per request. We pass the
+        # first active adapter in provider-specific kwargs and surface the rest
+        # as metadata in the prompt.
+        resolved = next(iter(active_adapters.values()))
+        if tier_config.provider == "vllm":
+            return {
+                "extra_body": {
+                    "lora_request": {
+                        "name": resolved.metadata.name,
+                        "path": str(resolved.artifact_dir),
+                    }
+                }
+            }
+        if tier_config.provider == "ollama":
+            return {"options": {"adapter": str(resolved.artifact_dir)}}
+        # Generic dynamic fallback.
+        return {
+            "extra_body": {
+                "lora_request": {
+                    "name": resolved.metadata.name,
+                    "path": str(resolved.artifact_dir),
+                }
+            }
+        }
 
     def _active_tier_order(self) -> list[str]:
         """Tiers actually configured in the spec, in canonical escalation order."""
@@ -306,6 +405,13 @@ class LLMNode(BaseNode):
                 stage_id=self._stage.id,
             )
 
+        initial_tier_name = self._resolve_tier_name()
+        initial_tier_config = getattr(self._tiers, initial_tier_name, None) or getattr(
+            self._tiers, self._active_tier_order()[0]
+        )
+        active_adapters = self._resolve_active_adapters(initial_tier_config)
+        omitted_skills = self._apply_adapter_fallback(active_adapters, initial_tier_config)
+
         system_prompt = self._assembler.build(
             role=role,
             tools=stage_tools,
@@ -315,6 +421,8 @@ class LLMNode(BaseNode):
             examples=examples,
             skills=self._resolve_skills(),
             mission_block=self._mission_context,
+            active_adapters=active_adapters,
+            omitted_skills=omitted_skills,
         )
 
         # Apply the same signature.input filter to the user message that PromptAssembler
@@ -334,12 +442,12 @@ class LLMNode(BaseNode):
 
         # Streaming path: text mode only; bypasses cache, retry, and tier escalation.
         if self._on_token is not None and not is_json_mode:
-            tier_name = self._resolve_tier_name()
-            tier_config = getattr(self._tiers, tier_name, None) or getattr(
-                self._tiers, self._active_tier_order()[0]
-            )
-            model = self._model_string(tier_config)
-            stream_kwargs = {"messages": messages, **self._tier_extra_kwargs(tier_config)}
+            model = self._model_string(initial_tier_config)
+            stream_kwargs = {
+                "messages": messages,
+                **self._tier_extra_kwargs(initial_tier_config),
+                **self._adapter_kwargs(initial_tier_config, active_adapters),
+            }
             content, input_tok, output_tok = await self._stream_response(model, stream_kwargs)
             self._append_transcript(messages, model, content)
             return {
@@ -351,11 +459,18 @@ class LLMNode(BaseNode):
                 "_tools_called": [],
             }
 
+        cache_extra = {"output_mode": self._stage.output_mode.value}
+        if active_adapters:
+            cache_extra["adapters"] = {
+                sid: f"{r.metadata.name}@{r.metadata.version}"
+                for sid, r in active_adapters.items()
+            }
+
         if self._cache is not None:
             cache_key = self._cache._make_key(
                 self._resolve_model(),
                 messages,
-                {"output_mode": self._stage.output_mode.value},
+                cache_extra,
             )
             cached = await self._cache.get(cache_key)
             if cached is not None:
@@ -389,10 +504,12 @@ class LLMNode(BaseNode):
             tier_attempt += 1
 
             model = self._model_string(tier_config)
+            tier_active_adapters = self._resolve_active_adapters(tier_config)
             kwargs = {
                 "messages": messages,
                 **self._tier_extra_kwargs(tier_config),
                 **self._response_format_kwargs(tier_config),
+                **self._adapter_kwargs(tier_config, tier_active_adapters),
             }
 
             # Inject native tool specs when the tier supports tool calling.
