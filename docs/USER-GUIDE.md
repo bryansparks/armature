@@ -613,6 +613,11 @@ Post-run stages see `_transcript` (full conversation log) and `_diagnostics` (fa
 Armature can replace skill text at runtime with a fine-tuned LoRA adapter.
 This is the runtime half of the fine-tuning flywheel: export high-quality
 traces, train a small specialist, register it, and reference it from a skill.
+The pattern is developed from **Skill-to-LoRA: From Using Skills to Learning
+Behaviors for Token-Efficient LLM Agents** (Zhang & Qi, CUHK, June 2026 —
+[arXiv:2606.16769](https://arxiv.org/abs/2606.16769)), which shows that
+skill-induced behavior can be distilled into LoRA weights and loaded at runtime
+to cut prefill tokens while preserving task success.
 
 ```yaml
 model_tiers:

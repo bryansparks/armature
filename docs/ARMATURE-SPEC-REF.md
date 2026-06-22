@@ -94,6 +94,11 @@ Declarative skills that can be attached to LLM stages via `role.skills`. Each
 skill may declare inline `content`, load text from a `path`, or reference a
 registered LoRA adapter via `adapter`.
 
+> Adapter-backed skills implement the Skill-to-LoRA pattern (Zhang & Qi, CUHK,
+> June 2026 — [arXiv:2606.16769](https://arxiv.org/abs/2606.16769)): skill
+> behavior is distilled into LoRA weights and loaded at runtime instead of
+> injecting the full skill text into the prompt.
+
 ```yaml
 skill_library:
   tdd:

@@ -27,7 +27,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes nine academic papers published between February and June 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes ten academic papers published between February and June 2026, plus one industry governance framework released in 2025, plus one open-source agent architecture project — all converging on the same insight: **the harness is more important than the model.**
 
 ### Paper 1: Natural-Language Agent Harnesses (NLAH)
 **Tsinghua University, March 2026** — [arXiv:2603.25723](https://arxiv.org/abs/2603.25723)
@@ -195,6 +195,27 @@ Self-Harness introduces a 3-stage loop: Weakness Mining (characterize failures i
 - `_pick_best_proposal(candidates, diagnostics)` — selects the candidate whose `predicted_fixes` most overlap active diagnostic codes
 - `_healthy_stage_ids(traces, diagnostics)` + `_proposal_regression_risk(candidate, old_spec, healthy_stage_ids)` — regression gating before selection
 - `ImprovementReport.n_proposals_generated` + `regression_risk_count` — audit fields written to `ImprovementReport` and JSONL log
+
+### Paper 10: Skill-to-LoRA — From Using Skills to Learning Behaviors for Token-Efficient LLM Agents
+**The Chinese University of Hong Kong, June 2026** — [arXiv:2606.16769](https://arxiv.org/abs/2606.16769)
+
+The paper behind adapter-backed skills. S2L starts from the observation that agent skills are commonly distributed as SKILL.md procedural documents that are injected into prompts in full at runtime. That approach is modular and human-readable, but it consumes context window and repeats the same instructions on every call. S2L replaces the inline skill text with a small LoRA adapter trained to reproduce the skill-induced behavior. The full document is used offline to generate demonstrations; the adapter is plugged in online to invoke the learned behavior.
+
+Armature's implementation matches the paper directly:
+
+- **Skill-to-LoRA (`s2l`) backend** — trains a LoRA adapter from a skill document so the skill's behavior is captured in weight space.
+- **Trace backend** — trains adapters from exported high-quality traces, the natural continuation of the fine-tuning bridge described in Continual Harness.
+- **`skill_library.adapter` references** — declare which adapter a skill should load, with `version: latest` resolving the promoted pointer.
+- **`adapter_support: dynamic` tiers** — the engine passes the resolved adapter artifact to the provider in provider-specific kwargs and omits the original skill text from the prompt, cutting prefill tokens while preserving behavior.
+- **Fallback policies** — when an adapter is unavailable, the harness can fall back to the skill text, omit the skill, or fail explicitly.
+
+**Armature contributions from this paper:**
+- `AdapterFactory` ABC with `submit` / `poll` / `available` methods
+- `AdapterRegistry` for versioned local storage with `manifest.json`
+- `skill_library` entries with optional `adapter` block
+- `model_tiers.*.adapter_support` (`dynamic` | `none`) and `adapter_path_template`
+- `MergedAdapterFactory` for parameter-space merging of registered adapters
+- CLI: `armature adapter create/promote/merge/eval`
 
 ---
 
@@ -821,7 +842,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=... # optional: send traces to Jaeger/Grafana
 
 ## Summary
 
-Armature is a production-grade agent harness synthesized from nine academic papers spanning February–June 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
+Armature is a production-grade agent harness synthesized from ten academic papers spanning February–June 2026, plus five governance concepts borrowed from Microsoft's Agent Governance Toolkit. It handles the structural engineering — orchestration, quality control, failure recovery, observability, safety enforcement, and self-improvement — so that every team building on top of it can focus on the domain problem rather than the execution infrastructure.
 
 The sixth paper, AHE ([arXiv:2604.25850](https://arxiv.org/abs/2604.25850)), added accountability to the improvement loop: every spec revision now carries a falsifiable contract, and each subsequent run verifies whether the predicted fixes actually materialized. The harness does not just improve — it explains itself as it does, cycle by cycle.
 
@@ -831,11 +852,12 @@ The AGT governance layer added five capabilities the academic papers left open: 
 
 The async HTTP service and LangGraph sidecar pattern complete the integration story: Armature is clearly positioned as a **batch-oriented multi-stage work engine**, not a conversational loop. LangGraph owns the conversation; Armature owns the heavy lifting inside each turn. The SSE event stream and latency acknowledgement pattern let chatbot users see progress immediately while multi-stage work runs in the background.
 
-With all nine papers and the AGT framework implemented, the harness now has:
+With all ten papers and the AGT framework implemented, the harness now has:
 - **Execution**: DAG orchestration, four role types, parallel fan-out (including consensus synthesis), guided JSON output, model-tier auto-escalation
 - **Quality**: HQS metric, consensus deliberation, output schema validation, declarative evaluation stages, post-condition verification
 - **Safety**: fail-closed strict mode, five rule actions including human approval, reversibility-based blocking, `ToolBlocked` non-retryable exception
 - **Observability**: tamper-evident trace records with inputs hash, policy version, and per-key provenance; OpenTelemetry; run reports with failure signatures; drift score for regression detection
+- **Skill execution**: LoRA adapter-backed skills via `skill_library.adapter`, `adapter_support: dynamic`, and the pluggable adapter factory — the Skill-to-LoRA pattern ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769))
 - **Memory**: cross-run persistence, staleness detection, `_stale_memory_keys` warnings, knowledge extraction
 - **Self-improvement**: inner refiner loop, outer `SelfImproveRunner`, causal 3-tuple attribution, declared editable surfaces, K-proposal diversity with regression gating, prediction-verification accounting, component governance, SFT/DPO trace export
 

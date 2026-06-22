@@ -8,6 +8,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Pluggable adapter factory + LoRA adapter skills** — `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter artifact is passed to the provider at runtime and the skill text is omitted from the prompt to save context; on `none` tiers the configured `fallback` policy applies. Includes `mock`, `s2l`, `trace`, `local`, `remote`, and `merged` backends; `AdapterRegistry` for versioned local storage; `MergedAdapterFactory` for parameter-space adapter merging; CLI commands `armature adapter create/promote/merge/eval`; and `watch --tune` skeleton. The pattern is developed from the **Skill-to-LoRA** paper (Zhang & Qi, CUHK, June 2026 — [arXiv:2606.16769](https://arxiv.org/abs/2606.16769)).
+- Example `examples/07_lora_adapter.yml` demonstrating a mock-backed TDD skill adapter end-to-end.
+- `--registry` option on `armature run` and `Harness.from_spec(...)` so workflows can use a custom adapter registry without relying on the default `~/.armature/adapters`.
+
+### Docs
+
+- README, `docs/USER-GUIDE.md`, and `docs/ARMATURE-SPEC-REF.md` now cite the Skill-to-LoRA paper as the research foundation for adapter-backed skills.
+
 ---
 
 ## [0.3.5] — 2026-06-17
