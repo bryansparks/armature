@@ -24,6 +24,7 @@ docs/deferred-research.md
 docs/use-case-ad-campaign.md
 docs/ARMATURE-AGENTCORE.md
 docs/plan-gaps-agentcore.md
+docs/LORA-ARMATURE-PLAN.md
 
 # Generated HTML docs (regenerate with: bash docs/regen-guide.sh)
 USER-GUIDE.html
