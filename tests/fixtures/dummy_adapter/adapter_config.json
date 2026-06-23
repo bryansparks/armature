@@ -1,0 +1,7 @@
+{
+  "base_model_name_or_path": "qwen/qwen2.5-7b",
+  "peft_type": "LORA",
+  "r": 16,
+  "lora_alpha": 32,
+  "target_modules": ["q_proj", "v_proj"]
+}

@@ -384,6 +384,70 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 stage_id=None,
             ))
 
+    # ── Adapter factory validation ───────────────────────────────────────────
+    _KNOWN_ADAPTER_BACKENDS = frozenset({
+        "modal", "local", "together", "runpod", "replicate", "mock",
+    })
+    if spec.adapter_factory is not None:
+        factory = spec.adapter_factory
+        if factory.backend not in _KNOWN_ADAPTER_BACKENDS:
+            errors.append(SpecError(
+                code="UNKNOWN_ADAPTER_BACKEND",
+                message=(
+                    f"adapter_factory.backend '{factory.backend}' is not recognized; "
+                    f"supported backends: {sorted(_KNOWN_ADAPTER_BACKENDS)}"
+                ),
+                stage_id=None,
+            ))
+
+        if factory.base_model is None:
+            # If no base_model is declared, at least one tier must name the same
+            # model implicitly. We can't verify that statically, so warn.
+            errors.append(SpecError(
+                code="ADAPTER_FACTORY_NO_BASE_MODEL",
+                message=(
+                    "adapter_factory has no base_model; adapters must be trained "
+                    "against a base model matching one of the configured model tiers"
+                ),
+                stage_id=None,
+                severity="warning",
+            ))
+
+    # Collect configured base models from tiers (including extras).
+    configured_base_models: set[str] = set()
+    for tier_name in ["tiny", "small", "medium", "large", "frontier"] + list(
+        getattr(spec.model_tiers, "__pydantic_extra__", {}) or {}
+    ):
+        tier_cfg = getattr(spec.model_tiers, tier_name, None)
+        if tier_cfg is not None and tier_cfg.model:
+            configured_base_models.add(tier_cfg.model)
+
+    for skill_id, skill_def in spec.skill_library.items():
+        if skill_def.adapter is None:
+            continue
+        ref = skill_def.adapter
+        if ref.fallback == "text" and not (skill_def.content or skill_def.path):
+            errors.append(SpecError(
+                code="ADAPTER_NO_FALLBACK",
+                message=(
+                    f"Skill '{skill_id}' has adapter fallback='text' but no "
+                    f"content/path is provided for text fallback"
+                ),
+                stage_id=None,
+            ))
+
+        if spec.adapter_factory is not None and spec.adapter_factory.base_model:
+            base = spec.adapter_factory.base_model
+            if configured_base_models and base not in configured_base_models:
+                errors.append(SpecError(
+                    code="ADAPTER_BASE_MODEL_MISMATCH",
+                    message=(
+                        f"Skill '{skill_id}' adapter base model '{base}' does not "
+                        f"match any configured model tier model"
+                    ),
+                    stage_id=None,
+                ))
+
     if strict and errors:
         raise SpecValidationError(errors)
 

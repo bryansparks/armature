@@ -6,11 +6,13 @@ Features below are directional — no committed dates or release targets.
 
 ## v1 — Current state (complete)
 
-All v1 scope is implemented. 1,388 tests passing.
+All v1 scope is implemented. 1,512 tests passing.
 
 The v1 harness delivers: YAML-declarative workflow execution, four role types, DAG orchestration with automatic parallelism, fan-out/fan-in, HQS quality scoring, self-improvement loop (inner + outer), prediction-verification accountability, declarative safety rules with strict mode, human-in-the-loop gates, checkpoint/resume, four memory layers (mission context, continuation, MemoryStore, KnowledgeStore), model tiers, a REST API with SSE streaming, the `armature watch` trigger daemon, and a Rich terminal dashboard.
 
-The `armature export-traces` command is also shipped — it produces LoRA-ready SFT and DPO training data from accumulated traces, quality-filtered by judge quorum score. The infrastructure for fine-tuning is in place. Executing the fine-tuning pipeline itself is the v2 story below.
+The **pluggable adapter factory** is now shipped end-to-end: `skill_library` entries can reference LoRA adapters, the runtime resolves them from a local versioned registry, and the CLI provides `armature adapter create | list | register | promote | merge | eval` plus a `watch --tune` skeleton. Backends include `mock`, `s2l` (skill-to-LoRA), `trace`, `local` (PEFT/MLX), `remote` (Modal/Together/RunPod/Replicate stubs), and `merge`. Adapter fallback policies (`text` / `none` / `fail`) and tier-level `adapter_support` control what happens when an adapter is unavailable.
+
+The `armature export-traces` command produces LoRA-ready SFT and DPO training data from accumulated traces, quality-filtered by judge quorum score. The remaining v2 work is production hardening of the training backends, auto-promotion gates, and the `watch --tune` daemon.
 
 ---
 

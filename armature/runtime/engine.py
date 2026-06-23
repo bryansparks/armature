@@ -114,6 +114,7 @@ class Harness:
         validate: bool = True,
         traces_db: Path | str | None = None,
         use_cache: bool = True,
+        adapter_registry=None,
     ):
         if validate:
             from armature.spec.validator import validate_spec
@@ -177,6 +178,13 @@ class Harness:
             self._llm_cache: "LLMCache | None" = LLMCache(resolved_traces.parent / "llm_cache.sqlite")
         else:
             self._llm_cache = None
+
+        if adapter_registry is not None:
+            self._adapter_registry = adapter_registry
+        else:
+            from armature.adapters.registry import AdapterRegistry
+            self._adapter_registry = AdapterRegistry()
+
         self._behaviors = make_default_behavior_registry()
 
         mem_cfg = self._spec.memory
@@ -267,9 +275,15 @@ class Harness:
         return self._spec.name
 
     @classmethod
-    def from_spec(cls, path: Path | str, vars: dict | None = None, use_cache: bool = True) -> "Harness":
+    def from_spec(
+        cls,
+        path: Path | str,
+        vars: dict | None = None,
+        use_cache: bool = True,
+        adapter_registry=None,
+    ) -> "Harness":
         spec = load_spec(path, vars=vars)
-        return cls(spec=spec, use_cache=use_cache)
+        return cls(spec=spec, use_cache=use_cache, adapter_registry=adapter_registry)
 
     async def _ensure_traces(self) -> None:
         if not hasattr(self, "_traces_initialized"):
@@ -413,6 +427,7 @@ class Harness:
                             cache=self._llm_cache,
                             mission_context=mission_ctx,
                             on_token=self._on_token if stage.response_stage else None,
+                            adapter_registry=self._adapter_registry,
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()

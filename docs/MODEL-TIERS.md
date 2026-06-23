@@ -44,6 +44,10 @@ This block lives at the top level of the spec, alongside `name`, `mission`, and 
 | `temperature` | `float` | Default temperature for all calls on this tier |
 | `max_tokens` | `int` | Default max output tokens for all calls on this tier |
 | `tool_calling` | `bool` | Force tool calling on or off; `null` auto-detects by provider |
+| `adapter_support` | `"dynamic"` \| `"none"` | Load LoRA adapters from the registry and pass them to the provider per request (`dynamic`) or disable adapter loading (`none`) |
+| `adapter_path_template` | `str` | Optional path template for locating LoRA artifacts served by this tier |
+
+See `docs/ADAPTER-POWERED-TEAMS.md` for how to select an SLM tier as the host for LoRA adapter-backed skills.
 
 ---
 

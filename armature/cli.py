@@ -105,13 +105,17 @@ def _print_run_header(
     # ── last run timing ──────────────────────────────────────────────────
     if last_run:
         def _fmt_ago(s: float) -> str:
-            if s < 60:   return f"{int(s)}s ago"
-            if s < 3600: return f"{int(s / 60)}m ago"
-            if s < 86400: return f"{int(s / 3600)}h ago"
+            if s < 60:
+                return f"{int(s)}s ago"
+            if s < 3600:
+                return f"{int(s / 60)}m ago"
+            if s < 86400:
+                return f"{int(s / 3600)}h ago"
             return f"{int(s / 86400)}d ago"
 
         def _fmt_dur(s: float) -> str:
-            if s < 60: return f"{s:.0f}s"
+            if s < 60:
+                return f"{s:.0f}s"
             m, sec = divmod(int(s), 60)
             return f"{m}m {sec}s"
 
@@ -395,7 +399,7 @@ def validate(
         raise typer.Exit(1)
 
     from armature.spec.loader import load_spec
-    from armature.spec.validator import validate_spec, SpecValidationError
+    from armature.spec.validator import validate_spec
 
     try:
         loaded = load_spec(spec)
@@ -489,6 +493,7 @@ def run(
     output_file: Path = typer.Option(None, "--output", "-o", help="Write result JSON to file"),
     force: bool = typer.Option(False, "--force", help="Ignore checkpoint and rerun all stages"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable LLM response cache"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
     auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when HQS < 0.75"),
 ):
     """Run a workflow from a YAML spec file."""
@@ -499,8 +504,15 @@ def run(
     parsed_inputs = parse_inputs(inputs)
 
     from armature.spec.validator import SpecValidationError
+    from armature.adapters.registry import AdapterRegistry
+
     try:
-        harness = Harness.from_spec(spec, vars=parsed_inputs, use_cache=not no_cache)
+        harness = Harness.from_spec(
+            spec,
+            vars=parsed_inputs,
+            use_cache=not no_cache,
+            adapter_registry=AdapterRegistry(base_dir=registry_dir) if registry_dir else None,
+        )
     except SpecValidationError as exc:
         typer.echo(f"Spec validation failed:\n{exc}", err=True)
         raise typer.Exit(1)
@@ -764,7 +776,6 @@ def replay(
     """Display a recorded run stage-by-stage from the TraceStore."""
     from rich.console import Console
     from rich.table import Table
-    from rich.text import Text
 
     console = Console()
     resolved_traces = traces or Path("~/.armature/traces.db").expanduser()
@@ -981,6 +992,7 @@ def watch(
     port: int = typer.Option(8081, "--port", "-p", help="Port for webhook triggers"),
     traces: Path = typer.Option(None, "--traces", help="Path to traces SQLite database"),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress run output"),
+    tune: bool = typer.Option(False, "--tune", help="Run tune daemon that optimizes the spec between triggers (skeleton)"),
 ):
     """Run trigger listeners for a spec. Blocks until Ctrl-C."""
     if not spec.exists():
@@ -999,6 +1011,11 @@ def watch(
     if not loaded.triggers:
         typer.echo("No triggers defined in spec — nothing to watch.", err=True)
         raise typer.Exit(1)
+
+    if tune:
+        # Skeleton: tune daemon would periodically improve the spec from traces.
+        typer.echo("Tune daemon mode is a skeleton — full implementation pending.")
+        raise typer.Exit(0)
 
     async def _run_fn(payload: dict) -> None:
         harness = Harness(spec=loaded, traces_db=traces)
@@ -1346,6 +1363,283 @@ def dashboard(
     else:
         data = asyncio.run(_load())
         render_terminal(data, console=console)
+
+
+adapter_app = typer.Typer(name="adapter", help="Create and manage LoRA adapters")
+app.add_typer(adapter_app, name="adapter")
+
+
+@adapter_app.command("create")
+def adapter_create(
+    spec: Path = typer.Option(..., "--spec", help="Path to workflow spec YAML"),
+    skill: str | None = typer.Option(None, "--skill", "-s", help="Skill ID to convert to an adapter"),
+    traces: Path | None = typer.Option(None, "--traces", "-t", help="Path to exported trace JSONL"),
+    name: str | None = typer.Option(None, "--name", "-n", help="Adapter name (defaults to skill ID or traces stem)"),
+    backend: str | None = typer.Option(None, "--backend", "-b", help="Adapter backend to use"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+    role_type: str | None = typer.Option(None, "--role-type", help="Filter trace examples by role type"),
+    stage_id: str | None = typer.Option(None, "--stage-id", help="Filter trace examples by stage ID"),
+):
+    """Create a LoRA adapter from a skill document or exported traces."""
+    from armature.adapters.backends.mock import MockAdapterFactory
+    from armature.adapters.backends.s2l import S2LSkillAdapterFactory
+    from armature.adapters.backends.trace import TraceAdapterFactory
+    from armature.adapters.factory import AdapterRequest
+    from armature.adapters.registry import AdapterRegistry
+    from armature.spec.loader import load_spec
+
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(code=1)
+
+    if skill is None and traces is None:
+        typer.echo("Either --skill or --traces is required", err=True)
+        raise typer.Exit(code=1)
+    if skill is not None and traces is not None:
+        typer.echo("Use only one of --skill or --traces", err=True)
+        raise typer.Exit(code=1)
+
+    harness_spec = load_spec(spec)
+    factory_cfg = harness_spec.adapter_factory
+    chosen_backend = backend or (factory_cfg.backend if factory_cfg else "mock")
+    base_model = _resolve_adapter_base_model(harness_spec)
+    rank = factory_cfg.rank if factory_cfg else 16
+    alpha = factory_cfg.alpha if factory_cfg else 32
+    target_modules = list(factory_cfg.target_modules if factory_cfg else ["q_proj", "v_proj"])
+    use_dora = factory_cfg.use_dora if factory_cfg else False
+    cl_cfg = factory_cfg.continual_learning if factory_cfg else None
+    continual_learning = cl_cfg.enabled if cl_cfg else False
+    prior_adapter_version = cl_cfg.prior_version if cl_cfg else None
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    if chosen_backend == "mock":
+        factory = MockAdapterFactory(registry=registry)
+    elif chosen_backend == "s2l":
+        factory = S2LSkillAdapterFactory(registry=registry)
+    elif chosen_backend == "trace":
+        factory = TraceAdapterFactory(registry=registry)
+    else:
+        typer.echo(f"Unsupported adapter backend '{chosen_backend}'", err=True)
+        raise typer.Exit(code=1)
+
+    if skill is not None:
+        if skill not in harness_spec.skill_library:
+            typer.echo(f"Skill '{skill}' not found in spec.skill_library", err=True)
+            raise typer.Exit(code=1)
+        skill_def = harness_spec.skill_library[skill]
+        request = AdapterRequest(
+            name=name or skill,
+            base_model=base_model,
+            skill=skill_def,
+            rank=rank,
+            alpha=alpha,
+            target_modules=target_modules,
+            use_dora=use_dora,
+            continual_learning=continual_learning,
+            prior_adapter_version=prior_adapter_version,
+        )
+    else:
+        if not traces.exists():
+            typer.echo(f"Traces file not found: {traces}", err=True)
+            raise typer.Exit(code=1)
+        extra = {}
+        if role_type:
+            extra["role_type"] = role_type
+        if stage_id:
+            extra["stage_id"] = stage_id
+        request = AdapterRequest(
+            name=name or traces.stem,
+            base_model=base_model,
+            traces_path=traces,
+            rank=rank,
+            alpha=alpha,
+            target_modules=target_modules,
+            use_dora=use_dora,
+            continual_learning=continual_learning,
+            prior_adapter_version=prior_adapter_version,
+            extra=extra,
+        )
+
+    try:
+        job = asyncio.run(_poll_adapter_job(factory, request))
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Created adapter {job.metadata.name}@{job.metadata.version} "
+        f"at {job.artifact_path}"
+    )
+
+
+async def _poll_adapter_job(factory, request):
+    job = await factory.submit(request)
+    while job.status not in ("done", "failed"):
+        await asyncio.sleep(0.05)
+        job = await factory.poll(job)
+    if job.status == "failed":
+        raise RuntimeError("Adapter creation failed:\n" + "\n".join(job.logs))
+    return job
+
+
+def _resolve_adapter_base_model(harness_spec) -> str:
+    if harness_spec.adapter_factory and harness_spec.adapter_factory.base_model:
+        return harness_spec.adapter_factory.base_model
+    for tier_name in ("small", "medium", "large", "frontier", "tiny"):
+        tier_cfg = getattr(harness_spec.model_tiers, tier_name, None)
+        if tier_cfg is not None and tier_cfg.model:
+            return tier_cfg.model
+    raise typer.BadParameter("No adapter_factory.base_model configured and no model tiers defined")
+
+
+@adapter_app.command("list")
+def adapter_list(
+    name: str | None = typer.Option(None, "--name", "-n", help="Filter by adapter name"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """List registered adapters and their versions."""
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    rows = list(registry.list(name))
+    if not rows:
+        typer.echo("No adapters found.")
+        return
+    for metadata, artifact_dir in rows:
+        typer.echo(f"{metadata.name}@{metadata.version}  {metadata.base_model}  {artifact_dir}")
+
+
+@adapter_app.command("register")
+def adapter_register(
+    name: str = typer.Argument(..., help="Adapter name"),
+    version: str = typer.Argument(..., help="Adapter version"),
+    path: Path = typer.Argument(..., help="Path to adapter artifact directory"),
+    base_model: str = typer.Option(..., "--base-model", help="Base model the adapter was trained on"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+    rank: int = typer.Option(16, "--rank", help="LoRA rank"),
+    alpha: int = typer.Option(32, "--alpha", help="LoRA alpha"),
+    backend: str = typer.Option("manual", "--backend", help="Backend that produced the adapter"),
+):
+    """Register a pre-trained adapter artifact in the local registry."""
+    from armature.adapters.manifest import AdapterMetadata
+    from armature.adapters.registry import AdapterRegistry
+
+    if not path.exists() or not path.is_dir():
+        typer.echo(f"Artifact directory not found: {path}", err=True)
+        raise typer.Exit(code=1)
+
+    metadata = AdapterMetadata(
+        name=name,
+        version=version,
+        base_model=base_model,
+        rank=rank,
+        alpha=alpha,
+        backend=backend,
+    )
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    registry.register(metadata, path)
+    typer.echo(f"Registered {name}@{version}")
+
+
+@adapter_app.command("promote")
+def adapter_promote(
+    name: str = typer.Argument(..., help="Adapter name"),
+    version: str = typer.Argument(..., help="Version to promote to latest"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Promote an adapter version to `latest`."""
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    try:
+        registry.promote(name, version)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"Promoted {name}@{version} to latest")
+
+
+@adapter_app.command("merge")
+def adapter_merge(
+    refs: list[str] = typer.Argument(..., help="Source adapters as name@version"),
+    name: str = typer.Option(..., "--name", "-n", help="Name for the merged adapter"),
+    base_model: str | None = typer.Option(None, "--base-model", help="Base model (defaults to first source adapter's base model)"),
+    rank: int = typer.Option(16, "--rank", help="LoRA rank"),
+    alpha: int = typer.Option(32, "--alpha", help="LoRA alpha"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Merge multiple registered adapters into a single artifact."""
+    from armature.adapters.backends.merge import MergedAdapterFactory
+    from armature.adapters.factory import AdapterRequest
+    from armature.adapters.registry import AdapterRegistry
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+
+    if len(refs) < 2:
+        typer.echo("At least two source adapters are required", err=True)
+        raise typer.Exit(code=1)
+
+    resolved_base = base_model
+    if resolved_base is None:
+        first_name, first_version = refs[0].split("@", 1)
+        resolved_base = registry.get(first_name, first_version).metadata.base_model
+
+    factory = MergedAdapterFactory(registry=registry)
+    request = AdapterRequest(
+        name=name,
+        base_model=resolved_base,
+        rank=rank,
+        alpha=alpha,
+        target_modules=["q_proj", "v_proj"],
+        use_dora=False,
+        continual_learning=False,
+        prior_adapter_version=None,
+        extra={"adapter_refs": refs},
+    )
+
+    try:
+        job = asyncio.run(_poll_adapter_job(factory, request))
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Merged adapter {job.metadata.name}@{job.metadata.version} "
+        f"at {job.artifact_path}"
+    )
+
+
+@adapter_app.command("eval")
+def adapter_eval(
+    name: str = typer.Argument(..., help="Adapter name"),
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    version: str | None = typer.Option(None, "--version", "-v", help="Adapter version (defaults to latest)"),
+    stage_id: str | None = typer.Option(None, "--stage-id", help="Stage to score (defaults to first judge/leaf)"),
+    input_kv: list[str] = typer.Option([], "--input", help="Runtime inputs as key=value"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Evaluate an adapter by comparing workflow runs with and without it."""
+    from armature.adapters.eval import evaluate_adapter
+    from armature.adapters.registry import AdapterRegistry
+
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(code=1)
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+    inputs = parse_inputs(input_kv)
+
+    try:
+        result = asyncio.run(evaluate_adapter(registry, name, version, spec, inputs, stage_id))
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"Evaluated {result.adapter_name}@{result.adapter_version}: "
+        f"with={result.with_adapter_score}, without={result.without_adapter_score}, "
+        f"delta={result.delta}"
+    )
 
 
 if __name__ == "__main__":

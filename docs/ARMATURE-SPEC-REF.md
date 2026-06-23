@@ -42,6 +42,7 @@ model_tiers:
     api_base: https://...             # required for ollama / azure / bedrock
     temperature: 0.2          # 0.0–1.0
     max_tokens: 2048
+    adapter_support: dynamic  # dynamic | none — see §skill_library
 ```
 
 Recommended models (OpenRouter):
@@ -84,6 +85,103 @@ adapters:
     cmd: "echo {{ arg }}"     # Jinja2 allowed
     timeout: 60
 ```
+
+---
+
+## skill_library:
+
+Declarative skills that can be attached to LLM stages via `role.skills`. Each
+skill may declare inline `content`, load text from a `path`, or reference a
+registered LoRA adapter via `adapter`.
+
+> Adapter-backed skills implement the Skill-to-LoRA pattern (Zhang & Qi, CUHK,
+> June 2026 — [arXiv:2606.16769](https://arxiv.org/abs/2606.16769)): skill
+> behavior is distilled into LoRA weights and loaded at runtime instead of
+> injecting the full skill text into the prompt.
+
+```yaml
+skill_library:
+  tdd:
+    id: tdd
+    description: Test-driven development workflow
+    content: |
+      Follow test-driven development:
+      1. Write a failing test first.
+      2. Write the minimal implementation.
+      3. Refactor.
+    adapter:
+      name: tdd
+      version: latest          # or a concrete version, e.g. "3"
+      fallback: text           # text | none | fail
+      inject_metadata: false   # true → append adapter metadata to prompt
+```
+
+**`adapter` fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Adapter name in the local registry |
+| `version` | string \| `latest` | Version to load; `latest` resolves the promoted pointer |
+| `fallback` | `text` \| `none` \| `fail` | Behavior when the adapter cannot be loaded |
+| `inject_metadata` | bool | Append an "Active via adapter ..." note to the skill prompt |
+
+**`fallback` behavior:**
+- `text` — keep the skill's `content`/`path` text in the prompt (default)
+- `none` — omit the skill from the prompt entirely
+- `fail` — raise an error and abort the run
+
+See also: `model_tiers.*.adapter_support` and `adapter_factory:`.
+
+---
+
+## adapter_factory:
+
+Configuration block for the pluggable LoRA adapter factory used by
+`armature adapter create`.
+
+```yaml
+adapter_factory:
+  backend: local              # mock | s2l | trace | local | modal | together |
+                              # runpod | replicate
+  base_model: qwen/qwen2.5-7b # must match a configured tier model
+  rank: 16
+  alpha: 32
+  target_modules: [q_proj, v_proj]
+  use_dora: false            # Weight-Decomposed Low-Rank Adaptation
+  continual_learning:        # C-LoRA-style sequential updates
+    enabled: false
+    prior_version: latest     # or a concrete version, e.g. "3"
+    orthogonality_lambda: 0.01
+    freeze_old_routing: true
+    init_delta_near_zero: true
+  schedule:
+    min_new_traces: 100
+    max_age_days: 30
+    quality_drift_threshold: 0.05
+  promotion_policy:
+    min_cng: 0.10
+    min_hqs_delta: 0.02
+    require_manual_review: false
+  skills:
+    tdd:
+      backend: s2l            # per-skill override
+      base_model: qwen/qwen2.5-7b
+```
+
+**Fields:**
+
+| Field | Type | Description |
+|---|---|---|
+| `backend` | string | Adapter backend. `mock` writes placeholder artifacts instantly; `s2l` trains from a skill document; `trace` trains from exported SFT/DPO JSONL; `local` runs PEFT/MLX locally; remote backends dispatch to GPU providers. |
+| `base_model` | string | Base model the adapter is trained on — must match one configured `model_tiers.*.model` |
+| `rank` | int | LoRA rank (default 16) |
+| `alpha` | int | LoRA alpha (default 32) |
+| `target_modules` | list[string] | Modules to apply LoRA to (default `[q_proj, v_proj]`) |
+| `use_dora` | bool | Use Weight-Decomposed Low-Rank Adaptation (DoRA) instead of vanilla LoRA |
+| `continual_learning` | `ContinualLearningConfig` | C-LoRA-style continual adapter updates — freeze prior routing matrix, train a near-zero `R_delta`, apply orthogonality regularizer |
+| `schedule` | `AdapterSchedule` | Retraining policy |
+| `promotion_policy` | `AdapterPromotionPolicy` | Gate for auto-promoting a new adapter to `latest` |
+| `skills` | dict[str, `AdapterFactorySkillOverride`] | Per-skill overrides; can override `use_dora` and `continual_learning` per skill |
 
 ---
 
@@ -328,6 +426,10 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `SIGNATURE_TYPE_MISMATCH` | Align types between upstream output and downstream input |
 | `POST_RUN_TRANSCRIPT_OVERFLOW_RISK` | Add signature.input to the post_run stage |
 | `CONTRACT_INPUT_MISSING_NAME` | Add name: to each contracts.inputs entry |
+| `UNKNOWN_ADAPTER_BACKEND` | Use a recognized `adapter_factory.backend` |
+| `ADAPTER_FACTORY_NO_BASE_MODEL` | Set `adapter_factory.base_model` or ensure it matches a tier |
+| `ADAPTER_NO_FALLBACK` | Add `content`/`path` to the skill or change `fallback` to `none`/`fail` |
+| `ADAPTER_BASE_MODEL_MISMATCH` | Align `adapter_factory.base_model` with a configured tier model |
 
 ---
 
@@ -340,4 +442,11 @@ armature run spec.yml --dry-run                    # validate only, no execution
 armature dashboard spec.yml                        # health metrics after runs
 armature new spec.yml                              # terminal wizard
 armature optimize spec.yml                         # AI-proposed spec improvements
+armature adapter create --spec spec.yml --skill tdd --backend local
+armature adapter merge skill-a@1 skill-b@1 --name combo
+armature adapter eval tdd spec.yml --input topic="..."
 ```
+
+See `docs/ADAPTER-POWERED-TEAMS.md` for the full end-to-end workflow: choosing
+candidate SLM tiers, declaring adapter-backed skills, creating adapters,
+periodic retraining from traces, and promotion.

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 from armature.spec.models import Role, RoleType
 
 if TYPE_CHECKING:
+    from armature.adapters.registry import ResolvedAdapter
     from armature.spec.models import Signature, SkillDef
 
 _ROLE_PREAMBLES = {
@@ -42,6 +43,8 @@ class PromptAssembler:
         examples: list[dict] | None = None,
         skills: "list[SkillDef]" = [],
         mission_block: str = "",
+        active_adapters: "dict[str, ResolvedAdapter] | None" = None,
+        omitted_skills: "set[str] | None" = None,
     ) -> str:
         import json as _json
 
@@ -72,14 +75,39 @@ class PromptAssembler:
             tool_lines = "\n".join(f"- {t['name']}: {t['description']}" for t in tools)
             sections.append(f"## Available Tools\n{tool_lines}")
 
+        active_adapters = active_adapters or {}
+        omitted_skills = omitted_skills or set()
         if skills:
             skill_parts = []
             for skill in skills:
+                if skill.id in omitted_skills:
+                    continue
+                resolved = active_adapters.get(skill.id)
+                if resolved is not None:
+                    if skill.adapter and skill.adapter.inject_metadata:
+                        skill_parts.append(
+                            f"### {skill.description}\n"
+                            f"*Active via adapter {resolved.metadata.name}@{resolved.metadata.version}*"
+                        )
+                    # When an adapter is active (and metadata injection is off),
+                    # the full skill text is omitted to save context window.
+                    continue
                 body = skill.content
                 if body is None and skill.path:
                     body = Path(skill.path).read_text(encoding="utf-8").strip()
                 skill_parts.append(f"### {skill.description}\n{body}")
-            sections.append("## Skills\n" + "\n\n".join(skill_parts))
+            if skill_parts:
+                sections.append("## Skills\n" + "\n\n".join(skill_parts))
+
+            if active_adapters:
+                adapter_lines = []
+                for skill_id, resolved in active_adapters.items():
+                    meta = resolved.metadata
+                    adapter_lines.append(
+                        f"- {meta.name}@{meta.version} "
+                        f"(base: {meta.base_model}, rank: {meta.rank})"
+                    )
+                sections.append("## Active Adapters\n" + "\n".join(adapter_lines))
 
         if examples:
             ex_parts = []
