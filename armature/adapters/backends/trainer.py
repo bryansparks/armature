@@ -29,6 +29,8 @@ class Trainer(ABC):
         dataset: TrainingDataset,
         request: AdapterRequest,
         work_dir: Path,
+        *,
+        prior_artifact_dir: Path | None = None,
     ) -> Path:
         """Train an adapter and return the artifact directory."""
 
@@ -44,6 +46,8 @@ class MockTrainer(Trainer):
         dataset: TrainingDataset,
         request: AdapterRequest,
         work_dir: Path,
+        *,
+        prior_artifact_dir: Path | None = None,
     ) -> Path:
         metadata = AdapterMetadata(
             name=request.name,
@@ -52,11 +56,29 @@ class MockTrainer(Trainer):
             rank=request.rank,
             alpha=request.alpha,
             target_modules=list(request.target_modules),
+            use_dora=request.use_dora,
+            continual_learning=request.continual_learning,
+            prior_adapter_version=request.prior_adapter_version,
         )
-        return _write_dummy_artifact(metadata, work_dir)
+        return _write_dummy_artifact(metadata, work_dir, prior_artifact_dir=prior_artifact_dir)
 
 
-def _write_dummy_artifact(metadata: AdapterMetadata, work_dir: Path) -> Path:
+def _write_dummy_artifact(
+    metadata: AdapterMetadata,
+    work_dir: Path,
+    *,
+    prior_artifact_dir: Path | None = None,
+) -> Path:
+    import shutil
+
+    if prior_artifact_dir is not None:
+        # Continual-learning warm start: copy the prior artifact as a baseline.
+        # A production trainer would load the prior LoRA and add a near-zero
+        # delta with an orthogonality regularizer (C-LoRA); here we inherit the
+        # prior weights so the lifecycle can be exercised end-to-end.
+        if prior_artifact_dir.exists():
+            shutil.copytree(prior_artifact_dir, work_dir, dirs_exist_ok=True)
+
     config = {
         "lora_alpha": metadata.alpha,
         "r": metadata.rank,
@@ -69,5 +91,6 @@ def _write_dummy_artifact(metadata: AdapterMetadata, work_dir: Path) -> Path:
     (work_dir / "adapter_config.json").write_text(
         json.dumps(config, indent=2), encoding="utf-8"
     )
-    (work_dir / "adapter.safetensors").write_bytes(b"MOCK")
+    if not (work_dir / "adapter.safetensors").exists():
+        (work_dir / "adapter.safetensors").write_bytes(b"MOCK")
     return work_dir

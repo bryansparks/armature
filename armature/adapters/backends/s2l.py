@@ -71,13 +71,22 @@ class S2LSkillAdapterFactory(AdapterFactory):
             job.logs.append("invalid job state")
             return job
         try:
+            from armature.adapters.backends.continual import resolve_prior_artifact_dir
+
             skill = job.request.skill
             if skill is None:
                 raise ValueError("missing skill")
             dataset = _synthesize_dataset(skill, job.request)
+            prior_artifact_dir = resolve_prior_artifact_dir(self._registry, job.request)
             work_dir = Path(tempfile.mkdtemp(prefix="armature-s2l-"))
-            artifact_dir = await self._trainer.train(dataset, job.request, work_dir)
-            self._registry.register(job.metadata, artifact_dir)
+            artifact_dir = await self._trainer.train(
+                dataset,
+                job.request,
+                work_dir,
+                prior_artifact_dir=prior_artifact_dir,
+            )
+            promote = job.request.extra.get("promote", True)
+            self._registry.register(job.metadata, artifact_dir, promote=promote)
             job.artifact_path = self._registry.get(
                 job.metadata.name, job.metadata.version
             ).artifact_dir

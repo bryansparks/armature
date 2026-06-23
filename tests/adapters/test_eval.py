@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import json
-
-import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from armature.adapters.eval import evaluate_adapter
 from armature.adapters.manifest import AdapterMetadata

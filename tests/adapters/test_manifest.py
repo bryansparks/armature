@@ -1,6 +1,5 @@
 """Tests for adapter manifest read/write."""
 import pytest
-from pathlib import Path
 
 from armature.adapters.manifest import Manifest, AdapterMetadata
 

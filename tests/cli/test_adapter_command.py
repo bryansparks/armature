@@ -246,6 +246,61 @@ def test_adapter_merge_requires_two_sources(tmp_path):
     assert "At least two source adapters" in merge.output
 
 
+def test_adapter_update_trains_new_version(tmp_path):
+    import json
+
+    adapters_dir = tmp_path / "adapters"
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    (artifact_dir / "adapter_config.json").write_text("{}")
+    (artifact_dir / "adapter.safetensors").write_bytes(b"X")
+
+    reg = runner.invoke(
+        app,
+        [
+            "adapter", "register",
+            "worker", "1", str(artifact_dir),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+        ],
+    )
+    assert reg.exit_code == 0, reg.output
+
+    traces = tmp_path / "traces.jsonl"
+    with traces.open("w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "messages": [
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "hi"},
+                        {"role": "assistant", "content": "hello"},
+                    ]
+                }
+            )
+            + "\n"
+        )
+
+    update = runner.invoke(
+        app,
+        [
+            "adapter", "update",
+            "worker", str(traces),
+            "--base-model", "qwen/qwen2.5-7b",
+            "--registry", str(adapters_dir),
+            "--no-promote",
+        ],
+    )
+    assert update.exit_code == 0, update.output
+    assert "Updated adapter worker@2" in update.output
+
+    lst = runner.invoke(app, ["adapter", "list", "--name", "worker", "--registry", str(adapters_dir)])
+    assert lst.exit_code == 0, lst.output
+    # Latest should still be 1 because we passed --no-promote.
+    lines = [line for line in lst.output.splitlines() if line.startswith("worker@")]
+    assert any("worker@1" in line for line in lines)
+
+
 def test_adapter_eval_command(tmp_path):
     adapters_dir = tmp_path / "adapters"
     spec = tmp_path / "wf.yaml"

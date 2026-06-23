@@ -1546,13 +1546,19 @@ def adapter_promote(
     name: str = typer.Argument(..., help="Adapter name"),
     version: str = typer.Argument(..., help="Version to promote to latest"),
     registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+    force: bool = typer.Option(False, "--force", help="Bypass promotion policy"),
+    min_score: float | None = typer.Option(None, "--min-score", help="Require validation_score >= this"),
 ):
     """Promote an adapter version to `latest`."""
+    from armature.adapters.policy import ThresholdPromotionPolicy
     from armature.adapters.registry import AdapterRegistry
 
     registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
     try:
-        registry.promote(name, version)
+        policy = None
+        if min_score is not None:
+            policy = ThresholdPromotionPolicy(min_score=min_score)
+        registry.promote(name, version, policy=policy, force=force)
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
@@ -1640,6 +1646,132 @@ def adapter_eval(
         f"with={result.with_adapter_score}, without={result.without_adapter_score}, "
         f"delta={result.delta}"
     )
+
+
+@adapter_app.command("update")
+def adapter_update(
+    name: str = typer.Argument(..., help="Adapter name"),
+    traces: Path = typer.Argument(..., help="Path to SFT/DPO JSONL traces"),
+    base_model: str | None = typer.Option(None, "--base-model", help="Base model; defaults to prior adapter's base model"),
+    rank: int = typer.Option(16, "--rank", help="LoRA rank"),
+    alpha: int = typer.Option(32, "--alpha", help="LoRA alpha"),
+    target_modules: list[str] = typer.Option(["q_proj", "v_proj"], "--target-module", help="Target module names"),
+    use_dora: bool = typer.Option(False, "--use-dora", help="Use DoRA"),
+    continual_learning: bool = typer.Option(True, "--continual/--no-continual", help="Continual update from prior version"),
+    prior_version: str | None = typer.Option(None, "--prior-version", help="Prior version; defaults to latest"),
+    eval_spec: Path | None = typer.Option(None, "--eval-spec", help="Workflow spec for evaluation"),
+    eval_inputs: list[str] = typer.Option([], "--eval-input", help="Inputs for eval as key=value"),
+    eval_stage: str | None = typer.Option(None, "--eval-stage", help="Stage to score"),
+    min_score: float | None = typer.Option(None, "--min-score", help="Promotion threshold"),
+    promote: bool = typer.Option(True, "--promote/--no-promote", help="Advance latest pointer if policy passes"),
+    registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
+):
+    """Train a new adapter version from traces and optionally evaluate + promote it."""
+    from dataclasses import replace
+
+    from armature.adapters.backends.local import LocalAdapterFactory
+    from armature.adapters.backends.trace import TraceAdapterFactory
+    from armature.adapters.eval import evaluate_adapter
+    from armature.adapters.factory import AdapterRequest
+    from armature.adapters.policy import ThresholdPromotionPolicy
+    from armature.adapters.registry import AdapterRegistry
+
+    if not traces.exists():
+        typer.echo(f"Traces file not found: {traces}", err=True)
+        raise typer.Exit(code=1)
+
+    registry = AdapterRegistry(base_dir=registry_dir) if registry_dir else AdapterRegistry()
+
+    prior = None
+    try:
+        prior = registry.get(name, prior_version)
+    except ValueError:
+        if prior_version is not None:
+            typer.echo(f"Prior adapter {name}@{prior_version} not found", err=True)
+            raise typer.Exit(code=1)
+
+    if prior is not None:
+        resolved_base = base_model or prior.metadata.base_model
+        resolved_rank = rank or prior.metadata.rank
+        resolved_alpha = alpha or prior.metadata.alpha
+        resolved_target = target_modules or prior.metadata.target_modules
+        resolved_dora = use_dora or prior.metadata.use_dora
+        resolved_prior = prior_version or prior.metadata.version
+    else:
+        if base_model is None:
+            typer.echo("No prior adapter found; --base-model is required", err=True)
+            raise typer.Exit(code=1)
+        resolved_base = base_model
+        resolved_rank = rank
+        resolved_alpha = alpha
+        resolved_target = target_modules
+        resolved_dora = use_dora
+        resolved_prior = prior_version
+
+    factory = LocalAdapterFactory(registry=registry)
+    if not factory.available():
+        factory = TraceAdapterFactory(registry=registry)
+
+    extra: dict[str, object] = {"promote": False}
+    request = AdapterRequest(
+        name=name,
+        base_model=resolved_base,
+        traces_path=traces,
+        rank=resolved_rank,
+        alpha=resolved_alpha,
+        target_modules=list(resolved_target),
+        use_dora=resolved_dora,
+        continual_learning=continual_learning,
+        prior_adapter_version=resolved_prior,
+        extra=extra,
+    )
+
+    try:
+        job = asyncio.run(_poll_adapter_job(factory, request))
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    version = job.metadata.version
+    validation_score: float | None = None
+
+    if eval_spec is not None:
+        if not eval_spec.exists():
+            typer.echo(f"Eval spec not found: {eval_spec}", err=True)
+            raise typer.Exit(code=1)
+        inputs = parse_inputs(eval_inputs)
+        try:
+            result = asyncio.run(
+                evaluate_adapter(registry, name, version, eval_spec, inputs, eval_stage)
+            )
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1)
+        validation_score = result.delta
+        if validation_score is None:
+            validation_score = result.with_adapter_score
+        new_meta = replace(
+            registry.get(name, version).metadata,
+            validation_score=validation_score,
+        )
+        registry.update_metadata(new_meta)
+        typer.echo(
+            f"Evaluated {name}@{version}: with={result.with_adapter_score}, "
+            f"without={result.without_adapter_score}, delta={result.delta}"
+        )
+
+    if promote:
+        try:
+            policy = None
+            if min_score is not None:
+                policy = ThresholdPromotionPolicy(min_score=min_score)
+            registry.promote(name, version, policy=policy, force=(min_score is None))
+            typer.echo(f"Promoted {name}@{version} to latest")
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1)
+
+    typer.echo(f"Updated adapter {name}@{version} at {job.artifact_path}")
 
 
 if __name__ == "__main__":
