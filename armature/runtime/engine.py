@@ -461,6 +461,9 @@ class Harness:
                             outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
                             sandbox_image_digest=self._sandbox_image_digest,
+                            agent_id=getattr(stage.role, "x_source", None),
+                            agent_version=getattr(stage.role, "x_agent_version", None),
+                            active_skill_ids=list(getattr(stage.role, "skills", []) or []),
                         ))
                         if _escalation_count > 0 and stage.output_mode == "guided_json" and self._on_event:
                             self._on_event("tier_escalation_warning", {
