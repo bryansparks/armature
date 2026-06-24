@@ -93,6 +93,9 @@ class TraceStore:
                 "tools_called_json TEXT DEFAULT '[]'",
                 "sandbox_image_digest TEXT",
                 "loop_iteration INTEGER",
+                "agent_id TEXT",
+                "agent_version TEXT",
+                "active_skill_ids_json TEXT DEFAULT '[]'",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -111,8 +114,9 @@ class TraceStore:
                     error_type, escalation_count, spec_version,
                     inputs_hash, policy_version, inputs_provenance_json,
                     tools_declared_json, tools_called_json,
-                    sandbox_image_digest, loop_iteration)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    sandbox_image_digest, loop_iteration,
+                    agent_id, agent_version, active_skill_ids_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -127,6 +131,9 @@ class TraceStore:
                     json.dumps(trace.tools_called),
                     trace.sandbox_image_digest,
                     trace.loop_iteration,
+                    trace.agent_id,
+                    trace.agent_version,
+                    json.dumps(trace.active_skill_ids),
                 ),
             )
             await db.commit()
@@ -192,6 +199,9 @@ class TraceStore:
             tools_called=json.loads(d.get("tools_called_json") or "[]"),
             sandbox_image_digest=d.get("sandbox_image_digest") or None,
             loop_iteration=d.get("loop_iteration") or None,
+            agent_id=d.get("agent_id") or None,
+            agent_version=d.get("agent_version") or None,
+            active_skill_ids=json.loads(d.get("active_skill_ids_json") or "[]"),
         )
 
     async def latest_run_id(self, workflow_name: str) -> str | None:

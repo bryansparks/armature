@@ -1,4 +1,5 @@
-from armature.state.traces import TraceRecord
+from pathlib import Path
+from armature.state.traces import TraceStore, TraceRecord
 
 
 def test_trace_record_has_attribution_fields_with_defaults():
@@ -21,3 +22,33 @@ def test_trace_record_accepts_attribution_values():
     assert t.agent_id == "gmail-reader"
     assert t.agent_version == "0.2.0"
     assert t.active_skill_ids == ["triage-inbox", "draft-reply"]
+
+
+async def test_store_round_trips_attribution(tmp_path: Path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    await store.record(TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="m",
+        agent_id="gmail-reader", agent_version="0.2.0",
+        active_skill_ids=["triage-inbox", "draft-reply"],
+    ))
+    rows = await store.query(workflow_name="wf")
+    assert len(rows) == 1
+    t = rows[0]
+    assert t.agent_id == "gmail-reader"
+    assert t.agent_version == "0.2.0"
+    assert t.active_skill_ids == ["triage-inbox", "draft-reply"]
+
+
+async def test_store_round_trips_null_attribution(tmp_path: Path):
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    await store.record(TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="m",
+    ))  # inline role: stage -> no attribution
+    rows = await store.query(workflow_name="wf")
+    assert rows[0].agent_id is None
+    assert rows[0].agent_version is None
+    assert rows[0].active_skill_ids == []
