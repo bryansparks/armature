@@ -32,6 +32,9 @@ class TraceRecord(BaseModel):
     tools_called: list[str] = Field(default_factory=list)
     sandbox_image_digest: str | None = None
     loop_iteration: int | None = None  # set for stages running inside a loop (1-based)
+    agent_id: str | None = None
+    agent_version: str | None = None
+    active_skill_ids: list[str] = Field(default_factory=list)
 
 
 class HqsResult(BaseModel):
