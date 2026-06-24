@@ -52,3 +52,17 @@ async def test_store_round_trips_null_attribution(tmp_path: Path):
     assert rows[0].agent_id is None
     assert rows[0].agent_version is None
     assert rows[0].active_skill_ids == []
+
+
+async def test_legacy_record_call_still_works(tmp_path: Path):
+    """A TraceRecord built without the new fields still records and reads back."""
+    store = TraceStore(tmp_path / "traces.db")
+    await store.init()
+    await store.record(TraceRecord(
+        run_id="r1", workflow_name="wf", stage_id="s1",
+        role_type="worker", model="m",
+        # no agent_id / agent_version / active_skill_ids
+    ))
+    rows = await store.query(workflow_name="wf")
+    assert rows[0].agent_id is None
+    assert rows[0].active_skill_ids == []

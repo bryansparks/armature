@@ -2849,6 +2849,20 @@ Stage analyst:
 - **Staleness tracing:** Identify which stages received stale memory entries by filtering on `"stale_memory"` labels.
 - **Information flow analysis:** Reconstruct the complete data lineage of any context key at any stage.
 
+### Agent attribution fields
+
+Each LLM-stage trace carries optional attribution back to the agent definition that
+produced it (set when the stage resolves a `CompiledAgent` bundle from `agent_library`;
+absent for inline `role:` stages):
+
+- `agent_id` — the bundle role's `x_source` (the Cabinet agent folder id).
+- `agent_version` — the bundle role's `x_agent_version` (per-agent semantic version).
+- `active_skill_ids` — the skill ids attached to the stage's role (`stage.role.skills`),
+  i.e. the skills the agent brought into play for this stage.
+
+Per-skill tool attribution is derivable by joining `active_skill_ids` × the skill
+library's per-skill `x_tools` × the recorded `tools_called`.
+
 ---
 
 ## 24. Memory staleness
