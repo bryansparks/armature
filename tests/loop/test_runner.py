@@ -56,6 +56,7 @@ class _FakeHarness:
         self._traces_db = traces_db
         self._results = results
         self._idx = idx
+        self._run_id = f"fake-{idx}"
         self._calls_per_iter = calls_per_iter
         self._in_tok = in_tok
         self._out_tok = out_tok
@@ -63,7 +64,7 @@ class _FakeHarness:
     async def run(self, inputs):
         store = TraceStore(self._traces_db)
         await store.init()
-        rid = f"fake-{self._idx}"
+        rid = self._run_id
         ts = datetime(2026, 1, 1, 0, 0, self._idx, tzinfo=timezone.utc).isoformat()
         for i in range(self._calls_per_iter):
             await store.record(TraceRecord(
@@ -233,3 +234,41 @@ async def test_loop_summary_does_not_inflate_other_runs_hqs(tmp_path):
     summary_rows = await store.query_by_run(res.loop_session_id)
     assert len(summary_rows) == 1
     assert summary_rows[0].stage_id == "__loop__"
+
+
+class _NoTraceHarness:
+    """Models a Harness whose run writes zero trace rows (e.g. a tool_call-only
+    workflow). Mints run_id at construction like the real Harness (engine.py:127)
+    but records nothing — exercising the runner's run_id discovery path."""
+
+    def __init__(self, spec, traces_db, idx):
+        self._spec = spec
+        self._traces_db = traces_db
+        self._run_id = f"notrace-{idx}"
+
+    async def run(self, inputs):
+        return {"ok": True}
+
+
+async def test_loop_handles_harness_that_writes_no_trace_rows(tmp_path):
+    """A workflow whose stages write zero traces (tool_call/subagent_spec only)
+    must still get a correct per-iteration run_id and zero budget inflation."""
+    db = tmp_path / "traces.db"
+    counter = itertools.count(1)
+    def make():
+        return _NoTraceHarness(_spec(), db, idx=next(counter))
+    runner = LoopRunner(
+        spec=_spec(), traces_db=db, max_iterations=3,
+        harness_factory=make,
+    )
+    res = await runner.run()
+    assert res.stop_reason == "max_iterations"
+    assert len(res.iterations) == 3
+    # each iteration gets the harness's own run_id — never empty, never the loop session
+    for ir in res.iterations:
+        assert ir.run_id.startswith("notrace-")
+        assert ir.run_id != ""
+        assert ir.run_id != res.loop_session_id
+    # zero trace rows -> zero llm_calls/tokens accounted, no inflation
+    assert res.accumulated["llm_calls"] == 0
+    assert res.accumulated["tokens"] == 0

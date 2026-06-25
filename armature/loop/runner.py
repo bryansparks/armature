@@ -138,7 +138,7 @@ class LoopRunner:
                 break
             iter_latency = time.monotonic() - iter_start
 
-            rid = await store.latest_run_id(self.spec.name)
+            rid = harness._run_id
             calls, toks = await _account_run(store, rid)
             accumulated["llm_calls"] += calls
             accumulated["tokens"] += toks
