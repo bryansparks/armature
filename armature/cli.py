@@ -1032,6 +1032,83 @@ def watch(
 
 
 @app.command()
+def loop(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    inputs: list[str] = typer.Option([], "--input", "-i", help="Input values as key=value"),
+    max_iterations: int = typer.Option(10, "--max-iterations", help="Maximum loop iterations"),
+    max_llm_calls: int | None = typer.Option(None, "--max-llm-calls", help="Cap total LLM calls across iterations"),
+    max_wallclock: float | None = typer.Option(None, "--max-wallclock", help="Cap total wall-clock seconds"),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Cap total tokens across iterations"),
+    until: str | None = typer.Option(None, "--until", help="Jinja2 stop predicate, e.g. '{{ judge.accept }}'"),
+    carry_forward: str = typer.Option("*", "--carry-forward", help="Carry dot-paths (e.g. 'a.b,c.d') or '*' for whole result"),
+    inject_as: str = typer.Option("prior_run", "--inject-as", help="Key under which carried values are injected"),
+    interval: float = typer.Option(0.0, "--interval", help="Seconds to sleep between iterations (0 = back-to-back)"),
+    converge: bool = typer.Option(False, "--converge", help="Stop when two consecutive results are identical"),
+    traces: Path = typer.Option(None, "--traces", help="Path to traces SQLite database"),
+    output: Path = typer.Option(None, "--output", help="Write the full LoopResult as JSON to PATH"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Bypass the spec cache"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress per-iteration output"),
+):
+    """Run a workflow repeatedly under a central budget until a stop condition.
+
+    Each iteration is a fresh run with its own trace/run_id. The driver injects
+    ``_iteration`` and carry-forward context each pass, tracks a central budget
+    (iterations / llm-calls / wall-clock / tokens), stops on an optional ``until``
+    predicate, convergence, or budget, and prints a merged multi-pass report.
+    """
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+    parsed_inputs = parse_inputs(inputs)
+
+    from armature.spec.loader import load_spec
+    from armature.loop.runner import LoopRunner
+
+    loaded = load_spec(spec)
+    runner = LoopRunner(
+        spec=loaded,
+        traces_db=traces,
+        inputs=parsed_inputs,
+        max_iterations=max_iterations,
+        max_llm_calls=max_llm_calls,
+        max_wallclock=max_wallclock,
+        max_tokens=max_tokens,
+        until=until,
+        carry_forward=carry_forward,
+        inject_as=inject_as,
+        interval=interval,
+        converge=converge,
+        use_cache=not no_cache,
+    )
+
+    async def _run():
+        return await runner.run()
+
+    result = asyncio.run(_run())
+
+    if not quiet:
+        for ir in result.iterations:
+            typer.echo(
+                f"  [{ir.iteration}] run={ir.run_id} llm_calls={ir.llm_calls} "
+                f"tokens={ir.tokens}"
+            )
+        typer.echo(
+            f"loop_session={result.loop_session_id} stop={result.stop_reason} "
+            f"iterations={len(result.iterations)} "
+            f"llm_calls={result.accumulated['llm_calls']} "
+            f"tokens={result.accumulated['tokens']}"
+        )
+
+    if output:
+        import json
+        from dataclasses import asdict
+        output.write_text(json.dumps(asdict(result), indent=2, default=str))
+
+    if result.stop_reason == "error":
+        raise typer.Exit(1)
+
+
+@app.command()
 def doctor(
     spec: Path = typer.Option(None, "--spec", help="Optional spec file to validate"),
 ):
