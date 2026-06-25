@@ -35,3 +35,32 @@ def build_iteration_inputs(
             iter_inputs[inject_as] = carried
         _merge_carry_forward(iter_inputs, carried)
     return iter_inputs
+
+
+def decide_stop(
+    result: dict,
+    prev_result: dict | None,
+    until_met: bool,
+    converge: bool,
+    accumulated: dict,
+    budgets: dict,
+) -> str | None:
+    """Decide whether the loop should stop after this iteration.
+
+    Precedence (matches spec §5): until_met → converged → budget. Returns a
+    stop_reason string or ``None`` (continue). ``budgets`` is a dict that may
+    contain ``max_llm_calls`` / ``max_tokens`` / ``max_wallclock`` (each
+    optional, value None means unset). ``accumulated`` is
+    ``{llm_calls, tokens, wall_s}``.
+    """
+    if until_met:
+        return "until_met"
+    if converge and prev_result is not None and result == prev_result:
+        return "converged"
+    if budgets.get("max_llm_calls") is not None and accumulated["llm_calls"] >= budgets["max_llm_calls"]:
+        return "budget_llm_calls"
+    if budgets.get("max_tokens") is not None and accumulated["tokens"] >= budgets["max_tokens"]:
+        return "budget_tokens"
+    if budgets.get("max_wallclock") is not None and accumulated["wall_s"] >= budgets["max_wallclock"]:
+        return "budget_wallclock"
+    return None
