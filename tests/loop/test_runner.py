@@ -1,4 +1,5 @@
 import pytest
+import itertools
 from datetime import datetime, timezone
 from armature.state.traces import TraceStore, TraceRecord
 from armature.spec.models import HarnessSpec, ModelTiers, ModelTierConfig
@@ -45,18 +46,21 @@ def _spec():
 
 
 class _FakeHarness:
-    """Writes deterministic trace rows; returns canned results in order."""
-    def __init__(self, spec, traces_db, results, calls_per_iter=2, in_tok=10, out_tok=5):
+    """Models a fresh Harness per iteration: each instance mints its own run_id
+    (the factory-supplied ``idx``) at construction — mirroring the real Harness,
+    which mints ``run_id`` in ``__init__`` (engine.py:127). Writes deterministic
+    trace rows and returns the canned result for this iteration's index."""
+
+    def __init__(self, spec, traces_db, results, idx, calls_per_iter=2, in_tok=10, out_tok=5):
         self._spec = spec
         self._traces_db = traces_db
         self._results = results
-        self._idx = 0
+        self._idx = idx
         self._calls_per_iter = calls_per_iter
         self._in_tok = in_tok
         self._out_tok = out_tok
 
     async def run(self, inputs):
-        self._idx += 1
         store = TraceStore(self._traces_db)
         await store.init()
         rid = f"fake-{self._idx}"
@@ -72,9 +76,11 @@ class _FakeHarness:
 
 
 def _factory(spec, traces_db, results, **kw):
-    """Build a harness_factory closure for a fake with the given canned results."""
+    """harness_factory closure: each call mints a fresh fake with the next index,
+    mirroring a fresh Harness per iteration."""
+    counter = itertools.count(1)
     def make():
-        return _FakeHarness(spec, traces_db, results)
+        return _FakeHarness(spec, traces_db, results, idx=next(counter))
     return make
 
 
@@ -145,8 +151,9 @@ async def test_loop_carries_forward_into_inputs(tmp_path):
             seen.append(inputs)
             return await super().run(inputs)
 
+    counter = itertools.count(1)
     def make():
-        return _Capturing(_spec(), db, results)
+        return _Capturing(_spec(), db, results, idx=next(counter))
 
     runner = LoopRunner(
         spec=_spec(), traces_db=db,

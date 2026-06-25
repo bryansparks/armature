@@ -94,20 +94,16 @@ class LoopRunner:
         self.adapter_registry = adapter_registry
         self.traces_db = Path(traces_db).expanduser() if traces_db else Path("~/.armature/traces.db").expanduser()
         self._harness_factory = harness_factory
-        self._harness = None
 
     def _make_harness(self):
-        if self._harness is None:
-            if self._harness_factory is not None:
-                self._harness = self._harness_factory()
-            else:
-                self._harness = Harness(
-                    spec=self.spec,
-                    traces_db=self.traces_db,
-                    use_cache=self.use_cache,
-                    adapter_registry=self.adapter_registry,
-                )
-        return self._harness
+        if self._harness_factory is not None:
+            return self._harness_factory()
+        return Harness(
+            spec=self.spec,
+            traces_db=self.traces_db,
+            use_cache=self.use_cache,
+            adapter_registry=self.adapter_registry,
+        )
 
     async def run(self) -> LoopResult:
         session_id = uuid.uuid4().hex[:8]
