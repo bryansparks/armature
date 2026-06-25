@@ -185,3 +185,51 @@ async def test_loop_aborts_on_harness_error(tmp_path):
     assert res.stop_reason == "error"
     assert "kaboom" in (res.error or "")
     assert len(res.iterations) == 0
+
+
+async def test_loop_writes_one_summary_trace_row(tmp_path):
+    db = tmp_path / "traces.db"
+    results = [{"n": 1}, {"n": 1}]
+    runner = LoopRunner(
+        spec=_spec(), traces_db=db, max_iterations=2, converge=True,
+        harness_factory=_factory(_spec(), db, results),
+    )
+    res = await runner.run()
+    # exactly one __loop__ row for this workflow
+    store = TraceStore(db)
+    await store.init()
+    all_rows = await store.query(workflow_name="wf", limit=1000)
+    loop_rows = [r for r in all_rows if r.stage_id == "__loop__"]
+    assert len(loop_rows) == 1
+    row = loop_rows[0]
+    assert row.run_id == res.loop_session_id
+    assert row.role_type == "orchestrator"
+    assert row.model == "loop-driver"
+    assert row.success is True
+    assert row.outputs["stop_reason"] == "converged"
+    assert len(row.outputs["iterations"]) == 2
+    # the summary run_id is distinct from the per-iteration run_ids
+    iter_run_ids = {ir.run_id for ir in res.iterations}
+    assert row.run_id not in iter_run_ids
+
+
+async def test_loop_summary_does_not_inflate_other_runs_hqs(tmp_path):
+    db = tmp_path / "traces.db"
+    results = [{"n": 1}]
+    runner = LoopRunner(
+        spec=_spec(), traces_db=db, max_iterations=1,
+        harness_factory=_factory(_spec(), db, results),
+    )
+    res = await runner.run()
+    store = TraceStore(db)
+    await store.init()
+    # compute_hqs on a per-iteration run_id (which has real worker rows) must work
+    # and must NOT be polluted by the __loop__ summary row (different run_id).
+    iter_rid = res.iterations[0].run_id
+    hqs = await store.compute_hqs(iter_rid)
+    assert hqs is not None
+    assert hqs.n_traces == 2  # the two fake worker rows for that iteration
+    # the summary row's own run_id has exactly one __loop__ row
+    summary_rows = await store.query_by_run(res.loop_session_id)
+    assert len(summary_rows) == 1
+    assert summary_rows[0].stage_id == "__loop__"
