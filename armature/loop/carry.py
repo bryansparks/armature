@@ -12,7 +12,7 @@ def resolve_carry(result: dict | None, carry_paths: str) -> dict:
     """Resolve carried values from the prior iteration's result dict.
 
     carry_paths:
-      ``"*"``  -> a shallow copy of the whole result dict.
+      ``"*"``  -> a deep copy of the whole result dict.
       ``"a.b,c.d"`` -> only ``a.b`` and ``c.d`` (dot-paths into the result),
                        nested into the output via ``_set_nested_key``.
 
