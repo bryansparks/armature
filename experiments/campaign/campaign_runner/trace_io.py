@@ -66,8 +66,8 @@ def list_runs(db_path: Path, workflow_name: str) -> list[str]:
     con = _connect(db_path)
     try:
         cur = con.execute(
-            "SELECT DISTINCT run_id FROM traces WHERE workflow_name = ? "
-            "AND stage_id != '__loop__' ORDER BY timestamp ASC",
+            "SELECT run_id FROM traces WHERE workflow_name = ? "
+            "AND stage_id != '__loop__' GROUP BY run_id ORDER BY MIN(timestamp) ASC",
             (workflow_name,),
         )
         return [r["run_id"] for r in cur.fetchall()]
@@ -78,6 +78,24 @@ def list_runs(db_path: Path, workflow_name: str) -> list[str]:
 def latest_run_id(db_path: Path, workflow_name: str) -> str | None:
     runs = list_runs(db_path, workflow_name)
     return runs[-1] if runs else None
+
+
+def total_tokens(db_path: Path) -> int:
+    """Sum of input+output tokens across all traces (read-only)."""
+    if not db_path.exists():
+        return 0
+    con = _connect(db_path)
+    try:
+        cur = con.execute(
+            "SELECT COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) "
+            "FROM traces"
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row is not None else 0
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        con.close()
 
 
 def read_improve_log(path: Path) -> list[dict]:

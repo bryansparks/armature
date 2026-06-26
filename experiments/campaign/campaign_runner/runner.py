@@ -58,6 +58,12 @@ class CampaignRunner:
         # hqs_feedback hook hint in the run's stderr. rolling (improve_log
         # hqs_before) is opportunistic — filled by the improve step, not here.
         arm_auth = self.drv.replay_hqs(run_id) if run_id else None
+        # NOTE: hqs_ours["dashboard"] is computed from per-run trace rows
+        # (trace_io.read_rows_by_run), while hqs_armature["dashboard"] comes from
+        # `armature dashboard --format json`, which computes the HQS trend across
+        # ALL workflow traces in the DB — not just this single run. So a persistent
+        # dashboard delta in H3 reflects a row-set mismatch, not necessarily formula
+        # drift. The formula reproduction itself is verified in tests/test_hqs.py.
         arm_dash = (self.drv.dashboard_json(self.workflow_name) or {}).get("current_hqs") if run_id else None
         arm_feedback = parse_hqs_from_text(run_stderr)
         hqs_armature = {"authoritative": arm_auth, "rolling": None,
@@ -85,7 +91,8 @@ class CampaignRunner:
         llm_calls = 0
         for pi, phase in enumerate(self.plan.phases):
             for rep in range(phase.repeats):
-                if self._budget_exceeded(len(rows), llm_calls, time.monotonic() - t0):
+                if self._budget_exceeded(len(rows), llm_calls, time.monotonic() - t0,
+                                         trace_io.total_tokens(self.sb.trace_db)):
                     gaps.append({"want": "budget", "needed": "stop before max_runs/llm/wallclock",
                                  "severity": "info"})
                     break
@@ -100,7 +107,8 @@ class CampaignRunner:
                 llm_calls += 1
                 improve_log, recovery, spec_diff = [], None, ""
                 if phase.self_improve and phase.self_improve.enabled:
-                    improve_log, recovery = self._do_improve(phase, gaps)
+                    improve_log, recovery, improve_llm = self._do_improve(phase, gaps)
+                    llm_calls += improve_llm
                     spec_diff = self._diff(spec_before, self.sb.working_spec.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
@@ -112,25 +120,30 @@ class CampaignRunner:
                     rows[-1]["hqs_armature"]["rolling"] = improve_log[-1].get("hqs_before")
         return self._finalize(rows, gaps)
 
-    def _do_improve(self, phase, gaps: list) -> tuple[list[dict], dict | None]:
+    def _do_improve(self, phase, gaps: list) -> tuple[list[dict], dict | None, int]:
         si = phase.self_improve
         log: list[dict] = []
+        improve_rounds = 0
         for _round in range(si.max_rounds):
             imp = self.drv.improve(self.sb.working_spec, target_hqs=si.target_hqs,
                                    min_traces=si.min_traces, apply=si.apply)
+            improve_rounds += 1
             log.extend(imp.improve_log)
             if not imp.improve_log or not imp.improve_log[-1].get("needs_improvement"):
                 break
         # recovery probe: one more run after edits
         recovery = None
+        probe_calls = 0
         if log:
             probe = self.drv.run(self.sb.working_spec, {}, workflow_name=self.workflow_name)
             probe_rows = trace_io.read_rows_by_run(self.sb.trace_db, probe.run_id) if probe.run_id else []
             recovery = hqs.all_four(probe_rows)
+            probe_calls = 1
         if log and not any(lr.get("needs_improvement") for lr in log):
             gaps.append({"want": "self_improve firing", "needed": "needs_improvement=True in log",
                          "severity": "low"})
-        return log, recovery
+        # one LLM-invoking call per improve round + 1 for the recovery probe
+        return log, recovery, improve_rounds + probe_calls
 
     def _diff(self, a: str, b: str) -> str:
         import difflib
@@ -147,11 +160,14 @@ class CampaignRunner:
             return "cold" if mem.get("fresh") else "warm"
         return None
 
-    def _budget_exceeded(self, runs: int, llm_calls: int, wall_s: float) -> bool:
+    def _budget_exceeded(self, runs: int, llm_calls: int, wall_s: float,
+                        tokens: int = 0) -> bool:
         b = self.plan.budget
         if runs >= b.max_runs:
             return True
         if b.max_llm_calls and llm_calls >= b.max_llm_calls:
+            return True
+        if b.max_tokens and tokens >= b.max_tokens:
             return True
         if b.max_wallclock_hours and wall_s >= b.max_wallclock_hours * 3600:
             return True

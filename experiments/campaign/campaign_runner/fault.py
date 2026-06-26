@@ -52,19 +52,71 @@ def apply_lever(phase: Phase, *, phase_index: int, rep: int,
     return {k: _render(v, ctx) for k, v in phase.inputs.items()}
 
 
-_DESC_RE = re.compile(r'(description:\s*"?)([^\n]*)(\??")', re.MULTILINE)
+# Match `description:` anywhere (block key or inline in a flow mapping) followed
+# by the rest of that line — the value may be quoted ("..."), a block-scalar
+# indicator (| or >), or bare unquoted text.
+_DESC_RE = re.compile(r'description:[ \t]*(?P<rest>[^\n]*)')
 
 
 def _corrupt_spec(path: Path, rng: random.Random) -> None:
-    """Garble one stage's description text so HQS degrades, deterministically."""
+    """Garble one stage's description text so HQS degrades, deterministically.
+
+    Handles three real-world description forms so the corruption actually
+    fires on real Armature specs (not just quoted single-line ones):
+      1. quoted single-line:   description: "Research X"
+      2. unquoted single-line: description: Research X
+      3. block-scalar:         description: |\n  Research X\n  ...
+    The garble style (truncate to ~half + " ZZZCORRUPT zzz ") is preserved so
+    downstream tests' expectations of degraded text still hold.
+    """
     text = path.read_text()
-    # find all description lines
     matches = list(_DESC_RE.finditer(text))
     if not matches:
         return
     m = rng.choice(matches)
-    original = m.group(2)
-    # drop a few characters and inject a confusing token — degrades prompt quality
-    garbled = original[: max(0, len(original) // 2)] + " ZZZCORRUPT zzz "
-    new_text = text[:m.start()] + m.group(1) + garbled + m.group(3) + text[m.end():]
+    rest = m.group("rest").rstrip()
+    garble_token = " ZZZCORRUPT zzz "
+
+    # indentation of the line holding `description:` — needed to locate
+    # block-scalar content lines (which must be indented deeper than this).
+    line_start = text.rfind("\n", 0, m.start()) + 1
+    line_indent = ""
+    for ch in text[line_start:m.start()]:
+        if ch in " \t":
+            line_indent += ch
+        else:
+            break
+
+    if rest.startswith('"'):
+        # quoted single-line: description: "Research X"
+        inner = rest[1:]
+        if inner.endswith('"'):
+            inner = inner[:-1]
+        garbled = inner[: max(0, len(inner) // 2)] + garble_token
+        replacement = f'description: "{garbled}"'
+        new_text = text[:m.start()] + replacement + text[m.end():]
+    elif rest[:1] in ("|", ">"):
+        # block-scalar: description: |  (or >, |-, >-, etc.)
+        # inject the garble token into the first indented content line below,
+        # preserving indentation so the YAML stays valid.
+        after = m.end()
+        line_re = re.compile(r'^(?P<lindent>[ \t]*)(?P<content>\S.*)$', re.MULTILINE)
+        new_text = None
+        for lm in line_re.finditer(text, after):
+            if lm.group("lindent") <= line_indent:
+                break  # dedented past the key — block ended, no content found
+            content = lm.group("content")
+            lindent = lm.group("lindent")
+            garbled = content[: max(0, len(content) // 2)] + garble_token
+            new_text = text[:lm.start()] + lindent + garbled + text[lm.end():]
+            break
+        if new_text is None:
+            return
+    else:
+        # unquoted single-line: description: Research X
+        original = rest
+        garbled = original[: max(0, len(original) // 2)] + garble_token
+        replacement = f'description: {garbled}'
+        new_text = text[:m.start()] + replacement + text[m.end():]
+
     path.write_text(new_text)

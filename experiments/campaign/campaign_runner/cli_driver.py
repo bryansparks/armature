@@ -57,10 +57,12 @@ class CliDriver:
             run_id = result_json["run_id"]
         else:
             run_id = trace_io.latest_run_id(self.sb.trace_db, workflow_name) if workflow_name else None
-        if self.record and run_id:
+        if self.record:
             from campaign_runner.record import capture_trace_rows
+            trace_rows = (capture_trace_rows(self.sb.trace_db, run_id)
+                          if run_id else [])
             self.record.record_run(run_id, ["armature", *args], cp.stdout, cp.stderr,
-                                    cp.returncode, capture_trace_rows(self.sb.trace_db, run_id),
+                                    cp.returncode, trace_rows,
                                     {}, {})
         return RunOutcome(run_id, cp.returncode, cp.stdout, cp.stderr, result_json)
 

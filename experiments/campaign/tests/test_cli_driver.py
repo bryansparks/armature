@@ -59,6 +59,34 @@ def test_run_invokes_armature_and_captures_run_id(tmp_path, monkeypatch):
     assert rec.replay()[0]["argv"] == captured["cmd"]
 
 
+def test_failed_run_still_recorded(tmp_path, monkeypatch):
+    """A run with run_id=None (failure) must still be recorded for replay."""
+    plan = _plan(tmp_path)
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+    drv = cli_driver.CliDriver(sb, rec)
+
+    class FakeResult:
+        returncode = 1
+        def __init__(self, stdout, stderr): self.stdout = stdout; self.stderr = stderr
+
+    def fake_run(cmd, **kw):
+        # no --output result written, no trace DB → run_id resolves to None
+        return FakeResult("partial stdout", "error: bad spec")
+
+    monkeypatch.setattr(cli_driver.subprocess, "run", fake_run)
+    spec = tmp_path / "ws.yml"
+    spec.write_text("name: x\n")
+    out = drv.run(spec, {"topic": "q"})
+    assert out.run_id is None
+    assert out.exit_code == 1
+    # recording still captured the failed run
+    rows = rec.replay()
+    assert len(rows) == 1
+    assert rows[0]["run_id"] is None
+    assert rows[0]["exit_code"] == 1
+
+
 def test_validate_true_on_exit0(tmp_path, monkeypatch):
     plan = _plan(tmp_path)
     sb = Sandbox(plan, root=tmp_path / "out")

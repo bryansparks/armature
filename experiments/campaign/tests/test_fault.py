@@ -56,6 +56,64 @@ def test_spec_corruption_mutates_working_spec_and_yields_seed(tmp_path):
     assert "seed" in inputs
 
 
+def test_spec_corruption_unquoted_single_line(tmp_path):
+    """Form 2: unquoted single-line description must be corrupted and stay parseable."""
+    plan, _ = _plan_with_lever(tmp_path, "spec_corruption")
+    ws = tmp_path / "spec_unquoted.yml"
+    ws.write_text(textwrap.dedent("""
+        name: wf
+        version: "1.0"
+        stages:
+          - id: researcher
+            role:
+              name: Researcher
+              type: researcher
+              description: Research the topic cleanly.
+            output_mode: text
+            depends_on: []
+    """))
+    before = ws.read_text()
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=7)
+    after = ws.read_text()
+    assert after != before                       # corruption changed the spec
+    parsed = yaml.safe_load(after)               # must still be parseable YAML
+    assert parsed["name"] == "wf"
+    # the description text was garbled
+    desc = parsed["stages"][0]["role"]["description"]
+    assert "ZZZCORRUPT" in desc
+
+
+def test_spec_corruption_block_scalar(tmp_path):
+    """Form 3: block-scalar description:| must be corrupted and stay parseable."""
+    plan, _ = _plan_with_lever(tmp_path, "spec_corruption")
+    ws = tmp_path / "spec_block.yml"
+    ws.write_text(textwrap.dedent("""
+        name: wf
+        version: "1.0"
+        stages:
+          - id: researcher
+            role:
+              name: Researcher
+              type: researcher
+              description: |
+                Research the topic thoroughly.
+                Identify key findings and open questions.
+            output_mode: text
+            depends_on: []
+    """))
+    before = ws.read_text()
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=7)
+    after = ws.read_text()
+    assert after != before                       # corruption changed the spec
+    parsed = yaml.safe_load(after)               # must still be parseable YAML
+    assert parsed["name"] == "wf"
+    # the block content was garbled
+    desc = parsed["stages"][0]["role"]["description"]
+    assert "ZZZCORRUPT" in desc
+
+
 def test_none_lever_passes_inputs_through(tmp_path):
     plan, _ = _plan_with_lever(tmp_path, "none")
     inputs = fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],

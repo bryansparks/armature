@@ -175,7 +175,6 @@ cite them. Everything the harness reads is something Armature already wrote.
 ```bash
 # Real campaign (spends LLM budget)
 python experiments/campaign/run.py plans/hqdynamics.yml
-python experiments/campaign/run.py plans/hqdynamics.yml --input tier_override.small=qwen/qwen3-6-27b
 
 # Mock operation mode — re-render the same report from a recording, zero LLM cost
 python experiments/campaign/run.py plans/hqdynamics.yml --replay out/hqdynamics-baseline/recordings/

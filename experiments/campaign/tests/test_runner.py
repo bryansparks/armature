@@ -70,6 +70,104 @@ def test_run_drives_one_phase_and_writes_campaign_jsonl(tmp_path, monkeypatch):
     assert result.report_path.exists()
 
 
+def test_budget_trips_on_llm_calls_including_improve_rounds(tmp_path, monkeypatch):
+    """max_llm_calls must count improve rounds + recovery probe, not just main runs."""
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 5, max_llm_calls: 2}
+        phases:
+          - id: p
+            lever: none
+            inputs: {topic: "q"}
+            repeats: 3
+            self_improve: {enabled: true, target_hqs: 0.75, min_traces: 1, max_rounds: 1, apply: false}
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name=""):
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript(trace_io_ddl.replace(
+                "CREATE TABLE traces", "CREATE TABLE IF NOT EXISTS traces"))
+            con.execute(
+                "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,"
+                "timestamp,quorum_score,latency_ms,success,output_valid,escalation_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("r1", "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01",
+                 0.8, 1000.0, 1, 1, 0))
+            con.commit(); con.close()
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"})
+        def improve(self, spec, **kw):
+            # non-empty log with needs_improvement=False → one round, then break
+            return cli_driver.ImproveOutcome(0, "", [{"needs_improvement": False}], None, False)
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    result = r.run()
+    # Each rep costs 1 (main) + 1 (improve round) + 1 (probe) = 3 LLM calls.
+    # After rep 0: llm_calls=3 >= max_llm_calls=2 → rep 1 budget check trips.
+    assert len(result.rows) == 1
+
+
+def test_budget_trips_on_max_tokens(tmp_path, monkeypatch):
+    """max_tokens must be enforced against accumulated trace tokens."""
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 5, max_tokens: 160}
+        phases:
+          - id: p
+            lever: none
+            inputs: {topic: "q"}
+            repeats: 3
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name=""):
+            # insert a trace row with 100 input + 50 output = 150 tokens per run
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript(trace_io_ddl.replace(
+                "CREATE TABLE traces", "CREATE TABLE IF NOT EXISTS traces"))
+            con.execute(
+                "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,"
+                "timestamp,quorum_score,latency_ms,success,output_valid,escalation_count,"
+                "input_tokens,output_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("r1", "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01",
+                 0.8, 1000.0, 1, 1, 0, 100, 50))
+            con.commit(); con.close()
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"})
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    result = r.run()
+    # Rep 0: 0 tokens < 160 → OK, run → 150 tokens.
+    # Rep 1: 150 < 160 → OK, run → 300 tokens.
+    # Rep 2: 300 >= 160 → exceeded! Break.
+    assert len(result.rows) == 2
+
+
 def test_replay_reconstructs_rows_without_armature(tmp_path, monkeypatch):
     plan = _plan(tmp_path)
     src = tmp_path / "src.yml"

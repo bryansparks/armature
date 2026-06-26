@@ -76,3 +76,14 @@ def test_read_pending_returns_none_when_absent(tmp_path):
     p = tmp_path / "x.pending.yaml"
     p.write_text("stages_added: []\n")
     assert trace_io.read_pending(p) == "stages_added: []\n"
+
+
+def test_total_tokens_sums_input_and_output(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    _build_db(db)
+    # r1: 10+20 + 5+30 = 65; r2: 10+20 = 30; ls: 0+0 = 0 → total 95
+    assert trace_io.total_tokens(db) == 95
+
+
+def test_total_tokens_zero_when_no_db(tmp_path):
+    assert trace_io.total_tokens(tmp_path / "nonexistent.sqlite") == 0

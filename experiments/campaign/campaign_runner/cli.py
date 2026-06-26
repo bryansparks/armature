@@ -15,7 +15,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("plan", help="path to a campaign plan YAML")
     ap.add_argument("--replay", metavar="DIR", help="replay a recording dir instead of running")
     ap.add_argument("--record", action="store_true", help="record a run for later replay")
-    ap.add_argument("--input", "-i", action="append", default=[], help="key=value runtime input")
     ap.add_argument("--out-dir", default=str(HARNESS_ROOT / "out"),
                     help="where to write campaign artifacts (default: experiments/campaign/out)")
     args = ap.parse_args(argv)
