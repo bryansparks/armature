@@ -108,8 +108,9 @@ Each iteration re-executes the sub-DAG from `from_stage` through the current sta
 
 - **Continuation + external re-trigger** — use the existing `continuation.carry_forward` mechanism to pass prior-run context across separate workflow invocations; each iteration is a fresh run that picks up where the last left off. Costs: something external must re-invoke Armature, each iteration produces its own report and trace, and stages have no `_iteration` awareness.
 - **Post-run trigger stage** — a final stage calls a webhook that re-triggers the workflow, removing the external orchestrator. Same per-iteration trace/report fragmentation and no iteration counter, plus runaway-loop risk since no central budget spans the iterations.
+- **`armature loop` outer-loop driver** — the `armature loop <spec>` CLI subcommand runs the whole workflow back-to-back under a central budget (`--max-iterations` / `--max-llm-calls` / `--max-wallclock` / `--max-tokens`), with carry-forward between passes, a `--until` stop predicate, and `--converge` early stop. It removes the external orchestrator, enforces a central budget (no runaway loop), and writes one `__loop__` summary trace row that merges the passes into a single report (full `LoopResult` available via `--output`). It does **not** give stages `_iteration` awareness inside their prompts — that still requires `IterateConfig`. See `docs/USER-GUIDE.md` §18.
 
-These workarounds are serviceable for early adopters; `IterateConfig` is the durable design once the runtime risks can be addressed with proper test coverage. Validation signal to watch: users hand-rolling the webhook pattern or asking for merged multi-pass reports.
+These workarounds are serviceable for early adopters; `IterateConfig` is the durable design once the runtime risks can be addressed with proper test coverage. Validation signal to watch: users who use `armature loop` and then specifically need per-stage `_iteration` awareness or sub-DAG loopback (rather than whole-workflow re-runs) — that is the demand `IterateConfig` exists to meet.
 
 ---
 

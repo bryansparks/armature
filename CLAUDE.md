@@ -291,6 +291,7 @@ armature run my_workflow.yml \
   --input focus="..." \
   --quiet                                  # suppress live output
 armature run my_workflow.yml --dry-run     # validate spec only, no execution
+armature loop my_workflow.yml              # run repeatedly under a central budget until a stop
 armature dashboard my_workflow.yml         # health metrics after multiple runs
 armature new my_workflow.yml               # terminal wizard (secondary path)
 armature optimize my_workflow.yml          # LLM-proposed spec improvements from traces

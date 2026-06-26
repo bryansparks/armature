@@ -1856,6 +1856,7 @@ Armature ships with a full CLI. All commands:
 armature new           — interactive wizard to create a new spec file
 armature validate      — validate a spec file, report all errors, and show risk score
 armature run           — execute a workflow from a YAML spec
+armature loop          — run a workflow repeatedly under a central budget until a stop condition
 armature replay        — display a recorded run stage-by-stage from the TraceStore
 armature serve         — start the HTTP service
 armature optimize      — analyze traces and propose spec improvements
@@ -1911,6 +1912,44 @@ armature run my_workflow.yml \
 | `--force` | Ignore checkpoint and rerun all stages from scratch |
 | `--no-cache` | Bypass the LLM response cache; every LLM call goes to the provider |
 | `--auto-improve` | After the run, if HQS < 0.75 automatically apply spec improvements |
+
+---
+
+#### `armature loop`
+
+Run a workflow repeatedly under a central budget until a stop condition. Each iteration is a fresh `Harness.run()` with its own run_id; the driver accounts the budget from the TraceStore, carries forward context between passes, and writes one `__loop__` summary trace row (whose run_id is the loop session id, so per-iteration HQS is not inflated).
+
+```bash
+armature loop my_workflow.yml \
+  --input topic="quantum error correction" \
+  --max-iterations 20 \
+  --max-llm-calls 500 \
+  --until "{{ judge.accept }}" \
+  --carry-forward "researcher.content,judge.reasoning" \
+  --interval 5
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `<spec>` | — | Path to workflow spec YAML (positional argument) |
+| `--input key=value` / `-i` | — | Input values (repeatable), same semantics as `armature run` |
+| `--max-iterations` | `10` | Maximum number of iterations |
+| `--max-llm-calls` | unset | Cap total LLM calls across all iterations |
+| `--max-wallclock` | unset | Cap total wall-clock seconds |
+| `--max-tokens` | unset | Cap total tokens across all iterations |
+| `--until` | unset | Jinja2 stop predicate evaluated against each iteration's result, e.g. `"{{ judge.accept }}"` (true / `1` / `yes` stops) |
+| `--carry-forward` | `*` | Which parts of each result carry to the next pass: `*` (whole result, deep-copied) or a comma-separated list of dot-paths (`a.b,c.d`) |
+| `--inject-as` | `prior_run` | Context key under which carried values are injected (also merged at the top level) |
+| `--interval` | `0.0` | Seconds to sleep between iterations (`0` = back-to-back) |
+| `--converge` | off | Stop when two consecutive results are identical |
+| `--traces` | `~/.armature/traces.db` | Path to the traces SQLite database |
+| `--output path` | — | Write the full `LoopResult` (iterations, accumulated, stop_reason, final result) as JSON |
+| `--no-cache` | off | Bypass the LLM response cache for every iteration |
+| `--quiet` / `-q` | off | Suppress per-iteration live output |
+
+**Stop precedence:** `until` predicate → `--converge` → `--max-llm-calls` → `--max-tokens` → `--max-wallclock` → `--max-iterations`. Exit code is `1` if the loop stops because of an error, `0` otherwise.
+
+> **Not to be confused with the per-stage `loop:` config.** The stage-level `loop` / `IterationConfig` block (added in v0.3.0) deliberately iterates a *single stage* in-place, with full `_iteration` awareness inside that stage's prompt and one merged trace. `armature loop` is an *outer* driver that re-runs the *entire* workflow — no engine or spec changes, no `_iteration` awareness inside stages, but it spans a central budget across passes and produces a single `__loop__` summary row. For sub-DAG loopback with in-context iteration awareness, see the `IterateConfig` roadmap item.
 
 ---
 

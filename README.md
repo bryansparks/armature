@@ -159,6 +159,8 @@ armature run my_workflow.yml --input text="Your content here..."
 armature run <spec>                           # execute a workflow
 armature run <spec> --no-cache               # run without LLM response cache
 armature run <spec> --auto-improve           # run then auto-apply spec improvements when HQS < 0.75
+armature loop <spec>                         # run a workflow back-to-back under a central budget
+armature loop <spec> --until "{{ judge.done }}" --max-llm-calls 500
 armature validate <spec>                      # validate spec + show KYA-inspired risk score (LOW/MEDIUM/HIGH/CRITICAL)
 armature new [output]                         # interactive spec creation wizard
 armature doctor                               # environment health check
