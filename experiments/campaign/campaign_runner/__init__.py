@@ -1,0 +1,1 @@
+"""Campaign Runner — a decoupled, black-box long-run trial harness for Armature."""
