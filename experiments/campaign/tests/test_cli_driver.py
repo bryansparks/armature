@@ -67,3 +67,28 @@ def test_validate_true_on_exit0(tmp_path, monkeypatch):
         returncode = 0
     monkeypatch.setattr(cli_driver.subprocess, "run", lambda *a, **k: R())
     assert drv.validate(tmp_path / "ws.yml") is True
+
+
+def test_parse_hqs_from_text_extracts_float():
+    assert cli_driver.parse_hqs_from_text("... HQS: 0.82 (valid=1 ...)") == 0.82
+
+
+def test_parse_hqs_from_text_none_when_absent():
+    assert cli_driver.parse_hqs_from_text("no hqs line here") is None
+
+
+def test_parse_hqs_from_text_none_on_garbage():
+    # regex requires digits; "notanumber" does not match -> None
+    assert cli_driver.parse_hqs_from_text("HQS: notanumber") is None
+
+
+def test_replay_hqs_returns_none_when_no_hqs_line(tmp_path, monkeypatch):
+    plan = _plan(tmp_path)
+    sb = Sandbox(plan, root=tmp_path / "out")
+    drv = cli_driver.CliDriver(sb, None)
+    class FakeReplay:
+        returncode = 0
+        stdout = "replay output with no HQS"
+        stderr = ""
+    monkeypatch.setattr(cli_driver.subprocess, "run", lambda *a, **k: FakeReplay())
+    assert drv.replay_hqs("some-run") is None
