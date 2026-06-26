@@ -34,3 +34,30 @@ def test_report_is_self_contained_with_all_sections(tmp_path):
     assert "<svg" in html
     # reproduce command present
     assert "--replay" in html
+
+
+def test_report_escapes_user_controlled_strings(tmp_path):
+    rows = [{
+        "run_id": "r1", "phase_id": "ramp", "lever": "input_difficulty_ramp",
+        "inputs": {"difficulty": "1"}, "exit_code": 0,
+        "hqs_ours": {"authoritative": 0.9, "rolling": 0.9, "dashboard": 0.9, "feedback": 0.9},
+        "hqs_armature": {"authoritative": 0.9, "rolling": 0.9, "dashboard": 0.9, "feedback": 0.9},
+        "improve_log": [{"needs_improvement": True, "hqs_before": 0.4,
+                         "applied": "<script>alert(1)</script>"}],
+        "recovery_hqs_ours": None, "spec_diff": "", "memory_mode": None,
+    }]
+    out = report.render_report(
+        campaign={"name": "<script>name</script>", "git_sha": "abc", "totals": {"runs": 1}},
+        rows=rows,
+        verdicts=[("hqs_tracks_difficulty", "PASS", {})],
+        gaps=[{"want": "<b>gap</b>", "needed": "x", "severity": "low"}],
+        reproduce_cmd="python run.py <img src=x>",
+        out_path=tmp_path / "report.html")
+    html = out.read_text()
+    # raw script/img tags must NOT survive
+    assert "<script>alert(1)</script>" not in html
+    assert "<script>name</script>" not in html
+    assert "<img src=x>" not in html
+    # escaped forms should be present
+    assert "&lt;script&gt;" in html
+    assert "&lt;b&gt;gap&lt;/b&gt;" in html

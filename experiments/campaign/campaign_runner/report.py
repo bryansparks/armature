@@ -39,9 +39,10 @@ def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str,
             if lr.get("needs_improvement"):
                 fire_narr.append(
                     f"<p>Run <code>{escape(r['run_id'])}</code>: fired at "
-                    f"hqs_before={lr.get('hqs_before')}, target={lr.get('target_hqs')}, "
-                    f"applied={lr.get('applied')}. Recovery probe HQS="
-                    f"{(r.get('recovery_hqs_ours') or {}).get('authoritative')}.</p>")
+                    f"hqs_before={escape(str(lr.get('hqs_before')))}, "
+                    f"target={escape(str(lr.get('target_hqs')))}, "
+                    f"applied={escape(str(lr.get('applied')))}. Recovery probe HQS="
+                    f"{escape(str((r.get('recovery_hqs_ours') or {}).get('authoritative')))}.</p>")
     fire_html = "\n".join(fire_narr) or "<p>(no firings recorded)</p>"
 
     gaps_html = "\n".join(
