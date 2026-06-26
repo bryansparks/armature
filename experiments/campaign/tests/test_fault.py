@@ -24,7 +24,7 @@ def _plan_with_lever(tmp_path: Path, lever: str) -> tuple:
 
 def test_input_difficulty_ramp_walks_corpus_in_order(tmp_path):
     plan, _ = _plan_with_lever(tmp_path, "input_difficulty_ramp")
-    corpus = fault.load_corpus(Path("tests/fixtures/difficulty.csv"))
+    corpus = fault.load_corpus(Path(__file__).parent / "fixtures" / "difficulty.csv")
     # phase_index 0 -> first row, phase_index 1 -> second row
     inputs0 = fault.apply_lever(plan.phases[0], phase_index=0, rep=0,
                                  corpus=corpus, working_spec=tmp_path / "ws.yml", rng_seed=1)
