@@ -1,0 +1,98 @@
+"""Raw reads of what Armature wrote: the trace DB + self-improve sidecars.
+
+Read-only. We never write to the trace DB. We reproduce HQS from these rows
+ourselves (see hqs.py) rather than trusting Armature's reported numbers.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass
+class TraceRow:
+    run_id: str
+    workflow_name: str
+    stage_id: str
+    role_type: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    latency_ms: float
+    success: bool
+    output_valid: bool
+    quorum_score: float | None
+    escalation_count: int
+
+
+_SELECT = (
+    "SELECT run_id, workflow_name, stage_id, role_type, model, "
+    "input_tokens, output_tokens, latency_ms, success, output_valid, "
+    "quorum_score, escalation_count FROM traces"
+)
+
+
+def _connect(db_path: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(str(db_path))
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def _row_to_trace(r: sqlite3.Row) -> TraceRow:
+    return TraceRow(
+        run_id=r["run_id"], workflow_name=r["workflow_name"], stage_id=r["stage_id"],
+        role_type=r["role_type"], model=r["model"],
+        input_tokens=r["input_tokens"], output_tokens=r["output_tokens"],
+        latency_ms=float(r["latency_ms"] or 0.0),
+        success=bool(r["success"]), output_valid=bool(r["output_valid"]),
+        quorum_score=r["quorum_score"],
+        escalation_count=int(r["escalation_count"] or 0),
+    )
+
+
+def read_rows_by_run(db_path: Path, run_id: str) -> list[TraceRow]:
+    con = _connect(db_path)
+    try:
+        cur = con.execute(_SELECT + " WHERE run_id = ? ORDER BY timestamp ASC", (run_id,))
+        return [_row_to_trace(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def list_runs(db_path: Path, workflow_name: str) -> list[str]:
+    """Run IDs for a workflow, oldest→newest, excluding __loop__ summary rows."""
+    con = _connect(db_path)
+    try:
+        cur = con.execute(
+            "SELECT DISTINCT run_id FROM traces WHERE workflow_name = ? "
+            "AND stage_id != '__loop__' ORDER BY timestamp ASC",
+            (workflow_name,),
+        )
+        return [r["run_id"] for r in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def latest_run_id(db_path: Path, workflow_name: str) -> str | None:
+    runs = list_runs(db_path, workflow_name)
+    return runs[-1] if runs else None
+
+
+def read_improve_log(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def read_spec_history(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def read_pending(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return path.read_text()
