@@ -1,0 +1,20 @@
+name: hqdynamics-baseline
+description: "Does HQS track difficulty, and does self-improve fire + recover?"
+workflow: specs/dangerous_pretzel.yml
+budget: {max_runs: 60, max_wallclock_hours: 6.0, max_llm_calls: 4000}
+phases:
+  - id: ramp_easy_to_hard
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 1
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 3, apply: false}
+  - id: inject_spec_corruption
+    lever: spec_corruption
+    inputs: {seed: "{{ phase_index }}"}
+    repeats: 3
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 3, apply: false}
+verdicts:
+  hqs_tracks_difficulty: {spearman_le: -0.50, p_le: 0.05}
+  self_improve_fires_and_recovers: {fires_within_k_traces: 5, edits_correct_surface: true, recovers_above: 0.75, within_r_runs: 5}
+  hqs_formula_consistency: {max_abs_delta_le: 0.02}
+  memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}

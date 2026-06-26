@@ -1,0 +1,15 @@
+name: cold-vs-warm
+description: "Does carry-forward memory raise HQS vs fresh memory?"
+workflow: specs/dangerous_pretzel.yml
+budget: {max_runs: 20}
+phases:
+  - id: cold
+    lever: none
+    inputs: {topic: "carry-forward trial", memory_fresh: "true"}
+    repeats: 5
+  - id: warm
+    lever: none
+    inputs: {topic: "carry-forward trial", memory_fresh: "false"}
+    repeats: 5
+verdicts:
+  memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}

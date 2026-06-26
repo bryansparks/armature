@@ -1,0 +1,10 @@
+name: quick-demo
+description: "Replay the bundled demo recording — zero LLM cost, zero deps."
+workflow: tests/fixtures/sample_spec.yml
+budget: {max_runs: 1}
+phases:
+  - id: demo
+    lever: none
+    inputs: {topic: "demo"}
+    repeats: 1
+verdicts: {}
