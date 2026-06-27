@@ -125,12 +125,20 @@ class CampaignRunner:
         for pi, phase in enumerate(self.plan.phases):
             if phase.fresh_db:
                 self.sb.reset_trace_db()
-            # Concurrency phases are dispatched by Task 7; until then skip them
-            # with a high-severity gap so a plan that opts in doesn't silently
-            # fall through to the serial path.
             if phase.concurrency is not None:
-                gaps.append({"want": "concurrency phase", "needed": "not yet implemented",
-                             "severity": "high", "phase": phase.id})
+                from campaign_runner import concurrency as conc_mod
+                ws = self.sb.working_spec_for(phase.id)
+                self.sb.copy_working_spec_to(self._resolve_phase_spec(phase), ws)
+                if self.plan.tier_override:
+                    self.sb.apply_tier_override(ws, self.plan.tier_override)
+                self.last_working_spec = ws
+                if not self.drv.validate(ws):
+                    gaps.append({"want": "valid concurrency spec", "needed": "validate exit 0",
+                                 "severity": "high", "phase": phase.id})
+                    continue
+                summaries = conc_mod.run_workers(self.sb, ws, phase.concurrency, phase.id,
+                                                  self.recording)
+                rows.extend(summaries)
                 continue
             # Per-phase spec resolution: copy this phase's workflow (or the
             # plan-level default) into a phase-specific working spec, then apply
@@ -249,6 +257,9 @@ class CampaignRunner:
         rec = Recording(Path(recording_dir))
         rows: list[dict] = []
         for r in rec.replay():
+            if r.get("tag") == "concurrency":
+                rows.append((r.get("meta") or {}).get("summary", {}))
+                continue
             tr = [trace_io.TraceRow(**t) for t in r["trace_rows"]]
             meta = r.get("meta") or {}
             if r.get("tag", "main") == "probe":

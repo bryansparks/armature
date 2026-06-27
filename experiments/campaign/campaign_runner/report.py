@@ -32,16 +32,18 @@ def _tiers_html(tiers: list[dict]) -> str:
 def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str, str, dict]],
                   gaps: list[dict], reproduce_cmd: str, out_path: Path) -> Path:
     auth_series = [r["hqs_ours"]["authoritative"] for r in rows
-                   if r["hqs_ours"].get("authoritative") is not None]
+                   if (r.get("hqs_ours") or {}).get("authoritative") is not None]
     dash_series = [r["hqs_ours"]["dashboard"] for r in rows
-                   if r["hqs_ours"].get("dashboard") is not None]
+                   if (r.get("hqs_ours") or {}).get("dashboard") is not None]
     chart = svgplot.line_chart({"authoritative": auth_series or [0.0],
                                  "dashboard": dash_series or [0.0]})
 
     diverg = []
     for r in rows:
-        for k in r["hqs_ours"]:
-            a, b = r["hqs_ours"].get(k), r["hqs_armature"].get(k)
+        ours = r.get("hqs_ours") or {}
+        arm = r.get("hqs_armature") or {}
+        for k in ours:
+            a, b = ours.get(k), arm.get(k)
             if a is not None and b is not None:
                 diverg.append(abs(a - b))
     div_bars = svgplot.bar(["max_delta"], [max(diverg) if diverg else 0.0])

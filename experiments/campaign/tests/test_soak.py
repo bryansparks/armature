@@ -582,3 +582,62 @@ def test_run_workers_counts_busy_from_stderr(tmp_path, monkeypatch):
     summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
     assert all(s["sqlite_busy_count"] >= 1 for s in summaries)
     assert all(s["exit_code"] == 1 for s in summaries)
+
+def test_concurrency_phase_dispatched_and_recorded(tmp_path, monkeypatch):
+    from campaign_runner import runner, concurrency as conc_mod
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: soak-conc
+        description: x
+        workflow: specs/soak/synth_fanout_mid.yml
+        tier_override:
+          apply: true
+          tiers:
+            tiny: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+        budget: {max_runs: 20}
+        phases:
+          - id: overlap
+            lever: none
+            inputs: {topic: q}
+            repeats: 1
+            concurrency: {workers: 2, driver: armature_loop, reps_per_worker: 3}
+        soak_verdicts: {no_unclean_exits: {allowed_failures: 0}}
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    fake_summaries = [{"run_id": None, "phase_id": "overlap", "lever": "none",
+                       "is_concurrency_summary": True, "worker": i, "exit_code": 0,
+                       "exit_codes": [0], "run_ids": [f"w{i}-0", f"w{i}-1", f"w{i}-2"],
+                       "n_trace_rows": 3, "sqlite_busy_count": 0,
+                       "hqs_ours": None, "hqs_armature": None, "inputs": {},
+                       "improve_log": [], "recovery_hqs_ours": None,
+                       "spec_diff": "", "memory_mode": None} for i in range(2)]
+    called = {}
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p): return True
+        def run(self, *a, **k): raise AssertionError("serial run should not be called for concurrency phase")
+        def improve(self, *a, **k): ...
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    def fake_run_workers(sb, spec_path, conc, phase_id, recording=None):
+        called["n"] = conc.workers
+        called["spec"] = str(spec_path)
+        if recording is not None:
+            for s in fake_summaries:
+                recording.record_run(None, ["armature", "loop", str(spec_path)], "", "",
+                                     s["exit_code"], [], {}, {}, tag="concurrency",
+                                     meta={"summary": s})
+        return fake_summaries
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+    monkeypatch.setattr(conc_mod, "run_workers", fake_run_workers)
+    (tmp_path / "ws.yml").write_text('name: synth-fanout-mid\nversion: "1.0"\nmodel_tiers: {small: {provider: anthropic, model: x, api_key_env: X}}\nrole_type_defaults: {worker: small}\nstages: [{id: s, role: {name: S, type: worker, description: x}, output_mode: text, depends_on: []}]\n')
+    r = runner.CampaignRunner(plan, tmp_path / "ws.yml", root=tmp_path / "out", record_mode=True)
+    result = r.run()
+    assert called.get("n") == 2
+    assert len(result.rows) == 2
+    assert all(row["is_concurrency_summary"] for row in result.rows)
+    # replay reproduces the concurrency summary rows
+    replayed = r.replay(r.recording.dir)
+    assert len(replayed.rows) == 2
+    assert all(row["is_concurrency_summary"] for row in replayed.rows)
