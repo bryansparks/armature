@@ -518,3 +518,67 @@ def test_finalize_emits_h1_h4_when_no_soak(tmp_path, monkeypatch):
     result = r.run()
     names = [v[0] for v in result.verdicts]
     assert "hqs_tracks_difficulty" in names and "agent_spawn_count" not in names
+
+
+def test_run_workers_concurrent_writes_no_row_loss(tmp_path, monkeypatch):
+    """N fake workers each insert reps_per_worker distinct rows into the shared
+    WAL trace DB concurrently; run_workers must report zero BUSY and total
+    distinct run_ids == workers*reps_per_worker."""
+    import sqlite3, threading
+    from campaign_runner import concurrency as conc_mod
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import load_plan, Concurrency
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 5}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    # initialize the trace DB schema (armature normally does this)
+    con = sqlite3.connect(sb.trace_db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.commit(); con.close()
+    reps = 5
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, text=False):
+            self.cmd = cmd; self.returncode = 0
+            self._out, self._err = "", ""
+            db = Path(env["HOME"]) / ".armature" / "traces.db"
+            self._t = threading.Thread(target=self._write, args=(db, reps))
+            self._t.start()
+        def _write(self, db, n):
+            c = sqlite3.connect(db, timeout=30)
+            c.execute("PRAGMA journal_mode=WAL")
+            for r in range(n):
+                rid = f"wk-{threading.get_ident()}-{r}"
+                c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                          (rid, "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            c.commit(); c.close()
+        def communicate(self):
+            self._t.join(); return self._out, self._err
+    monkeypatch.setattr(conc_mod.subprocess, "Popen", FakePopen)
+    conc = Concurrency(workers=3, driver="armature_loop", reps_per_worker=reps)
+    summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
+    assert len(summaries) == 3
+    all_ids = [rid for s in summaries for rid in s["run_ids"]]
+    assert len(set(all_ids)) == 3 * reps
+    assert all(s["sqlite_busy_count"] == 0 for s in summaries)
+    assert all(s["exit_code"] == 0 for s in summaries)
+    assert all(s["is_concurrency_summary"] for s in summaries)
+
+
+def test_run_workers_counts_busy_from_stderr(tmp_path, monkeypatch):
+    from campaign_runner import concurrency as conc_mod
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import load_plan, Concurrency
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 5}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, text=False):
+            self.returncode = 1; self._out = ""; self._err = "Error: database is locked\n"
+        def communicate(self): return self._out, self._err
+    monkeypatch.setattr(conc_mod.subprocess, "Popen", FakePopen)
+    conc = Concurrency(workers=2, driver="armature_run_force", reps_per_worker=1)
+    summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
+    assert all(s["sqlite_busy_count"] >= 1 for s in summaries)
+    assert all(s["exit_code"] == 1 for s in summaries)
