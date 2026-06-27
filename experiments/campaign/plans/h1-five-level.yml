@@ -1,5 +1,13 @@
 name: h1-five-level
 description: "H1: does HQS track difficulty? Five difficulty-ramp phases (one per corpus level, 4 reps each) with self-improve exercised, plus a model-tier-degradation phase (fresh DB) that applies edits to test fire→edit→recover. OpenRouter tiers borrowed from armature-research."
+purpose: >
+  This is a hypothesis test of Armature's HQS dynamics. It checks three claims:
+  (H1) HQS tracks input difficulty — harder corpora should score lower; (H2) the
+  self-improve loop fires when a degradation lever drops HQS below target, applies
+  a spec edit, and recovers above target; (H3) the harness's HQS formula reproduces
+  Armature's independently emitted values. A fourth (H4) memory carry-forward
+  hypothesis is inconclusive without cold/warm phases. An outsider can replay the
+  recording at zero cost to verify the same verdicts.
 workflow: specs/campaign_research_brief.yml
 budget: {max_runs: 50, max_wallclock_hours: 2.5, max_llm_calls: 800}
 
