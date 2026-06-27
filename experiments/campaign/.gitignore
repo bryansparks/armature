@@ -1,4 +1,6 @@
 out/
+# generated test-report index (local artifact; links to gitignored out/)
+/index.html
 __pycache__/
 *.pyc
 *.pyo
