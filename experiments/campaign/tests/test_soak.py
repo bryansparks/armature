@@ -441,3 +441,80 @@ def test_all_soak_verdicts_dispatcher(tmp_path):
     # expected derived from concurrency phase: 2 workers * 5 reps = 10
     nrl = [v for v in vs if v[0] == "no_row_loss_under_concurrency"][0]
     assert nrl[2]["expected"] == 10
+
+
+def test_finalize_emits_soak_verdicts_when_set(tmp_path, monkeypatch):
+    from campaign_runner import runner
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: soak-fin
+        description: x
+        purpose: "soak purpose"
+        workflow: specs/soak/synth_fanout_mid.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        soak_verdicts: {agent_spawn_count: {min_total: 1}}
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                        ("r1", "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            con.commit(); con.close()
+            from campaign_runner import cli_driver
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"}, hqs_armature={"authoritative": 0.8, "dashboard": None})
+        def improve(self, spec, **kw): ...
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+    (tmp_path / "ws.yml").write_text('name: wf\nversion: "1.0"\nmodel_tiers: {small: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY}}\nrole_type_defaults: {worker: small}\nstages: [{id: s, role: {name: S, type: worker, description: x}, output_mode: text, depends_on: []}]\n')
+    r = runner.CampaignRunner(plan, tmp_path / "ws.yml", root=tmp_path / "out")
+    result = r.run()
+    names = [v[0] for v in result.verdicts]
+    assert "agent_spawn_count" in names
+    assert "hqs_tracks_difficulty" not in names   # H1-H4 skipped for soak
+    import json
+    meta = json.loads((r.sb.dir / "meta.json").read_text())
+    assert meta["purpose"] == "soak purpose"
+    assert any(v["name"] == "agent_spawn_count" for v in meta["verdict_statuses"])
+
+
+def test_finalize_emits_h1_h4_when_no_soak(tmp_path, monkeypatch):
+    from campaign_runner import runner
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: h1-fin
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts: {hqs_tracks_difficulty: {spearman_le: -0.5, p_le: 0.05}}
+    """))
+    plan = load_plan(p)
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid,quorum_score) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        ("r1", "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1, 0.8))
+            con.commit(); con.close()
+            from campaign_runner import cli_driver
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"}, hqs_armature={"authoritative": 0.8, "dashboard": None})
+        def improve(self, spec, **kw): ...
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+    (tmp_path / "ws.yml").write_text('name: wf\nversion: "1.0"\nmodel_tiers: {small: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY}}\nrole_type_defaults: {worker: small}\nstages: [{id: s, role: {name: S, type: worker, description: x}, output_mode: text, depends_on: []}]\n')
+    r = runner.CampaignRunner(plan, tmp_path / "ws.yml", root=tmp_path / "out")
+    result = r.run()
+    names = [v[0] for v in result.verdicts]
+    assert "hqs_tracks_difficulty" in names and "agent_spawn_count" not in names

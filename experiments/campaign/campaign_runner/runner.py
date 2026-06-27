@@ -291,10 +291,22 @@ class CampaignRunner:
         with open(self.gaps_jsonl, "w") as f:
             for g in gaps:
                 f.write(json.dumps(g, default=str) + "\n")
-        vs = verdicts_mod.all_verdicts(rows, self.plan)
+        from campaign_runner import soak_verdicts
+        if self.plan.soak_verdicts is not None:
+            vs = soak_verdicts.all_soak_verdicts(rows, self.plan, self.sb.trace_db)
+        else:
+            vs = verdicts_mod.all_verdicts(rows, self.plan)
+        date_str = _now()
+        purpose = self.plan.purpose or self.plan.description
+        meta = {"name": self.plan.name, "purpose": purpose, "date": date_str,
+                "git_sha": _git_sha(),
+                "totals": {"runs": len(rows), "phases": len(self.plan.phases)},
+                "verdict_statuses": [{"name": n, "result": r} for n, r, _ in vs],
+                "report": "report.html"}
+        (self.sb.dir / "meta.json").write_text(json.dumps(meta, default=str))
         report = render_report(
             campaign={"name": self.plan.name, "description": self.plan.description,
-                      "git_sha": _git_sha(), "date": _now(),
+                      "purpose": purpose, "git_sha": meta["git_sha"], "date": date_str,
                       "workflow": self.workflow_name,
                       "tiers": _spec_tiers(self.last_working_spec),
                       "totals": {"runs": len(rows), "phases": len(self.plan.phases)}},
