@@ -10,6 +10,12 @@
   improve's STAGE_FAILED (model_problem) -> upgrade model_tier rule, giving a
   plausible fire->edit->recover path. Use with fresh_db:true so the failures
   are not diluted by prior phases' successes. Tests H2 (fires + recovers).
+- memory_cold_warm: toggles the working spec's `memory.fresh` field from the
+  phase's `memory_fresh` input ("true" -> cold, "false" -> warm). The memory
+  block itself (enabled/capture/inject_as) lives in the workflow spec; this
+  lever only flips the one field that distinguishes a cold run (ignore prior
+  memories) from a warm run (inject them) against the shared memory DB.
+  memory_mode() reads the field back to label the row for the H4 verdict.
 - none: pass the phase's literal inputs through.
 """
 from __future__ import annotations
@@ -55,10 +61,53 @@ def apply_lever(phase: Phase, *, phase_index: int, rep: int,
     elif phase.lever == "model_tier_degradation":
         _break_judge_tier(working_spec)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
+    elif phase.lever == "memory_cold_warm":
+        fresh = str(phase.inputs.get("memory_fresh", "false")).strip().lower() == "true"
+        _set_memory_fresh(working_spec, fresh)
+        ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     else:  # "none"
         ctx = {"phase_index": phase_index, "rep": rep}
 
     return {k: _render(v, ctx) for k, v in phase.inputs.items()}
+
+
+def memory_mode(path: Path) -> str | None:
+    """Label a working spec's run 'cold' or 'warm' from its `memory.fresh` field.
+
+    'cold'  -> memory.fresh is true  (prior memories ignored this run; a clean
+               baseline that still captures, so it populates the shared DB).
+    'warm'  -> memory.fresh is false (prior memories injected at run start).
+    None    -> the spec has no `memory` block (memory is not exercised).
+
+    Drives the H4 verdict's cold/warm split. Pure reader — never mutates.
+    """
+    import yaml
+    try:
+        spec = yaml.safe_load(path.read_text())
+    except Exception:
+        return None
+    mem = (spec or {}).get("memory")
+    if isinstance(mem, dict):
+        return "cold" if mem.get("fresh") else "warm"
+    return None
+
+
+def _set_memory_fresh(path: Path, fresh: bool) -> None:
+    """Set spec['memory']['fresh'] to toggle cold (fresh=True) vs warm (fresh=False).
+
+    Only this one field is flipped; the rest of the memory block (enabled,
+    capture, inject_as) is the workflow's and is left untouched. A no-op when
+    the spec has no `memory` dict (memory_mode() then returns None for the row).
+    Uses yaml round-trip (drops source comments) — fine for the per-campaign
+    sandbox working copy, the source spec is never mutated.
+    """
+    import yaml
+    spec = yaml.safe_load(path.read_text()) or {}
+    mem = spec.get("memory")
+    if not isinstance(mem, dict):
+        return
+    mem["fresh"] = fresh
+    path.write_text(yaml.safe_dump(spec, sort_keys=False))
 
 
 # Match `description:` anywhere (block key or inline in a flow mapping) followed

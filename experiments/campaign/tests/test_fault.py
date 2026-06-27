@@ -120,3 +120,89 @@ def test_none_lever_passes_inputs_through(tmp_path):
                                working_spec=tmp_path / "ws.yml", rng_seed=1)
     # only the literal inputs from the plan (templated to empty for corpus refs)
     assert inputs["topic"] == ""
+
+
+# ── memory_cold_warm lever (wires the H4 cold-vs-warm test) ──────────────
+
+def _memory_plan(tmp_path: Path, memory_fresh: str) -> tuple:
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent(f"""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {{max_runs: 9}}
+        phases:
+          - id: p
+            lever: memory_cold_warm
+            inputs: {{memory_fresh: "{memory_fresh}"}}
+            repeats: 1
+        verdicts: {{}}
+    """))
+    return load_plan(p), p
+
+
+def _memory_working_spec(tmp_path: Path, name: str = "ws.yml") -> Path:
+    """A spec with a memory block whose `fresh` the lever will toggle. The block
+    also carries capture/inject_as — the lever must preserve those, only flip fresh."""
+    ws = tmp_path / name
+    ws.write_text(textwrap.dedent("""
+        name: wf
+        version: "1.0"
+        memory:
+          enabled: true
+          fresh: false
+          inject_as: _memory
+          capture:
+            - stage: researcher
+              key: content
+              max_entries: 8
+        stages:
+          - id: researcher
+            role: {name: Researcher, type: researcher, description: "Research."}
+            output_mode: text
+            depends_on: []
+    """))
+    return ws
+
+
+def test_memory_cold_warm_lever_sets_fresh_true_labels_cold(tmp_path):
+    plan, _ = _memory_plan(tmp_path, "true")
+    ws = _memory_working_spec(tmp_path)
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    spec = yaml.safe_load(ws.read_text())
+    assert spec["memory"]["fresh"] is True          # lever wrote fresh=true
+    assert fault.memory_mode(ws) == "cold"          # fresh truthy -> cold (ignores prior memory)
+
+
+def test_memory_cold_warm_lever_sets_fresh_false_labels_warm(tmp_path):
+    plan, _ = _memory_plan(tmp_path, "false")
+    ws = _memory_working_spec(tmp_path)
+    # start from fresh=true so we can see the lever flip it back to false
+    s = yaml.safe_load(ws.read_text())
+    s["memory"]["fresh"] = True
+    ws.write_text(yaml.safe_dump(s, sort_keys=False))
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    spec = yaml.safe_load(ws.read_text())
+    assert spec["memory"]["fresh"] is False
+    assert fault.memory_mode(ws) == "warm"
+
+
+def test_memory_cold_warm_lever_preserves_capture_and_inject_as(tmp_path):
+    plan, _ = _memory_plan(tmp_path, "true")
+    ws = _memory_working_spec(tmp_path)
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    spec = yaml.safe_load(ws.read_text())
+    mem = spec["memory"]
+    assert mem["enabled"] is True
+    assert mem["inject_as"] == "_memory"            # untouched
+    assert mem["capture"] == [{"stage": "researcher", "key": "content", "max_entries": 8}]
+    assert mem["fresh"] is True                     # only fresh changed
+
+
+def test_memory_mode_none_when_no_memory_block(tmp_path):
+    ws = tmp_path / "no_mem.yml"
+    ws.write_text('name: wf\nversion: "1.0"\nstages: []\n')
+    assert fault.memory_mode(ws) is None            # no memory block -> unlabeled

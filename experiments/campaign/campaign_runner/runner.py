@@ -175,7 +175,7 @@ class CampaignRunner:
                     spec_diff = self._diff(spec_before, ws.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
-                                               spec_diff, self._memory_mode(ws),
+                                               spec_diff, fault.memory_mode(ws),
                                                run_stderr=out.stderr, gaps=gaps,
                                                hqs_arm=out.hqs_armature))
                 # rolling (improve_log hqs_before) is the one Armature emission
@@ -219,17 +219,6 @@ class CampaignRunner:
     def _diff(self, a: str, b: str) -> str:
         import difflib
         return "\n".join(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=""))
-
-    def _memory_mode(self, ws) -> str | None:
-        import yaml
-        try:
-            spec = yaml.safe_load(ws.read_text())
-        except Exception:
-            return None
-        mem = (spec or {}).get("memory")
-        if isinstance(mem, dict):
-            return "cold" if mem.get("fresh") else "warm"
-        return None
 
     def _budget_exceeded(self, runs: int, llm_calls: int, wall_s: float,
                         tokens: int = 0) -> bool:

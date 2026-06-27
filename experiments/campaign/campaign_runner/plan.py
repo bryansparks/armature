@@ -8,7 +8,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 KNOWN_LEVERS = {"none", "input_difficulty_ramp", "spec_corruption",
-                "model_tier_degradation"}
+                "model_tier_degradation", "memory_cold_warm"}
 KNOWN_GATHERS = {
     "hqs_trace", "improve_log", "spec_history", "pending",
     "dashboard_json", "stderr",
