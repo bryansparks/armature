@@ -52,31 +52,45 @@ def verdict_h2(rows: list[dict], th: dict) -> tuple[str, str, dict]:
 def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:
     """HQS formula consistency: ours vs Armature's INDEPENDENTLY emitted values.
 
-    Only compares a formula where Armature actually emitted a value for it
-    (hqs_armature[k] is not None). rolling/feedback are opportunistic — if
-    they were never emitted, that is an observability gap, not a pass.
+    Only the `authoritative` channel is apples-to-apples — both sides are
+    computed over the SAME per-run trace rows: ours via hqs.compute_authoritative
+    on this run's rows, Armature's via `armature replay <run_id>`. So only
+    authoritative counts toward pass/fail.
+
+    `rolling` and `dashboard` are NOT comparable: ours is computed from this
+    run's rows, while Armature's rolling (improve_log.hqs_before) and dashboard
+    (`armature dashboard --format json`) are across-run, DB-wide values over a
+    different row set. A persistent delta there is a scope mismatch, not
+    formula drift — reported as informational `excluded` detail, never a
+    failure. The formula math itself is verified in tests/test_hqs.py.
     """
-    deltas: list[tuple[str, float]] = []
+    COMPARABLE = "authoritative"
+    EXCLUDED = ("rolling", "dashboard")   # per-run vs across-run scope mismatch
+    auth_deltas: list[float] = []
+    excluded: dict[str, float] = {}
     for r in rows:
         ours, arm = r["hqs_ours"], r["hqs_armature"]
-        for k in ours:
-            a, b = ours.get(k), arm.get(k)
-            if a is None or b is None:
+        a, b = ours.get(COMPARABLE), arm.get(COMPARABLE)
+        if a is not None and b is not None:
+            auth_deltas.append(abs(a - b))
+        for k in EXCLUDED:
+            oa, ob = ours.get(k), arm.get(k)
+            if oa is None or ob is None:
                 continue
-            deltas.append((k, abs(a - b)))
-    if len(deltas) < 2:
+            excluded[k] = max(excluded.get(k, 0.0), abs(oa - ob))
+    if len(auth_deltas) < 2:
         return ("hqs_formula_consistency", INCON,
-                {"n_comparable": len(deltas),
-                 "note": "Armature emitted too few independent HQS values to compare"})
-    max_delta = max(d for _k, d in deltas)
+                {"n_comparable": len(auth_deltas),
+                 "note": "Armature emitted too few authoritative HQS values to compare"})
+    max_delta = max(auth_deltas)
     ok = max_delta <= th.get("max_abs_delta_le", 0.02)
-    by_formula = {}
-    for k, d in deltas:
-        by_formula.setdefault(k, 0.0)
-        by_formula[k] = max(by_formula[k], d)
     return ("hqs_formula_consistency", PASS if ok else FAIL,
-            {"max_delta": round(max_delta, 4), "n_comparable": len(deltas),
-             "by_formula": {k: round(v, 4) for k, v in by_formula.items()}})
+            {"max_delta": round(max_delta, 4), "n_comparable": len(auth_deltas),
+             "compared": "authoritative",
+             "excluded": {k: round(v, 4) for k, v in excluded.items()},
+             "excluded_reason":
+             "rolling/dashboard compare per-run rows vs across-run DB values "
+             "- scope mismatch, not formula drift"})
 
 
 def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:

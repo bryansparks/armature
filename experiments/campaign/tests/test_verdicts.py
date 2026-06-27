@@ -60,22 +60,39 @@ def test_h3_pass_when_formulas_agree():
     assert result == "PASS"
 
 
-def test_h3_fail_when_formulas_diverge():
-    r = _row("r1")
-    r["hqs_armature"]["dashboard"] = r["hqs_ours"]["dashboard"] + 0.5
-    _name, result, detail = verdicts.verdict_h3([r], {"max_abs_delta_le": 0.02})
+def test_h3_ignores_scope_mismatched_channels():
+    # rolling & dashboard compare per-run rows (ours) vs across-run DB values
+    # (armature) — different row sets by design. Their divergence must NOT
+    # fail H3; only authoritative (same row set both sides) counts.
+    rows = [_row("r1"), _row("r2"), _row("r3")]
+    for r in rows:
+        r["hqs_armature"]["rolling"] = r["hqs_ours"]["rolling"] + 0.5
+        r["hqs_armature"]["dashboard"] = r["hqs_ours"]["dashboard"] + 0.6
+    _name, result, detail = verdicts.verdict_h3(rows, {"max_abs_delta_le": 0.02})
+    assert result == "PASS"
+    assert detail["max_delta"] <= 0.02          # authoritative matched
+    assert detail["excluded"]["dashboard"] >= 0.6
+    assert detail["excluded"]["rolling"] >= 0.5
+
+
+def test_h3_fails_on_authoritative_divergence():
+    rows = [_row("r1"), _row("r2")]
+    for r in rows:
+        r["hqs_armature"]["authoritative"] = r["hqs_ours"]["authoritative"] + 0.5
+    _name, result, detail = verdicts.verdict_h3(rows, {"max_abs_delta_le": 0.02})
     assert result == "FAIL"
     assert detail["max_delta"] >= 0.5
+    assert detail["compared"] == "authoritative"
 
 
 def test_h3_inconclusive_when_too_few_observations():
-    # only one formula observed independently -> cannot compare
+    # no authoritative observations -> cannot compare the apples-to-apples channel
     r = _row("r1")
     r["hqs_armature"] = {"authoritative": None, "rolling": None,
                          "dashboard": r["hqs_ours"]["dashboard"], "feedback": None}
     _name, result, detail = verdicts.verdict_h3([r], {"max_abs_delta_le": 0.02})
     assert result == "INCONCLUSIVE"
-    assert detail["n_comparable"] == 1
+    assert detail["n_comparable"] == 0
 
 
 def test_h4_pass_when_warm_beats_cold():
