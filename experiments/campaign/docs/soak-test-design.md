@@ -81,6 +81,7 @@ class SoakVerdicts(BaseModel):
 
 class CampaignPlan(BaseModel):
     # ...existing fields...
+    purpose: str = ""               # top-of-report "what this test is" paragraph (falls back to description)
     tier_override: TierOverride | None = None
     soak_verdicts: SoakVerdicts | None = None
 ```
@@ -138,6 +139,18 @@ Agent-spawn count = sum over rows of trace rows for that `run_id` where `role_ty
 ### report.py — soak section
 
 When `plan.soak_verdicts` is set, append a soak section: HQS-over-run-index line chart, latency-over-run-index line chart, DB-size-growth curve, agent-spawn total, concurrency-phase worker summary, and the soak verdict table. Reuse the existing header (name, date, git_sha, tiers, totals) and reproduce-cmd.
+
+### Report UX — purpose, narrative, index page (applies to ALL campaign reports)
+
+Outsiders run these tests themselves, so every `report.html` must be self-explanatory and the suite must have a single entry point. Three additions, all render-time (no new data collection; derived from existing `campaign.jsonl` + verdicts + plan metadata):
+
+1. **Top "What this test is" paragraph** — rendered at the top of every report, above the verdict table. Sourced from a new plan field `purpose:` (a short prose string; falls back to `description:` if absent). For the H1 campaign it states the HQS-tracks-difficulty / self-improve / formula-consistency hypotheses; for the soak it states the reliability/longevity goal. Written for a reader who has never seen Armature.
+
+2. **Bottom narrative evaluation** — a generated prose section at the foot of every report summarizing the run as **good / bad / inconclusive** per verdict, in plain language. A pure function `narrative(verdicts, rows, plan) -> str` maps each verdict status (PASS/FAIL/INCONCLUSIVE) to a sentence, plus an overall one-line verdict ("This run supports / does not support / is inconclusive for the stated purpose"). No hand-authoring per run — derived from the data so replay reproduces an identical narrative. The soak narrative additionally summarizes agent-spawn total, DB growth, and any concurrency row-loss.
+
+3. **Index page** — a new `build_index(out_dir) -> Path` in `report.py` (and a `python experiments/campaign/run.py --build-index <out_dir>` CLI flag) that scans `out/*/report.html`, reads each run's `campaign.jsonl` + `gaps.jsonl` for its header (name, date, git_sha, totals) and verdict statuses, and renders a single self-contained `out/index.html`. Each row: test name, one-line "what it tests" (from that run's `purpose`), when run (date), overall verdict (good/bad/inconclusive), and a link to its `report.html`. The index links to every campaign/soak report under `out/` — the shareable landing page. Run automatically at the end of every campaign/soak run, and independently via `--build-index`.
+
+These are additive to `report.py`; existing report fields/structure unchanged. The narrative function is unit-tested on synthetic verdict fixtures (PASS/FAIL/INCONCLUSIVE each); the index builder is tested on a fake `out/` tree with two reports. The H1 campaign plan (`plans/h1-five-level.yml`) gains a `purpose:` field so its existing reports pick up the paragraph + narrative on the next run.
 
 ## Data flow
 
