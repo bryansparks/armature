@@ -700,7 +700,8 @@ def test_build_index_links_all_reports(tmp_path):
     assert "soak" in html and "h1-five-level" in html
     assert "Soak reliability test." in html
     assert "soak/report.html" in html and "h1-five-level/report.html" in html
-    assert "good" in html and "bad" in html   # soak all PASS -> good; h1 has FAIL -> bad
+    # overall column: soak all-PASS -> green PASS; h1 has a FAIL -> red FAIL
+    assert "color:#2e7d32'>PASS" in html and "color:#c62828'>FAIL" in html
 
 
 def test_build_index_cli_flag_runs_without_plan(tmp_path):
@@ -716,6 +717,36 @@ def test_build_index_cli_flag_runs_without_plan(tmp_path):
     rc = cli.main(["--build-index", str(out)])
     assert rc == 0
     assert (out / "index.html").exists()
+
+
+def test_build_index_finds_nested_and_metaless_reports(tmp_path):
+    """Recursive scan must catch nested replay dirs and report-only dirs
+    that lack a meta.json (older runs), not just top-level meta.json dirs."""
+    import json
+    from campaign_runner.report import build_index
+    out = tmp_path / "out"
+    # top-level report with meta
+    d1 = out / "soak"; d1.mkdir(parents=True)
+    (d1 / "report.html").write_text("<html>soak</html>")
+    (d1 / "meta.json").write_text(json.dumps(
+        {"name": "soak", "purpose": "Soak reliability test.", "date": "2026-06-27",
+         "totals": {"runs": 9},
+         "verdict_statuses": [{"name": "agent_spawn_count", "result": "PASS"}]}))
+    # nested replay report with meta
+    d2 = out / "soak-replay" / "soak"; d2.mkdir(parents=True)
+    (d2 / "report.html").write_text("<html>soak-replay</html>")
+    (d2 / "meta.json").write_text(json.dumps(
+        {"name": "soak", "purpose": "Soak replay.", "date": "2026-06-27",
+         "totals": {"runs": 9},
+         "verdict_statuses": [{"name": "agent_spawn_count", "result": "PASS"}]}))
+    # report-only dir, no meta (older run)
+    d3 = out / "degrade-only"; d3.mkdir(parents=True)
+    (d3 / "report.html").write_text("<html>degrade-only</html>")
+    html = build_index(out).read_text()
+    assert "soak/report.html" in html
+    assert "soak-replay/soak/report.html" in html      # nested, recursive
+    assert "degrade-only/report.html" in html          # meta-less, still linked
+    assert html.count("color:#2e7d32'>PASS") >= 2     # both meta'd reports all-PASS
 
 
 def test_apply_tier_override_maps_by_name_with_default(tmp_path):

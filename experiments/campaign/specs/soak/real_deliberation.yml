@@ -238,34 +238,6 @@ stages:
             type: object
     depends_on: [analyst, strategist, risk_assessor, challenger]
 
-  # ----------------------------------------------------------------
-  # Human escalation gate — fires when confidence is low
-  # In application code: check synthesizer.confidence and conditionally
-  # route to this gate. Shown here as an unconditional review step.
-  # ----------------------------------------------------------------
-
-  - id: human_review
-    gate: human
-    present: |
-      ============================================================
-      DELIBERATION COMPLETE — SYNTHESIZER DECISION
-      ============================================================
-
-      Decision: {{ synthesizer.decision }}
-      Confidence: {{ synthesizer.confidence }}
-
-      Reasoning: {{ synthesizer.reasoning }}
-
-      Risk Factors:
-      {% for r in synthesizer.risk_factors %}- {{ r }}
-      {% endfor %}
-      Open Questions:
-      {% for q in synthesizer.open_questions %}- {{ q }}
-      {% endfor %}
-      ============================================================
-      Do you approve this recommendation?
-    depends_on: [synthesizer]
-
 # ── Expected output (illustrative — actual content varies by model/input) ─
 #
 #   armature run examples/03_deliberation_standard.yml \

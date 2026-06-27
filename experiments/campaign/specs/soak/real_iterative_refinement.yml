@@ -11,6 +11,15 @@ model_tiers:
     api_key_env: OPENROUTER_API_KEY
     temperature: 0.3
     max_tokens: 2048
+  # guided_json needs a tier above `small`/`tiny` or armature's validator
+  # rejects the spec (GUIDED_JSON_LOW_TIER_RISK) and `armature run` exits 1.
+  # The soak tier_override remaps medium -> a capable model regardless.
+  medium:
+    provider: openrouter
+    model: google/gemini-2.5-flash
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 2048
 
 role_type_defaults:
   worker: small
@@ -36,6 +45,7 @@ stages:
     role:
       name: WriterJudge
       type: worker
+      model_tier: medium
       description: |
         You are a writer and self-critic. Your task is to write (or improve) a
         short paragraph about the given topic, then grade your own output.

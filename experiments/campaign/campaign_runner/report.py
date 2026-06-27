@@ -139,41 +139,105 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
     return Path(out_path)
 
 
+def _overall(verdicts: list[dict]) -> str:
+    statuses = [v.get("result") for v in verdicts]
+    if not statuses:
+        return "none"
+    if all(s == "PASS" for s in statuses):
+        return "good"
+    if any(s == "FAIL" for s in statuses):
+        return "bad"
+    return "inconclusive"
+
+
+def _kind(name: str, path: str) -> str:
+    n = name.lower()
+    if "replay" in path.lower() or "replay" in n:
+        return "Replay (determinism check)"
+    if "soak" in n:
+        return "Soak / reliability"
+    if n.startswith("h1") or "hypothesis" in n:
+        return "Hypothesis (HQS dynamics)"
+    return "Campaign"
+
+
 def build_index(out_dir: Path) -> Path:
-    """Scan out/*/meta.json; render a self-contained out/index.html linking
-    every campaign/soak report with name / purpose / date / overall verdict."""
+    """Recursively scan out_dir for report.html files; render a self-contained
+    out_dir/index.html that describes the test program and links to every
+    report with its kind / what-it-tests / runs / verdict tally / date /
+    overall verdict. Catches nested replay dirs and report-only dirs that
+    lack a meta.json."""
     import json
-    rows = []
-    for meta_p in sorted(Path(out_dir).glob("*/meta.json")):
-        try:
-            m = json.loads(meta_p.read_text())
-        except Exception:
-            continue
-        statuses = [v.get("result") for v in m.get("verdict_statuses", [])]
-        if statuses and all(s == "PASS" for s in statuses):
-            overall = "good"
-        elif any(s == "FAIL" for s in statuses):
-            overall = "bad"
-        else:
-            overall = "inconclusive"
-        color = {"good": "#2e7d32", "bad": "#c62828", "inconclusive": "#f57c00"}[overall]
-        rows.append(
-            f"<tr><td><a href='{escape(meta_p.parent.name)}/report.html'>{escape(m.get('name', meta_p.parent.name))}</a></td>"
-            f"<td>{escape(m.get('purpose', ''))}</td>"
-            f"<td>{escape(m.get('date', ''))}</td>"
-            f"<td style='color:{color}'>{overall}</td></tr>")
-    body = "\n".join(rows) or "<tr><td colspan='4'>(no reports found)</td></tr>"
+
+    out_dir = Path(out_dir)
+    idx_path = out_dir / "index.html"
+    entries = []
+    for rp in out_dir.rglob("report.html"):
+        meta_p = rp.parent / "meta.json"
+        m = json.loads(meta_p.read_text()) if meta_p.exists() else {}
+        name = m.get("name") or rp.parent.name
+        verdicts = m.get("verdict_statuses", [])
+        overall = _overall(verdicts)
+        counts = {"PASS": 0, "FAIL": 0, "INCONCLUSIVE": 0}
+        for v in verdicts:
+            r = v.get("result")
+            if r in counts:
+                counts[r] += 1
+        tallies = [f"{counts[k]} {k}" for k in ("PASS", "FAIL", "INCONCLUSIVE") if counts[k]]
+        tally = ", ".join(tallies) or "—"
+        runs = (m.get("totals") or {}).get("runs")
+        date = (m.get("date") or "").replace("T", " ").split("+")[0].split(".")[0] or "—"
+        href = rp.relative_to(out_dir).as_posix()
+        entries.append({
+            "name": name, "kind": _kind(name, str(rp)), "purpose": m.get("purpose", ""),
+            "runs": runs if runs is not None else "—", "tally": tally,
+            "date": date, "overall": overall, "href": href, "mtime": rp.stat().st_mtime,
+        })
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+
+    colors = {"good": "#2e7d32", "bad": "#c62828", "inconclusive": "#f57c00", "none": "#666"}
+    labels = {"good": "PASS", "bad": "FAIL", "inconclusive": "INCONCLUSIVE", "none": "—"}
+    if entries:
+        body = "\n".join(
+            f"<tr><td><a href='{escape(e['href'])}'>{escape(e['name'])}</a></td>"
+            f"<td>{escape(e['kind'])}</td>"
+            f"<td>{escape(e['purpose'].replace(chr(10), ' ')[:160])}</td>"
+            f"<td style='text-align:center'>{e['runs']}</td>"
+            f"<td>{escape(e['tally'])}</td>"
+            f"<td>{escape(e['date'])}</td>"
+            f"<td style='color:{colors[e['overall']]}'>{labels[e['overall']]}</td></tr>"
+            for e in entries)
+    else:
+        body = "<tr><td colspan='7'>(no reports found)</td></tr>"
+
     html = f"""<!doctype html><html><head><meta charset='utf-8'>
 <title>Armature test reports</title>
-<style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
-table{{border-collapse:collapse;width:100%}} td,th{{border:1px solid #ddd;padding:.4em .6em;text-align:left}}
-h1{{border-bottom:2px solid #333}}</style></head>
-<body><h1>Armature test reports</h1>
-<p>Each row is one test run. Click a test name to open its full report (what it tests, the data,
-verdicts, and a narrative of the results). Overall: <b>good</b> = all verdicts PASS,
-<b>bad</b> = any FAIL, <b>inconclusive</b> = unsettled.</p>
-<table><tr><th>Test</th><th>What it tests</th><th>Run</th><th>Overall</th></tr>
-{body}</table></body></html>"""
-    out = Path(out_dir) / "index.html"
-    out.write_text(html)
-    return out
+<style>
+body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#222}}
+h1{{border-bottom:2px solid #333}}
+table{{border-collapse:collapse;width:100%;margin-top:1rem}}
+td,th{{border:1px solid #ddd;padding:.4em .6em;text-align:left;vertical-align:top}}
+th{{background:#f5f5f5}}
+a{{color:#1565c0;text-decoration:none}}a:hover{{text-decoration:underline}}
+code,small{{color:#666}}
+.lead{{line-height:1.5}}
+</style></head>
+<body><h1>Armature campaign test reports</h1>
+<p class='lead'>This is the black-box test harness for the Armature workflow engine. It runs
+real campaigns through the <code>armature</code> CLI (as a subprocess) and judges each run
+against a set of <b>verdicts</b> — named, pass/fail/inconclusive checks that turn a raw run into
+a claim about engine behavior. Each row below is one completed test; click the name to open its
+full self-contained report (what it tests, the per-run data, the verdict table, and a narrative
+of the results). Replay rows re-execute a recording at zero LLM cost to confirm a run's verdicts
+reproduce — that is the determinism check. Overall: <b>PASS</b> = every verdict passed,
+<b>FAIL</b> = at least one verdict failed, <b>INCONCLUSIVE</b> = the data could not settle a
+verdict (an observability gap, not a quiet failure).</p>
+<table>
+<tr><th>Test</th><th>Kind</th><th>What it tests</th><th>Runs</th><th>Verdicts</th><th>Run date</th><th>Overall</th></tr>
+{body}
+</table>
+<p><small>Generated by <code>python run.py --build-index</code>. Reports are self-contained
+HTML; no external assets are required to view them.</small></p>
+</body></html>"""
+    idx_path.write_text(html)
+    return idx_path
