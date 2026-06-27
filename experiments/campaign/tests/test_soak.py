@@ -535,6 +535,7 @@ def test_run_workers_concurrent_writes_no_row_loss(tmp_path, monkeypatch):
     # initialize the trace DB schema (armature normally does this)
     con = sqlite3.connect(sb.trace_db)
     con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.execute("PRAGMA journal_mode=WAL")
     con.commit(); con.close()
     reps = 5
     class FakePopen:
@@ -546,7 +547,6 @@ def test_run_workers_concurrent_writes_no_row_loss(tmp_path, monkeypatch):
             self._t.start()
         def _write(self, db, n):
             c = sqlite3.connect(db, timeout=30)
-            c.execute("PRAGMA journal_mode=WAL")
             for r in range(n):
                 rid = f"wk-{threading.get_ident()}-{r}"
                 c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
