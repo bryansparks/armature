@@ -12,3 +12,8 @@ def test_cli_replay_demo_recording(tmp_path):
                      "--out-dir", str(tmp_path / "out")])
     assert code == 0
     assert (tmp_path / "out" / "quick-demo" / "report.html").exists()
+    # a run/replay auto-rebuilds the unified index over the out-dir, so a
+    # clone-and-run user always has a single entry point after each command
+    idx = tmp_path / "out" / "index.html"
+    assert idx.exists()
+    assert "quick-demo/report.html" in idx.read_text()

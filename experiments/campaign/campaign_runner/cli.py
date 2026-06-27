@@ -35,12 +35,26 @@ def main(argv: list[str] | None = None) -> int:
         r = CampaignRunner(plan, src, root=Path(args.out_dir))
         result = r.replay(Path(args.replay))
         print(f"replayed {len(result.rows)} runs -> {result.report_path}")
+        _refresh_index(Path(args.out_dir))
         return 0
 
     r = CampaignRunner(plan, src, root=Path(args.out_dir), record_mode=args.record)
     result = r.run()
     print(f"ran {len(result.rows)} runs -> {result.report_path}")
+    _refresh_index(Path(args.out_dir))
     return 0
+
+
+def _refresh_index(out_dir: Path) -> None:
+    """Rebuild <out_dir>/index.html linking every report found under out_dir.
+
+    A run/replay only produces one report; this assembles the unified view of
+    ALL reports collected so far, so a clone-and-run user always has a current
+    single entry point after each command (no separate --build-index needed).
+    """
+    from campaign_runner.report import build_index
+    idx = build_index(out_dir)
+    print(f"index -> {idx}")
 
 
 def _resolve_source_spec(plan) -> Path:
