@@ -94,6 +94,8 @@ class CampaignRunner:
         t0 = time.monotonic()
         llm_calls = 0
         for pi, phase in enumerate(self.plan.phases):
+            if phase.fresh_db:
+                self.sb.reset_trace_db()
             for rep in range(phase.repeats):
                 if self._budget_exceeded(len(rows), llm_calls, time.monotonic() - t0,
                                          trace_io.total_tokens(self.sb.trace_db)):
@@ -107,11 +109,14 @@ class CampaignRunner:
                     gaps.append({"want": "valid spec after lever", "needed": "validate exit 0",
                                  "severity": "high", "phase": phase.id})
                     continue
-                out = self.drv.run(self.sb.working_spec, inputs, workflow_name=self.workflow_name)
+                out = self.drv.run(self.sb.working_spec, inputs, workflow_name=self.workflow_name,
+                                   meta={"phase_id": phase.id, "lever": phase.lever,
+                                         "inputs": inputs})
                 llm_calls += 1
                 improve_log, recovery, spec_diff = [], None, ""
                 if phase.self_improve and phase.self_improve.enabled:
-                    improve_log, recovery, improve_llm = self._do_improve(phase, gaps)
+                    improve_log, recovery, improve_llm = self._do_improve(
+                        phase, inputs, gaps)
                     llm_calls += improve_llm
                     spec_diff = self._diff(spec_before, self.sb.working_spec.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
@@ -125,7 +130,7 @@ class CampaignRunner:
                     rows[-1]["hqs_armature"]["rolling"] = improve_log[-1].get("hqs_before")
         return self._finalize(rows, gaps)
 
-    def _do_improve(self, phase, gaps: list) -> tuple[list[dict], dict | None, int]:
+    def _do_improve(self, phase, inputs: dict, gaps: list) -> tuple[list[dict], dict | None, int]:
         si = phase.self_improve
         log: list[dict] = []
         improve_rounds = 0
@@ -137,12 +142,17 @@ class CampaignRunner:
             if not imp.improve_log or not imp.improve_log[-1].get("needs_improvement"):
                 break
         # recovery probe: one more run after edits (tagged so replay folds it
-        # into this run's recovery_hqs_ours instead of emitting a standalone row)
+        # into this run's recovery_hqs_ours instead of emitting a standalone row).
+        # The probe's meta carries the improve_log so zero-cost replay can
+        # restore it onto the parent main row (the main run is recorded before
+        # improve runs, so its own record cannot carry the improve_log).
         recovery = None
         probe_calls = 0
         if log:
             probe = self.drv.run(self.sb.working_spec, {}, workflow_name=self.workflow_name,
-                                  tag="probe")
+                                  tag="probe",
+                                  meta={"phase_id": phase.id, "lever": phase.lever,
+                                        "inputs": inputs, "improve_log": log})
             probe_rows = trace_io.read_rows_by_run(self.sb.trace_db, probe.run_id) if probe.run_id else []
             recovery = hqs.all_four(probe_rows)
             probe_calls = 1
@@ -194,16 +204,32 @@ class CampaignRunner:
         rows: list[dict] = []
         for r in rec.replay():
             tr = [trace_io.TraceRow(**t) for t in r["trace_rows"]]
+            meta = r.get("meta") or {}
             if r.get("tag", "main") == "probe":
+                # Fold the probe into its parent main row: recovery_hqs_ours from
+                # the probe's trace rows, and improve_log/phase context lifted
+                # from the probe's meta (the main run is recorded before improve,
+                # so its own meta lacks improve_log).
                 if rows:
                     rows[-1]["recovery_hqs_ours"] = hqs.all_four(tr)
+                    if "improve_log" in meta:
+                        rows[-1]["improve_log"] = meta["improve_log"]
+                    for k in ("phase_id", "lever", "inputs"):
+                        if k in meta and not rows[-1].get(k):
+                            rows[-1][k] = meta[k]
                 continue
             arm = r.get("hqs_armature") or {}
             arm_dash = arm.get("dashboard")
             if arm_dash is None:
                 arm_dash = r.get("dashboard_json", {}).get("current_hqs")
-            rows.append({"run_id": r["run_id"], "phase_id": "replay", "lever": "replay",
-                         "inputs": {}, "exit_code": r["exit_code"],
+            # Restore phase context from the recording's meta so replayed rows
+            # carry the same lever/inputs the live rows did — verdicts read these.
+            # Fall back to "replay"/{} for older recordings that predate meta.
+            rows.append({"run_id": r["run_id"],
+                         "phase_id": meta.get("phase_id", "replay"),
+                         "lever": meta.get("lever", "replay"),
+                         "inputs": meta.get("inputs", {}),
+                         "exit_code": r["exit_code"],
                          "hqs_ours": hqs.all_four(tr),
                          "hqs_armature": {"authoritative": arm.get("authoritative"),
                                           "rolling": None, "dashboard": arm_dash,

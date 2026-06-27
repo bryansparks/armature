@@ -62,6 +62,8 @@ def test_run_invokes_armature_and_captures_run_id(tmp_path, monkeypatch):
     out = drv.run(spec, {"topic": "q"})
     assert out.run_id == "abc12345"
     assert out.exit_code == 0
+    # --force is passed so every campaign rep is a fresh run (no checkpoint resume)
+    assert "--force" in captured["run_cmd"]
     # HOME was redirected (every armature subprocess uses the sandbox env)
     assert captured["env"]["HOME"] == str(sb.dir)
     # recording captured the run argv (not the follow-on replay/dashboard calls)

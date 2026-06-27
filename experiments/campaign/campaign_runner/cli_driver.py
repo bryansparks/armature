@@ -46,9 +46,14 @@ class CliDriver:
                                capture_output=capture_output, text=True)
 
     def run(self, working_spec: Path, inputs: dict, workflow_name: str = "",
-            tag: str = "main") -> RunOutcome:
+            tag: str = "main", meta: dict | None = None) -> RunOutcome:
+        # --force bypasses armature's checkpoint/resume: without it, a run whose
+        # (spec, inputs) match a prior run resumes from checkpoint and writes no
+        # new trace rows / --output, so the harness would mis-attribute that
+        # rep's HQS to a prior run. Every campaign rep must be a fresh, isolated
+        # execution — the harness measures per-run HQS, not cached results.
         out_json = self.sb.dir / f"run_{abs(hash(tuple(sorted(inputs.items()))) ) % 100000}.json"
-        args = ["run", str(working_spec), "--quiet", "--output", str(out_json)]
+        args = ["run", str(working_spec), "--quiet", "--force", "--output", str(out_json)]
         for k, v in inputs.items():
             args += ["--input", f"{k}={v}"]
         cp = self._armature(args)
@@ -82,7 +87,7 @@ class CliDriver:
             self.record.record_run(run_id, ["armature", *args], cp.stdout, cp.stderr,
                                     cp.returncode, trace_rows,
                                     {}, dashboard_json, tag=tag,
-                                    hqs_armature=hqs_armature)
+                                    hqs_armature=hqs_armature, meta=meta)
         return RunOutcome(run_id, cp.returncode, cp.stdout, cp.stderr, result_json,
                           hqs_armature=hqs_armature)
 

@@ -4,6 +4,12 @@
   injecting row fields as --input values. Tests H1 (HQS tracks difficulty).
 - spec_corruption: deterministically corrupts one prompt in the working spec,
   then lets self-improve try to recover. Tests H2 (fires + recovers).
+- model_tier_degradation: downgrades the judge's model_tier to a deliberately
+  broken tier (invalid model id) so its LLM call reliably errors -> a failure
+  trace row is written -> HQS drops below target -> self_improve fires. Maps to
+  improve's STAGE_FAILED (model_problem) -> upgrade model_tier rule, giving a
+  plausible fire->edit->recover path. Use with fresh_db:true so the failures
+  are not diluted by prior phases' successes. Tests H2 (fires + recovers).
 - none: pass the phase's literal inputs through.
 """
 from __future__ import annotations
@@ -45,6 +51,9 @@ def apply_lever(phase: Phase, *, phase_index: int, rep: int,
     elif phase.lever == "spec_corruption":
         rng = random.Random(rng_seed + phase_index * 100 + rep)
         _corrupt_spec(working_spec, rng)
+        ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
+    elif phase.lever == "model_tier_degradation":
+        _break_judge_tier(working_spec)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     else:  # "none"
         ctx = {"phase_index": phase_index, "rep": rep}
@@ -120,3 +129,41 @@ def _corrupt_spec(path: Path, rng: random.Random) -> None:
         new_text = text[:m.start()] + replacement + text[m.end():]
 
     path.write_text(new_text)
+
+
+# An OpenRouter model id that does not exist. litellm raises a BadRequestError
+# immediately (client error, not retried), so the judge's LLM call fails fast
+# and deterministically without burning tokens or wall-clock.
+_BROKEN_MODEL = "z-ai/nonexistent-degradation-model"
+
+
+def _break_judge_tier(path: Path) -> None:
+    """Degrade the judge's model tier to a deliberately-broken tier.
+
+    Adds a `broken` tier pointing at an invalid model id and sets the judge
+    stage's `model_tier: broken`. The judge's LLM call then errors every time
+    (BadRequestError), producing a failure trace row (success=0, output_valid=0)
+    so the run's HQS drops below target and self_improve fires. improve's
+    diagnostic for this is STAGE_FAILED (model_problem) -> "upgrade model_tier",
+    so the SpecRefiner plausibly upgrades the judge back to a valid tier and the
+    recovery probe succeeds: a real fire->edit->recover.
+
+    The working spec is a per-campaign sandbox copy, so the yaml round-trip
+    (which drops source comments) is fine — the source spec is untouched.
+    Re-applied each rep so a prior improve fix is re-broken deterministically.
+    """
+    import yaml
+    spec = yaml.safe_load(path.read_text()) or {}
+    tiers = spec.setdefault("model_tiers", {})
+    tiers["broken"] = {
+        "provider": "openrouter",
+        "model": _BROKEN_MODEL,
+        "api_key_env": "OPENROUTER_API_KEY",
+        "temperature": 0.2,
+        "max_tokens": 64,
+    }
+    for stage in spec.get("stages", []):
+        if stage.get("id") == "judge":
+            stage.setdefault("role", {})["model_tier"] = "broken"
+            break
+    path.write_text(yaml.safe_dump(spec, sort_keys=False))

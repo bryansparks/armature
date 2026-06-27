@@ -20,7 +20,8 @@ class Recording:
     def record_run(self, run_id: str | None, argv: list[str], stdout: str, stderr: str,
                    exit_code: int, trace_rows: list[dict], sidecars: dict[str, str],
                    dashboard_json: dict, *, tag: str = "main",
-                   hqs_armature: dict | None = None) -> None:
+                   hqs_armature: dict | None = None,
+                   meta: dict | None = None) -> None:
         """Append one run to the recording.
 
         ``tag`` distinguishes main campaign runs ("main") from self-improve
@@ -29,11 +30,14 @@ class Recording:
         the HQS values Armature independently emitted for this run
         (authoritative via `armature replay`, dashboard via `armature dashboard`)
         so zero-cost replay can restore hqs_armature without re-invoking Armature.
+        ``meta`` stores the runner-level phase context (phase_id, lever, inputs;
+        and improve_log for probes) so zero-cost replay can restore the verdict
+        inputs that the live rows carried but the trace rows alone do not.
         """
         row = {"run_id": run_id, "argv": argv, "stdout": stdout, "stderr": stderr,
                "exit_code": exit_code, "trace_rows": trace_rows, "sidecars": sidecars,
                "dashboard_json": dashboard_json, "tag": tag,
-               "hqs_armature": hqs_armature or {}}
+               "hqs_armature": hqs_armature or {}, "meta": meta or {}}
         with open(self.path, "a") as f:
             f.write(json.dumps(row, default=str) + "\n")
 

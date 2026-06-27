@@ -9,6 +9,10 @@ from campaign_runner import stats
 
 PASS, FAIL, INCON = "PASS", "FAIL", "INCONCLUSIVE"
 
+# Levers whose purpose is to degrade HQS below target so self_improve fires.
+# H2 aggregates firing + recovery across any of these.
+DEGRADATION_LEVERS = {"spec_corruption", "model_tier_degradation"}
+
 
 def verdict_h1(rows: list[dict], th: dict) -> tuple[str, str, dict]:
     """HQS tracks input difficulty (negative correlation expected)."""
@@ -27,22 +31,22 @@ def verdict_h1(rows: list[dict], th: dict) -> tuple[str, str, dict]:
 
 
 def verdict_h2(rows: list[dict], th: dict) -> tuple[str, str, dict]:
-    """Self-improve fires and recovers after corruption."""
-    corr = [r for r in rows if r["lever"] == "spec_corruption"]
+    """Self-improve fires and recovers after a degradation lever."""
+    corr = [r for r in rows if r["lever"] in DEGRADATION_LEVERS]
     if not corr:
-        return ("self_improve_fires_and_recovers", INCON, {"n_corruption_runs": 0})
-    # any firing in any corruption run's improve_log
+        return ("self_improve_fires_and_recovers", INCON, {"n_degradation_runs": 0})
+    # any firing in any degradation run's improve_log
     fired = any(any(lr.get("needs_improvement") for lr in r["improve_log"]) for r in corr)
     recovered = [r["recovery_hqs_ours"]["authoritative"] for r in corr
                  if r.get("recovery_hqs_ours") and r["recovery_hqs_ours"].get("authoritative") is not None]
     if not fired:
         return ("self_improve_fires_and_recovers", INCON if not recovered else FAIL,
-                {"fired": False, "n_corruption_runs": len(corr)})
+                {"fired": False, "n_degradation_runs": len(corr)})
     recovers_above = th.get("recovers_above", 0.75)
     ok = bool(recovered) and max(recovered) >= recovers_above
     return ("self_improve_fires_and_recovers", PASS if ok else FAIL,
             {"fired": fired, "recovered_to": max(recovered) if recovered else None,
-             "n_corruption_runs": len(corr)})
+             "n_degradation_runs": len(corr)})
 
 
 def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:

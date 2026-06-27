@@ -36,3 +36,17 @@ class Sandbox:
     def write_working_spec(self, text: str) -> Path:
         self.working_spec.write_text(text)
         return self.working_spec
+
+    def reset_trace_db(self) -> None:
+        """Delete the trace DB so the next `armature run` starts a fresh history.
+
+        `armature improve` / `armature dashboard` compute HQS across the shared
+        DB's last ~200 traces; without a reset, a degradation phase's few
+        failure runs are diluted by prior phases' successes and self_improve
+        never fires. The recording is untouched (it captured each run's trace
+        rows at record time), so replay still reproduces the full campaign.
+        """
+        try:
+            self.trace_db.unlink()
+        except FileNotFoundError:
+            pass

@@ -1,0 +1,85 @@
+name: campaign-research-brief
+version: "1.0"
+description: "Lightweight research-briefing workflow for the campaign harness. Model tiers borrowed from armature-research (OpenRouter)."
+mission: >
+  You are a concise research analyst. Given a topic and a difficulty level,
+  produce a short, accurate briefing and self-assess its quality. Do not
+  fabricate; if the topic is advanced, reason carefully and flag uncertainty.
+
+# ── Model configuration (borrowed from ~/projects/Research-Project/workflows/research-analyst.yaml)
+# All three tiers via OpenRouter. Swap providers/models here without touching stages.
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+
+  medium:
+    provider: openrouter
+    # NOTE: armature-research names "moonshotai/kimi-k2.7", but OpenRouter has no
+    # general kimi-k2.7 (only kimi-k2.7-code). kimi-k2.6 is the closest valid
+    # general-reasoning kimi and is what the role needs (researcher, not code).
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 8192
+
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 16384
+
+role_type_defaults:
+  worker: small
+  orchestrator: medium
+  researcher: medium
+  judge: large
+
+contracts:
+  inputs:
+    - name: topic          # required — the research subject
+    - name: difficulty      # 1=easy … 5=hard — steers expected depth
+  max_iterations: 40
+  max_llm_calls: 200
+  timeout_hours: 1.0
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      description: |
+        Research the following topic and produce a concise, accurate briefing:
+        3-5 key points, each with a one-sentence justification. Do not fabricate.
+        If the topic is advanced, reason step by step and flag any uncertainty.
+        Topic: {{ topic }}
+        Difficulty level (1=easy, 5=hard): {{ difficulty }}
+    output_mode: text
+    depends_on: []
+
+  - id: judge
+    role:
+      name: Judge
+      type: judge
+      description: |
+        Assess the researcher's briefing for accuracy, depth, and correctness
+        relative to the stated difficulty level. Return a structured verdict.
+        Briefing:
+        {{ researcher.content }}
+        Topic: {{ topic }}
+        Difficulty: {{ difficulty }}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept, confidence, issues]
+      properties:
+        accept: {type: boolean}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+        issues: {type: array, items: {type: string}}
+    on_fail:
+      loop: {stage: judge, max: 2}
+    depends_on: [researcher]

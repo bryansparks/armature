@@ -7,7 +7,8 @@ import re
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
-KNOWN_LEVERS = {"none", "input_difficulty_ramp", "spec_corruption"}
+KNOWN_LEVERS = {"none", "input_difficulty_ramp", "spec_corruption",
+                "model_tier_degradation"}
 KNOWN_GATHERS = {
     "hqs_trace", "improve_log", "spec_history", "pending",
     "dashboard_json", "stderr",
@@ -37,6 +38,13 @@ class Phase(BaseModel):
     repeats: int = 1
     self_improve: SelfImprove | None = None
     gathers: list[str] = Field(default_factory=lambda: list(KNOWN_GATHERS))
+    # Reset the trace DB at the start of this phase so the phase's runs are not
+    # diluted by prior phases' traces. Armature computes self-improve's
+    # hqs_before across the last ~200 traces in ONE shared DB, so a few failure
+    # runs after many successful ones never drop the aggregate below target and
+    # self_improve never fires. fresh_db isolates a degradation phase so its
+    # failures actually drive hqs_before < target_hqs -> needs_improvement True.
+    fresh_db: bool = False
 
     @field_validator("lever")
     @classmethod
