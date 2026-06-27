@@ -92,22 +92,45 @@ def memory_mode(path: Path) -> str | None:
     return None
 
 
+_MEMORY_BLOCK_RE = re.compile(r'^memory:[ \t]*(?:#.*)?$', re.MULTILINE)
+# matches an indented `fresh:` key with an optional value (true/false/<empty>).
+# `(?P<val>...)` lets us rewrite only the value, keeping the key+indent.
+_FRESH_LINE_RE = re.compile(r'^([ \t]*fresh:[ \t]*)(?P<val>\S.*?)?\s*$', re.MULTILINE)
+
+
 def _set_memory_fresh(path: Path, fresh: bool) -> None:
     """Set spec['memory']['fresh'] to toggle cold (fresh=True) vs warm (fresh=False).
 
-    Only this one field is flipped; the rest of the memory block (enabled,
-    capture, inject_as) is the workflow's and is left untouched. A no-op when
-    the spec has no `memory` dict (memory_mode() then returns None for the row).
-    Uses yaml round-trip (drops source comments) — fine for the per-campaign
-    sandbox working copy, the source spec is never mutated.
+    Only this one field is flipped; every other line of the spec — including
+    block-scalar Jinja `description:|` prompts with `{% if %}` / `{{ }}`
+    control blocks — is preserved byte-for-byte. This is a SURGICAL line edit,
+    NOT a yaml round-trip: yaml.safe_dump rewrites block scalars into
+    double-quoted folded form and injects stray backslashes into multi-line
+    Jinja, which then raises TemplateSyntaxError at run time (validation does
+    not render templates, so the bug is invisible until `armature run`).
+
+    A no-op when the spec has no top-level `memory:` mapping (memory_mode()
+    then returns None for the row). If the block exists but has no `fresh:`
+    line, one is inserted immediately under `memory:`.
     """
-    import yaml
-    spec = yaml.safe_load(path.read_text()) or {}
-    mem = spec.get("memory")
-    if not isinstance(mem, dict):
-        return
-    mem["fresh"] = fresh
-    path.write_text(yaml.safe_dump(spec, sort_keys=False))
+    text = path.read_text()
+    m = _MEMORY_BLOCK_RE.search(text)
+    if m is None:
+        return  # no memory block — nothing to toggle
+    new_val = "true" if fresh else "false"
+    fm = _FRESH_LINE_RE.search(text, m.end())
+    if fm is not None:
+        # rewrite only the value, keep indent + key + trailing newline
+        line_end = text.find("\n", fm.start())
+        replacement = f"{fm.group(1)}{new_val}"
+        new_text = text[:fm.start()] + replacement + text[line_end:]
+    else:
+        # no fresh: line — insert one (two-space indent) right after `memory:`
+        insert_at = text.find("\n", m.end())  # end of the `memory:` line
+        if insert_at == -1:
+            insert_at = len(text)
+        new_text = text[:insert_at] + f"\n  fresh: {new_val}" + text[insert_at:]
+    path.write_text(new_text)
 
 
 # Match `description:` anywhere (block key or inline in a flow mapping) followed

@@ -141,16 +141,21 @@ def _memory_plan(tmp_path: Path, memory_fresh: str) -> tuple:
     return load_plan(p), p
 
 
-def _memory_working_spec(tmp_path: Path, name: str = "ws.yml") -> Path:
+def _memory_working_spec(tmp_path: Path, name: str = "ws.yml", fresh: str = "false") -> Path:
     """A spec with a memory block whose `fresh` the lever will toggle. The block
-    also carries capture/inject_as — the lever must preserve those, only flip fresh."""
+    also carries capture/inject_as — the lever must preserve those, only flip fresh.
+
+    The researcher description is a block scalar with multi-line Jinja control
+    blocks (`{% if %}` / `{{ _memory... }}`) — the exact shape that yaml.safe_dump
+    round-trips into double-quoted folded form with stray backslashes, which breaks
+    Jinja rendering at run time. The lever must preserve it verbatim."""
     ws = tmp_path / name
-    ws.write_text(textwrap.dedent("""
+    ws.write_text(textwrap.dedent(f"""
         name: wf
         version: "1.0"
         memory:
           enabled: true
-          fresh: false
+          fresh: {fresh}
           inject_as: _memory
           capture:
             - stage: researcher
@@ -158,7 +163,20 @@ def _memory_working_spec(tmp_path: Path, name: str = "ws.yml") -> Path:
               max_entries: 8
         stages:
           - id: researcher
-            role: {name: Researcher, type: researcher, description: "Research."}
+            role:
+              name: Researcher
+              type: researcher
+              description: |
+                Research the topic and produce a concise briefing.
+                {{% if _memory is defined and _memory %}}
+                Prior briefings (newest first). Build on these — refine, add new
+                points not already covered, and ground new claims in what was
+                established before. Do not merely repeat what is already there.
+                {{{{ _memory.researcher.content }}}}
+                {{% else %}}
+                No prior briefings are available — produce a fresh briefing.
+                {{% endif %}}
+                Topic: {{{{ topic }}}}
             output_mode: text
             depends_on: []
     """))
@@ -177,11 +195,7 @@ def test_memory_cold_warm_lever_sets_fresh_true_labels_cold(tmp_path):
 
 def test_memory_cold_warm_lever_sets_fresh_false_labels_warm(tmp_path):
     plan, _ = _memory_plan(tmp_path, "false")
-    ws = _memory_working_spec(tmp_path)
-    # start from fresh=true so we can see the lever flip it back to false
-    s = yaml.safe_load(ws.read_text())
-    s["memory"]["fresh"] = True
-    ws.write_text(yaml.safe_dump(s, sort_keys=False))
+    ws = _memory_working_spec(tmp_path, fresh="true")  # start warm-ready but fresh=true
     fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
                       working_spec=ws, rng_seed=1)
     spec = yaml.safe_load(ws.read_text())
@@ -200,6 +214,28 @@ def test_memory_cold_warm_lever_preserves_capture_and_inject_as(tmp_path):
     assert mem["inject_as"] == "_memory"            # untouched
     assert mem["capture"] == [{"stage": "researcher", "key": "content", "max_entries": 8}]
     assert mem["fresh"] is True                     # only fresh changed
+
+
+def test_memory_cold_warm_lever_preserves_block_scalar_jinja_verbatim(tmp_path):
+    """Regression: the lever must NOT yaml round-trip the spec, because safe_dump
+    rewrites the block-scalar Jinja description into a double-quoted folded scalar
+    with stray backslashes -> TemplateSyntaxError at run time. Edit only the
+    `fresh:` line; every other line (including the multi-line Jinja description)
+    must be byte-identical."""
+    plan, _ = _memory_plan(tmp_path, "true")
+    ws = _memory_working_spec(tmp_path)
+    before = ws.read_text()
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    after = ws.read_text()
+    # the only change is the `fresh:` line; reconstruct it by swapping that one line
+    expected = before.replace("  fresh: false\n", "  fresh: true\n")
+    assert after == expected, "lever must touch only the fresh: line, preserving the rest verbatim"
+    # and specifically: no stray backslashes introduced into the description
+    assert "\\" not in after, "stray backslash from yaml safe_dump folding would break Jinja"
+    spec = yaml.safe_load(after)
+    assert "{% if _memory is defined and _memory %}" in spec["stages"][0]["role"]["description"]
+    assert "{{ _memory.researcher.content }}" in spec["stages"][0]["role"]["description"]
 
 
 def test_memory_mode_none_when_no_memory_block(tmp_path):

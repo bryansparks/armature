@@ -13,36 +13,42 @@ budget: {max_runs: 60, max_wallclock_hours: 4.0, max_llm_calls: 4000}
 
 # ── H1: one phase per difficulty level (corpus rows 0-4 = levels 1-5).
 # input_difficulty_ramp picks corpus[phase_index], so phase_index 0..4 maps
-# exactly to levels 1..5. repeats=2 gives 10 H1 data points across 5 distinct
-# levels — enough for a monotonic Spearman correlation while staying lighter
-# than h1-five-level's 4 reps. self_improve ON at apply:false exercises the
-# improve machinery and contributes firing evidence on hard levels, without
-# editing the working spec so the HQS-vs-difficulty signal stays clean.
+# exactly to levels 1..5. repeats=4 gives 20 H1 data points across 5 distinct
+# levels (4 per level) — enough for a monotonic Spearman correlation AND enough
+# that a single judge-variance outlier (quorum_score=0.0 on an easy topic) can
+# no longer flip the rank correlation. The earlier repeats=2 run was
+# underpowered: HQS is near-flat on this workflow+model (the glm-5.2 judge
+# does not discriminate difficulty), so one 0.719 outlier on an easy topic
+# turned rho positive. 4 reps matches h1-five-level's power so a FAIL is a
+# real "the judge does not track difficulty" finding, not a sampling artifact.
+# self_improve ON at apply:false exercises the improve machinery and
+# contributes firing evidence on hard levels, without editing the working spec
+# so the HQS-vs-difficulty signal stays clean.
 phases:
   - id: level1_easy
     lever: input_difficulty_ramp
     inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
-    repeats: 2
+    repeats: 4
     self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
   - id: level2
     lever: input_difficulty_ramp
     inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
-    repeats: 2
+    repeats: 4
     self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
   - id: level3
     lever: input_difficulty_ramp
     inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
-    repeats: 2
+    repeats: 4
     self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
   - id: level4
     lever: input_difficulty_ramp
     inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
-    repeats: 2
+    repeats: 4
     self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
   - id: level5_hard
     lever: input_difficulty_ramp
     inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
-    repeats: 2
+    repeats: 4
     self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
 
   # ── H2: model-tier degradation -> self-improve fires, applies edits, recovers.
