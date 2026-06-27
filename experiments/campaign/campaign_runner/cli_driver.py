@@ -20,6 +20,11 @@ class RunOutcome:
     stdout: str
     stderr: str
     result_json: dict | None
+    # HQS Armature independently emitted for this run (authoritative via
+    # `armature replay`, dashboard via `armature dashboard`). Populated for
+    # main runs; None for recovery probes. Carried into the recording so
+    # zero-cost replay can restore hqs_armature without re-invoking Armature.
+    hqs_armature: dict | None = None
 
 
 @dataclass
@@ -40,7 +45,8 @@ class CliDriver:
         return subprocess.run(["armature", *args], env=self.sb.env(),
                                capture_output=capture_output, text=True)
 
-    def run(self, working_spec: Path, inputs: dict, workflow_name: str = "") -> RunOutcome:
+    def run(self, working_spec: Path, inputs: dict, workflow_name: str = "",
+            tag: str = "main") -> RunOutcome:
         out_json = self.sb.dir / f"run_{abs(hash(tuple(sorted(inputs.items()))) ) % 100000}.json"
         args = ["run", str(working_spec), "--quiet", "--output", str(out_json)]
         for k, v in inputs.items():
@@ -57,14 +63,28 @@ class CliDriver:
             run_id = result_json["run_id"]
         else:
             run_id = trace_io.latest_run_id(self.sb.trace_db, workflow_name) if workflow_name else None
+        # Capture the HQS values Armature independently emits for this run, so
+        # the runner's hqs_armature column and the recording both come from one
+        # source (no copy from hqs_ours). Only main runs need these; recovery
+        # probes feed recovery_hqs_ours instead.
+        hqs_armature: dict | None = None
+        if tag == "main" and run_id:
+            arm_auth = self.replay_hqs(run_id)
+            dashboard_json = self.dashboard_json(workflow_name)
+            hqs_armature = {"authoritative": arm_auth,
+                            "dashboard": (dashboard_json or {}).get("current_hqs")}
         if self.record:
             from campaign_runner.record import capture_trace_rows
             trace_rows = (capture_trace_rows(self.sb.trace_db, run_id)
                           if run_id else [])
+            dashboard_json = ({"current_hqs": hqs_armature["dashboard"]}
+                              if hqs_armature else {})
             self.record.record_run(run_id, ["armature", *args], cp.stdout, cp.stderr,
                                     cp.returncode, trace_rows,
-                                    {}, {})
-        return RunOutcome(run_id, cp.returncode, cp.stdout, cp.stderr, result_json)
+                                    {}, dashboard_json, tag=tag,
+                                    hqs_armature=hqs_armature)
+        return RunOutcome(run_id, cp.returncode, cp.stdout, cp.stderr, result_json,
+                          hqs_armature=hqs_armature)
 
     def improve(self, working_spec: Path, *, target_hqs: float, min_traces: int,
                 apply: bool) -> ImproveOutcome:

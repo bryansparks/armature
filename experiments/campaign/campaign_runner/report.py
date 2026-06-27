@@ -16,6 +16,19 @@ def _verdict_rows_html(verdicts: list[tuple[str, str, dict]]) -> str:
     return "\n".join(rows)
 
 
+def _tiers_html(tiers: list[dict]) -> str:
+    if not tiers:
+        return ""
+    body = "\n".join(
+        f"<tr><td><code>{escape(str(t.get('tier','')))}</code></td>"
+        f"<td>{escape(str(t.get('provider','')))}</td>"
+        f"<td><code>{escape(str(t.get('model','')))}</code></td></tr>"
+        for t in tiers)
+    return ("<p><b>Model tiers:</b></p><table>"
+            "<tr><th>tier</th><th>provider</th><th>model</th></tr>"
+            f"{body}</table>")
+
+
 def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str, str, dict]],
                   gaps: list[dict], reproduce_cmd: str, out_path: Path) -> Path:
     auth_series = [r["hqs_ours"]["authoritative"] for r in rows
@@ -50,15 +63,26 @@ def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str,
         f"[{escape(g.get('severity',''))}]</li>" for g in gaps) or "<li>(none)</li>"
 
     totals = campaign.get("totals", {})
+    name = escape(campaign.get("name", ""))
+    desc = campaign.get("description", "")
+    desc_html = f"<p><em>{escape(desc)}</em></p>" if desc else ""
+    date_html = escape(campaign.get("date", ""))
+    workflow_html = escape(campaign.get("workflow", ""))
+    sha = escape(campaign.get("git_sha", ""))
+    tiers_html = _tiers_html(campaign.get("tiers", []) or [])
     html = f"""<!doctype html><html><head><meta charset='utf-8'>
-<title>Campaign report — {escape(campaign.get('name',''))}</title>
+<title>Campaign report — {name}</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
 h2{{border-bottom:1px solid #ddd;padding-bottom:.3em}} code{{background:#f5f5f5;padding:0 .2em}}
-table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em}}</style></head>
+table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em}}
+.meta{{color:#555;font-size:.9rem}}</style></head>
 <body>
-<h1>Campaign report — {escape(campaign.get('name',''))}</h1>
+<h1>Campaign report — {name}</h1>
+{desc_html}
+<p class='meta'><b>Generated:</b> {date_html} &middot; <b>Workflow:</b> {workflow_html}
+&middot; <b>git SHA:</b> <code>{sha}</code></p>
+{tiers_html}
 <h2>Campaign summary</h2>
-<p>git SHA: <code>{escape(campaign.get('git_sha',''))}</code></p>
 <p>Totals: <code>{escape(str(totals))}</code></p>
 <h2>HQS over runs</h2>
 {chart}

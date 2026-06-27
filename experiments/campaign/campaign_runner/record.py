@@ -17,12 +17,23 @@ class Recording:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.path = self.dir / "runs.jsonl"
 
-    def record_run(self, run_id: str, argv: list[str], stdout: str, stderr: str,
+    def record_run(self, run_id: str | None, argv: list[str], stdout: str, stderr: str,
                    exit_code: int, trace_rows: list[dict], sidecars: dict[str, str],
-                   dashboard_json: dict) -> None:
+                   dashboard_json: dict, *, tag: str = "main",
+                   hqs_armature: dict | None = None) -> None:
+        """Append one run to the recording.
+
+        ``tag`` distinguishes main campaign runs ("main") from self-improve
+        recovery probes ("probe") so replay can fold probes into their parent
+        row instead of emitting them as standalone rows. ``hqs_armature`` stores
+        the HQS values Armature independently emitted for this run
+        (authoritative via `armature replay`, dashboard via `armature dashboard`)
+        so zero-cost replay can restore hqs_armature without re-invoking Armature.
+        """
         row = {"run_id": run_id, "argv": argv, "stdout": stdout, "stderr": stderr,
                "exit_code": exit_code, "trace_rows": trace_rows, "sidecars": sidecars,
-               "dashboard_json": dashboard_json}
+               "dashboard_json": dashboard_json, "tag": tag,
+               "hqs_armature": hqs_armature or {}}
         with open(self.path, "a") as f:
             f.write(json.dumps(row, default=str) + "\n")
 

@@ -51,9 +51,15 @@ def test_run_drives_one_phase_and_writes_campaign_jsonl(tmp_path, monkeypatch):
     class FakeDrv:
         def __init__(self, sb, rec): self.sb = sb; self.rec = rec
         def validate(self, p): return True
-        def run(self, spec, inputs, workflow_name=""):
+        def run(self, spec, inputs, workflow_name="", tag="main"):
             _fake_trace_db(self.sb.trace_db, "r1")
-            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"})
+            # main runs emit the hqs_armature the real CliDriver now captures;
+            # probes (tag="probe") return None — recovery uses trace rows.
+            hqs_arm = ({"authoritative": 0.8,
+                        "dashboard": (self.dashboard_json(workflow_name) or {}).get("current_hqs")}
+                       if tag == "main" else None)
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"},
+                                         hqs_armature=hqs_arm)
         def improve(self, spec, **kw):
             return cli_driver.ImproveOutcome(0, "", [], None, False)
         def dashboard_json(self, w): return {}
@@ -93,8 +99,9 @@ def test_budget_trips_on_llm_calls_including_improve_rounds(tmp_path, monkeypatc
     class FakeDrv:
         def __init__(self, sb, rec): self.sb = sb; self.rec = rec
         def validate(self, p): return True
-        def run(self, spec, inputs, workflow_name=""):
+        def run(self, spec, inputs, workflow_name="", tag="main"):
             import sqlite3
+            rid = "r1" if tag == "main" else "probe1"
             con = sqlite3.connect(self.sb.trace_db)
             con.executescript(trace_io_ddl.replace(
                 "CREATE TABLE traces", "CREATE TABLE IF NOT EXISTS traces"))
@@ -102,10 +109,11 @@ def test_budget_trips_on_llm_calls_including_improve_rounds(tmp_path, monkeypatc
                 "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,"
                 "timestamp,quorum_score,latency_ms,success,output_valid,escalation_count) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                ("r1", "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01",
+                (rid, "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01",
                  0.8, 1000.0, 1, 1, 0))
             con.commit(); con.close()
-            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"})
+            hqs_arm = {"authoritative": 0.8, "dashboard": None} if tag == "main" else None
+            return cli_driver.RunOutcome(rid, 0, "", "", {"run_id": rid}, hqs_armature=hqs_arm)
         def improve(self, spec, **kw):
             # non-empty log with needs_improvement=False → one round, then break
             return cli_driver.ImproveOutcome(0, "", [{"needs_improvement": False}], None, False)
@@ -195,3 +203,47 @@ def test_replay_reconstructs_rows_without_armature(tmp_path, monkeypatch):
                    "run_id":"r1","workflow_name":"wf","stage_id":"s1","role_type":"worker",
                    "model":"m","input_tokens":0,"output_tokens":0,"latency_ms":1000.0,
                    "success":True,"output_valid":True,"quorum_score":0.8,"escalation_count":0})]) ) < 1e-9
+
+
+def test_replay_folds_probes_and_restores_hqs_armature(tmp_path, monkeypatch):
+    """Replay must fold a tagged recovery probe into its parent main row's
+    recovery_hqs_ours (not emit a standalone row) and restore hqs_armature
+    from the recording — reproducing the live row count + Armature emissions."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    main_rows = [{"run_id":"r1","workflow_name":"wf","stage_id":"s1","role_type":"worker",
+                  "model":"m","input_tokens":0,"output_tokens":0,"latency_ms":1000.0,
+                  "success":True,"output_valid":True,"quorum_score":0.8,"escalation_count":0}]
+    probe_rows = [{"run_id":"p1","workflow_name":"wf","stage_id":"s1","role_type":"worker",
+                   "model":"m","input_tokens":0,"output_tokens":0,"latency_ms":1000.0,
+                   "success":True,"output_valid":True,"quorum_score":0.9,"escalation_count":0}]
+    # main run — hqs_armature captured at record time (Armature's own emissions)
+    rec.record_run("r1", ["armature", "run"], "", "", 0, main_rows, {},
+                   {"current_hqs": 0.81}, tag="main",
+                   hqs_armature={"authoritative": 0.77, "dashboard": 0.81})
+    # recovery probe — tagged, must be folded, must NOT become its own row
+    rec.record_run("p1", ["armature", "run"], "", "", 0, probe_rows, {},
+                   {}, tag="probe", hqs_armature=None)
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    result = r.replay(sb.dir / "recording")
+    # probe folded → exactly one row (reproduces the live row count)
+    assert len(result.rows) == 1
+    row = result.rows[0]
+    # hqs_armature restored from the recording — not recomputed, not None
+    assert row["hqs_armature"]["authoritative"] == 0.77
+    assert row["hqs_armature"]["dashboard"] == 0.81
+    assert row["hqs_armature"]["feedback"] is None
+    # recovery_hqs_ours computed from the probe's trace rows
+    assert row["recovery_hqs_ours"] is not None
+    assert abs(row["recovery_hqs_ours"]["authoritative"]
+               - hqs.compute_authoritative(
+                   [trace_io.TraceRow(**probe_rows[0])])) < 1e-9

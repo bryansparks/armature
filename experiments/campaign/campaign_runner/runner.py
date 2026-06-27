@@ -49,22 +49,26 @@ class CampaignRunner:
     def _row_from_run(self, run_id: str, phase_id: str, lever: str, inputs: dict,
                       exit_code: int, improve_log: list[dict], recovery: dict | None,
                       spec_diff: str, memory_mode: str | None, run_stderr: str = "",
-                      gaps: list | None = None) -> dict:
+                      gaps: list | None = None,
+                      hqs_arm: dict | None = None) -> dict:
         rows = trace_io.read_rows_by_run(self.sb.trace_db, run_id) if run_id else []
         ours = hqs.all_four(rows)
         # hqs_armature holds ONLY values Armature independently emits, never a
-        # copy of ours. authoritative comes from `armature replay` output;
-        # dashboard from `armature dashboard --format json`; feedback from the
-        # hqs_feedback hook hint in the run's stderr. rolling (improve_log
-        # hqs_before) is opportunistic — filled by the improve step, not here.
-        arm_auth = self.drv.replay_hqs(run_id) if run_id else None
+        # copy of ours. authoritative + dashboard are captured once inside
+        # CliDriver.run (from `armature replay` / `armature dashboard`) and
+        # passed in as `hqs_arm` so the live row and the recording share one
+        # source. feedback comes from the hqs_feedback hook hint in the run's
+        # stderr. rolling (improve_log hqs_before) is opportunistic — filled by
+        # the improve step, not here.
+        arm = hqs_arm or {}
+        arm_auth = arm.get("authoritative")
         # NOTE: hqs_ours["dashboard"] is computed from per-run trace rows
         # (trace_io.read_rows_by_run), while hqs_armature["dashboard"] comes from
         # `armature dashboard --format json`, which computes the HQS trend across
         # ALL workflow traces in the DB — not just this single run. So a persistent
         # dashboard delta in H3 reflects a row-set mismatch, not necessarily formula
         # drift. The formula reproduction itself is verified in tests/test_hqs.py.
-        arm_dash = (self.drv.dashboard_json(self.workflow_name) or {}).get("current_hqs") if run_id else None
+        arm_dash = arm.get("dashboard")
         arm_feedback = parse_hqs_from_text(run_stderr)
         hqs_armature = {"authoritative": arm_auth, "rolling": None,
                         "dashboard": arm_dash, "feedback": arm_feedback}
@@ -113,7 +117,8 @@ class CampaignRunner:
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
                                                spec_diff, self._memory_mode(),
-                                               run_stderr=out.stderr, gaps=gaps))
+                                               run_stderr=out.stderr, gaps=gaps,
+                                               hqs_arm=out.hqs_armature))
                 # rolling (improve_log hqs_before) is the one Armature emission
                 # available only after an improve cycle — fill it in if present.
                 if improve_log:
@@ -131,11 +136,13 @@ class CampaignRunner:
             log.extend(imp.improve_log)
             if not imp.improve_log or not imp.improve_log[-1].get("needs_improvement"):
                 break
-        # recovery probe: one more run after edits
+        # recovery probe: one more run after edits (tagged so replay folds it
+        # into this run's recovery_hqs_ours instead of emitting a standalone row)
         recovery = None
         probe_calls = 0
         if log:
-            probe = self.drv.run(self.sb.working_spec, {}, workflow_name=self.workflow_name)
+            probe = self.drv.run(self.sb.working_spec, {}, workflow_name=self.workflow_name,
+                                  tag="probe")
             probe_rows = trace_io.read_rows_by_run(self.sb.trace_db, probe.run_id) if probe.run_id else []
             recovery = hqs.all_four(probe_rows)
             probe_calls = 1
@@ -174,16 +181,32 @@ class CampaignRunner:
         return False
 
     def replay(self, recording_dir: Path) -> CampaignResult:
-        """Reconstruct campaign.jsonl from a recording — zero Armature/LLM cost."""
+        """Reconstruct campaign.jsonl from a recording — zero Armature/LLM cost.
+
+        Main runs become rows; a recovery probe (tag="probe") following its
+        parent main run is folded into that row's recovery_hqs_ours, mirroring
+        the live structure so replay reproduces the same row count. hqs_armature
+        is restored from what CliDriver.run captured at record time (authoritative
+        + dashboard), falling back to the legacy dashboard_json field for older
+        recordings that predate hqs_armature capture.
+        """
         rec = Recording(Path(recording_dir))
         rows: list[dict] = []
         for r in rec.replay():
             tr = [trace_io.TraceRow(**t) for t in r["trace_rows"]]
+            if r.get("tag", "main") == "probe":
+                if rows:
+                    rows[-1]["recovery_hqs_ours"] = hqs.all_four(tr)
+                continue
+            arm = r.get("hqs_armature") or {}
+            arm_dash = arm.get("dashboard")
+            if arm_dash is None:
+                arm_dash = r.get("dashboard_json", {}).get("current_hqs")
             rows.append({"run_id": r["run_id"], "phase_id": "replay", "lever": "replay",
                          "inputs": {}, "exit_code": r["exit_code"],
                          "hqs_ours": hqs.all_four(tr),
-                         "hqs_armature": {"authoritative": None, "rolling": None,
-                                          "dashboard": r.get("dashboard_json", {}).get("current_hqs"),
+                         "hqs_armature": {"authoritative": arm.get("authoritative"),
+                                          "rolling": None, "dashboard": arm_dash,
                                           "feedback": None},
                          "improve_log": [], "recovery_hqs_ours": None,
                          "spec_diff": "", "memory_mode": None})
@@ -198,7 +221,10 @@ class CampaignRunner:
                 f.write(json.dumps(g, default=str) + "\n")
         vs = verdicts_mod.all_verdicts(rows, self.plan)
         report = render_report(
-            campaign={"name": self.plan.name, "git_sha": _git_sha(),
+            campaign={"name": self.plan.name, "description": self.plan.description,
+                      "git_sha": _git_sha(), "date": _now(),
+                      "workflow": self.workflow_name,
+                      "tiers": _spec_tiers(self.sb.working_spec),
                       "totals": {"runs": len(rows), "phases": len(self.plan.phases)}},
             rows=rows, verdicts=vs, gaps=gaps,
             reproduce_cmd=f"python experiments/campaign/run.py {self.plan.name} "
@@ -216,3 +242,22 @@ def _git_sha() -> str:
                                capture_output=True, text=True, check=False).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _now() -> str:
+    """UTC timestamp for the report header (report-only; not written to
+    campaign.jsonl, so it does not affect replay determinism)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _spec_tiers(working_spec: Path) -> list[dict]:
+    """Model-tiers summary parsed from the working spec, for the report header
+    (provider + model per tier) so comparing runs across model swaps is easy."""
+    try:
+        import yaml
+        tiers = (yaml.safe_load(working_spec.read_text()) or {}).get("model_tiers") or {}
+        return [{"tier": t, "provider": v.get("provider"), "model": v.get("model")}
+                for t, v in tiers.items()]
+    except Exception:
+        return []
