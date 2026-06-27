@@ -137,3 +137,43 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
 </body></html>"""
     Path(out_path).write_text(html)
     return Path(out_path)
+
+
+def build_index(out_dir: Path) -> Path:
+    """Scan out/*/meta.json; render a self-contained out/index.html linking
+    every campaign/soak report with name / purpose / date / overall verdict."""
+    import json
+    rows = []
+    for meta_p in sorted(Path(out_dir).glob("*/meta.json")):
+        try:
+            m = json.loads(meta_p.read_text())
+        except Exception:
+            continue
+        statuses = [v.get("result") for v in m.get("verdict_statuses", [])]
+        if statuses and all(s == "PASS" for s in statuses):
+            overall = "good"
+        elif any(s == "FAIL" for s in statuses):
+            overall = "bad"
+        else:
+            overall = "inconclusive"
+        color = {"good": "#2e7d32", "bad": "#c62828", "inconclusive": "#f57c00"}[overall]
+        rows.append(
+            f"<tr><td><a href='{escape(meta_p.parent.name)}/report.html'>{escape(m.get('name', meta_p.parent.name))}</a></td>"
+            f"<td>{escape(m.get('purpose', ''))}</td>"
+            f"<td>{escape(m.get('date', ''))}</td>"
+            f"<td style='color:{color}'>{overall}</td></tr>")
+    body = "\n".join(rows) or "<tr><td colspan='4'>(no reports found)</td></tr>"
+    html = f"""<!doctype html><html><head><meta charset='utf-8'>
+<title>Armature test reports</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
+table{{border-collapse:collapse;width:100%}} td,th{{border:1px solid #ddd;padding:.4em .6em;text-align:left}}
+h1{{border-bottom:2px solid #333}}</style></head>
+<body><h1>Armature test reports</h1>
+<p>Each row is one test run. Click a test name to open its full report (what it tests, the data,
+verdicts, and a narrative of the results). Overall: <b>good</b> = all verdicts PASS,
+<b>bad</b> = any FAIL, <b>inconclusive</b> = unsettled.</p>
+<table><tr><th>Test</th><th>What it tests</th><th>Run</th><th>Overall</th></tr>
+{body}</table></body></html>"""
+    out = Path(out_dir) / "index.html"
+    out.write_text(html)
+    return out

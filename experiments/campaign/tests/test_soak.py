@@ -678,3 +678,41 @@ def test_render_report_purpose_falls_back_to_description(tmp_path):
                   rows=[], verdicts=[], gaps=[], reproduce_cmd="c", out_path=out)
     html = out.read_text()
     assert "desc-only" in html
+
+
+def test_build_index_links_all_reports(tmp_path):
+    import json
+    from campaign_runner.report import build_index
+    out = tmp_path / "out"
+    for name, purpose, statuses in [
+        ("soak", "Soak reliability test.", [("agent_spawn_count", "PASS")]),
+        ("h1-five-level", "H1 HQS dynamics.", [("hqs_tracks_difficulty", "FAIL")]),
+    ]:
+        d = out / name
+        d.mkdir(parents=True)
+        (d / "report.html").write_text(f"<html>{name}</html>")
+        (d / "meta.json").write_text(json.dumps(
+            {"name": name, "purpose": purpose, "date": "2026-06-27",
+             "verdict_statuses": [{"name": n, "result": r} for n, r in statuses]}))
+    idx = build_index(out)
+    html = idx.read_text()
+    assert idx == out / "index.html"
+    assert "soak" in html and "h1-five-level" in html
+    assert "Soak reliability test." in html
+    assert "soak/report.html" in html and "h1-five-level/report.html" in html
+    assert "good" in html and "bad" in html   # soak all PASS -> good; h1 has FAIL -> bad
+
+
+def test_build_index_cli_flag_runs_without_plan(tmp_path):
+    import json
+    from campaign_runner import cli
+    from campaign_runner.report import build_index
+    out = tmp_path / "out"
+    d = out / "soak"; d.mkdir(parents=True)
+    (d / "report.html").write_text("<html>soak</html>")
+    (d / "meta.json").write_text(json.dumps(
+        {"name": "soak", "purpose": "Soak reliability test.", "date": "2026-06-27",
+         "verdict_statuses": [{"name": "agent_spawn_count", "result": "PASS"}]}))
+    rc = cli.main(["--build-index", str(out)])
+    assert rc == 0
+    assert (out / "index.html").exists()
