@@ -41,20 +41,28 @@ class Sandbox:
         return target
 
     def apply_tier_override(self, spec_path: Path, override) -> None:
-        """Rewrite every entry in spec's model_tiers to the override's tiny tier,
-        preserving tier names so stage model_tier references still resolve.
-        Idempotent. No-op when override is None/disabled/has no tiny tier/spec has
-        no model_tiers."""
+        """Rewrite each entry in spec's model_tiers from the override's tiers,
+        mapping by tier NAME so a campaign can keep worker tiers cheap while
+        giving guided_json/escalation tiers a more capable model. Preserves
+        tier names so stage model_tier references still resolve. Idempotent.
+        No-op when override is None/disabled/empty or the spec has no model_tiers.
+
+        Name mapping: spec tier `T` -> override.tiers[T] if present, else
+        override.tiers['default'], else override.tiers['tiny'], else the first
+        override tier. This is back-compatible: an override with only a `tiny`
+        tier maps every spec tier to tiny (the original flatten-all behavior)."""
         import yaml
         if override is None or not override.apply or not override.tiers:
             return
-        tiny = override.tiers.get("tiny") or next(iter(override.tiers.values()))
+        default = (override.tiers.get("default")
+                   or override.tiers.get("tiny")
+                   or next(iter(override.tiers.values())))
         spec = yaml.safe_load(spec_path.read_text()) or {}
         tiers = spec.get("model_tiers") or {}
         if not tiers:
             return
         for name in list(tiers.keys()):
-            tiers[name] = dict(tiny)            # preserve name, swap config
+            tiers[name] = dict(override.tiers.get(name, default))  # keep name, swap config
         spec["model_tiers"] = tiers
         spec_path.write_text(yaml.safe_dump(spec, sort_keys=False))
 

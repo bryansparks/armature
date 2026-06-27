@@ -256,7 +256,16 @@ class CampaignRunner:
         """
         rec = Recording(Path(recording_dir))
         rows: list[dict] = []
+        # Every recorded entry — main, probe, and concurrency — carries the
+        # trace rows it wrote to the live DB. Accumulate them so we can rebuild
+        # the trace DB from the recording alone: that is what makes the
+        # trace_db-dependent soak verdicts (trace_db_integrity /
+        # agent_spawn_count / wallclock_stability) reproduce at zero cost,
+        # instead of silently dropping to INCONCLUSIVE in a fresh replay
+        # sandbox that never ran Armature.
+        all_trace_rows: list[dict] = []
         for r in rec.replay():
+            all_trace_rows.extend(r.get("trace_rows") or [])
             if r.get("tag") == "concurrency":
                 rows.append((r.get("meta") or {}).get("summary", {}))
                 continue
@@ -293,7 +302,42 @@ class CampaignRunner:
                                           "feedback": None},
                          "improve_log": [], "recovery_hqs_ours": None,
                          "spec_diff": "", "memory_mode": None})
+        self._reconstruct_trace_db(self.sb.trace_db, all_trace_rows)
         return self._finalize(rows, [])
+
+    def _reconstruct_trace_db(self, db_path: Path, trace_rows: list[dict]) -> None:
+        """Rebuild a read-only trace DB in the replay sandbox from recorded
+        trace rows so the trace_db-dependent soak verdicts reproduce from the
+        recording alone. Mirrors the columns those verdicts query
+        (run_id / role_type / latency_ms) plus the rest of TraceRow for
+        faithfulness. This is our own reconstruction in the replay sandbox —
+        the live harness never writes to Armature's DB; replay never runs
+        Armature. Idempotent: an existing file (e.g. a prior replay) is replaced."""
+        import sqlite3
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        if db_path.exists():
+            db_path.unlink()
+        if not trace_rows:
+            return
+        con = sqlite3.connect(str(db_path))
+        try:
+            con.execute(
+                "CREATE TABLE traces ("
+                "run_id TEXT NOT NULL, workflow_name TEXT, stage_id TEXT, "
+                "role_type TEXT, model TEXT, input_tokens INTEGER, "
+                "output_tokens INTEGER, latency_ms REAL, success INTEGER, "
+                "output_valid INTEGER, quorum_score REAL, escalation_count INTEGER)")
+            con.executemany(
+                "INSERT INTO traces (run_id, workflow_name, stage_id, role_type, "
+                "model, input_tokens, output_tokens, latency_ms, success, "
+                "output_valid, quorum_score, escalation_count) "
+                "VALUES (:run_id, :workflow_name, :stage_id, :role_type, :model, "
+                ":input_tokens, :output_tokens, :latency_ms, :success, "
+                ":output_valid, :quorum_score, :escalation_count)",
+                trace_rows)
+            con.commit()
+        finally:
+            con.close()
 
     def _finalize(self, rows: list[dict], gaps: list[dict]) -> CampaignResult:
         with open(self.campaign_jsonl, "w") as f:

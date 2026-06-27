@@ -716,3 +716,147 @@ def test_build_index_cli_flag_runs_without_plan(tmp_path):
     rc = cli.main(["--build-index", str(out)])
     assert rc == 0
     assert (out / "index.html").exists()
+
+
+def test_apply_tier_override_maps_by_name_with_default(tmp_path):
+    """The tiered override maps each spec tier by NAME: named tiers get their
+    own config, unlisted tiers fall back to `default`. This keeps worker tiers
+    cheap while giving guided_json / escalation tiers a capable model."""
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import TierOverride
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 1}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    spec = tmp_path / "ws.yml"
+    spec.write_text(textwrap.dedent("""
+        name: wf
+        version: "1.0"
+        model_tiers:
+          small: {provider: anthropic, model: claude-haiku}
+          large: {provider: ollama, model: llama}
+          frontier: {provider: anthropic, model: claude-opus}
+        stages: [{id: s1, role: {name: S, type: worker, description: x}, output_mode: text, depends_on: []}]
+    """).strip() + "\n")
+    ov = TierOverride(apply=True, tiers={
+        "default": {"provider": "openrouter", "model": "qwen/qwen3.6-27b",
+                    "api_key_env": "OPENROUTER_API_KEY", "temperature": 0.2, "max_tokens": 2048},
+        "small": {"provider": "openrouter", "model": "qwen/qwen3.6-27b",
+                  "api_key_env": "OPENROUTER_API_KEY", "temperature": 0.2, "max_tokens": 2048},
+        "large": {"provider": "openrouter", "model": "google/gemini-2.5-flash",
+                  "api_key_env": "OPENROUTER_API_KEY", "temperature": 0.2, "max_tokens": 4096},
+        "frontier": {"provider": "openrouter", "model": "google/gemini-2.5-flash",
+                     "api_key_env": "OPENROUTER_API_KEY", "temperature": 0.2, "max_tokens": 4096},
+    })
+    sb.apply_tier_override(spec, ov)
+    import yaml
+    tiers = yaml.safe_load(spec.read_text())["model_tiers"]
+    assert set(tiers.keys()) == {"small", "large", "frontier"}   # names preserved
+    assert tiers["small"]["model"] == "qwen/qwen3.6-27b"          # worker tier stays cheap
+    assert tiers["large"]["model"] == "google/gemini-2.5-flash"   # guided_json tier -> strong
+    assert tiers["frontier"]["model"] == "google/gemini-2.5-flash"
+    # idempotent
+    sb.apply_tier_override(spec, ov)
+    assert yaml.safe_load(spec.read_text())["model_tiers"] == tiers
+
+
+def test_apply_tier_override_unlisted_tier_falls_back_to_default(tmp_path):
+    """A spec tier name not in the override falls back to `default` (then tiny,
+    then first) — so the soak's frontier/fast tiers pick up the strong config
+    even if only `default`+worker tiers were explicitly listed."""
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import TierOverride
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 1}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    spec = tmp_path / "ws.yml"
+    spec.write_text("name: wf\nmodel_tiers:\n"
+                    "  small: {provider: anthropic, model: claude-haiku}\n"
+                    "  fast: {provider: ollama, model: llama}\n")
+    # only `default` + `small` listed; `fast` is unlisted -> default (strong)
+    ov = TierOverride(apply=True, tiers={
+        "default": {"provider": "openrouter", "model": "google/gemini-2.5-flash"},
+        "small": {"provider": "openrouter", "model": "qwen/qwen3.6-27b"},
+    })
+    sb.apply_tier_override(spec, ov)
+    import yaml
+    tiers = yaml.safe_load(spec.read_text())["model_tiers"]
+    assert tiers["small"]["model"] == "qwen/qwen3.6-27b"
+    assert tiers["fast"]["model"] == "google/gemini-2.5-flash"   # fallback to default
+
+
+def test_replay_reconstructs_trace_db_so_verdicts_reproduce(tmp_path, monkeypatch):
+    """Replay must rebuild the trace DB from recorded trace rows so the
+    trace_db-dependent soak verdicts (integrity / agent_spawn_count) reproduce
+    from the recording alone — not silently drop to INCONCLUSIVE."""
+    import json
+    from campaign_runner import runner, record
+    from campaign_runner.plan import load_plan
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner import soak_verdicts
+
+    plan_p = tmp_path / "plan.yml"
+    plan_p.write_text(textwrap.dedent("""
+        name: soak-rep
+        description: x
+        workflow: src.yml
+        budget: {max_runs: 10}
+        phases:
+          - id: main
+            lever: none
+            inputs: {topic: q}
+            repeats: 1
+          - id: overlap
+            lever: none
+            concurrency: {workers: 2, driver: armature_loop, reps_per_worker: 1}
+        soak_verdicts: {no_unclean_exits: {allowed_failures: 0},
+                         trace_db_integrity: {allow_null_run_id: 0},
+                         agent_spawn_count: {min_total: 1}}
+        verdicts: {}
+    """))
+    plan = load_plan(plan_p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: src-wf\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    def trow(rid, role):
+        return {"run_id": rid, "workflow_name": "wf", "stage_id": "s", "role_type": role,
+                "model": "m", "input_tokens": 10, "output_tokens": 20, "latency_ms": 100.0,
+                "success": True, "output_valid": True, "quorum_score": 0.8,
+                "escalation_count": 0}
+
+    # one main run (2 trace rows: worker + judge) + one concurrency summary
+    # carrying its own 3 trace rows (workers).
+    rec.record_run("r1", ["armature", "run"], "", "", 0,
+                   [trow("r1", "worker"), trow("r1", "judge")], {}, {}, tag="main",
+                   hqs_armature={"authoritative": 0.8, "dashboard": None})
+    rec.record_run(None, ["armature", "loop"], "", "", 0,
+                   [trow("c1", "worker"), trow("c2", "worker"), trow("c3", "worker")],
+                   {}, {}, tag="concurrency",
+                   meta={"summary": {"run_id": None, "is_concurrency_summary": True,
+                                     "exit_code": 0, "exit_codes": [0], "run_ids": ["c1", "c2", "c3"],
+                                     "n_trace_rows": 3, "sqlite_busy_count": 0}})
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    result = r.replay(sb.dir / "recording")
+    # reconstructed DB exists and carries all 5 recorded trace rows
+    import sqlite3
+    assert r.sb.trace_db.exists()
+    con = sqlite3.connect(str(r.sb.trace_db))
+    n = con.execute("SELECT count(*) FROM traces").fetchone()[0]
+    n_agents = con.execute(
+        "SELECT count(*) FROM traces WHERE role_type IN ('worker','researcher','judge','orchestrator')").fetchone()[0]
+    con.close()
+    assert n == 5
+    assert n_agents == 5
+    # the soak verdicts reproduce from the recording (not INCONCLUSIVE)
+    vs = {name: status for name, status, _ in
+          soak_verdicts.all_soak_verdicts(result.rows, plan, r.sb.trace_db)}
+    assert vs["trace_db_integrity"] == "PASS"
+    assert vs["agent_spawn_count"] == "PASS"

@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
+
+from campaign_runner import trace_io
 
 
 def _count_rows(db: Path) -> int:
@@ -85,13 +88,21 @@ def run_workers(sb, spec_path: Path, conc, phase_id: str, recording=None) -> lis
     total_new = _count_rows(sb.trace_db) - rows_before
     per = total_new // len(summaries) if summaries else 0
     k = len(new_ids) // len(summaries) if summaries else 0
+    # Capture each worker's trace rows so a recording can reproduce the
+    # concurrency phase's trace DB footprint at replay time (kept off the
+    # summary dict so it never leaks into campaign.jsonl).
+    recorded_trace_rows: list[list[dict]] = []
     for i, s in enumerate(summaries):
         s["run_ids"] = new_ids[i * k:(i + 1) * k] if len(summaries) > 1 else new_ids
         s["n_trace_rows"] = per
+        trs = []
+        for rid in s["run_ids"]:
+            trs.extend(asdict(r) for r in trace_io.read_rows_by_run(sb.trace_db, rid))
+        recorded_trace_rows.append(trs)
 
     if recording is not None:
-        for s in summaries:
+        for s, trs in zip(summaries, recorded_trace_rows):
             recording.record_run(None, ["armature", conc.driver, str(spec_path)], "", "",
-                                 s["exit_code"], [], {}, {}, tag="concurrency",
+                                 s["exit_code"], trs, {}, {}, tag="concurrency",
                                  meta={"summary": s})
     return summaries

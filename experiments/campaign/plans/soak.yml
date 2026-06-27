@@ -12,10 +12,23 @@ purpose: >
 workflow: specs/soak/synth_fanout_mid.yml
 budget: {max_runs: 600, max_llm_calls: 15000, max_wallclock_hours: 3.0, max_tokens: 4000000}
 
+# Tiered override: worker/text tiers stay on the cheap qwen SLM (raised to
+# 2048 tokens so its one small-tier guided_json stage — real_iterative's
+# refine_round, a simple schema — validates), while every guided_json /
+# escalation tier (medium/large/frontier/fast) is pinned to gemini-2.5-flash,
+# which reliably produces the structured JSON those stages require. `default`
+# (the fallback for any unlisted tier name) is the cheap tier. This keeps the
+# ~60k worker spawns on the tiny tier while making the ~1k guided_json spawns
+# succeed — so the soak measures engine reliability, not model flakiness.
 tier_override:
   apply: true
   tiers:
-    tiny: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+    default:  {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 2048}
+    small:     {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 2048}
+    medium:    {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    large:     {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    frontier:  {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    fast:      {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
 
 phases:
   # ── real workflows (credibility): ~20 agents/iteration each, ~80 reps → ~6400 spawns
