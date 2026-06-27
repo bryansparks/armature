@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 KNOWN_LEVERS = {"none", "input_difficulty_ramp", "spec_corruption",
                 "model_tier_degradation"}
@@ -31,6 +31,43 @@ class SelfImprove(BaseModel):
     gather_corpora: bool = True
 
 
+class Concurrency(BaseModel):
+    workers: int = 2
+    driver: str = "armature_loop"
+    shared_db: bool = True
+    reps_per_worker: int = 20
+
+    @field_validator("driver")
+    @classmethod
+    def _check_driver(cls, v: str) -> str:
+        if v not in {"armature_loop", "armature_run_force"}:
+            raise ValueError(f"unknown concurrency driver: {v!r} (known: armature_loop, armature_run_force)")
+        return v
+
+    @field_validator("workers")
+    @classmethod
+    def _check_workers(cls, v: int) -> int:
+        if v < 2:
+            raise ValueError("concurrency.workers must be >= 2")
+        return v
+
+
+class TierOverride(BaseModel):
+    apply: bool = True
+    tiers: dict[str, dict] = Field(default_factory=dict)
+
+
+class SoakVerdicts(BaseModel):
+    no_unclean_exits: dict = Field(default_factory=dict)
+    trace_db_integrity: dict = Field(default_factory=dict)
+    no_row_loss_under_concurrency: dict = Field(default_factory=dict)
+    hqs_stability_no_drift: dict = Field(default_factory=dict)
+    wallclock_stability: dict = Field(default_factory=dict)
+    checkpoint_resume_correctness: dict = Field(default_factory=dict)
+    budget_obeyed: dict = Field(default_factory=dict)
+    agent_spawn_count: dict = Field(default_factory=dict)
+
+
 class Phase(BaseModel):
     id: str
     lever: str = "none"
@@ -45,6 +82,17 @@ class Phase(BaseModel):
     # self_improve never fires. fresh_db isolates a degradation phase so its
     # failures actually drive hqs_before < target_hqs -> needs_improvement True.
     fresh_db: bool = False
+    workflow: str | None = None
+    concurrency: Concurrency | None = None
+
+    @model_validator(mode="after")
+    def _check_concurrency_self_improve(self):
+        if (self.concurrency is not None and self.self_improve is not None
+                and self.self_improve.enabled):
+            raise ValueError(
+                "CONCURRENCY_AND_SELF_IMPROVE_CONFLICT: a phase may not set both "
+                "concurrency and an enabled self_improve")
+        return self
 
     @field_validator("lever")
     @classmethod
@@ -79,6 +127,9 @@ class CampaignPlan(BaseModel):
     tiers: dict[str, dict] = Field(default_factory=dict)
     phases: list[Phase]
     verdicts: Verdicts = Field(default_factory=Verdicts)
+    purpose: str = ""
+    tier_override: TierOverride | None = None
+    soak_verdicts: SoakVerdicts | None = None
 
     @field_validator("name")
     @classmethod
