@@ -16,6 +16,35 @@ def _verdict_rows_html(verdicts: list[tuple[str, str, dict]]) -> str:
     return "\n".join(rows)
 
 
+def narrative(verdicts: list[tuple[str, str, dict]], rows: list[dict], plan) -> str:
+    if not verdicts:
+        return "<h2>Narrative</h2><p>(no verdicts recorded)</p>"
+    statuses = [v[1] for v in verdicts]
+    if any(s == "FAIL" for s in statuses):
+        head = "Overall: this run does NOT support the stated purpose — at least one verdict FAILED."
+    elif statuses and all(s == "PASS" for s in statuses):
+        head = "Overall: this run supports the stated purpose — all verdicts PASS."
+    else:
+        head = "Overall: this run is INCONCLUSIVE for the stated purpose — one or more verdicts could not be settled."
+    word = {"PASS": "good", "FAIL": "bad", "INCONCLUSIVE": "inconclusive"}
+    items = "\n".join(
+        f"<li><b>{escape(name)}</b>: {word.get(result, result)} — "
+        f"<code>{escape(str(detail))}</code></li>"
+        for name, result, detail in verdicts)
+    return (f"<h2>Narrative</h2><p><b>{head}</b></p><ul>{items}</ul>")
+
+
+def _soak_metrics_html(verdicts: list[tuple[str, str, dict]]) -> str:
+    d = {n: detail for n, _r, detail in verdicts}
+    asc = d.get("agent_spawn_count")
+    if asc is None:
+        return ""
+    total = asc.get("total_agents", 0)
+    return ("<h2>Soak metrics</h2><ul>"
+            f"<li>Total agent spawns: <b>{total:,}</b> (min {asc.get('min_total', 5000):,})</li>"
+            "</ul>")
+
+
 def _tiers_html(tiers: list[dict]) -> str:
     if not tiers:
         return ""
@@ -68,6 +97,9 @@ def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str,
     name = escape(campaign.get("name", ""))
     desc = campaign.get("description", "")
     desc_html = f"<p><em>{escape(desc)}</em></p>" if desc else ""
+    purpose = campaign.get("purpose", "") or campaign.get("description", "")
+    purpose_html = (f"<h2>What this test is</h2><p>{escape(purpose)}</p>"
+                    if purpose else "")
     date_html = escape(campaign.get("date", ""))
     workflow_html = escape(campaign.get("workflow", ""))
     sha = escape(campaign.get("git_sha", ""))
@@ -81,6 +113,7 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
 <body>
 <h1>Campaign report — {name}</h1>
 {desc_html}
+{purpose_html}
 <p class='meta'><b>Generated:</b> {date_html} &middot; <b>Workflow:</b> {workflow_html}
 &middot; <b>git SHA:</b> <code>{sha}</code></p>
 {tiers_html}
@@ -92,11 +125,13 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
 {div_bars}
 <h2>Fire &rarr; recover narratives</h2>
 {fire_html}
+{_soak_metrics_html(verdicts)}
 <h2>Verdict table</h2>
 <table><tr><th>Hypothesis</th><th>Result</th><th>Detail</th></tr>
 {_verdict_rows_html(verdicts)}</table>
 <h2>Observability gaps</h2>
 <ul>{gaps_html}</ul>
+{narrative(verdicts, rows, campaign)}
 <h2>Reproduce this</h2>
 <pre><code>{escape(reproduce_cmd)}</code></pre>
 </body></html>"""

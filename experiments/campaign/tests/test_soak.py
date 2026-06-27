@@ -641,3 +641,40 @@ def test_concurrency_phase_dispatched_and_recorded(tmp_path, monkeypatch):
     replayed = r.replay(r.recording.dir)
     assert len(replayed.rows) == 2
     assert all(row["is_concurrency_summary"] for row in replayed.rows)
+
+
+def test_narrative_maps_verdict_statuses():
+    from campaign_runner.report import narrative
+    vs = [("no_unclean_exits", "PASS", {"n_runs": 3}),
+          ("trace_db_integrity", "FAIL", {"n_null_run_id": 1}),
+          ("hqs_stability_no_drift", "INCONCLUSIVE", {"n": 2})]
+    html = narrative(vs, [], None)
+    assert "no_unclean_exits" in html and "good" in html
+    assert "trace_db_integrity" in html and "bad" in html
+    assert "INCONCLUSIVE" in html or "inconclusive" in html
+    assert "does NOT support" in html   # overall line when any FAIL
+
+
+def test_render_report_includes_purpose_and_narrative(tmp_path):
+    from campaign_runner.report import render_report
+    out = tmp_path / "report.html"
+    vs = [("agent_spawn_count", "PASS", {"total_agents": 60000, "min_total": 5000})]
+    render_report(campaign={"name": "soak", "description": "d", "purpose": "Prove the engine stays up under cron.",
+                            "git_sha": "abc", "date": "2026-06-27", "workflow": "w",
+                            "tiers": [], "totals": {"runs": 500, "phases": 7}},
+                  rows=[], verdicts=vs, gaps=[],
+                  reproduce_cmd="python run.py soak --replay rec", out_path=out)
+    html = out.read_text()
+    assert "Prove the engine stays up under cron." in html
+    assert "60,000" in html or "60000" in html   # soak metrics agent total
+    assert "Overall" in html and "supports" in html   # narrative overall (all PASS)
+
+
+def test_render_report_purpose_falls_back_to_description(tmp_path):
+    from campaign_runner.report import render_report
+    out = tmp_path / "report.html"
+    render_report(campaign={"name": "x", "description": "desc-only", "purpose": "",
+                            "git_sha": "a", "date": "d", "workflow": "w", "tiers": [], "totals": {}},
+                  rows=[], verdicts=[], gaps=[], reproduce_cmd="c", out_path=out)
+    html = out.read_text()
+    assert "desc-only" in html
