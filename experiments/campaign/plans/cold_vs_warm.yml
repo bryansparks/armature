@@ -1,15 +1,36 @@
 name: cold-vs-warm
-description: "Does carry-forward memory raise HQS vs fresh memory?"
-workflow: specs/dangerous_pretzel.yml
-budget: {max_runs: 20}
+description: "Does carry-forward memory raise HQS vs fresh memory? Cold runs ignore prior briefings; warm runs build on them. Tests H4."
+purpose: >
+  A hypothesis test of Armature's cross-run memory (H4): warm runs — which
+  inject the researcher's prior briefings via MemoryStore and build on them —
+  should score higher HQS than cold runs, which ignore prior memory (memory.fresh:
+  true) and start each briefing from scratch. Both phases run the same fixed
+  topic against one shared memory DB. The cold phase runs first: each cold run
+  ignores injection (a clean baseline) but still captures its briefing, so the
+  DB accumulates content. The warm phase then runs against that accumulated
+  memory. The verdict compares warm HQS to cold HQS. An outsider can replay the
+  recording at zero cost to verify the same verdict.
+  Caveat: warm runs always follow cold runs in this plan (phases are sequential),
+  so a small ordering confound is unavoidable; the memory DB grows monotonically
+  and only warm runs ever read it, which is the intended carry-forward direction.
+workflow: specs/campaign_research_brief_memory.yml
+budget: {max_runs: 25, max_wallclock_hours: 2.0, max_llm_calls: 400}
+
+# ── Cold phase: memory.fresh=true -> ignore prior briefings, but still capture.
+# Each cold run is a clean baseline that adds its briefing to the shared DB.
 phases:
   - id: cold
-    lever: none
-    inputs: {topic: "carry-forward trial", memory_fresh: "true"}
-    repeats: 5
+    lever: memory_cold_warm
+    inputs: {topic: "the design and correctness of distributed consensus protocols", memory_fresh: "true"}
+    repeats: 10
+
+  # ── Warm phase: memory.fresh=false -> inject the accumulated prior briefings.
+  # The researcher builds on them, so warm briefings should be more grounded and
+  # comprehensive -> the judge scores them higher.
   - id: warm
-    lever: none
-    inputs: {topic: "carry-forward trial", memory_fresh: "false"}
-    repeats: 5
+    lever: memory_cold_warm
+    inputs: {topic: "the design and correctness of distributed consensus protocols", memory_fresh: "false"}
+    repeats: 10
+
 verdicts:
   memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}
