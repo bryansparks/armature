@@ -11,18 +11,18 @@ contracts:
   max_llm_calls: 200
 stages:
   - id: planner
-    role: {name: Planner, type: orchestrator, description: "Emit a JSON object with an `items` array of exactly 40 short research sub-questions about: {{ topic }}. Each item is {q: string}. Return only the object."}
+    role: {name: Planner, type: orchestrator, description: "Emit a JSON object with a `questions` array of exactly 40 short research sub-questions about: {{ topic }}. Each item is {q: string}. Return only the object."}
     output_mode: guided_json
     output_schema:
       type: object
-      required: [items]
+      required: [questions]
       properties:
-        items: {type: array, minItems: 40, maxItems: 40, items: {type: object, required: [q], properties: {q: {type: string}}}}
+        questions: {type: array, minItems: 40, maxItems: 40, items: {type: object, required: [q], properties: {q: {type: string}}}}
     depends_on: []
   - id: workers
     fan_out: 40
     fan_in: list
-    partition_source: "{{ planner.items }}"
+    partition_source: "{{ planner.questions }}"
     partition_key: item
     role: {name: Worker, type: worker, description: "Answer in one concise sentence: {{ item.q }}"}
     output_mode: text

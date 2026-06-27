@@ -148,27 +148,6 @@ stages:
           description: "APPROVED, REVISE, or REJECT with one-sentence rationale"
     depends_on: [researcher, writer]
 
-  # Gate: Human reviews the critic's assessment before the run completes
-  - id: review_gate
-    gate: human
-    present: |
-      ============================================================
-      PIPELINE COMPLETE — CRITIC'S ASSESSMENT
-      ============================================================
-
-      Overall Score: {{ critic.overall_score }}
-      Verdict: {{ critic.verdict }}
-
-      Strengths:
-      {% for s in critic.strengths %}- {{ s }}
-      {% endfor %}
-      Weaknesses:
-      {% for w in critic.weaknesses %}- {{ w }}
-      {% endfor %}
-
-      Approve to accept this output, or provide feedback.
-    depends_on: [critic]
-
 # ── Expected output (illustrative — actual content varies by model/input) ─
 #
 #   armature run examples/02_research_pipeline.yml \

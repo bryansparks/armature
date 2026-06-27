@@ -41,7 +41,7 @@ class Sandbox:
         return target
 
     def apply_tier_override(self, spec_path: Path, override) -> None:
-        """Rewrite each entry in spec's model_tiers from the override's tiers,
+        """Rewrite the spec's model_tiers block from the override's tiers,
         mapping by tier NAME so a campaign can keep worker tiers cheap while
         giving guided_json/escalation tiers a more capable model. Preserves
         tier names so stage model_tier references still resolve. Idempotent.
@@ -49,22 +49,57 @@ class Sandbox:
 
         Name mapping: spec tier `T` -> override.tiers[T] if present, else
         override.tiers['default'], else override.tiers['tiny'], else the first
-        override tier. This is back-compatible: an override with only a `tiny`
-        tier maps every spec tier to tiny (the original flatten-all behavior)."""
+        override tier. Back-compatible: an override with only a `tiny` tier maps
+        every spec tier to tiny (the original flatten-all behavior).
+
+        Surgical: only the top-level `model_tiers:` block is rewritten — the rest
+        of the file is left byte-for-byte intact. Armature's spec loader renders
+        the whole file as a Jinja2 template, so a full yaml round-trip would
+        reformat multi-line block scalars (descriptions) into escaped
+        double-quoted strings with literal backslashes that raise
+        TemplateSyntaxError. The tier configs are flat scalar dicts with no
+        multi-line strings, so serializing just model_tiers is safe."""
+        import re
         import yaml
         if override is None or not override.apply or not override.tiers:
+            return
+        text = spec_path.read_text()
+        parsed = yaml.safe_load(text) or {}
+        tiers = parsed.get("model_tiers") or {}
+        if not tiers:
             return
         default = (override.tiers.get("default")
                    or override.tiers.get("tiny")
                    or next(iter(override.tiers.values())))
-        spec = yaml.safe_load(spec_path.read_text()) or {}
-        tiers = spec.get("model_tiers") or {}
-        if not tiers:
+        new_tiers = {name: dict(override.tiers.get(name, default)) for name in tiers}
+        new_block = yaml.safe_dump({"model_tiers": new_tiers}, sort_keys=False)
+
+        lines = text.splitlines(keepends=True)
+        start = None
+        for idx, ln in enumerate(lines):
+            if ln[:1].isspace():
+                continue
+            m = re.match(r"^model_tiers:\s*(\S.*)?$", ln.rstrip("\n"))
+            if not m:
+                continue
+            start = idx
+            inline = bool(m.group(1))   # `model_tiers: {small: ...}` (one line)
+            break
+        if start is None:
             return
-        for name in list(tiers.keys()):
-            tiers[name] = dict(override.tiers.get(name, default))  # keep name, swap config
-        spec["model_tiers"] = tiers
-        spec_path.write_text(yaml.safe_dump(spec, sort_keys=False))
+        if inline:
+            end = start + 1
+        else:
+            # block style: consume indented / blank lines until the next
+            # top-level key
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if lines[j].strip() == "":
+                    continue
+                if not lines[j][:1].isspace():
+                    end = j
+                    break
+        spec_path.write_text("".join(lines[:start]) + new_block + "".join(lines[end:]))
 
     def write_working_spec(self, text: str) -> Path:
         self.working_spec.write_text(text)

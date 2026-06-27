@@ -11,35 +11,35 @@ contracts:
   max_llm_calls: 200
 stages:
   - id: planner_a
-    role: {name: PlannerA, type: orchestrator, description: "Emit a JSON object with `items`: exactly 15 sub-questions about: {{ topic }}. Each item {q: string}."}
+    role: {name: PlannerA, type: orchestrator, description: "Emit a JSON object with `questions`: exactly 15 sub-questions about: {{ topic }}. Each item {q: string}."}
     output_mode: guided_json
     output_schema:
       type: object
-      required: [items]
+      required: [questions]
       properties:
-        items: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
+        questions: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
     depends_on: []
   - id: workers_a
     fan_out: 15
     fan_in: list
-    partition_source: "{{ planner_a.items }}"
+    partition_source: "{{ planner_a.questions }}"
     partition_key: item
     role: {name: WorkerA, type: worker, description: "Answer in one sentence: {{ item.q }}"}
     output_mode: text
     depends_on: [planner_a]
   - id: planner_b
-    role: {name: PlannerB, type: orchestrator, description: "Given the prior worker answers, emit `items`: exactly 15 follow-up sub-questions about: {{ topic }}. Each item {q: string}."}
+    role: {name: PlannerB, type: orchestrator, description: "Given the prior worker answers, emit `questions`: exactly 15 follow-up sub-questions about: {{ topic }}. Each item {q: string}."}
     output_mode: guided_json
     output_schema:
       type: object
-      required: [items]
+      required: [questions]
       properties:
-        items: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
+        questions: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
     depends_on: [workers_a]
   - id: workers_b
     fan_out: 15
     fan_in: list
-    partition_source: "{{ planner_b.items }}"
+    partition_source: "{{ planner_b.questions }}"
     partition_key: item
     role: {name: WorkerB, type: worker, description: "Answer in one sentence: {{ item.q }}"}
     output_mode: text
