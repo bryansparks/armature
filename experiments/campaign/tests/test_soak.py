@@ -79,3 +79,58 @@ def test_concurrency_bad_driver_rejected(tmp_path):
     """))
     with pytest.raises(Exception):
         load_plan(p)
+
+
+def test_working_spec_for_distinct_paths(tmp_path):
+    from campaign_runner.sandbox import Sandbox
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 1}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    assert sb.working_spec_for("a").name == "spec_work_a.yml"
+    assert sb.working_spec_for("a") != sb.working_spec_for("b")
+
+
+def test_apply_tier_override_rewrites_all_tiers_preserving_names(tmp_path):
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import TierOverride
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 1}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    spec = tmp_path / "ws.yml"
+    spec.write_text(textwrap.dedent("""
+        name: wf
+        version: "1.0"
+        model_tiers:
+          small: {provider: anthropic, model: claude-haiku, api_key_env: ANTHROPIC_API_KEY, temperature: 0.3, max_tokens: 1024}
+          large: {provider: ollama, model: llama, api_key_env: ""}
+        role_type_defaults: {worker: small, judge: large}
+        stages: [{id: s1, role: {name: S, type: worker, description: x}, output_mode: text, depends_on: []}]
+    """).strip() + "\n")
+    ov = TierOverride(apply=True, tiers={"tiny": {"provider": "openrouter",
+            "model": "qwen/qwen3.6-27b", "api_key_env": "OPENROUTER_API_KEY",
+            "temperature": 0.2, "max_tokens": 512}})
+    sb.apply_tier_override(spec, ov)
+    import yaml
+    parsed = yaml.safe_load(spec.read_text())
+    assert set(parsed["model_tiers"].keys()) == {"small", "large"}   # names preserved
+    for v in parsed["model_tiers"].values():
+        assert v["model"] == "qwen/qwen3.6-27b"
+        assert v["provider"] == "openrouter"
+    # idempotent
+    sb.apply_tier_override(spec, ov)
+    assert yaml.safe_load(spec.read_text()) == parsed
+
+
+def test_apply_tier_override_noop_when_no_override(tmp_path):
+    from campaign_runner.sandbox import Sandbox
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 1}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    spec = tmp_path / "ws.yml"
+    spec.write_text("name: wf\nmodel_tiers: {small: {provider: anthropic, model: x}}\n")
+    before = spec.read_text()
+    sb.apply_tier_override(spec, None)
+    assert spec.read_text() == before
