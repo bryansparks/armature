@@ -25,15 +25,22 @@ def _count_rows(db: Path) -> int:
 
 
 def _new_run_ids(db: Path, before: int) -> list[str]:
-    """Return run_ids inserted after `before` rows existed (by row id order)."""
+    """Return run_ids inserted after `before` rows existed (by row id order),
+    excluding loop-driver summary rows. `armature loop` writes one __loop__
+    trace row per session (LoopRunner._write_summary, run_id=session_id) — that
+    is loop control, not a real run, so it must not be counted as a distinct
+    run by no_row_loss_under_concurrency. The slice stays on the full ordered
+    list (so it stays aligned with the `before` row count, since every trace
+    row carries a non-null run_id) and __loop__ rows are filtered out of the
+    new-rows slice only."""
     if not Path(db).exists():
         return []
     try:
         con = sqlite3.connect(str(db))
         all_rows = con.execute(
-            "SELECT run_id FROM traces WHERE run_id IS NOT NULL ORDER BY id").fetchall()
+            "SELECT run_id, stage_id FROM traces WHERE run_id IS NOT NULL ORDER BY id").fetchall()
         con.close()
-        return [r[0] for r in all_rows[before:]]
+        return [r[0] for r in all_rows[before:] if r[1] != "__loop__"]
     except Exception:
         return []
 

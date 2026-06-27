@@ -565,6 +565,53 @@ def test_run_workers_concurrent_writes_no_row_loss(tmp_path, monkeypatch):
     assert all(s["is_concurrency_summary"] for s in summaries)
 
 
+def test_run_workers_excludes_loop_driver_rows(tmp_path, monkeypatch):
+    """`armature loop` writes one __loop__ summary trace row per session
+    (LoopRunner._write_summary, run_id=session_id, stage_id='__loop__'). Those
+    are loop-control rows, not real runs — run_workers must exclude them from
+    the per-worker run_ids so no_row_loss_under_concurrency counts only real
+    iteration runs (distinct == workers*reps_per_worker)."""
+    import sqlite3, threading
+    from campaign_runner import concurrency as conc_mod
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import load_plan, Concurrency
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 5}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    con = sqlite3.connect(sb.trace_db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.execute("PRAGMA journal_mode=WAL")
+    con.commit(); con.close()
+    reps = 4
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, text=False):
+            self.cmd = cmd; self.returncode = 0
+            self._out, self._err = "", ""
+            db = Path(env["HOME"]) / ".armature" / "traces.db"
+            self._t = threading.Thread(target=self._write, args=(db, reps))
+            self._t.start()
+        def _write(self, db, n):
+            tid = threading.get_ident()
+            c = sqlite3.connect(db, timeout=30)
+            for r in range(n):                       # real iteration rows
+                c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                          (f"wk-{tid}-{r}", "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            # loop-driver summary row (mimics LoopRunner._write_summary)
+            c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                      (f"loop-{tid}", "wf", "__loop__", "orchestrator", "loop-driver", "2026-01-01T00:00:01", 100.0, 1, 1))
+            c.commit(); c.close()
+        def communicate(self):
+            self._t.join(); return self._out, self._err
+    monkeypatch.setattr(conc_mod.subprocess, "Popen", FakePopen)
+    conc = Concurrency(workers=3, driver="armature_loop", reps_per_worker=reps)
+    summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
+    all_ids = [rid for s in summaries for rid in s["run_ids"]]
+    # loop-driver session rows must NOT appear in run_ids
+    assert not any(rid.startswith("loop-") for rid in all_ids)
+    assert len(set(all_ids)) == 3 * reps
+
+
 def test_run_workers_counts_busy_from_stderr(tmp_path, monkeypatch):
     from campaign_runner import concurrency as conc_mod
     from campaign_runner.sandbox import Sandbox
