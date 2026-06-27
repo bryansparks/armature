@@ -43,7 +43,7 @@
 - `experiments/campaign/campaign_runner/concurrency.py` — the concurrent-worker fan-out against a shared sandbox DB.
 - `experiments/campaign/specs/soak/` — workflow specs:
   - `real_research_pipeline.yml`, `real_deliberation.yml`, `real_competitive_analysis.yml`, `real_iterative_refinement.yml` (copies of the repo examples, tiers overridden at runtime).
-  - `synth_fanout_wide.yml` (fan_out 40, 1 fan-out stage), `synth_fanout_deep.yml` (fan_out 15 × 3 chained fan-out stages), `synth_fanout_mid.yml` (fan_out 25).
+  - `synth_fanout_wide.yml` (planner → fan_out 40 workers → synthesizer), `synth_fanout_deep.yml` (planner_a → fan_out 15 → planner_b → fan_out 15 → synthesizer; depth-5 DAG, 30 agents), `synth_fanout_mid.yml` (planner → fan_out 30 workers → synthesizer).
 - `experiments/campaign/plans/soak.yml` — the soak campaign plan.
 - `experiments/campaign/tests/test_soak.py` — schema, tier-override, per-phase isolation, concurrency integrity, verdict logic.
 
@@ -190,7 +190,7 @@ Existing `tests/test_runner.py`, `test_cli_driver.py` unchanged and green (singl
 
 ## Scale, budget, cost
 
-- ~500 real runs across 7 workflows (4 real + 3 synthetic). Per-iteration aggregate agents: synth (40+45+25=110) + real (~20) ≈ 130. × ~500 reps ≈ **65k agent spawns**.
+- ~500 real runs across 7 workflows (4 real + 3 synthetic). Per-iteration aggregate agents: synth (40+30+30 = 100) + real (~20) ≈ 120. × ~500 reps ≈ **60k agent spawns**.
 - Concurrency phase: 3 workers × 20 reps = 60 runs against one DB.
 - Budget: `max_runs: 600`, `max_llm_calls: 15000`, `max_wallclock_hours: 3.0`, `max_tokens: 4000000`.
 - **Budget unit note:** the campaign runner's `max_llm_calls` counts `armature run` *invocations* (~1 per rep + improve/probe), **not** individual agent LLM calls. So ~560 run-invocations fit comfortably under 15000; the ~65k agent spawns are counted separately by the `agent_spawn_count` verdict from trace rows. Do not read `max_llm_calls` as an agent-call cap.
