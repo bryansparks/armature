@@ -298,3 +298,146 @@ def test_self_improve_threads_per_phase_ws_not_shared(tmp_path, monkeypatch):
     # _memory_mode reflects the per-phase spec's memory block (fresh: true -> "cold").
     # A stale read of the shared working_spec (no memory block) would yield None.
     assert row["memory_mode"] == "cold"
+
+
+def _soak_row(run_id, hqs=0.8, exit_code=0, latency_ms=100.0, role="worker"):
+    return {"run_id": run_id, "phase_id": "p", "lever": "none", "inputs": {},
+            "exit_code": exit_code, "is_concurrency_summary": False,
+            "hqs_ours": {"authoritative": hqs, "rolling": None, "dashboard": None, "feedback": None},
+            "hqs_armature": {"authoritative": None, "rolling": None, "dashboard": None, "feedback": None},
+            "improve_log": [], "recovery_hqs_ours": None, "spec_diff": "", "memory_mode": None,
+            "_latency_ms": latency_ms, "_role": role}
+
+
+def test_verdict_no_unclean_exits(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    rows = [_soak_row("r1", exit_code=0), _soak_row("r2", exit_code=1)]
+    name, status, detail = sv.verdict_no_unclean_exits(rows, {"allowed_failures": 0})
+    assert (name, status) == ("no_unclean_exits", "FAIL")
+    assert detail["n_unclean"] == 1
+
+
+def test_verdict_trace_db_integrity(tmp_path):
+    import sqlite3
+    from campaign_runner import soak_verdicts as sv
+    db = tmp_path / "traces.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms) VALUES (?,?,?,?,?,?,?)",
+                ("r1", "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0))
+    con.commit(); con.close()
+    name, status, detail = sv.verdict_trace_db_integrity([], {}, db)
+    assert status == "PASS" and detail["integrity_check"] == "ok" and detail["n_null_run_id"] == 0
+
+
+def test_verdict_no_row_loss_pass(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b"],
+             "exit_codes": [0], "n_trace_rows": 2, "sqlite_busy_count": 0},
+            {"is_concurrency_summary": True, "worker": 1, "run_ids": ["c", "d"],
+             "exit_codes": [0], "n_trace_rows": 2, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 4, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "PASS")
+    assert detail["actual"] == 4 and detail["sqlite_busy_count"] == 0
+
+
+def test_verdict_no_row_loss_busy_fails(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a"],
+             "exit_codes": [0], "n_trace_rows": 1, "sqlite_busy_count": 1}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 4, "tolerance": 0})
+    assert status == "FAIL" and detail["sqlite_busy_count"] == 1
+
+
+def test_verdict_hqs_stability_no_drift(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    flat = [_soak_row(f"r{i}", hqs=0.80 + (i % 3) * 0.001) for i in range(20)]
+    name, status, detail = sv.verdict_hqs_stability_no_drift(flat, {"max_mean_delta": 0.08})
+    assert status == "PASS" and detail["delta"] <= 0.08
+    drifty = [_soak_row(f"r{i}", hqs=0.5 + i * 0.05) for i in range(20)]
+    _, status2, _ = sv.verdict_hqs_stability_no_drift(drifty, {"max_mean_delta": 0.08})
+    assert status2 == "FAIL"
+
+
+def test_verdict_wallclock_stability(tmp_path):
+    import sqlite3
+    from campaign_runner import soak_verdicts as sv
+    db = tmp_path / "traces.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    rows = []
+    for i in range(10):
+        rid = f"r{i}"
+        rows.append(_soak_row(rid, latency_ms=100.0 + i * 0.5))   # ~0.5 ms/run slope -> PASS
+        con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms) VALUES (?,?,?,?,?,?,?)",
+                    (rid, "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0 + i * 0.5))
+    con.commit(); con.close()
+    name, status, detail = sv.verdict_wallclock_stability(rows, {"max_latency_slope_ms_per_run": 5.0}, db)
+    assert status == "PASS" and detail["slope_ms_per_run"] <= 5.0
+
+
+def test_verdict_checkpoint_resume_correctness(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    rows = [_soak_row(f"r{i}") for i in range(5)]
+    name, status, detail = sv.verdict_checkpoint_resume_correctness(rows, {"require_distinct_run_ids": True})
+    assert status == "PASS" and detail["n_distinct_run_ids"] == 5
+    dup = [_soak_row("r1"), _soak_row("r1")]
+    _, status2, _ = sv.verdict_checkpoint_resume_correctness(dup, {"require_distinct_run_ids": True})
+    assert status2 == "FAIL"
+
+
+def test_verdict_budget_obeyed(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    plan = type("P", (), {"budget": type("B", (), {"max_runs": 5})(), "soak_verdicts": None})()
+    rows = [_soak_row(f"r{i}") for i in range(4)]
+    name, status, detail = sv.verdict_budget_obeyed(rows, {}, plan)
+    assert status == "PASS" and detail["stop_reason"] == "completed"
+    rows2 = [_soak_row(f"r{i}") for i in range(5)]
+    _, status2, detail2 = sv.verdict_budget_obeyed(rows2, {}, plan)
+    assert status2 == "PASS" and detail2["stop_reason"] == "budget"
+
+
+def test_verdict_agent_spawn_count(tmp_path):
+    import sqlite3
+    from campaign_runner import soak_verdicts as sv
+    db = tmp_path / "traces.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    for i in range(10):
+        con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp) VALUES (?,?,?,?,?,?)",
+                    (f"r{i}", "wf", "s", "worker", "m", "2026-01-01T00:00:01"))
+    con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp) VALUES (?,?,?,?,?,?)",
+                ("rt", "wf", "st", "tool_call", "m", "2026-01-01T00:00:01"))  # excluded
+    con.commit(); con.close()
+    name, status, detail = sv.verdict_agent_spawn_count([], {"min_total": 10}, db)
+    assert status == "PASS" and detail["total_agents"] == 10
+    _, status2, _ = sv.verdict_agent_spawn_count([], {"min_total": 100}, db)
+    assert status2 == "FAIL"
+
+
+def test_all_soak_verdicts_dispatcher(tmp_path):
+    from campaign_runner import soak_verdicts as sv
+    from campaign_runner.plan import load_plan
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: soak-t
+        workflow: specs/soak/synth_fanout_mid.yml
+        budget: {max_runs: 5}
+        phases:
+          - {id: a, lever: none, inputs: {topic: q}, repeats: 1}
+          - id: b
+            lever: none
+            inputs: {topic: q}
+            repeats: 1
+            concurrency: {workers: 2, driver: armature_loop, reps_per_worker: 5}
+        soak_verdicts: {no_unclean_exits: {allowed_failures: 0}, agent_spawn_count: {min_total: 1}}
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    rows = [_soak_row(f"r{i}") for i in range(3)]
+    vs = sv.all_soak_verdicts(rows, plan, None)
+    names = [v[0] for v in vs]
+    assert "no_unclean_exits" in names and "agent_spawn_count" in names
+    # expected derived from concurrency phase: 2 workers * 5 reps = 10
+    nrl = [v for v in vs if v[0] == "no_row_loss_under_concurrency"][0]
+    assert nrl[2]["expected"] == 10
