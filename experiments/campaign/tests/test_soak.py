@@ -134,3 +134,71 @@ def test_apply_tier_override_noop_when_no_override(tmp_path):
     before = spec.read_text()
     sb.apply_tier_override(spec, None)
     assert spec.read_text() == before
+
+
+def test_per_phase_workflow_resolution_and_tier_override(tmp_path, monkeypatch):
+    from campaign_runner import runner
+    # two self-contained workflow specs with distinct names + tiers
+    wa = tmp_path / "wf_a.yml"
+    wa.write_text('name: wf-a\nversion: "1.0"\nmodel_tiers:\n'
+                  '  small: {provider: anthropic, model: claude-haiku, api_key_env: ANTHROPIC_API_KEY}\n'
+                  'role_type_defaults: {worker: small}\n'
+                  'contracts: {inputs: [{name: topic}]}\n'
+                  'stages: [{id: s, role: {name: S, type: worker, description: "{{ topic }}"}, output_mode: text, depends_on: []}]\n')
+    wb = tmp_path / "wf_b.yml"
+    wb.write_text('name: wf-b\nversion: "1.0"\nmodel_tiers:\n'
+                  '  small: {provider: ollama, model: llama, api_key_env: ""}\n'
+                  'role_type_defaults: {worker: small}\n'
+                  'contracts: {inputs: [{name: topic}]}\n'
+                  'stages: [{id: s, role: {name: S, type: worker, description: "{{ topic }}"}, output_mode: text, depends_on: []}]\n')
+    plan_p = tmp_path / "plan.yml"
+    plan_p.write_text(textwrap.dedent(f"""
+        name: soak-res
+        description: x
+        workflow: {wa}
+        tier_override:
+          apply: true
+          tiers:
+            tiny: {{provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}}
+        budget: {{max_runs: 5}}
+        phases:
+          - {{id: a, lever: none, inputs: {{topic: "q"}}, repeats: 1}}
+          - {{id: b, lever: none, workflow: {wb}, inputs: {{topic: "q"}}, repeats: 1}}
+        verdicts: {{}}
+    """))
+    plan = load_plan(plan_p)
+
+    captured = []
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p):
+            captured.append(("validate", str(p)))
+            return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            captured.append(("run", str(spec), workflow_name))
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                        ("r1", workflow_name, "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            con.commit(); con.close()
+            from campaign_runner import cli_driver
+            return cli_driver.RunOutcome("r1", 0, "", "", {"run_id": "r1"},
+                                         hqs_armature={"authoritative": 0.8, "dashboard": None} if tag == "main" else None)
+        def improve(self, spec, **kw): ...
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, wa, root=tmp_path / "out")
+    result = r.run()
+    # two distinct per-phase working specs, distinct workflow names, tiers overridden to openrouter
+    specs = [c[1] for c in captured if c[0] == "validate"]
+    assert len(set(specs)) == 2
+    import yaml
+    for sp in set(specs):
+        parsed = yaml.safe_load(Path(sp).read_text())
+        assert parsed["model_tiers"]["small"]["provider"] == "openrouter"
+    names = [c[2] for c in captured if c[0] == "run"]
+    assert "wf-a" in names and "wf-b" in names
+    assert len(result.rows) == 2
