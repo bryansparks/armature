@@ -202,3 +202,99 @@ def test_per_phase_workflow_resolution_and_tier_override(tmp_path, monkeypatch):
     names = [c[2] for c in captured if c[0] == "run"]
     assert "wf-a" in names and "wf-b" in names
     assert len(result.rows) == 2
+
+
+def test_self_improve_threads_per_phase_ws_not_shared(tmp_path, monkeypatch):
+    """Regression: _do_improve and _memory_mode must operate on the per-phase
+    working spec (ws), not the stale shared self.sb.working_spec. With the bug,
+    FakeDrv.improve would edit the shared spec while spec_diff is computed
+    against ws (empty diff), and _memory_mode would read the shared spec's
+    memory block (no `fresh: true`) instead of the per-phase one — masking the
+    H2 self_improve verdict as a false positive."""
+    from campaign_runner import runner
+    # Source spec (copied into the shared working_spec) — NO memory block, so a
+    # stale _memory_mode read of self.sb.working_spec would yield None, not "cold".
+    src = tmp_path / "src.yml"
+    src.write_text('name: src-wf\nversion: "1.0"\nmodel_tiers:\n'
+                   '  small: {provider: anthropic, model: claude-haiku, api_key_env: ANTHROPIC_API_KEY}\n'
+                   'role_type_defaults: {worker: small}\n'
+                   'contracts: {inputs: [{name: topic}]}\n'
+                   'stages: [{id: s, role: {name: S, type: worker, description: "{{ topic }}"}, output_mode: text, depends_on: []}]\n')
+    # Per-phase workflow spec — has memory: {fresh: true} so _memory_mode(ws) == "cold".
+    ph = tmp_path / "ph.yml"
+    ph.write_text('name: ph-wf\nversion: "1.0"\nmodel_tiers:\n'
+                  '  small: {provider: anthropic, model: claude-haiku, api_key_env: ANTHROPIC_API_KEY}\n'
+                  'role_type_defaults: {worker: small}\n'
+                  'contracts: {inputs: [{name: topic}]}\n'
+                  'memory: {fresh: true}\n'
+                  'stages: [{id: s, role: {name: S, type: worker, description: "{{ topic }}"}, output_mode: text, depends_on: []}]\n')
+    plan_p = tmp_path / "plan.yml"
+    plan_p.write_text(textwrap.dedent(f"""
+        name: si-reg
+        description: x
+        workflow: {src}
+        budget: {{max_runs: 5}}
+        phases:
+          - id: x
+            lever: none
+            workflow: {ph}
+            inputs: {{topic: "q"}}
+            repeats: 1
+            self_improve: {{enabled: true, target_hqs: 0.75, min_traces: 1, max_rounds: 1, apply: false}}
+        verdicts: {{}}
+    """))
+    plan = load_plan(plan_p)
+
+    captured = {"improve_specs": [], "run_specs": []}
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p):
+            return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            captured["run_specs"].append((str(spec), tag))
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+            rid = "r-main" if tag == "main" else "r-probe"
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (rid, workflow_name, "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            con.commit(); con.close()
+            from campaign_runner import cli_driver
+            return cli_driver.RunOutcome(rid, 0, "", "", {"run_id": rid},
+                                         hqs_armature={"authoritative": 0.8, "dashboard": None} if tag == "main" else None)
+        def improve(self, spec, **kw):
+            captured["improve_specs"].append(str(spec))
+            # Actually edit the spec file we were handed — append a marker comment.
+            Path(spec).write_text(Path(spec).read_text() + "\n# improve-marker\n")
+            from campaign_runner import cli_driver
+            return cli_driver.ImproveOutcome(0, "", [{"needs_improvement": True, "hqs_before": 0.5}])
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    result = r.run()
+
+    expected_ws = str(r.sb.working_spec_for("x"))
+    shared_ws = str(r.sb.working_spec)
+
+    # improve received the per-phase ws, not the shared working_spec
+    assert captured["improve_specs"] == [expected_ws]
+    assert captured["improve_specs"][0] != shared_ws
+
+    # the recovery probe ran against the per-phase ws
+    probe_specs = [s for s, t in captured["run_specs"] if t == "probe"]
+    assert probe_specs == [expected_ws]
+    assert probe_specs[0] != shared_ws
+
+    # spec_diff is non-empty: improve edited ws, so ws changed between spec_before
+    # and the post-improve read. With the bug (improve editing the shared spec),
+    # ws would be untouched and spec_diff would be empty.
+    assert result.rows, "expected one row"
+    row = result.rows[0]
+    assert row["spec_diff"].strip(), "spec_diff must be non-empty (improve edited ws)"
+    assert "# improve-marker" in row["spec_diff"]
+
+    # _memory_mode reflects the per-phase spec's memory block (fresh: true -> "cold").
+    # A stale read of the shared working_spec (no memory block) would yield None.
+    assert row["memory_mode"] == "cold"

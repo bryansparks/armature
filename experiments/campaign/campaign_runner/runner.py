@@ -162,12 +162,12 @@ class CampaignRunner:
                 improve_log, recovery, spec_diff = [], None, ""
                 if phase.self_improve and phase.self_improve.enabled:
                     improve_log, recovery, improve_llm = self._do_improve(
-                        phase, inputs, gaps)
+                        phase, inputs, gaps, ws, wf_name)
                     llm_calls += improve_llm
                     spec_diff = self._diff(spec_before, ws.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
-                                               spec_diff, self._memory_mode(),
+                                               spec_diff, self._memory_mode(ws),
                                                run_stderr=out.stderr, gaps=gaps,
                                                hqs_arm=out.hqs_armature))
                 # rolling (improve_log hqs_before) is the one Armature emission
@@ -176,12 +176,12 @@ class CampaignRunner:
                     rows[-1]["hqs_armature"]["rolling"] = improve_log[-1].get("hqs_before")
         return self._finalize(rows, gaps)
 
-    def _do_improve(self, phase, inputs: dict, gaps: list) -> tuple[list[dict], dict | None, int]:
+    def _do_improve(self, phase, inputs: dict, gaps: list, ws, wf_name) -> tuple[list[dict], dict | None, int]:
         si = phase.self_improve
         log: list[dict] = []
         improve_rounds = 0
         for _round in range(si.max_rounds):
-            imp = self.drv.improve(self.sb.working_spec, target_hqs=si.target_hqs,
+            imp = self.drv.improve(ws, target_hqs=si.target_hqs,
                                    min_traces=si.min_traces, apply=si.apply)
             improve_rounds += 1
             log.extend(imp.improve_log)
@@ -195,7 +195,7 @@ class CampaignRunner:
         recovery = None
         probe_calls = 0
         if log:
-            probe = self.drv.run(self.sb.working_spec, {}, workflow_name=self.workflow_name,
+            probe = self.drv.run(ws, {}, workflow_name=wf_name,
                                   tag="probe",
                                   meta={"phase_id": phase.id, "lever": phase.lever,
                                         "inputs": inputs, "improve_log": log})
@@ -212,10 +212,10 @@ class CampaignRunner:
         import difflib
         return "\n".join(difflib.unified_diff(a.splitlines(), b.splitlines(), lineterm=""))
 
-    def _memory_mode(self) -> str | None:
+    def _memory_mode(self, ws) -> str | None:
         import yaml
         try:
-            spec = yaml.safe_load(self.sb.working_spec.read_text())
+            spec = yaml.safe_load(ws.read_text())
         except Exception:
             return None
         mem = (spec or {}).get("memory")
