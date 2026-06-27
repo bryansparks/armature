@@ -1,0 +1,33 @@
+name: synth-fanout-mid
+version: "1.0"
+description: "Synthetic mid fan-out soak workflow: planner emits 30 items, fanned out to 30 parallel workers, then synthesized. ~30 agents/run."
+model_tiers:
+  small: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+  large: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+role_type_defaults: {worker: small, orchestrator: large, judge: large, researcher: small}
+contracts:
+  inputs: [{name: topic}]
+  max_iterations: 40
+  max_llm_calls: 200
+stages:
+  - id: planner
+    role: {name: Planner, type: orchestrator, description: "Emit a JSON object with `items`: exactly 30 short sub-questions about: {{ topic }}. Each item {q: string}."}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, minItems: 30, maxItems: 30, items: {type: object, required: [q], properties: {q: {type: string}}}}
+    depends_on: []
+  - id: workers
+    fan_out: 30
+    fan_in: list
+    partition_source: "{{ planner.items }}"
+    partition_key: item
+    role: {name: Worker, type: worker, description: "Answer in one concise sentence: {{ item.q }}"}
+    output_mode: text
+    depends_on: [planner]
+  - id: synthesizer
+    role: {name: Synthesizer, type: judge, description: "Summarize the 30 worker answers into one paragraph."}
+    output_mode: text
+    depends_on: [workers]
