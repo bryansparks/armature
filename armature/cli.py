@@ -450,6 +450,17 @@ def _print_provider_error(exc: Exception) -> bool:
     msg = str(exc) or ""
     first_line = next((ln for ln in msg.splitlines() if ln.strip()), name)
 
+    # Insufficient credits (HTTP 402) — account-scoped, not retryable, distinct
+    # from auth. Surfaced so a billing cliff does not look like a model failure.
+    from armature.nodes.provider_errors import classify_provider_error
+    if classify_provider_error(exc) == "provider_credits":
+        typer.echo(
+            "\n✗ Provider account is out of credits (HTTP 402).\n"
+            "  Add credits at your provider and re-run — this is not a transient error.",
+            err=True,
+        )
+        return True
+
     def _types(*attrs):
         if litellm is None:
             return tuple()
