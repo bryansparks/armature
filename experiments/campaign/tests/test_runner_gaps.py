@@ -14,7 +14,7 @@ CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT,
  stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0,
  output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER
  DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT,
- inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT,
+ inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT,
  escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '',
  loop_iteration INTEGER, agent_id TEXT, agent_version TEXT,
  active_skill_ids_json TEXT DEFAULT '[]');

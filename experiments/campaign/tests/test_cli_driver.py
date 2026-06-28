@@ -45,7 +45,7 @@ def test_run_invokes_armature_and_captures_run_id(tmp_path, monkeypatch):
             # also fake a trace row so latest_run_id fallback works
             import sqlite3
             con = sqlite3.connect(sb.trace_db)
-            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '', loop_iteration INTEGER, agent_id TEXT, agent_version TEXT, active_skill_ids_json TEXT DEFAULT '[]')")
+            con.executescript("CREATE TABLE IF NOT EXISTS traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '', loop_iteration INTEGER, agent_id TEXT, agent_version TEXT, active_skill_ids_json TEXT DEFAULT '[]')")
             con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp) VALUES (?,?,?,?,?,?)", ("abc12345","sample-workflow","s1","worker","m","2026-01-01T00:00:01"))
             con.commit(); con.close()
             return FakeResult("quiet-stdout", "")

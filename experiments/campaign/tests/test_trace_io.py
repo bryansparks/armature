@@ -16,7 +16,7 @@ def _build_db(path: Path) -> None:
           latency_ms REAL DEFAULT 0.0, success INTEGER NOT NULL DEFAULT 1,
           output_valid INTEGER NOT NULL DEFAULT 1, quorum_score REAL,
           timestamp TEXT NOT NULL, inputs_json TEXT DEFAULT '{}',
-          outputs_json TEXT DEFAULT '{}', error_type TEXT,
+          outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT,
           escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '',
           loop_iteration INTEGER, agent_id TEXT, agent_version TEXT,
           active_skill_ids_json TEXT DEFAULT '[]'
@@ -36,6 +36,31 @@ def _build_db(path: Path) -> None:
     )
     con.commit()
     con.close()
+
+
+def _build_db_with_error_kind(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE traces (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL, workflow_name TEXT NOT NULL, stage_id TEXT NOT NULL,
+          role_type TEXT NOT NULL, model TEXT NOT NULL,
+          input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+          latency_ms REAL DEFAULT 0.0, success INTEGER NOT NULL DEFAULT 1,
+          output_valid INTEGER NOT NULL DEFAULT 1, quorum_score REAL,
+          error_kind TEXT, timestamp TEXT NOT NULL,
+          escalation_count INTEGER DEFAULT 0);
+    """)
+    con.executemany(
+        "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,"
+        "input_tokens,output_tokens,latency_ms,success,output_valid,quorum_score,"
+        "error_kind,timestamp,escalation_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [("r1", "wf", "s1", "worker", "m", 10, 20, 1200.0, 0, 0, None,
+          "provider_credits", "2026-01-01T00:00:01", 0),
+         ("r1", "wf", "s2", "judge",  "m", 5,  30, 3000.0, 1, 1, 0.9,
+          None, "2026-01-01T00:00:02", 1)],
+    )
+    con.commit(); con.close()
 
 
 def test_read_rows_by_run(tmp_path):
@@ -114,3 +139,24 @@ def test_count_agent_spawns_accepts_dicts_too():
 
 def test_count_agent_spawns_empty():
     assert trace_io.count_agent_spawns([]) == 0
+
+
+def test_read_rows_by_run_reads_error_kind(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    _build_db_with_error_kind(db)
+    rows = trace_io.read_rows_by_run(db, "r1")
+    assert rows[0].error_kind == "provider_credits"
+    assert rows[1].error_kind is None
+
+
+def test_account_scoped_rows_filters_by_error_kind():
+    r0 = trace_io.TraceRow(run_id="r", workflow_name="wf", stage_id="s", role_type="worker",
+                           model="m", input_tokens=0, output_tokens=0, latency_ms=1.0,
+                           success=False, output_valid=False, quorum_score=None,
+                           escalation_count=0, error_kind="provider_credits")
+    r1 = trace_io.TraceRow(run_id="r", workflow_name="wf", stage_id="s", role_type="judge",
+                           model="m", input_tokens=0, output_tokens=0, latency_ms=1.0,
+                           success=True, output_valid=True, quorum_score=0.9,
+                           escalation_count=0, error_kind=None)
+    scoped = trace_io.account_scoped_rows([r0, r1])
+    assert scoped == [r0]

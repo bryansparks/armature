@@ -35,12 +35,13 @@ class TraceRow:
     output_valid: bool
     quorum_score: float | None
     escalation_count: int
+    error_kind: str | None = None
 
 
 _SELECT = (
     "SELECT run_id, workflow_name, stage_id, role_type, model, "
     "input_tokens, output_tokens, latency_ms, success, output_valid, "
-    "quorum_score, escalation_count FROM traces"
+    "quorum_score, escalation_count, error_kind FROM traces"
 )
 
 
@@ -51,6 +52,7 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _row_to_trace(r: sqlite3.Row) -> TraceRow:
+    keys = r.keys()
     return TraceRow(
         run_id=r["run_id"], workflow_name=r["workflow_name"], stage_id=r["stage_id"],
         role_type=r["role_type"], model=r["model"],
@@ -59,6 +61,7 @@ def _row_to_trace(r: sqlite3.Row) -> TraceRow:
         success=bool(r["success"]), output_valid=bool(r["output_valid"]),
         quorum_score=r["quorum_score"],
         escalation_count=int(r["escalation_count"] or 0),
+        error_kind=(r["error_kind"] if "error_kind" in keys and r["error_kind"] else None),
     )
 
 
@@ -88,6 +91,19 @@ def count_agent_spawns(rows) -> int:
         if rt in LLM_ROLE_TYPES:
             n += 1
     return n
+
+
+def account_scoped_rows(rows) -> list:
+    """Trace rows carrying an account-scoped error_kind bucket (401/402/403-key).
+    Accepts TraceRow instances or dicts, like count_agent_spawns."""
+    out = []
+    for r in rows:
+        ek = getattr(r, "error_kind", None)
+        if ek is None and isinstance(r, dict):
+            ek = r.get("error_kind")
+        if ek:
+            out.append(r)
+    return out
 
 
 def list_runs(db_path: Path, workflow_name: str) -> list[str]:
