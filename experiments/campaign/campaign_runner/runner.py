@@ -49,6 +49,8 @@ class CampaignRunner:
         self.last_working_spec = self.sb.working_spec
         self.campaign_jsonl = self.sb.dir / "campaign.jsonl"
         self.gaps_jsonl = self.sb.dir / "gaps.jsonl"
+        self.aborted = False
+        self.abort_reason: str | None = None
 
     def _workflow_name(self) -> str:
         import yaml
@@ -86,6 +88,11 @@ class CampaignRunner:
         # workflow_name: prefer the phase's spec name (passed in); fall back to the
         # trace rows' workflow_name (the name armature recorded for the run).
         wf = workflow_name or (rows[0].workflow_name if rows else "")
+        acct = trace_io.account_scoped_rows(rows) if rows else []
+        if acct and gaps is not None:
+            gaps.append({"want": "funded provider account",
+                         "needed": f"{acct[0].model} not 401/402/403 ({acct[0].error_kind})",
+                         "severity": "high", "run_id": run_id})
         ours = hqs.all_four(rows)
         # hqs_armature holds ONLY values Armature independently emits, never a
         # copy of ours. authoritative + dashboard are captured once inside
@@ -120,7 +127,31 @@ class CampaignRunner:
                 "exit_code": exit_code, "hqs_ours": ours, "hqs_armature": hqs_armature,
                 "improve_log": improve_log, "recovery_hqs_ours": recovery,
                 "spec_diff": spec_diff, "memory_mode": memory_mode,
-                "agents_run": agents_run, "workflow_name": wf}
+                "agents_run": agents_run, "workflow_name": wf,
+                "account_scoped": bool(acct),
+                "account_scoped_kind": acct[0].error_kind if acct else None,
+                "account_scoped_model": acct[0].model if acct else None}
+
+    def _abort_k(self) -> int:
+        return self.plan.abort.on_consecutive_account_errors if self.plan.abort else 3
+
+    def _compute_abort(self, rows: list[dict]) -> None:
+        """Deterministically set self.aborted/abort_reason by scanning rows for
+        K consecutive account-scoped runs (skipping concurrency summaries).
+        Used by replay() to reproduce the live abort decision from rows alone."""
+        k = self._abort_k()
+        consecutive = 0
+        for r in rows:
+            if r.get("is_concurrency_summary"):
+                continue
+            if r.get("account_scoped"):
+                consecutive += 1
+                if consecutive >= k:
+                    self.aborted = True
+                    self.abort_reason = "provider account exhausted"
+                    return
+            else:
+                consecutive = 0
 
     def run(self) -> CampaignResult:
         corpus_path = self.sb.dir.parent.parent / "corpora" / "difficulty.csv"
@@ -129,6 +160,10 @@ class CampaignRunner:
         gaps: list[dict] = []
         t0 = time.monotonic()
         llm_calls = 0
+        self.aborted = False
+        self.abort_reason = None
+        K = self._abort_k()
+        consecutive_account = 0
         for pi, phase in enumerate(self.plan.phases):
             if phase.fresh_db:
                 self.sb.reset_trace_db()
@@ -190,6 +225,22 @@ class CampaignRunner:
                 # available only after an improve cycle — fill it in if present.
                 if improve_log:
                     rows[-1]["hqs_armature"]["rolling"] = improve_log[-1].get("hqs_before")
+                # Circuit breaker: K consecutive account-scoped runs abort the
+                # campaign so a drained provider account doesn't burn the rest
+                # of the budget. A non-account-scoped run resets the streak.
+                if rows[-1].get("account_scoped"):
+                    consecutive_account += 1
+                    if consecutive_account >= K:
+                        self.aborted = True
+                        self.abort_reason = "provider account exhausted"
+                        gaps.append({"want": "campaign continued past exhaustion",
+                                     "needed": f"abort after {K} consecutive account-scoped runs",
+                                     "severity": "info"})
+                        break
+                else:
+                    consecutive_account = 0
+            if self.aborted:
+                break
         return self._finalize(rows, gaps)
 
     def _do_improve(self, phase, inputs: dict, gaps: list, ws, wf_name) -> tuple[list[dict], dict | None, int]:
@@ -259,6 +310,8 @@ class CampaignRunner:
         """
         rec = Recording(Path(recording_dir))
         rows: list[dict] = []
+        self.aborted = False
+        self.abort_reason = None
         # Every recorded entry — main, probe, and concurrency — carries the
         # trace rows it wrote to the live DB. Accumulate them so we can rebuild
         # the trace DB from the recording alone: that is what makes the
@@ -291,6 +344,7 @@ class CampaignRunner:
             arm_dash = arm.get("dashboard")
             if arm_dash is None:
                 arm_dash = r.get("dashboard_json", {}).get("current_hqs")
+            acct = [t for t in tr if getattr(t, "error_kind", None)]
             # Restore phase context from the recording's meta so replayed rows
             # carry the same lever/inputs the live rows did — verdicts read these.
             # Fall back to "replay"/{} for older recordings that predate meta.
@@ -306,8 +360,12 @@ class CampaignRunner:
                          "improve_log": [], "recovery_hqs_ours": None,
                          "spec_diff": "", "memory_mode": None,
                          "agents_run": trace_io.count_agent_spawns(tr),
-                         "workflow_name": tr[0].workflow_name if tr else ""})
+                         "workflow_name": tr[0].workflow_name if tr else "",
+                         "account_scoped": bool(acct),
+                         "account_scoped_kind": acct[0].error_kind if acct else None,
+                         "account_scoped_model": acct[0].model if acct else None})
         self._reconstruct_trace_db(self.sb.trace_db, all_trace_rows)
+        self._compute_abort(rows)
         return self._finalize(rows, [])
 
     def _reconstruct_trace_db(self, db_path: Path, trace_rows: list[dict]) -> None:
@@ -372,6 +430,8 @@ class CampaignRunner:
                 "verdict_statuses": [{"name": n, "result": r} for n, r, _ in vs],
                 "agents_per_workflow": agents_per_workflow,
                 "grand_total_agents": grand_total_agents,
+                "aborted": self.aborted,
+                "abort_reason": self.abort_reason,
                 "report": "report.html"}
         (self.sb.dir / "meta.json").write_text(json.dumps(meta, default=str))
         report = render_report(
@@ -381,7 +441,9 @@ class CampaignRunner:
                       "tiers": _spec_tiers(self.last_working_spec),
                       "totals": {"runs": len(rows), "phases": len(self.plan.phases)},
                       "agents_per_workflow": agents_per_workflow,
-                      "grand_total_agents": grand_total_agents},
+                      "grand_total_agents": grand_total_agents,
+                      "aborted": self.aborted,
+                      "abort_reason": self.abort_reason},
             rows=rows, verdicts=vs, gaps=gaps,
             reproduce_cmd=f"python experiments/campaign/run.py {self.plan.name} "
                           f"--replay {self.recording.dir if self.recording else '<recording>'}",

@@ -401,3 +401,149 @@ def test_degradation_lever_in_verdict_h2_set(tmp_path):
     assert name == "self_improve_fires_and_recovers"
     assert status == "PASS"
     assert detail["fired"] is True
+
+
+def test_plan_abort_default(tmp_path):
+    plan = _plan(tmp_path)
+    assert plan.abort is None  # default: no abort block → default K=3 applies
+
+
+def test_plan_abort_parsed(tmp_path):
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 5}
+        abort: {on_consecutive_account_errors: 2}
+        phases:
+          - id: p
+            lever: none
+            inputs: {topic: "q"}
+            repeats: 1
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    assert plan.abort.on_consecutive_account_errors == 2
+
+
+def test_row_from_run_logs_gap_and_flags_for_account_scoped(tmp_path, monkeypatch):
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    # seed a run with an account-scoped trace row
+    import sqlite3
+    con = sqlite3.connect(r.sb.trace_db)
+    con.executescript(trace_io_ddl)
+    con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,error_kind,success,output_valid,escalation_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("r1", "wf", "s1", "worker", "openrouter/m", "2026-01-01T00:00:01", "provider_credits", 0, 0, 0))
+    con.commit(); con.close()
+    gaps = []
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=gaps, hqs_arm=None, workflow_name="wf")
+    assert row["account_scoped"] is True
+    assert row["account_scoped_kind"] == "provider_credits"
+    assert row["account_scoped_model"] == "openrouter/m"
+    assert any(g["want"] == "funded provider account" and g["severity"] == "high" for g in gaps)
+
+
+def test_circuit_breaker_aborts_after_k_consecutive(tmp_path, monkeypatch):
+    """K=2 consecutive account-scoped runs → aborted=True, run stops, _finalize
+    writes aborted/abort_reason; a good run between resets the streak."""
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 20}
+        abort: {on_consecutive_account_errors: 2}
+        phases:
+          - id: p
+            lever: none
+            inputs: {topic: "q"}
+            repeats: 20
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    call = {"n": 0}
+
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            call["n"] += 1
+            rid = f"r{call['n']}"
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript(trace_io_ddl.replace("CREATE TABLE traces", "CREATE TABLE IF NOT EXISTS traces"))
+            # runs 1 and 2 are account-scoped (402); run 3 would not happen
+            ek = "provider_credits" if call["n"] <= 2 else None
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,error_kind,success,output_valid,escalation_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (rid, "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01", ek, 0 if ek else 1, 0 if ek else 1, 0))
+            con.commit(); con.close()
+            hqs_arm = {"authoritative": None, "dashboard": None} if tag == "main" else None
+            return cli_driver.RunOutcome(rid, 1 if ek else 0, "", "", {"run_id": rid}, hqs_armature=hqs_arm)
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return None
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    result = r.run()
+    assert r.aborted is True
+    assert r.abort_reason == "provider account exhausted"
+    assert len(result.rows) == 2           # stopped after the 2nd account-scoped run
+    assert call["n"] == 2                  # no 3rd run was spawned
+    meta = json.loads((r.sb.dir / "meta.json").read_text())
+    assert meta["aborted"] is True
+
+
+def test_good_run_resets_account_scoped_streak(tmp_path, monkeypatch):
+    """A non-account-scoped run between two account-scoped runs resets the
+    streak, so K=2 consecutive never trips and the campaign continues."""
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 5}
+        abort: {on_consecutive_account_errors: 2}
+        phases:
+          - id: p
+            lever: none
+            inputs: {topic: "q"}
+            repeats: 5
+        verdicts: {}
+    """))
+    plan = load_plan(p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    call = {"n": 0}
+
+    class FakeDrv:
+        def __init__(self, sb, rec): self.sb = sb; self.rec = rec
+        def validate(self, p): return True
+        def run(self, spec, inputs, workflow_name="", tag="main", meta=None):
+            call["n"] += 1
+            rid = f"r{call['n']}"
+            import sqlite3
+            con = sqlite3.connect(self.sb.trace_db)
+            con.executescript(trace_io_ddl.replace("CREATE TABLE traces", "CREATE TABLE IF NOT EXISTS traces"))
+            # pattern: scoped, good, scoped, good, good → never 2 consecutive scoped
+            scoped = call["n"] in (1, 3)
+            ek = "provider_credits" if scoped else None
+            con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,error_kind,success,output_valid,escalation_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (rid, "sample-workflow", "s1", "worker", "m", "2026-01-01T00:00:01", ek, 0 if scoped else 1, 0 if scoped else 1, 0))
+            con.commit(); con.close()
+            hqs_arm = {"authoritative": 0.8, "dashboard": None} if tag == "main" else None
+            return cli_driver.RunOutcome(rid, 1 if scoped else 0, "", "", {"run_id": rid}, hqs_armature=hqs_arm)
+        def dashboard_json(self, w): return {}
+        def replay_hqs(self, run_id): return 0.8
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    result = r.run()
+    assert r.aborted is False
+    assert len(result.rows) == 5

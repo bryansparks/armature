@@ -22,6 +22,10 @@ class Budget(BaseModel):
     max_tokens: int | None = None
 
 
+class Abort(BaseModel):
+    on_consecutive_account_errors: int = 3
+
+
 class SelfImprove(BaseModel):
     enabled: bool = True
     target_hqs: float = 0.75
@@ -130,6 +134,7 @@ class CampaignPlan(BaseModel):
     purpose: str = ""
     tier_override: TierOverride | None = None
     soak_verdicts: SoakVerdicts | None = None
+    abort: Abort | None = None
 
     @field_validator("name")
     @classmethod
