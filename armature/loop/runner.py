@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from armature.runtime.engine import Harness
+from armature.runtime.engine import Harness, new_run_id
 from armature.state.traces import TraceStore, TraceRecord
 
 from armature.loop.carry import resolve_carry
@@ -106,7 +105,7 @@ class LoopRunner:
         )
 
     async def run(self) -> LoopResult:
-        session_id = uuid.uuid4().hex[:8]
+        session_id = new_run_id()
         store = TraceStore(self.traces_db)
         await store.init()
         budgets = {

@@ -24,6 +24,21 @@ from armature.state.traces import TraceStore, TraceRecord
 from armature.telemetry import get_tracer
 
 
+def new_run_id() -> str:
+    """A fresh run id.
+
+    12 hex chars = 48 bits of entropy. The previous 8-hex (32-bit) id collided
+    at soak scale (~450 runs, birthday bound ~65k) and tripped
+    checkpoint_resume_correctness, which mis-reports a run_id REUSE. There is
+    no reuse path — `armature run --force` shells out fresh per rep and
+    `__init__` calls this — so widening the space to 48 bits makes collisions
+    negligible (~1e-10 at 600 runs) and keeps run_ids INTRINSICALLY distinct,
+    not a CLI option. Full uuid (122 bits) would also work but 12 chars keeps
+    display strings short.
+    """
+    return uuid.uuid4().hex[:12]
+
+
 _QUORUM_SCORE_KEYS = ("score", "quality_score", "confidence")
 
 
@@ -125,7 +140,7 @@ class Harness:
         self._spec_version = hashlib.sha256(
             self._spec.model_dump_json().encode()
         ).hexdigest()[:12]
-        self._run_id = str(uuid.uuid4())[:8]
+        self._run_id = new_run_id()
         base_dir = Path(session_dir or f"~/.armature/runs/{self._run_id}").expanduser()
         self._session = SessionLog(base_dir / "session.jsonl")
         self._artifacts = ArtifactStore(base_dir / "artifacts")
