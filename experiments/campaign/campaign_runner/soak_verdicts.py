@@ -62,6 +62,8 @@ def verdict_no_row_loss_under_concurrency(rows, th):
     # A clean shortfall (actual < expected, no BUSY, all exit 0) is a budget
     # stop — the phase ran fewer reps than planned but lost no rows — not a
     # failure. The prior abs(actual-expected)<=tol check false-FAILed on that.
+    # `tolerance` in the verdict config is intentionally NOT read here: a clean
+    # shortfall is INCONCLUSIVE regardless of magnitude, so the band is subsumed.
     if busy > 0 or not all_exit0:
         return ("no_row_loss_under_concurrency", FAIL,
                 {"expected": expected, "actual": actual, "sqlite_busy_count": busy,

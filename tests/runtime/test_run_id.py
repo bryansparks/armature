@@ -11,6 +11,6 @@ def test_new_run_id_is_12_hex_chars():
 
 
 def test_new_run_id_unique_over_many_calls():
-    # 48-bit space: P(collision in 2000 draws) ~ 2000^2/2 / 2^48 ~ 7e-10 — never flakes.
+    # 48-bit space: P(collision in 2000 draws) ~ 2000^2 / (2 * 2^48) ~ 7e-9 — never flakes.
     ids = {new_run_id() for _ in range(2000)}
     assert len(ids) == 2000, "run_id must be intrinsically distinct across calls"
