@@ -63,7 +63,7 @@ the engine's behavior tracks that movement. Four hypotheses:
 | ID | Hypothesis | Lever | What "PASS" demonstrates |
 |----|------------|-------|--------------------------|
 | H1 | **HQS tracks input difficulty** | `input_difficulty_ramp` (easy → hard) | HQS monotonically falls as inputs get harder (negative Spearman correlation, p ≤ threshold). HQS is not noise — it responds to the task. |
-| H2 | **Self-improve fires and recovers** | `spec_corruption` (inject a defect that drops HQS) | When HQS drops below target, `armature improve` fires, edits the spec, and a recovery probe shows HQS returning above target. The improvement loop is closed and effective. |
+| H2 | **Self-improve fires and recovers** | `model_tier_degradation` (break the judge's model tier so its LLM call errors → a failure trace → HQS drops) | When HQS drops below target, `armature improve` fires, edits the spec, and a recovery probe shows HQS returning above target. The improvement loop is closed and effective. (`spec_corruption` also exists as a lever, but did not reliably drop HQS on the research-brief workflow — `model_tier_degradation` does, deterministically, so the repaired plans use it for H2.) |
 | H3 | **HQS formula consistency** | (cross-cutting) | The four HQS channels Armature emits (authoritative, rolling, dashboard, feedback) agree with an independent recomputation from raw trace rows. No formula has drifted. |
 | H4 | **Memory + carry-forward helps** | cold vs warm runs | Warm runs (memory enabled) beat their paired cold runs on HQS. Memory carries useful context forward. |
 
@@ -73,8 +73,9 @@ points, no firings, no hqs values). It is an *observability* result: the test
 could not settle the claim, which is itself useful to know.
 
 The example plans: `plans/h1-five-level.yml` (H1–H3 across five difficulty
-levels), `plans/hqdynamics.yml` (H1–H4 with a difficulty ramp + corruption
-injection), `plans/cold_vs_warm.yml` (H4).
+levels), `plans/hqdynamics.yml` (H1–H3 with a difficulty ramp + model-tier
+degradation; H4 runs but is INCONCLUSIVE here since it uses no memory lever),
+`plans/cold_vs_warm.yml` (H4, the only plan that exercises the memory lever).
 
 ### 3b. The soak / endurance test
 
