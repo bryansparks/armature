@@ -612,6 +612,57 @@ def test_run_workers_excludes_loop_driver_rows(tmp_path, monkeypatch):
     assert len(set(all_ids)) == 3 * reps
 
 
+def test_run_workers_run_ids_unique_and_agents_not_inflated(tmp_path, monkeypatch):
+    """A real fan-out run writes MULTIPLE trace rows per run_id. _new_run_ids
+    must return each run_id ONCE (not once per row), so a worker's run_ids has
+    no duplicates and agents_run counts each run's rows once (not N×). The
+    prior per-row return inflated agents_run ~6× (synth-fanout-mid showed
+    n_run_ids=117 / agents_run=3744 for ~20 real runs)."""
+    import sqlite3, threading
+    from campaign_runner import concurrency as conc_mod
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import load_plan, Concurrency
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 5}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    con = sqlite3.connect(sb.trace_db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.execute("PRAGMA journal_mode=WAL"); con.commit(); con.close()
+    reps = 2
+    rows_per_run = 3              # 2 worker + 1 judge = 3 LLM rows per run_id
+
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, text=False):
+            self.returncode = 0; self._out, self._err = "", ""
+            db = Path(env["HOME"]) / ".armature" / "traces.db"
+            self._t = threading.Thread(target=self._write, args=(db, reps)); self._t.start()
+        def _write(self, db, n):
+            tid = threading.get_ident(); c = sqlite3.connect(db, timeout=30)
+            for r in range(n):
+                rid = f"wk-{tid}-{r}"
+                for _i in range(rows_per_run):   # multiple rows per run_id (fan-out)
+                    c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                              (rid, "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            c.commit(); c.close()
+        def communicate(self):
+            self._t.join(); return self._out, self._err
+
+    monkeypatch.setattr(conc_mod.subprocess, "Popen", FakePopen)
+    conc = Concurrency(workers=2, driver="armature_loop", reps_per_worker=reps)
+    summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
+
+    for s in summaries:
+        # run_ids must have NO duplicates (one entry per real run, not per row)
+        assert len(s["run_ids"]) == len(set(s["run_ids"])), \
+            f"worker {s['worker']} run_ids have duplicates: {s['run_ids']}"
+        assert len(s["run_ids"]) == reps, \
+            f"worker {s['worker']} expected {reps} run_ids, got {len(s['run_ids'])}"
+        # agents_run counts each run's rows ONCE: reps runs * rows_per_run LLM rows
+        assert s["agents_run"] == reps * rows_per_run, \
+            f"worker {s['worker']} agents_run inflated: got {s['agents_run']}, want {reps * rows_per_run}"
+
+
 def test_run_workers_counts_busy_from_stderr(tmp_path, monkeypatch):
     from campaign_runner import concurrency as conc_mod
     from campaign_runner.sandbox import Sandbox
