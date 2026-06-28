@@ -68,6 +68,29 @@ def _agents_html(campaign: dict) -> str:
             f"<td style='text-align:right'><b>{grand:,}</b></td></tr></table>")
 
 
+def _provider_health_html(campaign: dict, verdicts: list[tuple[str, str, dict]]) -> str:
+    """Red banner at the very top when provider_health != PASS or the campaign
+    was aborted — the fix for account exhaustion being 'completely hidden'.
+    Omitted entirely on PASS so clean reports stay clean."""
+    aborted = campaign.get("aborted")
+    ph = next((v for v in verdicts if v[0] == "provider_health"), None)
+    if (ph is None or ph[1] == "PASS") and not aborted:
+        return ""
+    detail = (ph[2] if ph else {}) or {}
+    reason = campaign.get("abort_reason") or detail.get("abort_reason") or "provider account exhausted"
+    models = ", ".join(detail.get("models") or []) or "—"
+    buckets = ", ".join(f"{k}×{v}" for k, v in (detail.get("buckets") or {}).items()) or "—"
+    run_ids = ", ".join(str(x) for x in (detail.get("run_ids") or [])) or "—"
+    K = detail.get("K", 3)
+    aborted_line = "campaign aborted" if aborted else "account-scoped failures present"
+    return (f"<div style='border:2px solid #c62828;background:#ffebee;padding:1em;margin:1em 0'>"
+            f"<b>⚠ Provider account exhausted — {aborted_line} after {K} consecutive account-scoped runs.</b><br>"
+            f"Provider/model: <code>{escape(models)}</code> &nbsp; Bucket: <code>{escape(buckets)}</code><br>"
+            f"Failed runs: <code>{escape(run_ids)}</code><br>"
+            f"{escape(reason)} — add credits / fix the key at your provider and resume."
+            f"</div>")
+
+
 def _tiers_html(tiers: list[dict]) -> str:
     if not tiers:
         return ""
@@ -139,6 +162,7 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
 {purpose_html}
 <p class='meta'><b>Generated:</b> {date_html} &middot; <b>Workflow:</b> {workflow_html}
 &middot; <b>git SHA:</b> <code>{sha}</code></p>
+{_provider_health_html(campaign, verdicts)}
 {tiers_html}
 <h2>Campaign summary</h2>
 <p>Totals: <code>{escape(str(totals))}</code></p>

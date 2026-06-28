@@ -105,3 +105,39 @@ def test_report_omits_agent_tally_when_no_data(tmp_path):
         rows=_rows(), verdicts=[], gaps=[], reproduce_cmd="x",
         out_path=tmp_path / "report.html")
     assert "Agents run per workflow" not in out.read_text()
+
+
+def test_provider_health_banner_on_fail(tmp_path):
+    from campaign_runner.report import render_report
+    verdicts = [("provider_health", "FAIL",
+                 {"account_scoped_runs": 3, "buckets": {"provider_credits": 3},
+                  "models": ["openrouter/m"], "run_ids": ["r1", "r2", "r3"], "K": 3,
+                  "aborted": True, "tripped_at": "r3", "abort_reason": "provider account exhausted"})]
+    out = tmp_path / "report.html"
+    render_report(campaign={"name": "t", "description": "", "purpose": "", "git_sha": "",
+                            "date": "", "workflow": "", "tiers": [],
+                            "totals": {"runs": 3, "phases": 1},
+                            "agents_per_workflow": {}, "grand_total_agents": 0,
+                            "aborted": True,
+                            "abort_reason": "provider account exhausted"},
+                  rows=[], verdicts=verdicts, gaps=[],
+                  reproduce_cmd="python run.py t", out_path=out)
+    html = out.read_text()
+    assert "Provider account exhausted" in html
+    assert "openrouter/m" in html
+    assert "r1" in html and "r3" in html
+
+
+def test_provider_health_banner_omitted_on_pass(tmp_path):
+    from campaign_runner.report import render_report
+    verdicts = [("provider_health", "PASS", {"account_scoped_runs": 0, "K": 3})]
+    out = tmp_path / "report.html"
+    render_report(campaign={"name": "t", "description": "", "purpose": "", "git_sha": "",
+                            "date": "", "workflow": "", "tiers": [],
+                            "totals": {"runs": 1, "phases": 1},
+                            "agents_per_workflow": {}, "grand_total_agents": 0,
+                            "aborted": False, "abort_reason": None},
+                  rows=[], verdicts=verdicts, gaps=[],
+                  reproduce_cmd="python run.py t", out_path=out)
+    html = out.read_text()
+    assert "Provider account exhausted" not in html
