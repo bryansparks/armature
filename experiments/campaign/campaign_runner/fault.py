@@ -62,7 +62,14 @@ def apply_lever(phase: Phase, *, phase_index: int, rep: int,
         _break_judge_tier(working_spec)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     elif phase.lever == "memory_cold_warm":
-        fresh = str(phase.inputs.get("memory_fresh", "false")).strip().lower() == "true"
+        mf = str(phase.inputs.get("memory_fresh", "false")).strip().lower()
+        if mf == "alternate":
+            # interleave cold/warm by rep parity so the H4 verdict is not
+            # confounded by phase ordering: even rep = cold (fresh=true, ignore
+            # prior memory but still capture), odd rep = warm (fresh=false, inject).
+            fresh = (rep % 2 == 0)
+        else:
+            fresh = (mf == "true")
         _set_memory_fresh(working_spec, fresh)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     else:  # "none"

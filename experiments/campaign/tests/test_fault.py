@@ -242,3 +242,56 @@ def test_memory_mode_none_when_no_memory_block(tmp_path):
     ws = tmp_path / "no_mem.yml"
     ws.write_text('name: wf\nversion: "1.0"\nstages: []\n')
     assert fault.memory_mode(ws) is None            # no memory block -> unlabeled
+
+
+# ── memory_cold_warm lever, "alternate" mode (H4 v2 interleaving) ─────────
+
+def _memory_plan_alt(tmp_path: Path) -> tuple:
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: "x"
+        workflow: s.yml
+        budget: {max_runs: 9}
+        phases:
+          - id: p
+            lever: memory_cold_warm
+            inputs: {memory_fresh: "alternate"}
+            repeats: 1
+        verdicts: {}
+    """))
+    return load_plan(p), p
+
+
+def test_memory_cold_warm_alternate_cold_on_even_warm_on_odd(tmp_path):
+    """memory_fresh='alternate' interleaves cold/warm by rep parity so the H4
+    verdict is not confounded by phase ordering: even rep = cold (fresh=true,
+    ignore prior memory), odd rep = warm (fresh=false, inject it)."""
+    plan, _ = _memory_plan_alt(tmp_path)
+    ws = _memory_working_spec(tmp_path)
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    assert yaml.safe_load(ws.read_text())["memory"]["fresh"] is True
+    assert fault.memory_mode(ws) == "cold"
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=1, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    assert yaml.safe_load(ws.read_text())["memory"]["fresh"] is False
+    assert fault.memory_mode(ws) == "warm"
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=2, corpus=[],
+                      working_spec=ws, rng_seed=1)
+    assert fault.memory_mode(ws) == "cold"          # alternates back
+
+
+def test_memory_cold_warm_alternate_preserves_block_scalar_jinja(tmp_path):
+    """The alternate mode must route through the same surgical fresh: edit —
+    block-scalar Jinja stays verbatim, no stray backslashes (the round-trip
+    hazard)."""
+    plan, _ = _memory_plan_alt(tmp_path)
+    ws = _memory_working_spec(tmp_path)
+    before = ws.read_text()
+    fault.apply_lever(plan.phases[0], phase_index=0, rep=0, corpus=[],
+                      working_spec=ws, rng_seed=1)   # even -> fresh=true
+    after = ws.read_text()
+    expected = before.replace("  fresh: false\n", "  fresh: true\n")
+    assert after == expected
+    assert "\\" not in after
