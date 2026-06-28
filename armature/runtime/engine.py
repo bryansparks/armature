@@ -14,6 +14,7 @@ from armature.runtime.prompt import PromptAssembler
 from armature.nodes.llm import LLMNode
 from armature.nodes.script import ScriptNode
 from armature.nodes.gate import HumanGateNode
+from armature.nodes.provider_errors import classify_provider_error
 from armature.registry.registry import ToolRegistry
 from armature.registry.builtins import register_builtins
 from armature.hooks.lifecycle import HookRegistry, HookDecision, make_default_behavior_registry, RogueSignalCounter
@@ -500,6 +501,7 @@ class Harness:
                                 success=False,
                                 output_valid=False,
                                 error_type=type(exc).__name__,
+                                error_kind=classify_provider_error(exc),
                                 spec_version=self._spec_version,
                                 inputs_hash=hashlib.sha256(
                                     json.dumps(context, sort_keys=True, default=str).encode()
