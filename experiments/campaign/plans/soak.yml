@@ -10,7 +10,7 @@ purpose: >
   under load. An outsider can replay the recording at zero cost to verify the same
   verdicts. Memory-subsystem correctness is tested separately elsewhere.
 workflow: specs/soak/synth_fanout_mid.yml
-budget: {max_runs: 600, max_llm_calls: 15000, max_wallclock_hours: 3.0, max_tokens: 4000000}
+budget: {max_runs: 600, max_llm_calls: 15000, max_wallclock_hours: 10.0, max_tokens: 20000000}
 
 # Tiered override: worker/text tiers stay on the cheap qwen SLM (raised to
 # 2048 tokens so its one small-tier guided_json stage — real_iterative's
