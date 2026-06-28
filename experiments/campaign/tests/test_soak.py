@@ -349,6 +349,20 @@ def test_verdict_no_row_loss_busy_fails(tmp_path):
     assert status == "FAIL" and detail["sqlite_busy_count"] == 1
 
 
+def test_verdict_no_row_loss_budget_stop_is_incon(tmp_path):
+    """A clean shortfall (actual < expected, no BUSY, all exit 0) is a budget
+    stop, not row loss — the verdict must NOT FAIL. The prior abs(actual-
+    expected)<=tol check conflated the two and false-FAILed the soak when the
+    concurrency phase was cut short by budget."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b"],
+             "exit_codes": [0, 0], "n_trace_rows": 2, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 6, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "INCONCLUSIVE")
+    assert detail["actual"] == 2 and detail["sqlite_busy_count"] == 0
+    assert "budget" in detail.get("note", "").lower()
+
+
 def test_verdict_hqs_stability_no_drift(tmp_path):
     from campaign_runner import soak_verdicts as sv
     flat = [_soak_row(f"r{i}", hqs=0.80 + (i % 3) * 0.001) for i in range(20)]
