@@ -84,7 +84,7 @@ def _provider_health_html(campaign: dict, verdicts: list[tuple[str, str, dict]])
     K = detail.get("K", 3)
     aborted_line = "campaign aborted" if aborted else "account-scoped failures present"
     return (f"<div style='border:2px solid #c62828;background:#ffebee;padding:1em;margin:1em 0'>"
-            f"<b>⚠ Provider account exhausted — {aborted_line} after {K} consecutive account-scoped runs.</b><br>"
+            f"<b>⚠ Provider account exhausted — {aborted_line} after {escape(str(K))} consecutive account-scoped runs.</b><br>"
             f"Provider/model: <code>{escape(models)}</code> &nbsp; Bucket: <code>{escape(buckets)}</code><br>"
             f"Failed runs: <code>{escape(run_ids)}</code><br>"
             f"{escape(reason)} — add credits / fix the key at your provider and resume."

@@ -344,7 +344,7 @@ class CampaignRunner:
             arm_dash = arm.get("dashboard")
             if arm_dash is None:
                 arm_dash = r.get("dashboard_json", {}).get("current_hqs")
-            acct = [t for t in tr if getattr(t, "error_kind", None)]
+            acct = trace_io.account_scoped_rows(tr)
             # Restore phase context from the recording's meta so replayed rows
             # carry the same lever/inputs the live rows did — verdicts read these.
             # Fall back to "replay"/{} for older recordings that predate meta.

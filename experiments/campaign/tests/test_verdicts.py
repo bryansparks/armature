@@ -142,7 +142,14 @@ def test_provider_health_records_abort_when_k_consecutive():
     from campaign_runner.plan import Abort
     _name, _r, d2 = verdicts.verdict_provider_health(rows, Abort(on_consecutive_account_errors=2))
     assert d2["aborted"] is True
-    assert d2["tripped_at"] in ("r1", "r2")
+    assert d2["tripped_at"] == "r2"
+
+
+def test_provider_health_models_sorted_multi():
+    rows = [_arow("r1", True, "provider_credits", "openrouter/b"),
+            _arow("r2", True, "provider_credits", "openrouter/a")]
+    _name, _r, detail = verdicts.verdict_provider_health(rows, None)
+    assert detail["models"] == ["openrouter/a", "openrouter/b"]
 
 
 def test_provider_health_streak_resets_on_good_run():
