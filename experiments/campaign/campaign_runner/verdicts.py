@@ -116,6 +116,52 @@ def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:
              "n_cold": len(cold), "n_warm": len(warm)})
 
 
+def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:
+    """Always-on health check: zero account-scoped (401/402/403) failures = PASS.
+
+    FAIL on >=1, with buckets/models/run_ids/K; abort detail when K consecutive
+    account-scoped runs would have tripped the circuit breaker. Deterministic
+    from rows alone so replay reproduces the same verdict. The streak rule
+    matches CampaignRunner._compute_abort exactly: iterate ALL rows in order,
+    skip is_concurrency_summary rows, reset the streak on any non-account-scoped
+    row, trip when consecutive >= K.
+    """
+    K = abort.on_consecutive_account_errors if abort else 3
+    acct = [r for r in rows if not r.get("is_concurrency_summary") and r.get("account_scoped")]
+    if not acct:
+        return ("provider_health", PASS, {"account_scoped_runs": 0, "K": K})
+    buckets: dict[str, int] = {}
+    models: set[str] = set()
+    run_ids: list[str] = []
+    for r in acct:
+        k = r.get("account_scoped_kind") or "unknown"
+        buckets[k] = buckets.get(k, 0) + 1
+        if r.get("account_scoped_model"):
+            models.add(r["account_scoped_model"])
+        run_ids.append(r.get("run_id"))
+    # detect K-consecutive abort across ALL rows (streak resets on a good run;
+    # concurrency summaries are neutral — neither count nor reset)
+    consecutive = 0
+    tripped_at = None
+    for r in rows:
+        if r.get("is_concurrency_summary"):
+            continue
+        if r.get("account_scoped"):
+            consecutive += 1
+            if consecutive >= K:
+                tripped_at = r.get("run_id")
+                break
+        else:
+            consecutive = 0
+    detail: dict = {"account_scoped_runs": len(acct), "buckets": buckets,
+                    "models": sorted(models), "run_ids": run_ids, "K": K}
+    if tripped_at is not None:
+        detail["aborted"] = True
+        detail["tripped_at"] = tripped_at
+        detail["abort_reason"] = "provider account exhausted"
+    return ("provider_health", FAIL, detail)
+
+
 def all_verdicts(rows: list[dict], plan) -> list[tuple[str, str, dict]]:
     v = plan.verdicts
     return [
@@ -123,4 +169,5 @@ def all_verdicts(rows: list[dict], plan) -> list[tuple[str, str, dict]]:
         verdict_h2(rows, v.self_improve_fires_and_recovers),
         verdict_h3(rows, v.hqs_formula_consistency),
         verdict_h4(rows, v.memory_carry_forward_helps),
+        verdict_provider_health(rows, plan.abort),
     ]

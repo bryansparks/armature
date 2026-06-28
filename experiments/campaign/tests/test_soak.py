@@ -938,3 +938,14 @@ def test_replay_reconstructs_trace_db_so_verdicts_reproduce(tmp_path, monkeypatc
           soak_verdicts.all_soak_verdicts(result.rows, plan, r.sb.trace_db)}
     assert vs["trace_db_integrity"] == "PASS"
     assert vs["agent_spawn_count"] == "PASS"
+
+
+def test_provider_health_always_on_in_soak_verdicts():
+    from campaign_runner import soak_verdicts
+    from campaign_runner.plan import CampaignPlan, SoakVerdicts, Phase
+    plan = CampaignPlan(name="soak", workflow="s.yml", phases=[Phase(id="p")],
+                        soak_verdicts=SoakVerdicts())
+    rows = [{"run_id": "r1", "account_scoped": False, "is_concurrency_summary": False,
+             "exit_code": 0, "hqs_ours": {"authoritative": 0.8}}]
+    names = [v[0] for v in soak_verdicts.all_soak_verdicts(rows, plan, trace_db=None)]
+    assert "provider_health" in names

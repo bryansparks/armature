@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 
 from campaign_runner.trace_io import LLM_ROLE_TYPES
+from campaign_runner.verdicts import verdict_provider_health
 
 PASS, FAIL, INCON = "PASS", "FAIL", "INCONCLUSIVE"
 
@@ -164,4 +165,5 @@ def all_soak_verdicts(rows, plan, trace_db=None):
         verdict_checkpoint_resume_correctness(rows, sv.checkpoint_resume_correctness),
         verdict_budget_obeyed(rows, sv.budget_obeyed, plan),
         verdict_agent_spawn_count(rows, sv.agent_spawn_count, trace_db),
+        verdict_provider_health(rows, plan.abort),
     ]

@@ -103,3 +103,61 @@ def test_h4_pass_when_warm_beats_cold():
     _name, result, _detail = verdicts.verdict_h4(rows, {
         "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
     assert result == "PASS"
+
+
+def _arow(run_id, scoped=False, kind=None, model="m"):
+    return {"run_id": run_id, "account_scoped": scoped,
+            "account_scoped_kind": kind, "account_scoped_model": model if scoped else None}
+
+
+def test_provider_health_pass_when_no_account_scoped():
+    rows = [{"run_id": "r1", "account_scoped": False}]
+    name, result, detail = verdicts.verdict_provider_health(rows, None)
+    assert name == "provider_health"
+    assert result == "PASS"
+    assert detail["account_scoped_runs"] == 0
+    assert detail["K"] == 3
+
+
+def test_provider_health_fail_with_buckets_and_models():
+    rows = [_arow("r1", True, "provider_credits", "openrouter/m"),
+            _arow("r2", True, "provider_credits", "openrouter/m"),
+            _arow("r3", False)]
+    name, result, detail = verdicts.verdict_provider_health(rows, None)
+    assert result == "FAIL"
+    assert detail["account_scoped_runs"] == 2
+    assert detail["buckets"] == {"provider_credits": 2}
+    assert detail["models"] == ["openrouter/m"]
+    assert detail["run_ids"] == ["r1", "r2"]
+
+
+def test_provider_health_records_abort_when_k_consecutive():
+    rows = [_arow("r1", True, "provider_credits"),
+            _arow("r2", True, "provider_credits")]
+    name, result, detail = verdicts.verdict_provider_health(rows, None)
+    assert result == "FAIL"
+    assert "aborted" not in detail
+
+    # K=2 trips
+    from campaign_runner.plan import Abort
+    _name, _r, d2 = verdicts.verdict_provider_health(rows, Abort(on_consecutive_account_errors=2))
+    assert d2["aborted"] is True
+    assert d2["tripped_at"] in ("r1", "r2")
+
+
+def test_provider_health_streak_resets_on_good_run():
+    rows = [_arow("r1", True, "provider_credits"),
+            _arow("r2", False),
+            _arow("r3", True, "provider_credits")]
+    from campaign_runner.plan import Abort
+    _name, _r, d = verdicts.verdict_provider_health(rows, Abort(on_consecutive_account_errors=2))
+    assert "aborted" not in d
+
+
+def test_provider_health_always_on_in_all_verdicts():
+    from campaign_runner.plan import CampaignPlan, Phase, Verdicts
+    plan = CampaignPlan(name="t", workflow="s.yml", phases=[Phase(id="p")], verdicts=Verdicts())
+    rows = [{"run_id": "r1", "account_scoped": False, "hqs_ours": {}, "hqs_armature": {},
+             "improve_log": [], "inputs": {}, "memory_mode": None, "lever": "none"}]
+    names = [v[0] for v in verdicts.all_verdicts(rows, plan)]
+    assert "provider_health" in names
