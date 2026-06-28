@@ -1,0 +1,74 @@
+name: hqdynamics-baseline
+description: "Does HQS track difficulty, and does self-improve fire + recover? A lighter 5-level confirmation of H1+H2+H3 (the fast-regression companion to h1-five-level)."
+purpose: >
+  A hypothesis test of Armature's HQS dynamics, kept deliberately lighter than
+  h1-five-level so it can run as a fast regression check. It checks three claims:
+  (H1) HQS tracks input difficulty — harder corpora should score lower; (H2) the
+  self-improve loop fires when a degradation lever drops HQS below target, applies
+  a spec edit, and recovers above target; (H3) the harness's HQS formula reproduces
+  Armature's independently emitted values. An outsider can replay the recording at
+  zero cost to verify the same verdicts.
+workflow: specs/campaign_research_brief.yml
+budget: {max_runs: 60, max_wallclock_hours: 4.0, max_llm_calls: 4000}
+
+# ── H1: one phase per difficulty level (corpus rows 0-4 = levels 1-5).
+# input_difficulty_ramp picks corpus[phase_index], so phase_index 0..4 maps
+# exactly to levels 1..5. repeats=4 gives 20 H1 data points across 5 distinct
+# levels (4 per level) — enough for a monotonic Spearman correlation AND enough
+# that a single judge-variance outlier (quorum_score=0.0 on an easy topic) can
+# no longer flip the rank correlation. The earlier repeats=2 run was
+# underpowered: HQS is near-flat on this workflow+model (the glm-5.2 judge
+# does not discriminate difficulty), so one 0.719 outlier on an easy topic
+# turned rho positive. 4 reps matches h1-five-level's power so a FAIL is a
+# real "the judge does not track difficulty" finding, not a sampling artifact.
+# self_improve ON at apply:false exercises the improve machinery and
+# contributes firing evidence on hard levels, without editing the working spec
+# so the HQS-vs-difficulty signal stays clean.
+phases:
+  - id: level1_easy
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level2
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level3
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level4
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level5_hard
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+
+  # ── H2: model-tier degradation -> self-improve fires, applies edits, recovers.
+  # The lever downgrades the judge to a broken tier so its LLM call errors and
+  # HQS drops below target. fresh_db:true isolates this phase's failure traces
+  # (Armature computes hqs_before across the shared DB's last ~200 traces, so
+  # without a reset the failures would be diluted by the 10 difficulty successes
+  # above and needs_improvement would never fire). apply:true so the SpecRefiner
+  # upgrade is written into the working spec and the recovery probe can rise
+  # above target — a real fire->edit->recover. (spec_corruption was the original
+  # H2 lever but did not reliably drop HQS on this workflow — model_tier_degradation
+  # does, deterministically, so it is the sound choice.)
+  - id: degrade_apply
+    lever: model_tier_degradation
+    inputs: {topic: "quantum error correction", difficulty: "3"}
+    repeats: 3
+    fresh_db: true
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 3, apply: true}
+
+verdicts:
+  hqs_tracks_difficulty: {spearman_le: -0.50, p_le: 0.05}
+  self_improve_fires_and_recovers: {fires_within_k_traces: 5, edits_correct_surface: true, recovers_above: 0.75, within_r_runs: 5}
+  hqs_formula_consistency: {max_abs_delta_le: 0.02}

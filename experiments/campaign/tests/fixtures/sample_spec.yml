@@ -1,0 +1,47 @@
+name: sample-workflow
+version: "1.0"
+description: "Tiny two-stage spec for campaign tests."
+
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3-6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 512
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 2048
+
+role_type_defaults:
+  worker: small
+  judge: large
+
+contracts:
+  inputs:
+    - name: topic
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      description: "Research: {{ topic }}"
+    output_mode: text
+    depends_on: []
+
+  - id: judge
+    role:
+      name: Judge
+      type: judge
+      description: "Assess: {{ researcher.content }}"
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept]
+      properties:
+        accept: {type: boolean}
+    depends_on: [researcher]

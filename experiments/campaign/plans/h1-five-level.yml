@@ -1,0 +1,66 @@
+name: h1-five-level
+description: "H1: does HQS track difficulty? Five difficulty-ramp phases (one per corpus level, 4 reps each) with self-improve exercised, plus a model-tier-degradation phase (fresh DB) that applies edits to test fire→edit→recover. OpenRouter tiers borrowed from armature-research."
+purpose: >
+  This is a hypothesis test of Armature's HQS dynamics. It checks three claims:
+  (H1) HQS tracks input difficulty — harder corpora should score lower; (H2) the
+  self-improve loop fires when a degradation lever drops HQS below target, applies
+  a spec edit, and recovers above target; (H3) the harness's HQS formula reproduces
+  Armature's independently emitted values. A fourth (H4) memory carry-forward
+  hypothesis is inconclusive without cold/warm phases. An outsider can replay the
+  recording at zero cost to verify the same verdicts.
+workflow: specs/campaign_research_brief.yml
+budget: {max_runs: 50, max_wallclock_hours: 2.5, max_llm_calls: 800}
+
+# ── H1: one phase per difficulty level (corpus rows 0-4 = levels 1-5).
+# input_difficulty_ramp picks corpus[phase_index], so phase_index 0..4 maps
+# exactly to levels 1..5. repeats=4 gives more iterations per level (more
+# data points for the Spearman correlation). self_improve is ON at apply:false
+# — it exercises the improve machinery and contributes firing evidence on hard
+# levels, while leaving the working spec unchanged so the HQS-vs-difficulty
+# signal stays clean.
+phases:
+  - id: level1_easy
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level2
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level3
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level4
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+  - id: level5_hard
+    lever: input_difficulty_ramp
+    inputs: {topic: "{{ corpus_row.topic }}", difficulty: "{{ corpus_row.level }}"}
+    repeats: 4
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 2, apply: false}
+
+  # ── H2: model-tier degradation → self-improve fires, applies edits, recovers.
+  # The lever downgrades the judge to a broken tier so its LLM call errors and
+  # HQS drops below target. fresh_db:true isolates this phase's failure traces
+  # (Armature computes hqs_before across the shared DB's last ~200 traces, so
+  # without a reset the failures would be diluted by the 20 difficulty successes
+  # above and needs_improvement would never fire). apply:true so the SpecRefiner
+  # upgrade is written into the working spec and the recovery probe can rise
+  # above target — a real fire→edit→recover.
+  - id: degrade_apply
+    lever: model_tier_degradation
+    inputs: {topic: "quantum error correction", difficulty: "3"}
+    repeats: 3
+    fresh_db: true
+    self_improve: {enabled: true, target_hqs: 0.75, min_traces: 3, max_rounds: 3, apply: true}
+
+verdicts:
+  hqs_tracks_difficulty: {spearman_le: -0.50, p_le: 0.05}
+  self_improve_fires_and_recovers: {fires_within_k_traces: 5, edits_correct_surface: true, recovers_above: 0.75, within_r_runs: 5}
+  hqs_formula_consistency: {max_abs_delta_le: 0.02}

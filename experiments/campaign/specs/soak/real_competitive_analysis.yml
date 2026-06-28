@@ -1,0 +1,245 @@
+# Fan-out / fan-in: parallel independent stages → single synthesizer.
+#
+# Armature's DAG engine automatically runs stages with no shared dependencies
+# concurrently. Stages that share no depends_on path run in parallel; wall-clock
+# time ≈ slowest individual stage, not the sum.
+#
+#   market_analyst  ─┐
+#   tech_analyst    ─┼─→  synthesizer
+#   pricing_analyst ─┘
+#
+# All three analyst stages have depends_on: [] and no mutual dependencies,
+# so the harness dispatches them concurrently. The synthesizer fires only
+# after all three complete, receiving their outputs in context automatically.
+#
+# Demonstrates: DAG parallelism, fan-out/fan-in, guided_json output per branch,
+#               frontier synthesizer receiving multi-branch structured context.
+#
+# Usage:
+#   armature run examples/04_fan_out.yml \
+#     --input company="Snowflake" \
+#     --input industry="cloud data warehousing"
+#
+# Python:
+#   harness = Harness.from_spec("examples/04_fan_out.yml")
+#   result = await harness.run({"company": "Snowflake", "industry": "cloud data warehousing"})
+#   print(result["synthesizer"]["verdict"])          # e.g. "STRONG"
+#   print(result["synthesizer"]["summary"])
+#   print(result["market_analyst"]["position"])
+#
+# ── Expected output (illustrative — actual content varies by model/input) ─
+#
+#   armature run examples/04_fan_out.yml \
+#     --input company="Snowflake" --input industry="cloud data warehousing"
+#
+#   [market_analyst, tech_analyst, pricing_analyst] running in parallel...
+#
+#   ┌─ synthesizer ───────────────────────────────────────────────────────┐
+#   │ {                                                                   │
+#   │   "summary": "Snowflake holds a dominant position in cloud data    │
+#   │     warehousing with strong technical differentiation via its      │
+#   │     multi-cluster shared data architecture...",                    │
+#   │   "verdict": "STRONG",                                             │
+#   │   "top_risks": [                                                   │
+#   │     "Commoditization pressure from Databricks and BigQuery",       │
+#   │     "Usage-based pricing amplifies revenue volatility in downturns"│
+#   │   ],                                                               │
+#   │   "top_opportunities": [                                           │
+#   │     "AI/ML workload expansion via Cortex AI features",            │
+#   │     "Application development platform (Snowpark) adoption"        │
+#   │   ],                                                               │
+#   │   "confidence": 0.81                                               │
+#   │ }                                                                  │
+#   └─────────────────────────────────────────────────────────────────────┘
+#   Done in 9.4s  ← three analysts ran in parallel; frontier call last
+
+name: competitive_analysis_fan_out
+version: "1.0"
+description: Parallel multi-angle competitive analysis with frontier synthesizer
+
+model_tiers:
+  # Fast tier — runs the three parallel analyst branches concurrently
+  fast:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  # Frontier tier — reserved for the synthesizer that sees all three outputs
+  frontier:
+    provider: openrouter
+    model: google/gemini-2.5-flash
+
+stages:
+
+  # ── Fan-out: three analysts run concurrently ─────────────────────────────
+  # No stage below declares depends_on on any of the others, so Armature
+  # dispatches all three at the same time.
+
+  - id: market_analyst
+    role:
+      name: Market Analyst
+      type: researcher
+      model_tier: fast
+      description: |
+        Analyze {{ company }}'s competitive position in {{ industry }}.
+
+        Assess: market share signals, customer segments, go-to-market motion,
+        key partnerships, and recent competitive moves.
+
+        Be specific — cite product names, customer types, and observable signals.
+        Avoid vague statements like "strong market presence."
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [position, strengths, weaknesses, key_competitors]
+      properties:
+        position:
+          type: string
+          description: One-sentence market position assessment
+        strengths:
+          type: array
+          description: Specific observable strengths
+          items:
+            type: string
+        weaknesses:
+          type: array
+          description: Specific observable weaknesses or exposure areas
+          items:
+            type: string
+        key_competitors:
+          type: array
+          description: Named competitors and their primary threat vector
+          items:
+            type: string
+    depends_on: []
+
+  - id: tech_analyst
+    role:
+      name: Technology Analyst
+      type: researcher
+      model_tier: fast
+      description: |
+        Analyze {{ company }}'s technology stack and technical differentiation
+        in {{ industry }}.
+
+        Assess: core technical architecture, proprietary capabilities,
+        build-vs-buy choices, engineering velocity signals, and technical
+        debt or fragility risks.
+
+        Assign a moat_score: 0.0 = easily replicated, 1.0 = deep technical moat.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [stack_summary, differentiators, risks, moat_score]
+      properties:
+        stack_summary:
+          type: string
+          description: High-level description of the technical approach
+        differentiators:
+          type: array
+          description: Specific technical capabilities competitors lack
+          items:
+            type: string
+        risks:
+          type: array
+          description: Technical fragility, scaling risks, or architectural debt
+          items:
+            type: string
+        moat_score:
+          type: number
+          description: Technical moat strength — 0.0 (none) to 1.0 (strong)
+          minimum: 0.0
+          maximum: 1.0
+    depends_on: []
+
+  - id: pricing_analyst
+    role:
+      name: Pricing Analyst
+      type: researcher
+      model_tier: fast
+      description: |
+        Analyze {{ company }}'s pricing strategy and commercial model
+        in {{ industry }}.
+
+        Assess: pricing model type (seat/usage/platform/hybrid), price
+        positioning vs. competitors, expansion revenue mechanisms, and
+        enterprise vs. SMB fit.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [model_type, competitive_position, expansion_mechanisms]
+      properties:
+        model_type:
+          type: string
+          description: e.g. "usage-based", "per-seat", "platform + add-ons"
+        competitive_position:
+          type: string
+          description: 'One of: PREMIUM, MID-MARKET, or VALUE'
+          enum: [PREMIUM, MID-MARKET, VALUE]
+        expansion_mechanisms:
+          type: array
+          description: How the company grows revenue within existing accounts
+          items:
+            type: string
+        churn_risks:
+          type: array
+          description: Pricing structure factors that increase churn risk
+          items:
+            type: string
+    depends_on: []
+
+  # ── Fan-in: synthesizer waits for all three branches ────────────────────
+  # depends_on lists all three analysts; Armature injects their structured
+  # outputs into this stage's context automatically. The frontier model sees
+  # clean structured data from three independent perspectives.
+
+  - id: synthesizer
+    role:
+      name: Investment Analyst
+      type: judge
+      model_tier: frontier
+      description: |
+        You have received three independent analyses of {{ company }}
+        in the {{ industry }} market:
+        - market_analyst: competitive positioning and market dynamics
+        - tech_analyst: technology stack and technical moat
+        - pricing_analyst: commercial model and expansion economics
+
+        Synthesize these into a unified competitive assessment.
+        Look for corroborating signals across analyses.
+        Flag any contradictions between analyst views.
+
+        Be direct — investors and executives will act on this output.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [summary, verdict, top_risks, top_opportunities, confidence]
+      properties:
+        summary:
+          type: string
+          description: Executive summary in 2-3 sentences
+        verdict:
+          type: string
+          description: Overall competitive position assessment
+          enum: [STRONG, NEUTRAL, WEAK]
+        top_risks:
+          type: array
+          description: Up to 3 highest-priority risks across all analyses
+          items:
+            type: string
+          maxItems: 3
+        top_opportunities:
+          type: array
+          description: Up to 3 highest-priority opportunities
+          items:
+            type: string
+          maxItems: 3
+        cross_analysis_conflicts:
+          type: array
+          description: Any contradictions or tensions between the three analysts
+          items:
+            type: string
+        confidence:
+          type: number
+          description: Confidence in the verdict — 0.0 (low) to 1.0 (high)
+          minimum: 0.0
+          maximum: 1.0
+    depends_on: [market_analyst, tech_analyst, pricing_analyst]

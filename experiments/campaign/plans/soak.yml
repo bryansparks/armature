@@ -1,0 +1,63 @@
+name: soak
+description: "Reliability/longevity soak: ~500 real runs across 7 workflows (~120 agents/iteration, ~60k agent spawns) on the tiny tier, plus an overlapping-firings concurrency phase against one shared trace DB."
+purpose: >
+  This is an endurance (soak) test of the Armature workflow engine. It runs seven
+  workflows repeatedly under a cron-style budget to confirm the engine stays up and
+  clean over many iterations: no crashes, no trace-DB corruption, no row loss when
+  firings overlap, no HQS drift or latency creep across the run, correct
+  checkpoint behavior on every --force rerun, and budget enforcement. It is NOT a
+  correctness test of any workflow's output — only of the engine's reliability
+  under load. An outsider can replay the recording at zero cost to verify the same
+  verdicts. Memory-subsystem correctness is tested separately elsewhere.
+workflow: specs/soak/synth_fanout_mid.yml
+budget: {max_runs: 600, max_llm_calls: 15000, max_wallclock_hours: 10.0, max_tokens: 20000000}
+
+# Tiered override: worker/text tiers stay on the cheap qwen SLM (raised to
+# 2048 tokens so its one small-tier guided_json stage — real_iterative's
+# refine_round, a simple schema — validates), while every guided_json /
+# escalation tier (medium/large/frontier/fast) is pinned to gemini-2.5-flash,
+# which reliably produces the structured JSON those stages require. `default`
+# (the fallback for any unlisted tier name) is the cheap tier. This keeps the
+# ~60k worker spawns on the tiny tier while making the ~1k guided_json spawns
+# succeed — so the soak measures engine reliability, not model flakiness.
+tier_override:
+  apply: true
+  tiers:
+    default:  {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 2048}
+    small:     {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 2048}
+    medium:    {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    large:     {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    frontier:  {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+    fast:      {provider: openrouter, model: google/gemini-2.5-flash, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 4096}
+
+phases:
+  # ── real workflows (credibility): ~20 agents/iteration each, ~80 reps → ~6400 spawns
+  - {id: real_research,    lever: none, workflow: specs/soak/real_research_pipeline.yml,   inputs: {topic: "quantum error correction", audience: "engineers"}, repeats: 80}
+  - {id: real_deliberation, lever: none, workflow: specs/soak/real_deliberation.yml,      inputs: {objective: "Should a startup adopt microservices?"}, repeats: 80}
+  - {id: real_competitive, lever: none, workflow: specs/soak/real_competitive_analysis.yml, inputs: {company: "Acme", industry: "robotics"}, repeats: 80}
+  - {id: real_iterative,   lever: none, workflow: specs/soak/real_iterative_refinement.yml, inputs: {topic: "explain CRDTs"}, repeats: 80}
+
+  # ── synthetic fan-out (agent-spawn load): wide 40, deep 30, mid 30 → 100 agents/iteration
+  - {id: synth_wide, lever: none, workflow: specs/soak/synth_fanout_wide.yml, inputs: {topic: "distributed systems"}, repeats: 60}
+  - {id: synth_deep, lever: none, workflow: specs/soak/synth_fanout_deep.yml, inputs: {topic: "distributed systems"}, repeats: 60}
+  - {id: synth_mid,  lever: none, workflow: specs/soak/synth_fanout_mid.yml,  inputs: {topic: "distributed systems"}, repeats: 60}
+
+  # ── concurrency: 3 workers × 20 reps against one shared trace DB (WAL, no busy-retry)
+  - id: cron_overlap
+    lever: none
+    workflow: specs/soak/synth_fanout_mid.yml
+    inputs: {topic: "distributed systems"}
+    repeats: 1
+    concurrency: {workers: 3, driver: armature_loop, reps_per_worker: 20}
+
+soak_verdicts:
+  no_unclean_exits: {allowed_failures: 0}
+  trace_db_integrity: {allow_null_run_id: 0}
+  no_row_loss_under_concurrency: {tolerance: 0}
+  hqs_stability_no_drift: {max_mean_delta: 0.08}
+  wallclock_stability: {max_latency_slope_ms_per_run: 5.0}
+  checkpoint_resume_correctness: {require_distinct_run_ids: true}
+  budget_obeyed: {}
+  agent_spawn_count: {min_total: 5000}
+
+verdicts: {}

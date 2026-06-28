@@ -1,0 +1,50 @@
+name: synth-fanout-deep
+version: "1.0"
+description: "Synthetic deep fan-out soak workflow: two sequential fan-out stages (15+15 workers) over a depth-5 DAG. ~30 agents/run."
+model_tiers:
+  small: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+  large: {provider: openrouter, model: qwen/qwen3.6-27b, api_key_env: OPENROUTER_API_KEY, temperature: 0.2, max_tokens: 512}
+role_type_defaults: {worker: small, orchestrator: large, judge: large, researcher: small}
+contracts:
+  inputs: [{name: topic}]
+  max_iterations: 40
+  max_llm_calls: 200
+stages:
+  - id: planner_a
+    role: {name: PlannerA, type: orchestrator, description: "Emit a JSON object with `questions`: exactly 15 sub-questions about: {{ topic }}. Each item {q: string}."}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [questions]
+      properties:
+        questions: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
+    depends_on: []
+  - id: workers_a
+    fan_out: 15
+    fan_in: list
+    partition_source: "{{ planner_a.questions }}"
+    partition_key: item
+    role: {name: WorkerA, type: worker, description: "Answer in one sentence: {{ item.q }}"}
+    output_mode: text
+    depends_on: [planner_a]
+  - id: planner_b
+    role: {name: PlannerB, type: orchestrator, description: "Given the prior worker answers, emit `questions`: exactly 15 follow-up sub-questions about: {{ topic }}. Each item {q: string}."}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [questions]
+      properties:
+        questions: {type: array, minItems: 15, maxItems: 15, items: {type: object, required: [q], properties: {q: {type: string}}}}
+    depends_on: [workers_a]
+  - id: workers_b
+    fan_out: 15
+    fan_in: list
+    partition_source: "{{ planner_b.questions }}"
+    partition_key: item
+    role: {name: WorkerB, type: worker, description: "Answer in one sentence: {{ item.q }}"}
+    output_mode: text
+    depends_on: [planner_b]
+  - id: synthesizer
+    role: {name: Synthesizer, type: judge, description: "Synthesize all worker answers into one paragraph."}
+    output_mode: text
+    depends_on: [workers_b, workers_a]

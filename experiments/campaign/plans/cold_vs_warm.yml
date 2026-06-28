@@ -1,0 +1,44 @@
+name: cold-vs-warm
+description: "Does carry-forward memory raise HQS vs fresh memory (v2: coverage-scaled judge + interleaved cold/warm)? Tests H4 with real headroom."
+purpose: >
+  A hypothesis test of Armature's cross-run memory (H4), redesigned (v2) so the
+  test has real headroom instead of a ceiling artifact.
+
+  v1 failed for a structural reason, not an engine reason: a narrow topic plus a
+  judge that scored any decent briefing ~0.86-0.89 left no HQS room for warm runs
+  to beat cold runs. v2 fixes both axes:
+  (1) BROAD multi-aspect topic — the topic spans many distinct sub-problems, so
+  one briefing cannot cover them all. Cold runs (memory.fresh: true, ignore prior
+  memory) redo the same few obvious sub-problems each time; warm runs
+  (memory.fresh: false) inject the accumulated prior briefings and are prompted to
+  cover NEW sub-problems not already addressed, so they reach broader coverage.
+  (2) COVERAGE-SCALED judge — the judge scores `confidence` as the breadth of
+  distinct, correct, non-fabricated sub-problems covered. That scalar is the
+  stage's quorum_score, which feeds HQS with a 0.20 weight. So a warm briefing
+  covering 7 sub-problems (confidence ~0.85) outscores a cold one covering 3
+  (confidence ~0.5) by ~0.07 HQS — enough to clear the 0.05 threshold when
+  memory genuinely helps.
+
+  Cold and warm are INTERLEAVED by rep parity (memory_fresh: "alternate": even
+  rep = cold, odd rep = warm), removing the v1 ordering confound where every
+  warm run followed every cold run against a monotonically growing DB. An
+  outsider can replay the recording at zero cost to verify the same verdict.
+  H4 may PASS (memory helps under the coverage rubric) or FAIL honestly with
+  headroom — either is a sound test, far stronger than the v1 ceiling artifact.
+workflow: specs/campaign_research_brief_memory.yml
+budget: {max_runs: 25, max_wallclock_hours: 2.0, max_llm_calls: 400}
+
+# ── Single interleaved phase: 20 reps = 10 cold (even) + 10 warm (odd), against
+# one shared memory DB that grows across reps. fresh_db:true starts the trace DB
+# clean; the memory DB is separate and persists, so the first cold run populates
+# it and later warm runs build on the accumulating briefings. The broad topic
+# input is fixed across all reps.
+phases:
+  - id: compare
+    lever: memory_cold_warm
+    inputs: {topic: "the core design problems of distributed systems", memory_fresh: "alternate"}
+    repeats: 20
+    fresh_db: true
+
+verdicts:
+  memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}

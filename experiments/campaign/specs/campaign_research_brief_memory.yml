@@ -1,0 +1,133 @@
+name: campaign-research-brief-memory
+version: "1.0"
+description: "Memory-enabled research-brief workflow for the H4 cold-vs-warm test (v2). A broad, multi-aspect topic lets warm runs (which build on accumulated prior briefings) cover MORE distinct sub-problems than cold runs (which redo the same few); a coverage-scaled judge turns that breadth difference into an HQS difference with real headroom."
+mission: >
+  You are a research analyst covering a BROAD, multi-aspect technical topic across
+  repeated runs. The topic spans many distinct sub-problems; no single briefing
+  can cover them all. Each run, produce a briefing that covers as many DISTINCT
+  relevant sub-problems as you can, each stated correctly in one grounded sentence.
+  When prior briefings are provided (warm runs), make your briefing ADDITIVE: cover
+  NEW sub-problems not already addressed, referencing and extending what was
+  established — do not repeat points already covered. Do not fabricate; omit a
+  sub-problem rather than invent one. Memory carries your accumulated coverage
+  forward across runs, so warm runs should reach broader coverage than cold ones.
+
+# ── Model configuration (borrowed from campaign_research_brief.yml / armature-research)
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+
+  medium:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 8192
+
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 16384
+
+role_type_defaults:
+  worker: small
+  orchestrator: medium
+  researcher: medium
+  judge: large
+
+contracts:
+  inputs:
+    - name: topic          # required — the broad research subject
+  max_iterations: 40
+  max_llm_calls: 200
+  timeout_hours: 1.0
+
+# ── Cross-run memory (MemoryStore, Layer 3). `fresh` is toggled per run by the
+# campaign's memory_cold_warm lever: true = cold (ignore prior memories this
+# run, but still capture), false = warm (inject prior briefings). Capture the
+# researcher's text output under `content` (text mode stores {content: ...}) so
+# the next warm run can see what sub-problems were already covered and avoid
+# repeating them. No knowledge extraction (zero extra LLM).
+memory:
+  enabled: true
+  fresh: false            # default warm; the lever flips this per run
+  inject_as: _memory
+  capture:
+    - stage: researcher
+      key: content
+      max_entries: 8
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      description: |
+        Research the following BROAD topic and produce a briefing that covers
+        as many DISTINCT relevant sub-problems as you can identify. The topic
+        spans many sub-areas, so BREADTH is the goal: cover more distinct
+        sub-problems (each correctly stated) rather than going deep on a few.
+        For each sub-problem, give one correct, grounded sentence stating what
+        the core challenge is. Do not fabricate — if you are unsure whether
+        something is a real sub-problem of this topic, omit it rather than invent.
+        {% if _memory is defined and _memory %}
+        Prior briefings from earlier runs (newest first). To make this briefing
+        ADDITIVE, cover NEW sub-problems NOT already addressed below — you may
+        briefly reference or extend what was established, but do NOT re-list
+        points already covered (repeating them wastes the briefing and lowers
+        its breadth). The more NEW distinct sub-problems you add, the stronger
+        this briefing.
+        {{ _memory.researcher.content }}
+        {% else %}
+        No prior briefings are available — produce a fresh briefing from
+        scratch, covering as many distinct sub-problems as you can identify.
+        {% endif %}
+        Topic: {{ topic }}
+    output_mode: text
+    depends_on: []
+
+  - id: judge
+    role:
+      name: Judge
+      type: judge
+      description: |
+        Assess the researcher's briefing on a BROAD, multi-aspect topic. The
+        decisive quality dimension is COVERAGE BREADTH: how many DISTINCT,
+        relevant sub-problems of the topic are each stated correctly and
+        grounded, with no fabrication.
+
+        Score `confidence` as the breadth of distinct, correct, non-repetitive,
+        non-fabricated sub-problems covered, on this scale:
+          - 1-2 distinct points  -> confidence ~0.15-0.25
+          - 3-4                  -> ~0.40-0.55
+          - 5-6                  -> ~0.65-0.80
+          - 7-8+                 -> ~0.85-1.00
+        Subtract ~0.15 for any fabricated or clearly incorrect claim, and ~0.05
+        per point that merely repeats an obvious surface fact with no real
+        content. A briefing covering the same few obvious points scores LOW; one
+        covering many distinct sub-problems scores HIGH. Do NOT give high
+        confidence to a briefing merely for being well-written — reward BREADTH
+        of correct coverage. `accept` is true iff confidence >= 0.5 and no
+        fabricated claim is present. List each defect / fabricated / incorrect
+        claim in `issues` (one per line); if there are none, return an empty
+        issues list.
+        Briefing:
+        {{ researcher.content }}
+        Topic: {{ topic }}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept, confidence, issues]
+      properties:
+        accept: {type: boolean}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+        issues: {type: array, items: {type: string}}
+    on_fail:
+      loop: {stage: judge, max: 2}
+    depends_on: [researcher]

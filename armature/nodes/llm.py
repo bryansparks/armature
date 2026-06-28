@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from armature.adapters.registry import AdapterRegistry, ResolvedAdapter
 from armature.nodes.base import BaseNode
+from armature.nodes.provider_errors import is_account_scoped
 from armature.spec.models import Stage, ModelTiers, RoleTypeDefaults, SkillDef
 from armature.runtime.prompt import PromptAssembler
 
@@ -98,11 +99,16 @@ async def _call_with_retry(
                 except Exception:
                     pass  # telemetry must never break execution
             return response
-        except retryable as exc:
-            last_exc = exc
-            if attempt < max_retries - 1:
-                delay = (3 ** attempt) * 5 + random.uniform(0.0, 2.0)
-                await asyncio.sleep(delay)
+        except Exception as exc:
+            if is_account_scoped(exc):
+                raise                      # account-scoped: do NOT retry
+            if isinstance(exc, retryable):
+                last_exc = exc
+                if attempt < max_retries - 1:
+                    delay = (3 ** attempt) * 5 + random.uniform(0.0, 2.0)
+                    await asyncio.sleep(delay)
+                continue
+            raise
 
     raise last_exc
 

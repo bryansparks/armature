@@ -1,0 +1,9 @@
+out/
+# local smoke-verification run artifacts (reduced-scale soak runs)
+/out-smoke*/
+# generated test-report index (local artifact; links to gitignored out/)
+/index.html
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/.env
