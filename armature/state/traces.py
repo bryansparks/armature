@@ -23,6 +23,7 @@ class TraceRecord(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] = Field(default_factory=dict)
     error_type: str | None = None
+    error_kind: str | None = None
     escalation_count: int = 0
     spec_version: str = ""
     inputs_hash: str = ""
@@ -84,6 +85,7 @@ class TraceStore:
             await db.execute(_CREATE_SQL)
             for col_def in [
                 "error_type TEXT",
+                "error_kind TEXT",
                 "escalation_count INTEGER DEFAULT 0",
                 "spec_version TEXT DEFAULT ''",
                 "inputs_hash TEXT DEFAULT ''",
@@ -111,12 +113,12 @@ class TraceStore:
                    (run_id, workflow_name, stage_id, role_type, model,
                     input_tokens, output_tokens, latency_ms, success, output_valid,
                     quorum_score, timestamp, inputs_json, outputs_json,
-                    error_type, escalation_count, spec_version,
+                    error_type, error_kind, escalation_count, spec_version,
                     inputs_hash, policy_version, inputs_provenance_json,
                     tools_declared_json, tools_called_json,
                     sandbox_image_digest, loop_iteration,
                     agent_id, agent_version, active_skill_ids_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     trace.run_id, trace.workflow_name, trace.stage_id,
                     trace.role_type, trace.model,
@@ -124,7 +126,7 @@ class TraceStore:
                     int(trace.success), int(trace.output_valid),
                     trace.quorum_score, trace.timestamp,
                     json.dumps(trace.inputs), json.dumps(trace.outputs),
-                    trace.error_type, trace.escalation_count, trace.spec_version,
+                    trace.error_type, trace.error_kind, trace.escalation_count, trace.spec_version,
                     trace.inputs_hash, trace.policy_version,
                     json.dumps(trace.inputs_provenance),
                     json.dumps(trace.tools_declared),
@@ -190,6 +192,7 @@ class TraceStore:
             inputs=json.loads(d.get("inputs_json") or "{}"),
             outputs=json.loads(d.get("outputs_json") or "{}"),
             error_type=d.get("error_type") or None,
+            error_kind=d.get("error_kind") or None,
             escalation_count=d.get("escalation_count") or 0,
             spec_version=d.get("spec_version") or "",
             inputs_hash=d.get("inputs_hash") or "",
