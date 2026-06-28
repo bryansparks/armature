@@ -66,6 +66,12 @@ def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:
     """
     COMPARABLE = "authoritative"
     EXCLUDED = ("rolling", "dashboard")   # per-run vs across-run scope mismatch
+    # feedback is structurally non-comparable: armature's hqs_feedback hook emits
+    # only a conditional prose alert (HQS below 0.75), never a parseable value.
+    NON_COMPARABLE = {"feedback":
+                      "armature's hqs_feedback hook emits only a conditional prose "
+                      "alert (HQS below 0.75), never a parseable HQS value, so the "
+                      "feedback channel cannot be compared against our recomputation"}
     auth_deltas: list[float] = []
     excluded: dict[str, float] = {}
     for r in rows:
@@ -90,7 +96,8 @@ def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:
              "excluded": {k: round(v, 4) for k, v in excluded.items()},
              "excluded_reason":
              "rolling/dashboard compare per-run rows vs across-run DB values "
-             "- scope mismatch, not formula drift"})
+             "- scope mismatch, not formula drift",
+             "non_comparable": NON_COMPARABLE})
 
 
 def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:

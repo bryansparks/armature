@@ -98,17 +98,18 @@ class CampaignRunner:
         # dashboard delta in H3 reflects a row-set mismatch, not necessarily formula
         # drift. The formula reproduction itself is verified in tests/test_hqs.py.
         arm_dash = arm.get("dashboard")
-        arm_feedback = parse_hqs_from_text(run_stderr)
+        # feedback: armature's hqs_feedback hook prints only a CONDITIONAL prose
+        # alert to stderr (HQS below 0.75) — it never emits a parseable `HQS:
+        # <number>` value. So the feedback channel is structurally non-comparable;
+        # we do not parse a value from stderr and never log a gap for it. H3
+        # documents it as non_comparable. (parse_hqs_from_text stays in use for the
+        # authoritative channel via replay_hqs.)
         hqs_armature = {"authoritative": arm_auth, "rolling": None,
-                        "dashboard": arm_dash, "feedback": arm_feedback}
+                        "dashboard": arm_dash, "feedback": None}
         if gaps is not None:
             if arm_auth is None and run_id:
                 gaps.append({"want": "authoritative HQS via replay", "needed":
                               "armature replay <run_id> printed an HQS line",
-                              "severity": "low", "run_id": run_id})
-            if arm_feedback is None:
-                gaps.append({"want": "feedback HQS via hook stderr", "needed":
-                              "hqs_feedback hook fired and printed an HQS hint",
                               "severity": "low", "run_id": run_id})
         return {"run_id": run_id, "phase_id": phase_id, "lever": lever, "inputs": inputs,
                 "exit_code": exit_code, "hqs_ours": ours, "hqs_armature": hqs_armature,
@@ -210,7 +211,13 @@ class CampaignRunner:
             probe_rows = trace_io.read_rows_by_run(self.sb.trace_db, probe.run_id) if probe.run_id else []
             recovery = hqs.all_four(probe_rows)
             probe_calls = 1
-        if log and not any(lr.get("needs_improvement") for lr in log):
+        if (log and phase.lever in verdicts_mod.DEGRADATION_LEVERS
+                and not any(lr.get("needs_improvement") for lr in log)):
+            # Only log a firing gap on phases whose purpose is to drop HQS below
+            # target so self_improve fires (the degradation levers). On difficulty-
+            # ramp / memory / none phases HQS sits above target, so NOT firing is
+            # correct — logging a gap there was a false positive (20× in the
+            # hqdynamics report).
             gaps.append({"want": "self_improve firing", "needed": "needs_improvement=True in log",
                          "severity": "low"})
         # one LLM-invoking call per improve round + 1 for the recovery probe
