@@ -2,7 +2,7 @@ from campaign_runner import verdicts
 
 
 def _row(run_id, phase_id="ramp", lever="input_difficulty_ramp", difficulty=1,
-         hqs_auth=0.8, improve_log=None, recovery=None, memory_mode=None):
+         hqs_auth=0.8, improve_log=None, recovery=None, memory_mode=None, quorum=None):
     return {
         "run_id": run_id, "phase_id": phase_id, "lever": lever,
         "inputs": {"difficulty": str(difficulty)},
@@ -14,6 +14,7 @@ def _row(run_id, phase_id="ramp", lever="input_difficulty_ramp", difficulty=1,
         "improve_log": improve_log or [],
         "recovery_hqs_ours": recovery,
         "spec_diff": "", "memory_mode": memory_mode,
+        "quorum_ours": quorum,
     }
 
 
@@ -96,13 +97,33 @@ def test_h3_inconclusive_when_too_few_observations():
 
 
 def test_h4_pass_when_warm_beats_cold():
-    rows = [_row("c1", lever="none", memory_mode="cold", hqs_auth=0.6),
-            _row("c2", lever="none", memory_mode="cold", hqs_auth=0.6),
-            _row("w1", lever="none", memory_mode="warm", hqs_auth=0.8),
-            _row("w2", lever="none", memory_mode="warm", hqs_auth=0.8)]
-    _name, result, _detail = verdicts.verdict_h4(rows, {
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=0.50),
+            _row("c2", lever="none", memory_mode="cold", quorum=0.50),
+            _row("w1", lever="none", memory_mode="warm", quorum=0.80),
+            _row("w2", lever="none", memory_mode="warm", quorum=0.80)]
+    _name, result, detail = verdicts.verdict_h4(rows, {
         "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
     assert result == "PASS"
+    assert detail["signal"] == "quorum"
+
+
+def test_h4_fail_when_warm_does_not_beat_cold_on_quorum():
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=0.80),
+            _row("c2", lever="none", memory_mode="cold", quorum=0.80),
+            _row("w1", lever="none", memory_mode="warm", quorum=0.82),
+            _row("w2", lever="none", memory_mode="warm", quorum=0.82)]
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "FAIL"
+    assert detail["signal"] == "quorum"
+
+
+def test_h4_inconclusive_when_no_quorum():
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=None),
+            _row("w1", lever="none", memory_mode="warm", quorum=None)]
+    _name, result, _detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "INCONCLUSIVE"
 
 
 def _arow(run_id, scoped=False, kind=None, model="m"):

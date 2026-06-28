@@ -181,3 +181,29 @@ def test_row_from_run_counts_agents_run_and_workflow_name(tmp_path, monkeypatch)
         hqs_arm={"authoritative": 0.8, "dashboard": None})
     assert row["agents_run"] == 3          # 2 researcher + 1 judge; gate excluded
     assert row["workflow_name"] == "sample-workflow"   # falls back to trace row
+
+
+def test_row_from_run_sets_quorum_ours(tmp_path, monkeypatch):
+    """_row_from_run must carry quorum_ours (avg judge quorum over the run's
+    trace rows) so verdict H4 v3 judges coverage, not aggregate HQS where the
+    latency term masks the memory benefit."""
+    from campaign_runner import runner as run_mod, hqs, trace_io
+    # 2 judge rows with quorum 0.6 and 0.8 -> avg 0.7
+    rows = [
+        trace_io.TraceRow(run_id="r1", workflow_name="wf", stage_id="s1",
+                          role_type="judge", model="m", input_tokens=0,
+                          output_tokens=0, latency_ms=10.0, success=1,
+                          output_valid=1, quorum_score=0.6, escalation_count=0,
+                          error_kind=None),
+        trace_io.TraceRow(run_id="r1", workflow_name="wf", stage_id="s2",
+                          role_type="judge", model="m", input_tokens=0,
+                          output_tokens=0, latency_ms=10.0, success=1,
+                          output_valid=1, quorum_score=0.8, escalation_count=0,
+                          error_kind=None),
+    ]
+    monkeypatch.setattr(trace_io, "read_rows_by_run", lambda db, rid: rows if rid == "r1" else [])
+    monkeypatch.setattr(run_mod.hqs, "all_four", lambda rs: {"authoritative": None, "rolling": None, "dashboard": None, "feedback": None})
+    r = run_mod.CampaignRunner.__new__(run_mod.CampaignRunner)
+    r.sb = type("S", (), {"trace_db": tmp_path / "traces.db"})()
+    row = r._row_from_run("r1", "p", "none", {}, 0, [], None, "", None)
+    assert row["quorum_ours"] == 0.7

@@ -85,6 +85,7 @@ class CampaignRunner:
                       workflow_name: str = "") -> dict:
         rows = trace_io.read_rows_by_run(self.sb.trace_db, run_id) if run_id else []
         agents_run = trace_io.count_agent_spawns(rows)
+        quorum_ours = hqs.avg_quorum(rows)
         # workflow_name: prefer the phase's spec name (passed in); fall back to the
         # trace rows' workflow_name (the name armature recorded for the run).
         wf = workflow_name or (rows[0].workflow_name if rows else "")
@@ -130,7 +131,8 @@ class CampaignRunner:
                 "agents_run": agents_run, "workflow_name": wf,
                 "account_scoped": bool(acct),
                 "account_scoped_kind": acct[0].error_kind if acct else None,
-                "account_scoped_model": acct[0].model if acct else None}
+                "account_scoped_model": acct[0].model if acct else None,
+                "quorum_ours": quorum_ours}
 
     def _abort_k(self) -> int:
         return self.plan.abort.on_consecutive_account_errors if self.plan.abort else 3
@@ -363,7 +365,8 @@ class CampaignRunner:
                          "workflow_name": tr[0].workflow_name if tr else "",
                          "account_scoped": bool(acct),
                          "account_scoped_kind": acct[0].error_kind if acct else None,
-                         "account_scoped_model": acct[0].model if acct else None})
+                         "account_scoped_model": acct[0].model if acct else None,
+                         "quorum_ours": hqs.avg_quorum(tr)})
         self._reconstruct_trace_db(self.sb.trace_db, all_trace_rows)
         self._compute_abort(rows)
         return self._finalize(rows, [])

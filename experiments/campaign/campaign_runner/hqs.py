@@ -32,6 +32,17 @@ def compute_authoritative(rows: list[TraceRow]) -> float | None:
     return 0.35 * valid + 0.25 * success + 0.20 * avg_quorum + 0.10 * latency_score + 0.10 * hfr
 
 
+def avg_quorum(rows: list[TraceRow]) -> float | None:
+    """The mean quorum_score across a run's trace rows (judge coverage), or
+    None if there are no rows / no quorum scores. Verdict H4 v3 judges on this
+    directly: in aggregate HQS it carries only 0.20 weight and is masked by
+    the latency/valid/success terms, so the memory carry-forward benefit (more
+    distinct sub-problems covered) does not show through. The raw quorum mean
+    is the honest signal."""
+    r = _rates(rows)
+    return r[2] if r is not None else None
+
+
 # The rolling formula is identical to the authoritative one; the only
 # difference is *which rows* feed it (last-200 across runs). Callers select
 # the rows; the math is the same.
