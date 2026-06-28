@@ -155,3 +155,29 @@ def test_firing_gap_logged_for_degradation_lever(tmp_path, monkeypatch):
     ws = r.sb.working_spec_for("p")
     r._do_improve(plan.phases[0], {"topic": "q"}, gaps, ws, "wf")
     assert any(g["want"] == "self_improve firing" for g in gaps)
+
+
+# ── 3. per-run agents_run + workflow_name on each row ────────────────────
+
+def test_row_from_run_counts_agents_run_and_workflow_name(tmp_path, monkeypatch):
+    """Each campaign row must carry agents_run (LLM-stage invocations for that
+    run, incl. fan-out partitions + retries) and workflow_name, so reports can
+    show a per-workflow agent tally. gate rows are excluded."""
+    r, _ = _runner(tmp_path, monkeypatch, "none", with_self_improve=False)
+    import sqlite3
+    con = sqlite3.connect(r.sb.trace_db)
+    con.executescript(trace_io_ddl)
+    for role in ("researcher", "researcher", "judge", "gate"):
+        con.execute(
+            "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,"
+            "timestamp,quorum_score,latency_ms,success,output_valid,escalation_count) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("r1", "sample-workflow", "s1", role, "m", "2026-01-01T00:00:01",
+             0.8, 1000.0, 1, 1, 0))
+    con.commit(); con.close()
+    row = r._row_from_run(
+        "r1", "p", "none", {"topic": "q"}, 0, [], None, "", None,
+        workflow_name="", run_stderr="", gaps=[],
+        hqs_arm={"authoritative": 0.8, "dashboard": None})
+    assert row["agents_run"] == 3          # 2 researcher + 1 judge; gate excluded
+    assert row["workflow_name"] == "sample-workflow"   # falls back to trace row

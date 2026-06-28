@@ -79,8 +79,13 @@ class CampaignRunner:
                       exit_code: int, improve_log: list[dict], recovery: dict | None,
                       spec_diff: str, memory_mode: str | None, run_stderr: str = "",
                       gaps: list | None = None,
-                      hqs_arm: dict | None = None) -> dict:
+                      hqs_arm: dict | None = None,
+                      workflow_name: str = "") -> dict:
         rows = trace_io.read_rows_by_run(self.sb.trace_db, run_id) if run_id else []
+        agents_run = trace_io.count_agent_spawns(rows)
+        # workflow_name: prefer the phase's spec name (passed in); fall back to the
+        # trace rows' workflow_name (the name armature recorded for the run).
+        wf = workflow_name or (rows[0].workflow_name if rows else "")
         ours = hqs.all_four(rows)
         # hqs_armature holds ONLY values Armature independently emits, never a
         # copy of ours. authoritative + dashboard are captured once inside
@@ -114,7 +119,8 @@ class CampaignRunner:
         return {"run_id": run_id, "phase_id": phase_id, "lever": lever, "inputs": inputs,
                 "exit_code": exit_code, "hqs_ours": ours, "hqs_armature": hqs_armature,
                 "improve_log": improve_log, "recovery_hqs_ours": recovery,
-                "spec_diff": spec_diff, "memory_mode": memory_mode}
+                "spec_diff": spec_diff, "memory_mode": memory_mode,
+                "agents_run": agents_run, "workflow_name": wf}
 
     def run(self) -> CampaignResult:
         corpus_path = self.sb.dir.parent.parent / "corpora" / "difficulty.csv"
@@ -178,7 +184,8 @@ class CampaignRunner:
                                                out.exit_code, improve_log, recovery,
                                                spec_diff, fault.memory_mode(ws),
                                                run_stderr=out.stderr, gaps=gaps,
-                                               hqs_arm=out.hqs_armature))
+                                               hqs_arm=out.hqs_armature,
+                                               workflow_name=wf_name))
                 # rolling (improve_log hqs_before) is the one Armature emission
                 # available only after an improve cycle — fill it in if present.
                 if improve_log:
@@ -297,7 +304,9 @@ class CampaignRunner:
                                           "rolling": None, "dashboard": arm_dash,
                                           "feedback": None},
                          "improve_log": [], "recovery_hqs_ours": None,
-                         "spec_diff": "", "memory_mode": None})
+                         "spec_diff": "", "memory_mode": None,
+                         "agents_run": trace_io.count_agent_spawns(tr),
+                         "workflow_name": tr[0].workflow_name if tr else ""})
         self._reconstruct_trace_db(self.sb.trace_db, all_trace_rows)
         return self._finalize(rows, [])
 
@@ -349,10 +358,13 @@ class CampaignRunner:
             vs = verdicts_mod.all_verdicts(rows, self.plan)
         date_str = _now()
         purpose = self.plan.purpose or self.plan.description
+        agents_per_workflow, grand_total_agents = _tally_agents(rows)
         meta = {"name": self.plan.name, "purpose": purpose, "date": date_str,
                 "git_sha": _git_sha(),
                 "totals": {"runs": len(rows), "phases": len(self.plan.phases)},
                 "verdict_statuses": [{"name": n, "result": r} for n, r, _ in vs],
+                "agents_per_workflow": agents_per_workflow,
+                "grand_total_agents": grand_total_agents,
                 "report": "report.html"}
         (self.sb.dir / "meta.json").write_text(json.dumps(meta, default=str))
         report = render_report(
@@ -360,7 +372,9 @@ class CampaignRunner:
                       "purpose": purpose, "git_sha": meta["git_sha"], "date": date_str,
                       "workflow": self.workflow_name,
                       "tiers": _spec_tiers(self.last_working_spec),
-                      "totals": {"runs": len(rows), "phases": len(self.plan.phases)}},
+                      "totals": {"runs": len(rows), "phases": len(self.plan.phases)},
+                      "agents_per_workflow": agents_per_workflow,
+                      "grand_total_agents": grand_total_agents},
             rows=rows, verdicts=vs, gaps=gaps,
             reproduce_cmd=f"python experiments/campaign/run.py {self.plan.name} "
                           f"--replay {self.recording.dir if self.recording else '<recording>'}",
@@ -377,6 +391,23 @@ def _git_sha() -> str:
                                capture_output=True, text=True, check=False).stdout.strip()
     except Exception:
         return "unknown"
+
+
+def _tally_agents(rows: list[dict]) -> tuple[dict, int]:
+    """Group rows by workflow_name, summing agents_run + counting runs per
+    workflow, plus a grand total across all rows (normal + concurrency). This
+    is the per-workflow agent-spawn breakdown shown in reports + meta; the grand
+    total should match the DB-wide agent_spawn_count soak verdict."""
+    apw: dict[str, dict] = {}
+    grand = 0
+    for r in rows:
+        wf = r.get("workflow_name") or "(unknown)"
+        e = apw.setdefault(wf, {"runs": 0, "agents": 0})
+        e["runs"] += 1
+        a = int(r.get("agents_run") or 0)
+        e["agents"] += a
+        grand += a
+    return dict(sorted(apw.items())), grand
 
 
 def _now() -> str:

@@ -105,6 +105,10 @@ def run_workers(sb, spec_path: Path, conc, phase_id: str, recording=None) -> lis
         trs = []
         for rid in s["run_ids"]:
             trs.extend(asdict(r) for r in trace_io.read_rows_by_run(sb.trace_db, rid))
+        # agents this worker spawned (LLM-stage rows across its run_ids) + the
+        # workflow they belong to — feeds the per-workflow agent tally in reports.
+        s["agents_run"] = trace_io.count_agent_spawns(trs)
+        s["workflow_name"] = trs[0]["workflow_name"] if trs else ""
         recorded_trace_rows.append(trs)
 
     if recording is not None:

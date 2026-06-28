@@ -71,6 +71,25 @@ def read_rows_by_run(db_path: Path, run_id: str) -> list[TraceRow]:
         con.close()
 
 
+def count_agent_spawns(rows) -> int:
+    """Count trace rows that represent an LLM-stage invocation — i.e. the number
+    of agents a run spawned. Each LLM stage writes one row, fan-out partitions
+    each write their own row, and each retry writes one too, so this equals
+    Armature's own `llm_calls = len(store.query_by_run(run_id))`. Excludes
+    `gate` (human pause, no LLM) and `script`/`adapter` (deterministic, no LLM).
+
+    Accepts both TraceRow instances (`.role_type`) and dicts (`['role_type']`),
+    so the live runner (TraceRow) and the concurrency summaries (asdict dicts)
+    share one count path.
+    """
+    n = 0
+    for r in rows:
+        rt = r.role_type if hasattr(r, "role_type") else r.get("role_type")
+        if rt in LLM_ROLE_TYPES:
+            n += 1
+    return n
+
+
 def list_runs(db_path: Path, workflow_name: str) -> list[str]:
     """Run IDs for a workflow, oldest→newest, excluding __loop__ summary rows."""
     con = _connect(db_path)

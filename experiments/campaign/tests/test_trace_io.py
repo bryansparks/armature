@@ -87,3 +87,30 @@ def test_total_tokens_sums_input_and_output(tmp_path):
 
 def test_total_tokens_zero_when_no_db(tmp_path):
     assert trace_io.total_tokens(tmp_path / "nonexistent.sqlite") == 0
+
+
+def _tr(role_type):
+    return trace_io.TraceRow(run_id="r", workflow_name="wf", stage_id="s",
+                              role_type=role_type, model="m", input_tokens=0,
+                              output_tokens=0, latency_ms=1.0, success=True,
+                              output_valid=True, quorum_score=0.5, escalation_count=0)
+
+
+def test_count_agent_spawns_counts_llm_role_rows():
+    """count_agent_spawns counts trace rows whose role_type is an LLM stage
+    (worker/researcher/judge/orchestrator) — one per agent invocation, incl.
+    fan-out partitions and retries. gate/script/adapter rows are excluded."""
+    rows = [_tr("researcher"), _tr("researcher"), _tr("judge"), _tr("gate")]
+    assert trace_io.count_agent_spawns(rows) == 3
+
+
+def test_count_agent_spawns_accepts_dicts_too():
+    """concurrency summaries hold trace rows as dicts (asdict(TraceRow)); the
+    helper must count those the same way."""
+    rows = [{"role_type": "worker"}, {"role_type": "orchestrator"},
+            {"role_type": "script"}, {"role_type": "adapter"}]
+    assert trace_io.count_agent_spawns(rows) == 2
+
+
+def test_count_agent_spawns_empty():
+    assert trace_io.count_agent_spawns([]) == 0

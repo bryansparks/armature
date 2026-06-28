@@ -61,3 +61,47 @@ def test_report_escapes_user_controlled_strings(tmp_path):
     # escaped forms should be present
     assert "&lt;script&gt;" in html
     assert "&lt;b&gt;gap&lt;/b&gt;" in html
+
+
+def _agent_rows():
+    """Three rows across two workflows with agents_run + workflow_name set, so
+    the per-workflow tally table can be rendered + checked."""
+    base = {"phase_id": "p", "lever": "none", "inputs": {}, "exit_code": 0,
+            "hqs_ours": {"authoritative": 0.8, "rolling": 0.8, "dashboard": 0.8,
+                         "feedback": 0.8},
+            "hqs_armature": {"authoritative": 0.8, "rolling": 0.8, "dashboard": 0.8,
+                             "feedback": None},
+            "improve_log": [], "recovery_hqs_ours": None, "spec_diff": "",
+            "memory_mode": None}
+    return [
+        dict(base, run_id="r1", workflow_name="wf-a", agents_run=4),
+        dict(base, run_id="r2", workflow_name="wf-a", agents_run=6),
+        dict(base, run_id="r3", workflow_name="wf-b", agents_run=10),
+    ]
+
+
+def test_report_renders_per_workflow_agent_tally(tmp_path):
+    out = report.render_report(
+        campaign={"name": "demo", "git_sha": "abc", "totals": {"runs": 3},
+                  "agents_per_workflow": {"wf-a": {"runs": 2, "agents": 10},
+                                          "wf-b": {"runs": 1, "agents": 10}},
+                  "grand_total_agents": 20},
+        rows=_agent_rows(),
+        verdicts=[("hqs_formula_consistency", "PASS", {})],
+        gaps=[],
+        reproduce_cmd="python run.py x --replay r",
+        out_path=tmp_path / "report.html")
+    html = out.read_text()
+    assert "Agents run per workflow" in html
+    assert "wf-a" in html and "wf-b" in html
+    # grand total row present with the summed count
+    assert "grand total" in html.lower()
+    assert "20" in html
+
+
+def test_report_omits_agent_tally_when_no_data(tmp_path):
+    out = report.render_report(
+        campaign={"name": "demo", "git_sha": "abc", "totals": {"runs": 1}},
+        rows=_rows(), verdicts=[], gaps=[], reproduce_cmd="x",
+        out_path=tmp_path / "report.html")
+    assert "Agents run per workflow" not in out.read_text()
