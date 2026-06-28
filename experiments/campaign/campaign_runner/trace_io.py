@@ -10,6 +10,16 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+# Role types that correspond to an LLM-stage invocation. Each such invocation
+# writes exactly one trace row (fan-out partitions each write their own row,
+# and each retry writes one too), so counting rows with these role types == the
+# number of agents a run spawned. This mirrors Armature's own
+# `llm_calls = len(store.query_by_run(run_id))` (armature/loop/runner.py).
+# Excludes `gate` (human pause, no LLM) and `script`/`adapter` (deterministic,
+# no LLM). The shared home for this set — runner/concurrency/soak_verdicts/report
+# all import it from here.
+LLM_ROLE_TYPES = {"worker", "researcher", "judge", "orchestrator"}
+
 
 @dataclass
 class TraceRow:

@@ -9,9 +9,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-PASS, FAIL, INCON = "PASS", "FAIL", "INCONCLUSIVE"
+from campaign_runner.trace_io import LLM_ROLE_TYPES
 
-LLM_ROLE_TYPES = {"worker", "researcher", "judge", "orchestrator"}
+PASS, FAIL, INCON = "PASS", "FAIL", "INCONCLUSIVE"
 
 
 def _soak_rows(rows):
