@@ -65,7 +65,7 @@ the engine's behavior tracks that movement. Four hypotheses:
 | H1 | **HQS tracks input difficulty** | `input_difficulty_ramp` (easy → hard) | HQS monotonically falls as inputs get harder (negative Spearman correlation, p ≤ threshold). HQS is not noise — it responds to the task. |
 | H2 | **Self-improve fires and recovers** | `model_tier_degradation` (break the judge's model tier so its LLM call errors → a failure trace → HQS drops) | When HQS drops below target, `armature improve` fires, edits the spec, and a recovery probe shows HQS returning above target. The improvement loop is closed and effective. (`spec_corruption` also exists as a lever, but did not reliably drop HQS on the research-brief workflow — `model_tier_degradation` does, deterministically, so the repaired plans use it for H2.) |
 | H3 | **HQS formula consistency** | (cross-cutting) | The four HQS channels Armature emits (authoritative, rolling, dashboard, feedback) agree with an independent recomputation from raw trace rows. No formula has drifted. |
-| H4 | **Memory + carry-forward helps** | cold vs warm runs | Warm runs (memory enabled) beat their paired cold runs on HQS. Memory carries useful context forward. |
+| H4 | **Memory + carry-forward helps** | cold vs warm runs (`memory_cold_warm`) | Warm runs beat their paired cold runs on the judge-coverage signal (`quorum_ours` — mean judge quorum, not aggregate HQS, whose latency term masked the memory effect), with the gap statistically real (bootstrap CI). Model-failed runs (a self-contradictory judge, or an empty researcher briefing) are excluded so the verdict is about memory, not model noise. |
 
 Each verdict returns **PASS**, **FAIL**, or **INCONCLUSIVE**. INCONCLUSIVE is
 not a quiet pass — it means the run did not exercise the signal (too few data
@@ -74,8 +74,7 @@ could not settle the claim, which is itself useful to know.
 
 The example plans: `plans/h1-five-level.yml` (H1–H3 across five difficulty
 levels), `plans/hqdynamics.yml` (H1–H3 with a difficulty ramp + model-tier
-degradation; H4 runs but is INCONCLUSIVE here since it uses no memory lever),
-`plans/cold_vs_warm.yml` (H4, the only plan that exercises the memory lever).
+degradation — declares only H1/H2/H3; H4 is **not emitted** for it), `plans/cold_vs_warm.yml` (H4, the only plan that exercises the memory lever).
 
 ### 3b. The soak / endurance test
 
@@ -89,12 +88,12 @@ then checks the engine stayed up and clean. Eight reliability verdicts:
 |---------|--------------------------|
 | `no_unclean_exits` | Every run exited 0. No crashes over hundreds of iterations. |
 | `trace_db_integrity` | `PRAGMA integrity_check` is `ok`; no NULL run_ids. The trace DB is uncorrupted. |
-| `no_row_loss_under_concurrency` | Overlapping concurrent writes lost no rows: distinct real run_ids == workers × reps, zero SQLITE_BUSY, all exits 0. |
+| `no_row_loss_under_concurrency` | Overlapping concurrent writes lost no rows: a clean shortfall (fewer reps than planned but zero SQLITE_BUSY) is INCONCLUSIVE — a budget stop or a per-rep model failure is not row loss. FAILs only when SQLITE_BUSY actually dropped rows. |
 | `hqs_stability_no_drift` | HQS does not drift across the run (mean of the first quartile ≈ mean of the last quartile). |
 | `wallclock_stability` | Per-run latency has no upward trend (slope ≤ threshold). No latency creep. |
 | `checkpoint_resume_correctness` | Every `--force` rerun produced a distinct run_id (no stale-checkpoint attribution). |
 | `budget_obeyed` | The run respected its `max_runs` budget. |
-| `agent_spawn_count` | The soak actually spawned the expected ~tens of thousands of agents (≥ min_total). Scale was real. |
+| `agent_spawn_count` | The soak spawned the expected scale of agents (≥ `min_total`). Budget-aware: a shortfall where the run stopped on the wallclock budget *before* the run cap is INCONCLUSIVE, not a failure — a genuine full-cap under-spawn still FAILs. |
 
 The soak plan is `plans/soak.yml` (full, ~500 runs) with a reduced
 `plans/soak-smoke.yml` for minute-scale smoke checks. Memory-subsystem
@@ -120,8 +119,43 @@ What a green run does *not* prove: correctness of any workflow's actual output
 or anything about workflows not in the plan. The claims are scoped to what the
 plan exercised — and the report says exactly what that was.
 
-## 5. Where to look next
+## 5. Soak-test-finding refinements (#117–120)
 
+The first full soak + replay pass surfaced four follow-on findings, all fixed on
+`feat/soak-fixes-113-116` and pushed to PR #5. They are part of what the harness
+checks now:
+
+- **#117 — plan-declared verdicts only.** `all_verdicts` runs only the verdicts a
+  plan declares (`None` = undeclared), plus the always-on `provider_health`. Stops
+  spurious INCONCLUSIVE on undeclared verdicts (e.g. hqdynamics emitting an H4 it
+  never claimed) dragging an otherwise-PASS report to INCONCLUSIVE.
+- **#118 — H4 excludes model-failed runs.** A replay-deterministic per-run
+  `model_failed` flag (shared `hqs.is_model_failed`: a self-contradictory judge
+  — accept true *and* confidence < 0.5 — or an empty researcher briefing < 40 chars)
+  is excluded from the H4 cold/warm comparison, and the verdict records
+  `n_excluded_cold` / `n_excluded_warm`. The negative becomes about memory, not
+  model noise.
+- **#119 — `agent_spawn_count` is budget-aware.** A shortfall with the run stopped
+  on the wallclock budget *before* the run cap is INCONCLUSIVE; only a full-cap
+  under-spawn FAILs.
+- **#120 — replay reconstructs `memory_mode`.** The recording now forward-captures
+  per-run `memory_mode` (cold/warm); old recordings derive it by rep parity via a
+  single shared `fault._fresh_for_memory` convention (live + replay cannot drift).
+  This makes the H4 cold/warm split reproducible from a recording at zero cost,
+  where before only a live run could produce it.
+
+For our honest assessment of the latest run — including the deficiencies these
+refinements do *not* yet close (the OpenRouter-credit block on #118's end-to-end
+live demo; the H4 judge ceiling with no headroom; the synth-fanout-mid planner
+guided_json failures) — see
+**[`docs/RESULTS-AND-LIMITATIONS.md`](RESULTS-AND-LIMITATIONS.md)**, which also
+gives the zero-cost replay commands to re-derive every verdict yourself.
+
+## 6. Where to look next
+
+- **`docs/RESULTS-AND-LIMITATIONS.md`** — our honest assessment of the latest run:
+  what each campaign verdicted, what passed, what FAILED/INCONCLUSIVE, and the
+  open deficiencies. Start here if you want the *results*, not the design.
 - **`docs/READING-REPORTS.md`** — how to read the `report.html` and the unified
   `index.html`: every section, every verdict status, and the JSON artifacts
   underneath.

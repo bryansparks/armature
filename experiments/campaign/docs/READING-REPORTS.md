@@ -94,12 +94,24 @@ back. "(no firings recorded)" means H2 could not be exercised (→ INCONCLUSIVE)
 
 ### 3.7 Soak metrics
 Only on soak reports: total agent spawns and the minimum expected. Confirms
-the run was real scale, not a few calls.
+the run was real scale, not a few calls. The `agent_spawn_count` verdict is
+**budget-aware** (#119): if the run stopped on the wallclock budget before the
+run cap, a shortfall below `min_total` is INCONCLUSIVE (a budget stop, not an
+under-spawn); only a full-cap under-spawn FAILs. Likewise
+`no_row_loss_under_concurrency` (#116): a clean shortfall (fewer reps than
+planned but zero SQLITE_BUSY) is INCONCLUSIVE — a budget stop or a per-rep
+model failure is not row loss; it FAILs only when SQLITE_BUSY actually dropped
+rows.
 
 ### 3.8 Verdict table
 The core. One row per verdict: **Hypothesis** (name), **Result** (PASS/FAIL/
 INCONCLUSIVE, color-coded), **Detail** (the numbers the verdict was decided on).
-This is where you go to see *why* Overall is what it is.
+This is where you go to see *why* Overall is what it is. Only the verdicts the
+plan declares appear here (#117) — a plan that declares H1/H2/H3 will not show
+an H4 row — plus the always-on `provider_health`. For H4, the detail records
+`n_excluded_cold` / `n_excluded_warm`: how many model-failed runs (a
+self-contradictory judge or an empty researcher briefing) were excluded from
+each arm (#118), so a FAIL is a finding about memory, not model noise.
 
 ### 3.9 Observability gaps
 What the harness wanted to measure but couldn't (e.g. "budget: stop before
