@@ -3,7 +3,7 @@ from pathlib import Path
 import jinja2
 from jinja2 import Environment, BaseLoader
 from ruamel.yaml import YAML
-from armature.spec.models import CompiledAgent, HarnessSpec, SkillDef
+from armature.spec.models import CompiledAgent, HarnessSpec, SkillDef, ToolSafetyRule
 
 _log = logging.getLogger(__name__)
 
@@ -66,6 +66,39 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     return spec
 
 
+def _cond_key(rule: ToolSafetyRule) -> tuple:
+    """Identity for dedup: (tool, condition). None condition = unconditional.
+
+    model_dump_json() gives a hashable, deterministic string so conditional
+    rules can live in a set (model_dump() returns a dict, which is unhashable).
+    """
+    cond = rule.condition.model_dump_json() if rule.condition else None
+    return (rule.tool, cond)
+
+
+def _merge_agent_safety(spec: HarnessSpec, bundle: CompiledAgent) -> None:
+    """Merge the bundle's block rules into spec.safety_rules.
+
+    Approach 2 (agent block rules are a non-overridable floor):
+      - workflow `allow` on a blocked tool is dropped (it would short-circuit
+        past the block; safety evaluation is first-match-wins in list order).
+      - agent block rules are prepended so they fire first.
+      - dedup by (tool, condition) so an existing unconditional workflow block
+        isn't duplicated, and so multiple references to the same agent are
+        idempotent. A condition-scoped workflow block coexists with the agent's
+        unconditional block (the unconditional one dominates, ordered first).
+    """
+    agent_blocks = [r for r in bundle.safety_rules if r.action == "block"]
+    if not agent_blocks:
+        return
+    blocked = {r.tool for r in agent_blocks}
+    kept = [r for r in spec.safety_rules
+            if not (r.tool in blocked and r.action == "allow")]
+    existing = {_cond_key(r) for r in kept if r.action == "block"}
+    new = [r for r in agent_blocks if _cond_key(r) not in existing]
+    spec.safety_rules = new + kept
+
+
 def _resolve_agent_references(spec: HarnessSpec, base_dir: Path) -> None:
     """Resolve agent_library references in each stage, merging role + skills in place.
 
@@ -120,3 +153,4 @@ def _resolve_agent_references(spec: HarnessSpec, base_dir: Path) -> None:
 
         stage.role = bundle.role
         stage.agent = None
+        _merge_agent_safety(spec, bundle)
