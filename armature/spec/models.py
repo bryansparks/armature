@@ -251,9 +251,12 @@ class CompiledAgent(BaseModel):
 
     Defines a reusable role and an optional set of skills that are merged
     into the referencing spec's skill_library when the agent is resolved.
+    safety_rules are merged into the referencing spec's safety_rules at load
+    (agent block rules are a non-overridable floor).
     """
     role: Role
     skill_library: dict[str, SkillDef] = Field(default_factory=dict)
+    safety_rules: list[ToolSafetyRule] = Field(default_factory=list)
 
 
 class AdapterSchedule(BaseModel):
