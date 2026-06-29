@@ -139,7 +139,7 @@ class SafetyCondition(BaseModel):
 
 class ToolSafetyRule(BaseModel):
     tool: str
-    condition: SafetyCondition
+    condition: SafetyCondition | None = None  # None = applies to every call of this tool
     action: Literal["block", "warn", "log", "require_approval", "allow"]
     message: str = ""
 
