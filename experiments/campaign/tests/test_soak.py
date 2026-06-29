@@ -461,6 +461,55 @@ def test_verdict_agent_spawn_count(tmp_path):
     assert status2 == "FAIL"
 
 
+def _agent_spawn_db(tmp_path, n_agents):
+    import sqlite3
+    db = tmp_path / "traces.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    for i in range(n_agents):
+        con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp) VALUES (?,?,?,?,?,?)",
+                    (f"r{i}", "wf", "s", "worker", "m", "2026-01-01T00:00:01"))
+    con.commit(); con.close()
+    return db
+
+
+def test_verdict_agent_spawn_count_budget_stop_is_inconclusive(tmp_path):
+    # total < min_total AND n_main_runs < max_runs -> INCONCLUSIVE (budget stop)
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(5)]  # n_main_runs = 5
+    th = {"min_total": 100, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "INCONCLUSIVE")
+    assert "budget stop" in detail["note"]
+    assert detail["n_main_runs"] == 5
+    assert detail["max_runs"] == 10
+    assert detail["total_agents"] == 10
+
+
+def test_verdict_agent_spawn_count_full_cap_under_spawn_fails(tmp_path):
+    # total < min_total AND n_main_runs >= max_runs -> FAIL (ran full cap, still under)
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(10)]  # n_main_runs = 10 == max_runs
+    th = {"min_total": 100, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "FAIL")
+    assert detail["n_main_runs"] == 10
+    assert detail["max_runs"] == 10
+
+
+def test_verdict_agent_spawn_count_passes_when_total_meets_floor(tmp_path):
+    # total >= min_total -> PASS (unchanged), even with max_runs threaded
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(3)]  # n_main_runs irrelevant when total meets floor
+    th = {"min_total": 10, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "PASS")
+    assert detail["total_agents"] == 10
+
+
 def test_all_soak_verdicts_dispatcher(tmp_path):
     from campaign_runner import soak_verdicts as sv
     from campaign_runner.plan import load_plan

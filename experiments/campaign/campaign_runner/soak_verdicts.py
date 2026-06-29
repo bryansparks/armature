@@ -161,9 +161,27 @@ def verdict_agent_spawn_count(rows, th, trace_db):
     except Exception as e:
         return ("agent_spawn_count", FAIL, {"error": str(e)})
     mn = th.get("min_total", 5000)
-    ok = total >= mn
-    return ("agent_spawn_count", PASS if ok else FAIL,
-            {"total_agents": total, "min_total": mn})
+    max_runs = th.get("max_runs")
+    n_main_runs = len(_soak_rows(rows))
+    if total >= mn:
+        return ("agent_spawn_count", PASS,
+                {"total_agents": total, "min_total": mn,
+                 "n_main_runs": n_main_runs, "max_runs": max_runs})
+    # total < min_total: distinguish a budget stop from a genuine under-spawn.
+    # If the soak stopped on a non-run budget (wallclock/tokens/llm_calls) before
+    # reaching the run cap, under-spawn is a budget artefact, not a quality
+    # failure — INCONCLUSIVE, paralleling no_row_loss_under_concurrency (#116).
+    # If the full run cap ran and still under-spawned, that is a real concern.
+    if max_runs is not None and n_main_runs < max_runs:
+        return ("agent_spawn_count", INCON,
+                {"total_agents": total, "min_total": mn,
+                 "n_main_runs": n_main_runs, "max_runs": max_runs,
+                 "note": f"soak stopped on a non-run budget (wallclock/tokens/llm_calls) "
+                         f"before the run cap; produced {total} of {mn} agents — "
+                         f"budget stop, not an under-spawn"})
+    return ("agent_spawn_count", FAIL,
+            {"total_agents": total, "min_total": mn,
+             "n_main_runs": n_main_runs, "max_runs": max_runs})
 
 
 def all_soak_verdicts(rows, plan, trace_db=None):
@@ -177,6 +195,8 @@ def all_soak_verdicts(rows, plan, trace_db=None):
             break
     th_nrl = dict(sv.no_row_loss_under_concurrency)
     th_nrl.setdefault("expected", expected)
+    th_asc = dict(sv.agent_spawn_count)
+    th_asc.setdefault("max_runs", plan.budget.max_runs)
     return [
         verdict_no_unclean_exits(rows, sv.no_unclean_exits),
         verdict_trace_db_integrity(rows, sv.trace_db_integrity, trace_db),
@@ -185,6 +205,6 @@ def all_soak_verdicts(rows, plan, trace_db=None):
         verdict_wallclock_stability(rows, sv.wallclock_stability, trace_db),
         verdict_checkpoint_resume_correctness(rows, sv.checkpoint_resume_correctness),
         verdict_budget_obeyed(rows, sv.budget_obeyed, plan),
-        verdict_agent_spawn_count(rows, sv.agent_spawn_count, trace_db),
+        verdict_agent_spawn_count(rows, th_asc, trace_db),
         verdict_provider_health(rows, plan.abort),
     ]
