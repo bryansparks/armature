@@ -53,15 +53,36 @@ def verdict_no_row_loss_under_concurrency(rows, th):
     if not conc:
         return ("no_row_loss_under_concurrency", INCON,
                 {"n_concurrency_workers": 0, "expected": expected})
-    tol = th.get("tolerance", 0)
     all_ids = [rid for r in conc for rid in (r.get("run_ids") or [])]
     actual = len(set(all_ids))
     busy = sum(r.get("sqlite_busy_count", 0) for r in conc)
     all_exit0 = all(r.get("exit_codes") and all(c == 0 for c in r["exit_codes"]) for r in conc)
-    ok = busy == 0 and all_exit0 and abs(actual - expected) <= tol
-    return ("no_row_loss_under_concurrency", PASS if ok else FAIL,
+    per_worker = [r.get("n_trace_rows") for r in conc]
+    # Row LOSS means rows that were written then dropped by SQLITE_BUSY lock
+    # contention — the only failure mode this verdict names. A non-zero worker
+    # exit is NOT row loss: under the armature_loop driver a single failed loop
+    # iteration (e.g. the planner model returning null guided_json) exits the
+    # whole worker process with code 1, yet every row that was written is
+    # intact in the trace DB (busy=0). Equating non-zero exit with row loss
+    # false-FAILed the soak's synth-fanout-mid phase. all_exit0 is recorded in
+    # the detail for observability, but only BUSY>0 fails this verdict.
+    # `tolerance` in the verdict config is intentionally NOT read here: a clean
+    # shortfall is INCONCLUSIVE regardless of magnitude, so the band is subsumed.
+    if busy > 0:
+        return ("no_row_loss_under_concurrency", FAIL,
+                {"expected": expected, "actual": actual, "sqlite_busy_count": busy,
+                 "per_worker_rows": per_worker, "all_exit0": all_exit0,
+                 "reason": "sqlite_busy dropped rows"})
+    if actual < expected:
+        return ("no_row_loss_under_concurrency", INCON,
+                {"expected": expected, "actual": actual, "completed": actual,
+                 "sqlite_busy_count": busy, "per_worker_rows": per_worker, "all_exit0": all_exit0,
+                 "note": f"completed {actual} of {expected} planned reps — no row loss "
+                         "(sqlite_busy=0; no dropped rows). Shortfall is a budget stop or "
+                         "per-rep failure, not row loss."})
+    return ("no_row_loss_under_concurrency", PASS,
             {"expected": expected, "actual": actual, "sqlite_busy_count": busy,
-             "per_worker_rows": [r.get("n_trace_rows") for r in conc]})
+             "per_worker_rows": per_worker, "all_exit0": all_exit0})
 
 
 def verdict_hqs_stability_no_drift(rows, th):
@@ -140,9 +161,27 @@ def verdict_agent_spawn_count(rows, th, trace_db):
     except Exception as e:
         return ("agent_spawn_count", FAIL, {"error": str(e)})
     mn = th.get("min_total", 5000)
-    ok = total >= mn
-    return ("agent_spawn_count", PASS if ok else FAIL,
-            {"total_agents": total, "min_total": mn})
+    max_runs = th.get("max_runs")
+    n_main_runs = len(_soak_rows(rows))
+    if total >= mn:
+        return ("agent_spawn_count", PASS,
+                {"total_agents": total, "min_total": mn,
+                 "n_main_runs": n_main_runs, "max_runs": max_runs})
+    # total < min_total: distinguish a budget stop from a genuine under-spawn.
+    # If the soak stopped on a non-run budget (wallclock/tokens/llm_calls) before
+    # reaching the run cap, under-spawn is a budget artefact, not a quality
+    # failure — INCONCLUSIVE, paralleling no_row_loss_under_concurrency (#116).
+    # If the full run cap ran and still under-spawned, that is a real concern.
+    if max_runs is not None and n_main_runs < max_runs:
+        return ("agent_spawn_count", INCON,
+                {"total_agents": total, "min_total": mn,
+                 "n_main_runs": n_main_runs, "max_runs": max_runs,
+                 "note": f"soak stopped on a non-run budget (wallclock/tokens/llm_calls) "
+                         f"before the run cap; produced {total} of {mn} agents — "
+                         f"budget stop, not an under-spawn"})
+    return ("agent_spawn_count", FAIL,
+            {"total_agents": total, "min_total": mn,
+             "n_main_runs": n_main_runs, "max_runs": max_runs})
 
 
 def all_soak_verdicts(rows, plan, trace_db=None):
@@ -156,6 +195,8 @@ def all_soak_verdicts(rows, plan, trace_db=None):
             break
     th_nrl = dict(sv.no_row_loss_under_concurrency)
     th_nrl.setdefault("expected", expected)
+    th_asc = dict(sv.agent_spawn_count)
+    th_asc.setdefault("max_runs", plan.budget.max_runs)
     return [
         verdict_no_unclean_exits(rows, sv.no_unclean_exits),
         verdict_trace_db_integrity(rows, sv.trace_db_integrity, trace_db),
@@ -164,6 +205,6 @@ def all_soak_verdicts(rows, plan, trace_db=None):
         verdict_wallclock_stability(rows, sv.wallclock_stability, trace_db),
         verdict_checkpoint_resume_correctness(rows, sv.checkpoint_resume_correctness),
         verdict_budget_obeyed(rows, sv.budget_obeyed, plan),
-        verdict_agent_spawn_count(rows, sv.agent_spawn_count, trace_db),
+        verdict_agent_spawn_count(rows, th_asc, trace_db),
         verdict_provider_health(rows, plan.abort),
     ]

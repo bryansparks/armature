@@ -125,12 +125,12 @@ Each function returns `(name, status, detail)` where status ∈ {PASS, FAIL, INC
 |---|---|---|
 | `no_unclean_exits` | `n_unclean == allowed_failures` (0) | `n_runs`, `n_unclean`, `bad_run_ids` |
 | `trace_db_integrity` | DB opens; `PRAGMA integrity_check` ok; 0 rows with NULL `run_id` | `integrity_check`, `n_null_run_id`, `n_rows` |
-| `no_row_loss_under_concurrency` | `actual_rows == expected_rows` (tolerance 0) | `expected`, `actual`, `sqlite_busy_count`, `per_worker_rows` |
+| `no_row_loss_under_concurrency` | FAIL only on `sqlite_busy_count > 0` (definitive row loss); a clean shortfall (actual < expected, busy = 0) → INCONCLUSIVE (budget stop or per-rep model failure, not row loss); full reps + busy = 0 → PASS (#116) | `expected`, `actual`, `sqlite_busy_count`, `all_exit0`, `per_worker_rows` |
 | `hqs_stability_no_drift` | abs(mean HQS first-quartile − last-quartile) ≤ 0.08 | `q1_mean`, `q4_mean`, `delta` |
 | `wallclock_stability` | per-run latency OLS slope ≤ 5.0 ms/run | `slope_ms_per_run`, `n` |
 | `checkpoint_resume_correctness` | every `--force` rerun has a distinct `run_id` (no dups) | `n_runs`, `n_distinct_run_ids`, `dup_run_ids` |
 | `budget_obeyed` | campaign stopped via budget, not crash; `len(rows) <= max_runs` | `n_rows`, `max_runs`, `stop_reason` |
-| `agent_spawn_count` | total agents spawned ≥ `min_total` (5000) | `total_agents`, `min_total` |
+| `agent_spawn_count` | `total ≥ min_total` → PASS; `total < min_total AND n_main_runs < max_runs` → INCONCLUSIVE (wallclock-budget stop, not an under-spawn); `total < min_total AND n_main_runs ≥ max_runs` → FAIL (full cap, genuine under-spawn) (#119) | `total_agents`, `min_total`, `n_main_runs`, `max_runs` |
 
 Agent-spawn count = sum over rows of trace rows for that `run_id` where `role_type` is an LLM stage (`worker`/`researcher`/`judge`/`orchestrator`), **excluding** `tool_call`/`adapter`/`gate` stages — i.e. real LLM agent calls, derived from the trace DB, not estimated.
 

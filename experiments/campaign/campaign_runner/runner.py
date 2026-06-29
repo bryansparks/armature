@@ -85,6 +85,13 @@ class CampaignRunner:
                       workflow_name: str = "") -> dict:
         rows = trace_io.read_rows_by_run(self.sb.trace_db, run_id) if run_id else []
         agents_run = trace_io.count_agent_spawns(rows)
+        quorum_ours = hqs.avg_quorum(rows)
+        # model_failed: degenerate judge/researcher output (self-contradictory
+        # judge verdict or empty researcher briefing). Computed from the run's
+        # trace rows via the shared hqs.is_model_failed helper so replay()
+        # reproduces it deterministically from the recorded rows. verdict_h4
+        # excludes these so it measures memory coverage, not model reliability.
+        model_failed = hqs.is_model_failed(rows) if rows else False
         # workflow_name: prefer the phase's spec name (passed in); fall back to the
         # trace rows' workflow_name (the name armature recorded for the run).
         wf = workflow_name or (rows[0].workflow_name if rows else "")
@@ -130,7 +137,9 @@ class CampaignRunner:
                 "agents_run": agents_run, "workflow_name": wf,
                 "account_scoped": bool(acct),
                 "account_scoped_kind": acct[0].error_kind if acct else None,
-                "account_scoped_model": acct[0].model if acct else None}
+                "account_scoped_model": acct[0].model if acct else None,
+                "quorum_ours": quorum_ours,
+                "model_failed": model_failed}
 
     def _abort_k(self) -> int:
         return self.plan.abort.on_consecutive_account_errors if self.plan.abort else 3
@@ -205,9 +214,15 @@ class CampaignRunner:
                 spec_before = ws.read_text()
                 inputs = fault.apply_lever(phase, phase_index=pi, rep=rep, corpus=corpus,
                                            working_spec=ws, rng_seed=1000)
+                # Resolve memory_mode once from the spec the lever just mutated
+                # (ground truth) and forward-capture it in the recording meta so
+                # zero-cost replay can restore the H4 cold/warm split without
+                # re-inspecting a spec it never ran. Older recordings that predate
+                # this field are derived by rep parity in replay() instead.
+                mm = fault.memory_mode(ws)
                 out = self.drv.run(ws, inputs, workflow_name=wf_name,
                                    meta={"phase_id": phase.id, "lever": phase.lever,
-                                         "inputs": inputs})
+                                         "inputs": inputs, "memory_mode": mm})
                 llm_calls += 1
                 improve_log, recovery, spec_diff = [], None, ""
                 if phase.self_improve and phase.self_improve.enabled:
@@ -217,7 +232,7 @@ class CampaignRunner:
                     spec_diff = self._diff(spec_before, ws.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
-                                               spec_diff, fault.memory_mode(ws),
+                                               spec_diff, mm,
                                                run_stderr=out.stderr, gaps=gaps,
                                                hqs_arm=out.hqs_armature,
                                                workflow_name=wf_name))
@@ -320,6 +335,10 @@ class CampaignRunner:
         # instead of silently dropping to INCONCLUSIVE in a fresh replay
         # sandbox that never ran Armature.
         all_trace_rows: list[dict] = []
+        # Per-phase main-run ordinal so the cold/warm alternation can be
+        # derived for OLD recordings whose meta predates forward-captured
+        # memory_mode (cold = even rep, warm = odd rep — fault.memory_mode_for).
+        phase_rep: dict[str, int] = {}
         for r in rec.replay():
             all_trace_rows.extend(r.get("trace_rows") or [])
             if r.get("tag") == "concurrency":
@@ -348,8 +367,17 @@ class CampaignRunner:
             # Restore phase context from the recording's meta so replayed rows
             # carry the same lever/inputs the live rows did — verdicts read these.
             # Fall back to "replay"/{} for older recordings that predate meta.
+            pid = meta.get("phase_id", "replay")
+            rep = phase_rep.get(pid, 0)
+            phase_rep[pid] = rep + 1
+            # memory_mode: prefer the forward-captured ground truth in meta; for
+            # older recordings that lack it, derive cold/warm by rep parity from
+            # the lever + inputs (fault.memory_mode_for) so H4's split reproduces.
+            mm = meta.get("memory_mode")
+            if mm is None:
+                mm = fault.memory_mode_for(meta.get("lever"), meta.get("inputs", {}), rep)
             rows.append({"run_id": r["run_id"],
-                         "phase_id": meta.get("phase_id", "replay"),
+                         "phase_id": pid,
                          "lever": meta.get("lever", "replay"),
                          "inputs": meta.get("inputs", {}),
                          "exit_code": r["exit_code"],
@@ -358,12 +386,14 @@ class CampaignRunner:
                                           "rolling": None, "dashboard": arm_dash,
                                           "feedback": None},
                          "improve_log": [], "recovery_hqs_ours": None,
-                         "spec_diff": "", "memory_mode": None,
+                         "spec_diff": "", "memory_mode": mm,
                          "agents_run": trace_io.count_agent_spawns(tr),
                          "workflow_name": tr[0].workflow_name if tr else "",
                          "account_scoped": bool(acct),
                          "account_scoped_kind": acct[0].error_kind if acct else None,
-                         "account_scoped_model": acct[0].model if acct else None})
+                         "account_scoped_model": acct[0].model if acct else None,
+                         "quorum_ours": hqs.avg_quorum(tr),
+                         "model_failed": hqs.is_model_failed(tr) if tr else False})
         self._reconstruct_trace_db(self.sb.trace_db, all_trace_rows)
         self._compute_abort(rows)
         return self._finalize(rows, [])
@@ -382,12 +412,14 @@ class CampaignRunner:
             db_path.unlink()
         if not trace_rows:
             return
-        # Backward compat: older recordings predate the error_kind field on
-        # TraceRow, so their asdict dicts lack the key. The named-param INSERT
-        # below binds :error_kind, so normalize missing keys to None rather
-        # than forcing every old recording to be re-captured.
+        # Backward compat: older recordings predate the error_kind and
+        # outputs_json fields on TraceRow, so their asdict dicts lack the keys.
+        # The named-param INSERT below binds :error_kind / :outputs_json, so
+        # normalize missing keys to None rather than forcing every old recording
+        # to be re-captured.
         for r in trace_rows:
             r.setdefault("error_kind", None)
+            r.setdefault("outputs_json", None)
         con = sqlite3.connect(str(db_path))
         try:
             con.execute(
@@ -396,14 +428,16 @@ class CampaignRunner:
                 "role_type TEXT, model TEXT, input_tokens INTEGER, "
                 "output_tokens INTEGER, latency_ms REAL, success INTEGER, "
                 "output_valid INTEGER, quorum_score REAL, escalation_count INTEGER, "
-                "error_kind TEXT)")
+                "error_kind TEXT, outputs_json TEXT)")
             con.executemany(
                 "INSERT INTO traces (run_id, workflow_name, stage_id, role_type, "
                 "model, input_tokens, output_tokens, latency_ms, success, "
-                "output_valid, quorum_score, escalation_count, error_kind) "
+                "output_valid, quorum_score, escalation_count, error_kind, "
+                "outputs_json) "
                 "VALUES (:run_id, :workflow_name, :stage_id, :role_type, :model, "
                 ":input_tokens, :output_tokens, :latency_ms, :success, "
-                ":output_valid, :quorum_score, :escalation_count, :error_kind)",
+                ":output_valid, :quorum_score, :escalation_count, :error_kind, "
+                ":outputs_json)",
                 trace_rows)
             con.commit()
         finally:

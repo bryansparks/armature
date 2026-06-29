@@ -25,14 +25,16 @@ def _count_rows(db: Path) -> int:
 
 
 def _new_run_ids(db: Path, before: int) -> list[str]:
-    """Return run_ids inserted after `before` rows existed (by row id order),
-    excluding loop-driver summary rows. `armature loop` writes one __loop__
-    trace row per session (LoopRunner._write_summary, run_id=session_id) — that
-    is loop control, not a real run, so it must not be counted as a distinct
-    run by no_row_loss_under_concurrency. The slice stays on the full ordered
-    list (so it stays aligned with the `before` row count, since every trace
-    row carries a non-null run_id) and __loop__ rows are filtered out of the
-    new-rows slice only."""
+    """Return UNIQUE run_ids inserted after `before` rows existed (by row id
+    order), excluding loop-driver summary rows. `armature loop` writes one
+    __loop__ trace row per session (LoopRunner._write_summary, run_id=session_id)
+    — loop control, not a real run, so it must not be counted as a distinct run.
+
+    Each run_id that wrote N trace rows appears N times in the raw row list; we
+    return each run_id ONCE (first appearance) so run_workers does not re-read a
+    run's rows once per row and inflate agents_run (~6× on synth-fanout-mid).
+    The slice stays anchored to `before` on the full ordered list (every trace
+    row carries a non-null run_id), then dedupes the new-rows slice."""
     if not Path(db).exists():
         return []
     try:
@@ -40,9 +42,17 @@ def _new_run_ids(db: Path, before: int) -> list[str]:
         all_rows = con.execute(
             "SELECT run_id, stage_id FROM traces WHERE run_id IS NOT NULL ORDER BY id").fetchall()
         con.close()
-        return [r[0] for r in all_rows[before:] if r[1] != "__loop__"]
     except Exception:
         return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for rid, stage_id in all_rows[before:]:
+        if stage_id == "__loop__":
+            continue
+        if rid not in seen:
+            seen.add(rid)
+            out.append(rid)
+    return out
 
 
 def run_workers(sb, spec_path: Path, conc, phase_id: str, recording=None) -> list[dict]:

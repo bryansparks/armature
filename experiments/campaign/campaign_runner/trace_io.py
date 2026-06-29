@@ -36,13 +36,12 @@ class TraceRow:
     quorum_score: float | None
     escalation_count: int
     error_kind: str | None = None
-
-
-_SELECT = (
-    "SELECT run_id, workflow_name, stage_id, role_type, model, "
-    "input_tokens, output_tokens, latency_ms, success, output_valid, "
-    "quorum_score, escalation_count, error_kind FROM traces"
-)
+    # The model's stringified outputs JSON. The trace DB stores this column
+    # (armature/state/traces.py); we read it so the model_failed detector
+    # (hqs.is_model_failed) can inspect judge accept/confidence and researcher
+    # content without a second query. Default "{}" for backward compat with
+    # older recordings whose captured trace-row dicts predate this field.
+    outputs_json: str = "{}"
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -62,13 +61,26 @@ def _row_to_trace(r: sqlite3.Row) -> TraceRow:
         quorum_score=r["quorum_score"],
         escalation_count=int(r["escalation_count"] or 0),
         error_kind=(r["error_kind"] if "error_kind" in keys and r["error_kind"] else None),
+        outputs_json=(r["outputs_json"] if "outputs_json" in keys and r["outputs_json"] else "{}"),
     )
 
 
 def read_rows_by_run(db_path: Path, run_id: str) -> list[TraceRow]:
     con = _connect(db_path)
     try:
-        cur = con.execute(_SELECT + " WHERE run_id = ? ORDER BY timestamp ASC", (run_id,))
+        # Build the SELECT from the columns this DB actually has. The armature
+        # trace DB always carries error_kind + outputs_json, but older test
+        # fakes / recordings may predate one of them — guard so a missing column
+        # doesn't crash the read (the row mapper defaults absent cols).
+        have = {row[1] for row in con.execute("PRAGMA table_info(traces)").fetchall()}
+        cols = ["run_id", "workflow_name", "stage_id", "role_type", "model",
+                "input_tokens", "output_tokens", "latency_ms", "success",
+                "output_valid", "quorum_score", "escalation_count"]
+        for opt in ("error_kind", "outputs_json"):
+            if opt in have:
+                cols.append(opt)
+        sql = "SELECT " + ", ".join(cols) + " FROM traces WHERE run_id = ? ORDER BY timestamp ASC"
+        cur = con.execute(sql, (run_id,))
         return [_row_to_trace(r) for r in cur.fetchall()]
     finally:
         con.close()

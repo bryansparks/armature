@@ -249,6 +249,76 @@ def test_replay_folds_probes_and_restores_hqs_armature(tmp_path, monkeypatch):
                    [trace_io.TraceRow(**probe_rows[0])])) < 1e-9
 
 
+def test_replay_derives_memory_mode_for_alternate_lever(tmp_path, monkeypatch):
+    """Replay must reconstruct the cold/warm memory_mode split for a
+    memory_cold_warm + alternate recording even when the recording's meta does
+    NOT carry the resolved memory_mode (old recordings predate forward-capture).
+    The alternation convention (cold = even rep, warm = odd rep) is the same one
+    fault.apply_lever uses live, factored into fault.memory_mode_for so the two
+    cannot drift. Without this, H4's cold/warm split is empty on replay and the
+    verdict silently drops to INCONCLUSIVE."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    def trow(rid):
+        return {"run_id": rid, "workflow_name": "wf", "stage_id": "s",
+                "role_type": "judge", "model": "m", "input_tokens": 0,
+                "output_tokens": 0, "latency_ms": 1000.0, "success": True,
+                "output_valid": True, "quorum_score": 0.9, "escalation_count": 0}
+    meta = {"phase_id": "compare", "lever": "memory_cold_warm",
+            "inputs": {"memory_fresh": "alternate"}}
+    # old recording: meta lacks memory_mode — replay must derive by rep parity
+    for i, rid in enumerate(["r0", "r1", "r2", "r3"]):
+        rec.record_run(rid, ["armature", "run"], "", "", 0, [trow(rid)], {},
+                       {"current_hqs": 0.9}, tag="main", hqs_armature=None,
+                       meta=meta)
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    result = r.replay(sb.dir / "recording")
+    modes = [row["memory_mode"] for row in result.rows]
+    assert modes == ["cold", "warm", "cold", "warm"]
+
+
+def test_replay_reads_forward_captured_memory_mode(tmp_path, monkeypatch):
+    """New recordings forward-capture the resolved memory_mode in meta (ground
+    truth read from the spec by fault.memory_mode). Replay reads it directly,
+    overriding the parity derivation — so a static 'warm' phase stays warm on
+    every rep, and the recording remains the single source of truth."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    def trow(rid):
+        return {"run_id": rid, "workflow_name": "wf", "stage_id": "s",
+                "role_type": "judge", "model": "m", "input_tokens": 0,
+                "output_tokens": 0, "latency_ms": 1000.0, "success": True,
+                "output_valid": True, "quorum_score": 0.9, "escalation_count": 0}
+    meta = {"phase_id": "compare", "lever": "memory_cold_warm",
+            "inputs": {"memory_fresh": "alternate"},
+            "memory_mode": "warm"}  # forward-captured ground truth
+    for rid in ["r0", "r1"]:
+        rec.record_run(rid, ["armature", "run"], "", "", 0, [trow(rid)], {},
+                       {"current_hqs": 0.9}, tag="main", hqs_armature=None,
+                       meta=meta)
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    result = r.replay(sb.dir / "recording")
+    assert [row["memory_mode"] for row in result.rows] == ["warm", "warm"]
+
+
 def test_break_judge_tier_adds_broken_tier_and_downgrades_judge(tmp_path):
     """The model_tier_degradation lever must add a broken tier and point the
     judge at it, so the judge's LLM call reliably errors and HQS drops."""
@@ -446,6 +516,79 @@ def test_row_from_run_logs_gap_and_flags_for_account_scoped(tmp_path, monkeypatc
     assert row["account_scoped_kind"] == "provider_credits"
     assert row["account_scoped_model"] == "openrouter/m"
     assert any(g["want"] == "funded provider account" and g["severity"] == "high" for g in gaps)
+
+
+def _seed_trace_row(db, run_id, role_type, outputs_json, quorum_score=0.9,
+                    stage_id="s1", workflow_name="wf"):
+    """Insert a trace row carrying outputs_json (the column the model_failed
+    detector reads). Reuses the proven trace_io_ddl shape from _fake_trace_db."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    con.executescript(trace_io_ddl.replace("CREATE TABLE traces",
+                                           "CREATE TABLE IF NOT EXISTS traces"))
+    con.execute(
+        "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,"
+        "quorum_score,latency_ms,success,output_valid,escalation_count,outputs_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, workflow_name, stage_id, role_type, "m", "2026-01-01T00:00:01",
+         quorum_score, 1000.0, 1, 1, 0, outputs_json))
+    con.commit(); con.close()
+
+
+def test_row_from_run_sets_model_failed_true_for_self_contradictory_judge(tmp_path):
+    """A judge row with accept=True and confidence<0.5 is a self-contradictory
+    model failure → _row_from_run sets row["model_failed"] is True."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0","issues":"[]"}',
+                    quorum_score=0.0, stage_id="judge")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher",
+                    '{"content":"' + ("x" * 200) + '"}',
+                    quorum_score=0.85, stage_id="researcher")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is True
+
+
+def test_row_from_run_sets_model_failed_true_for_empty_researcher(tmp_path):
+    """A researcher row whose content is < 40 chars is an empty briefing →
+    model_failed True, even when the judge is fine."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher", '{"content":"too short briefing"}',
+                    quorum_score=0.05, stage_id="researcher")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0.9","issues":"[]"}',
+                    quorum_score=0.9, stage_id="judge")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is True
+
+
+def test_row_from_run_sets_model_failed_false_for_clean_run(tmp_path):
+    """A clean run: judge accept=True confidence=0.9 AND a 200-char researcher
+    content → model_failed is False."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher",
+                    '{"content":"' + ("y" * 200) + '"}',
+                    quorum_score=0.85, stage_id="researcher")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0.9","issues":"[]"}',
+                    quorum_score=0.9, stage_id="judge")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is False
 
 
 def test_circuit_breaker_aborts_after_k_consecutive(tmp_path, monkeypatch):

@@ -2,7 +2,7 @@ from campaign_runner import verdicts
 
 
 def _row(run_id, phase_id="ramp", lever="input_difficulty_ramp", difficulty=1,
-         hqs_auth=0.8, improve_log=None, recovery=None, memory_mode=None):
+         hqs_auth=0.8, improve_log=None, recovery=None, memory_mode=None, quorum=None):
     return {
         "run_id": run_id, "phase_id": phase_id, "lever": lever,
         "inputs": {"difficulty": str(difficulty)},
@@ -14,6 +14,7 @@ def _row(run_id, phase_id="ramp", lever="input_difficulty_ramp", difficulty=1,
         "improve_log": improve_log or [],
         "recovery_hqs_ours": recovery,
         "spec_diff": "", "memory_mode": memory_mode,
+        "quorum_ours": quorum,
     }
 
 
@@ -96,13 +97,76 @@ def test_h3_inconclusive_when_too_few_observations():
 
 
 def test_h4_pass_when_warm_beats_cold():
-    rows = [_row("c1", lever="none", memory_mode="cold", hqs_auth=0.6),
-            _row("c2", lever="none", memory_mode="cold", hqs_auth=0.6),
-            _row("w1", lever="none", memory_mode="warm", hqs_auth=0.8),
-            _row("w2", lever="none", memory_mode="warm", hqs_auth=0.8)]
-    _name, result, _detail = verdicts.verdict_h4(rows, {
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=0.50),
+            _row("c2", lever="none", memory_mode="cold", quorum=0.50),
+            _row("w1", lever="none", memory_mode="warm", quorum=0.80),
+            _row("w2", lever="none", memory_mode="warm", quorum=0.80)]
+    _name, result, detail = verdicts.verdict_h4(rows, {
         "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
     assert result == "PASS"
+    assert detail["signal"] == "quorum"
+
+
+def test_h4_fail_when_warm_does_not_beat_cold_on_quorum():
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=0.80),
+            _row("c2", lever="none", memory_mode="cold", quorum=0.80),
+            _row("w1", lever="none", memory_mode="warm", quorum=0.82),
+            _row("w2", lever="none", memory_mode="warm", quorum=0.82)]
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "FAIL"
+    assert detail["signal"] == "quorum"
+
+
+def test_h4_inconclusive_when_no_quorum():
+    rows = [_row("c1", lever="none", memory_mode="cold", quorum=None),
+            _row("w1", lever="none", memory_mode="warm", quorum=None)]
+    _name, result, _detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "INCONCLUSIVE"
+
+
+def test_h4_excludes_model_failed_rows_and_records_exclusions():
+    """#118: H4 must exclude model_failed runs so it measures memory coverage,
+    not model reliability. Detail records n_excluded_cold / n_excluded_warm."""
+    rows = [
+        _row("c1", lever="none", memory_mode="cold", quorum=0.95),
+        _row("c2", lever="none", memory_mode="cold", quorum=0.97),
+        _row("c3", lever="none", memory_mode="cold", quorum=0.0),   # model_failed
+        _row("w1", lever="none", memory_mode="warm", quorum=0.95),
+        _row("w2", lever="none", memory_mode="warm", quorum=0.94),
+        _row("w3", lever="none", memory_mode="warm", quorum=0.05),  # model_failed
+    ]
+    rows[2]["model_failed"] = True
+    rows[5]["model_failed"] = True
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    # H4 computed over the 2-vs-2 clean rows only (cold [0.95,0.97],
+    # warm [0.95,0.94]); the model_failed outliers are NOT in the compared set.
+    assert detail["n_cold"] == 2
+    assert detail["n_warm"] == 2
+    assert detail["n_excluded_cold"] == 1
+    assert detail["n_excluded_warm"] == 1
+    # mean_diff over clean rows only: mean(warm) - mean(cold)
+    # = ((0.95+0.94)/2) - ((0.95+0.97)/2) = 0.945 - 0.96 = -0.015
+    assert abs(detail["mean_diff"] - round(0.945 - 0.96, 4)) < 1e-6
+
+
+def test_h4_model_failed_row_not_in_compared_set():
+    """A model_failed row must not contribute to the cold/warm lists even if it
+    is the only row of its arm (→ INCONCLUSIVE, not a contaminated comparison)."""
+    rows = [
+        _row("c1", lever="none", memory_mode="cold", quorum=0.95),
+        _row("c2", lever="none", memory_mode="cold", quorum=0.97),
+        _row("w1", lever="none", memory_mode="warm", quorum=0.05),  # model_failed
+    ]
+    rows[2]["model_failed"] = True
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "INCONCLUSIVE"
+    assert detail["n_warm"] == 0
+    assert detail["n_excluded_warm"] == 1
+    assert detail["n_cold"] == 2
 
 
 def _arow(run_id, scoped=False, kind=None, model="m"):
@@ -168,3 +232,76 @@ def test_provider_health_always_on_in_all_verdicts():
              "improve_log": [], "inputs": {}, "memory_mode": None, "lever": "none"}]
     names = [v[0] for v in verdicts.all_verdicts(rows, plan)]
     assert "provider_health" in names
+
+
+def test_all_verdicts_runs_only_declared(tmp_path):
+    """#117: all_verdicts must skip verdicts the plan does not declare.
+
+    A plan that declares only `memory_carry_forward_helps` should yield that
+    verdict plus the always-on `provider_health` — and none of the other three
+    hypotheses. Declared-but-empty still counts as declared.
+    """
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts: {memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"memory_carry_forward_helps", "provider_health"}
+    # the three undeclared hypotheses must be absent
+    assert "hqs_tracks_difficulty" not in names
+    assert "self_improve_fires_and_recovers" not in names
+    assert "hqs_formula_consistency" not in names
+
+
+def test_all_verdicts_runs_two_declared_plus_provider(tmp_path):
+    """Second case: declare hqs_tracks_difficulty + hqs_formula_consistency only."""
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t2
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts:
+          hqs_tracks_difficulty: {spearman_le: -0.5, p_le: 0.05}
+          hqs_formula_consistency: {max_abs_delta_le: 0.02}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"hqs_tracks_difficulty", "hqs_formula_consistency", "provider_health"}
+    assert "self_improve_fires_and_recovers" not in names
+    assert "memory_carry_forward_helps" not in names
+
+
+def test_all_verdicts_declared_empty_counts_as_declared(tmp_path):
+    """A verdict declared with an empty dict still runs (counts as declared)."""
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t3
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts: {hqs_tracks_difficulty: {}}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"hqs_tracks_difficulty", "provider_health"}

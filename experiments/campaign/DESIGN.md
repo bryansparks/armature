@@ -223,8 +223,11 @@ Single file, no external assets (inline SVG, inline CSS). Sections:
 ## 4. Hypotheses & verdicts (the point of the whole thing)
 
 Four hypotheses, each a verifiable verdict against `campaign.jsonl`. Thresholds below are **seed
-defaults**; every campaign overrides them in `verdicts:`. INCONCLUSIVE is a first-class result —
-it means the data couldn't settle it and points at a `gaps.jsonl` entry, not a quiet failure.
+defaults**; every campaign overrides them in `verdicts:`. A plan declares only the verdicts it
+means to run (`None` = undeclared); `all_verdicts` skips undeclared ones and always appends the
+always-on `provider_health` — so a campaign that declares only H1/H2/H3 never emits a spurious H4
+(#117). INCONCLUSIVE is a first-class result — it means the data couldn't settle it and points at a
+`gaps.jsonl` entry, not a quiet failure.
 
 ### H1 — HQS tracks input difficulty
 **Expectation:** as the difficulty-ramp lever increases, HQS trends down (negative correlation).
@@ -255,8 +258,18 @@ denominator) — a finding, not a bug in the harness.
 ### H4 — Memory + carry-forward helps
 **Expectation:** warm runs (carry-forward / continuation) score higher than paired cold runs
 (fresh memory) on the same input, with the gap statistically real.
-**Measure:** paired cold vs warm; mean Δ and a bootstrap 95% CI (vendored).
+**Measure:** paired cold vs warm on the **judge-coverage signal** `quorum_ours` (mean judge
+`quorum_score` across the run's trace rows, **not** aggregate HQS — the HQS latency term masked
+the memory effect); mean Δ and a bootstrap 95% CI (vendored, seed 12345, n=2000). Runs are split
+cold/warm by `memory_mode`, computed live from the spec's `memory.fresh` (cold = fresh, warm =
+injected) and **forward-captured in the recording** so zero-cost replay can reconstruct the split;
+old recordings derive `memory_mode` by rep parity via the shared `fault._fresh_for_memory`
+convention. **Model-failed runs** (a self-contradictory judge — `accept` truthy *and*
+`confidence` < 0.5 — or an empty researcher briefing, content < 40 chars; shared
+`hqs.is_model_failed`) are **excluded** from both arms, with `n_excluded_cold` /
+`n_excluded_warm` recorded in the detail.
 **Verdict:** PASS iff `mean Δ ≥ warm_minus_cold_mean_ge` (e.g. 0.05) **and** `CI lower ≥ 0`.
+INCONCLUSIVE when either arm has no surviving (non-excluded) runs.
 
 ### The four HQS formulas the harness reproduces (pinned here so the spec is self-contained)
 

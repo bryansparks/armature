@@ -349,6 +349,52 @@ def test_verdict_no_row_loss_busy_fails(tmp_path):
     assert status == "FAIL" and detail["sqlite_busy_count"] == 1
 
 
+def test_verdict_no_row_loss_budget_stop_is_incon(tmp_path):
+    """A clean shortfall (actual < expected, no BUSY, all exit 0) is a budget
+    stop, not row loss — the verdict must NOT FAIL. The prior abs(actual-
+    expected)<=tol check conflated the two and false-FAILed the soak when the
+    concurrency phase was cut short by budget."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b"],
+             "exit_codes": [0, 0], "n_trace_rows": 2, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 6, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "INCONCLUSIVE")
+    assert detail["actual"] == 2 and detail["sqlite_busy_count"] == 0
+    assert "budget" in detail.get("note", "").lower()
+
+
+def test_verdict_no_row_loss_nonzero_exit_no_busy_is_incon(tmp_path):
+    """A non-zero worker exit with no SQLITE_BUSY is NOT row loss. Under the
+    armature_loop driver a single failed loop iteration (e.g. the planner model
+    returning null guided_json) exits the whole worker process with code 1,
+    yet every row that was written is intact in the trace DB (busy=0). The soak
+    false-FAILed synth-fanout-mid on this; the verdict must report INCONCLUSIVE
+    (shortfall, no dropped rows), not FAIL, and must surface all_exit0=False
+    for observability."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b"],
+             "exit_codes": [1], "n_trace_rows": 151, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 60, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "INCONCLUSIVE")
+    assert detail["sqlite_busy_count"] == 0
+    assert detail["all_exit0"] is False  # surfaced, but not a failure
+    assert "no row loss" in detail.get("note", "").lower()
+
+
+def test_verdict_no_row_loss_nonzero_exit_full_reps_pass(tmp_path):
+    """All planned reps ran (actual >= expected), no SQLITE_BUSY: no row loss,
+    so PASS even though the worker exited non-zero (a workflow outcome such as
+    a judge rejection, not dropped rows). all_exit0=False is recorded but does
+    not fail the verdict."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b", "c", "d"],
+             "exit_codes": [1], "n_trace_rows": 4, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 4, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "PASS")
+    assert detail["sqlite_busy_count"] == 0
+    assert detail["all_exit0"] is False
+
+
 def test_verdict_hqs_stability_no_drift(tmp_path):
     from campaign_runner import soak_verdicts as sv
     flat = [_soak_row(f"r{i}", hqs=0.80 + (i % 3) * 0.001) for i in range(20)]
@@ -413,6 +459,55 @@ def test_verdict_agent_spawn_count(tmp_path):
     assert status == "PASS" and detail["total_agents"] == 10
     _, status2, _ = sv.verdict_agent_spawn_count([], {"min_total": 100}, db)
     assert status2 == "FAIL"
+
+
+def _agent_spawn_db(tmp_path, n_agents):
+    import sqlite3
+    db = tmp_path / "traces.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    for i in range(n_agents):
+        con.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp) VALUES (?,?,?,?,?,?)",
+                    (f"r{i}", "wf", "s", "worker", "m", "2026-01-01T00:00:01"))
+    con.commit(); con.close()
+    return db
+
+
+def test_verdict_agent_spawn_count_budget_stop_is_inconclusive(tmp_path):
+    # total < min_total AND n_main_runs < max_runs -> INCONCLUSIVE (budget stop)
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(5)]  # n_main_runs = 5
+    th = {"min_total": 100, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "INCONCLUSIVE")
+    assert "budget stop" in detail["note"]
+    assert detail["n_main_runs"] == 5
+    assert detail["max_runs"] == 10
+    assert detail["total_agents"] == 10
+
+
+def test_verdict_agent_spawn_count_full_cap_under_spawn_fails(tmp_path):
+    # total < min_total AND n_main_runs >= max_runs -> FAIL (ran full cap, still under)
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(10)]  # n_main_runs = 10 == max_runs
+    th = {"min_total": 100, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "FAIL")
+    assert detail["n_main_runs"] == 10
+    assert detail["max_runs"] == 10
+
+
+def test_verdict_agent_spawn_count_passes_when_total_meets_floor(tmp_path):
+    # total >= min_total -> PASS (unchanged), even with max_runs threaded
+    from campaign_runner import soak_verdicts as sv
+    db = _agent_spawn_db(tmp_path, 10)  # total_agents = 10
+    rows = [_soak_row(f"r{i}") for i in range(3)]  # n_main_runs irrelevant when total meets floor
+    th = {"min_total": 10, "max_runs": 10}
+    name, status, detail = sv.verdict_agent_spawn_count(rows, th, db)
+    assert (name, status) == ("agent_spawn_count", "PASS")
+    assert detail["total_agents"] == 10
 
 
 def test_all_soak_verdicts_dispatcher(tmp_path):
@@ -610,6 +705,57 @@ def test_run_workers_excludes_loop_driver_rows(tmp_path, monkeypatch):
     # loop-driver session rows must NOT appear in run_ids
     assert not any(rid.startswith("loop-") for rid in all_ids)
     assert len(set(all_ids)) == 3 * reps
+
+
+def test_run_workers_run_ids_unique_and_agents_not_inflated(tmp_path, monkeypatch):
+    """A real fan-out run writes MULTIPLE trace rows per run_id. _new_run_ids
+    must return each run_id ONCE (not once per row), so a worker's run_ids has
+    no duplicates and agents_run counts each run's rows once (not N×). The
+    prior per-row return inflated agents_run ~6× (synth-fanout-mid showed
+    n_run_ids=117 / agents_run=3744 for ~20 real runs)."""
+    import sqlite3, threading
+    from campaign_runner import concurrency as conc_mod
+    from campaign_runner.sandbox import Sandbox
+    from campaign_runner.plan import load_plan, Concurrency
+    p = tmp_path / "plan.yml"
+    p.write_text("name: t\ndescription: x\nworkflow: s.yml\nbudget: {max_runs: 5}\n"
+                 "phases: [{id: a, lever: none, inputs: {}, repeats: 1}]\nverdicts: {}\n")
+    sb = Sandbox(load_plan(p), root=tmp_path / "out")
+    con = sqlite3.connect(sb.trace_db)
+    con.execute("CREATE TABLE traces (id INTEGER PRIMARY KEY, run_id TEXT, workflow_name TEXT, stage_id TEXT, role_type TEXT, model TEXT, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0, latency_ms REAL DEFAULT 0, success INTEGER DEFAULT 1, output_valid INTEGER DEFAULT 1, quorum_score REAL, timestamp TEXT, inputs_json TEXT DEFAULT '{}', outputs_json TEXT DEFAULT '{}', error_type TEXT, error_kind TEXT, escalation_count INTEGER DEFAULT 0, spec_version TEXT DEFAULT '')")
+    con.execute("PRAGMA journal_mode=WAL"); con.commit(); con.close()
+    reps = 2
+    rows_per_run = 3              # 2 worker + 1 judge = 3 LLM rows per run_id
+
+    class FakePopen:
+        def __init__(self, cmd, env=None, stdout=None, stderr=None, text=False):
+            self.returncode = 0; self._out, self._err = "", ""
+            db = Path(env["HOME"]) / ".armature" / "traces.db"
+            self._t = threading.Thread(target=self._write, args=(db, reps)); self._t.start()
+        def _write(self, db, n):
+            tid = threading.get_ident(); c = sqlite3.connect(db, timeout=30)
+            for r in range(n):
+                rid = f"wk-{tid}-{r}"
+                for _i in range(rows_per_run):   # multiple rows per run_id (fan-out)
+                    c.execute("INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,latency_ms,success,output_valid) VALUES (?,?,?,?,?,?,?,?,?)",
+                              (rid, "wf", "s", "worker", "m", "2026-01-01T00:00:01", 100.0, 1, 1))
+            c.commit(); c.close()
+        def communicate(self):
+            self._t.join(); return self._out, self._err
+
+    monkeypatch.setattr(conc_mod.subprocess, "Popen", FakePopen)
+    conc = Concurrency(workers=2, driver="armature_loop", reps_per_worker=reps)
+    summaries = conc_mod.run_workers(sb, tmp_path / "spec.yml", conc, "overlap")
+
+    for s in summaries:
+        # run_ids must have NO duplicates (one entry per real run, not per row)
+        assert len(s["run_ids"]) == len(set(s["run_ids"])), \
+            f"worker {s['worker']} run_ids have duplicates: {s['run_ids']}"
+        assert len(s["run_ids"]) == reps, \
+            f"worker {s['worker']} expected {reps} run_ids, got {len(s['run_ids'])}"
+        # agents_run counts each run's rows ONCE: reps runs * rows_per_run LLM rows
+        assert s["agents_run"] == reps * rows_per_run, \
+            f"worker {s['worker']} agents_run inflated: got {s['agents_run']}, want {reps * rows_per_run}"
 
 
 def test_run_workers_counts_busy_from_stderr(tmp_path, monkeypatch):
@@ -938,6 +1084,64 @@ def test_replay_reconstructs_trace_db_so_verdicts_reproduce(tmp_path, monkeypatc
           soak_verdicts.all_soak_verdicts(result.rows, plan, r.sb.trace_db)}
     assert vs["trace_db_integrity"] == "PASS"
     assert vs["agent_spawn_count"] == "PASS"
+
+
+def test_replay_reconstructs_trace_db_preserves_outputs_json(tmp_path, monkeypatch):
+    """The reconstructed trace DB must carry the outputs_json column so a future
+    verdict that recomputes model_failed from read_rows_by_run on the replay
+    sandbox DB gets the recorded values, not the "{}" default. TraceRow carries
+    outputs_json (added with the model_failed detector); the reconstruction must
+    not silently drop it."""
+    import sqlite3
+    from campaign_runner import runner, record
+    from campaign_runner.plan import load_plan
+    from campaign_runner.sandbox import Sandbox
+
+    plan_p = tmp_path / "plan.yml"
+    plan_p.write_text(textwrap.dedent("""
+        name: soak-oj
+        description: x
+        workflow: src.yml
+        budget: {max_runs: 10}
+        phases:
+          - id: main
+            lever: none
+            inputs: {topic: q}
+            repeats: 1
+        soak_verdicts: {no_unclean_exits: {allowed_failures: 0},
+                         trace_db_integrity: {allow_null_run_id: 0},
+                         agent_spawn_count: {min_total: 1}}
+        verdicts: {}
+    """))
+    plan = load_plan(plan_p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: src-wf\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    judge_out = '{"accept": "True", "confidence": "0", "issues": "[]"}'
+    rec.record_run("r1", ["armature", "run"], "", "", 0,
+                   [{"run_id": "r1", "workflow_name": "wf", "stage_id": "s",
+                     "role_type": "judge", "model": "m", "input_tokens": 10,
+                     "output_tokens": 20, "latency_ms": 100.0, "success": True,
+                     "output_valid": True, "quorum_score": 0.0,
+                     "escalation_count": 0, "outputs_json": judge_out}],
+                   {}, {}, tag="main",
+                   hqs_armature={"authoritative": 0.8, "dashboard": None})
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r.replay(sb.dir / "recording")
+    con = sqlite3.connect(str(r.sb.trace_db))
+    cols = {row[1] for row in con.execute("PRAGMA table_info(traces)")}
+    val = con.execute(
+        "SELECT outputs_json FROM traces WHERE role_type='judge'").fetchone()[0]
+    con.close()
+    assert "outputs_json" in cols
+    assert val == judge_out
 
 
 def test_provider_health_always_on_in_soak_verdicts():

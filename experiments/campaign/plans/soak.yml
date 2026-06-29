@@ -1,5 +1,5 @@
 name: soak
-description: "Reliability/longevity soak: ~500 real runs across 7 workflows (~120 agents/iteration, ~60k agent spawns) on the tiny tier, plus an overlapping-firings concurrency phase against one shared trace DB."
+description: "Reliability/longevity soak: ~500 real runs across 7 workflows (~120 agents/iteration, ~8k agent spawns) on the tiny tier, plus an overlapping-firings concurrency phase against one shared trace DB."
 purpose: >
   This is an endurance (soak) test of the Armature workflow engine. It runs seven
   workflows repeatedly under a cron-style budget to confirm the engine stays up and
@@ -18,7 +18,7 @@ budget: {max_runs: 600, max_llm_calls: 15000, max_wallclock_hours: 10.0, max_tok
 # escalation tier (medium/large/frontier/fast) is pinned to gemini-2.5-flash,
 # which reliably produces the structured JSON those stages require. `default`
 # (the fallback for any unlisted tier name) is the cheap tier. This keeps the
-# ~60k worker spawns on the tiny tier while making the ~1k guided_json spawns
+# ~8k worker spawns on the tiny tier while making the ~1k guided_json spawns
 # succeed — so the soak measures engine reliability, not model flakiness.
 tier_override:
   apply: true

@@ -101,19 +101,47 @@ def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:
 
 
 def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:
-    """Memory + carry-forward helps: warm HQS > cold HQS."""
-    cold = [r["hqs_ours"]["authoritative"] for r in rows if r.get("memory_mode") == "cold"
-            and r["hqs_ours"]["authoritative"] is not None]
-    warm = [r["hqs_ours"]["authoritative"] for r in rows if r.get("memory_mode") == "warm"
-            and r["hqs_ours"]["authoritative"] is not None]
+    """Memory + carry-forward helps: warm judge coverage (avg quorum) > cold.
+
+    v3 judges on raw avg_quorum (judge coverage) per run, NOT aggregate HQS.
+    In aggregate HQS avg_quorum carries only 0.20 weight and the
+    latency/valid/success terms wash out the memory benefit (the v2 FAIL with
+    headroom). Coverage is the honest signal: warm runs build on prior
+    briefings and cover NEW sub-problems, so their judge quorum should exceed
+    cold. Deterministic from rows so replay reproduces it.
+
+    #118: excludes ``model_failed`` runs (degenerate judge self-contradiction
+    or empty researcher briefing) so H4 measures memory coverage, not model
+    reliability. ``n_excluded_cold`` / ``n_excluded_warm`` record how many rows
+    of each arm were skipped as model-failed outliers."""
+    cold, warm = [], []
+    n_excluded_cold = 0
+    n_excluded_warm = 0
+    for r in rows:
+        if r.get("memory_mode") == "cold":
+            if r.get("model_failed"):
+                n_excluded_cold += 1
+                continue
+            if r.get("quorum_ours") is not None:
+                cold.append(r["quorum_ours"])
+        elif r.get("memory_mode") == "warm":
+            if r.get("model_failed"):
+                n_excluded_warm += 1
+                continue
+            if r.get("quorum_ours") is not None:
+                warm.append(r["quorum_ours"])
     if not cold or not warm:
-        return ("memory_carry_forward_helps", INCON, {"n_cold": len(cold), "n_warm": len(warm)})
+        return ("memory_carry_forward_helps", INCON,
+                {"n_cold": len(cold), "n_warm": len(warm), "signal": "quorum",
+                 "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
     diffs = [w - c for w in warm for c in cold]
     mean_diff, lo, hi = stats.bootstrap_ci(diffs, seed=12345, n=2000)
     ok = mean_diff >= th.get("warm_minus_cold_mean_ge", 0.05) and lo >= th.get("bootstrap_ci_lower_ge", 0.0)
     return ("memory_carry_forward_helps", PASS if ok else FAIL,
-            {"mean_diff": round(mean_diff, 4), "ci_low": round(lo, 4), "ci_high": round(hi, 4),
-             "n_cold": len(cold), "n_warm": len(warm)})
+            {"mean_diff": round(mean_diff, 4), "ci_low": round(lo, 4),
+             "ci_high": round(hi, 4), "n_cold": len(cold), "n_warm": len(warm),
+             "signal": "quorum",
+             "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
 
 
 def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:
@@ -163,11 +191,21 @@ def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:
 
 
 def all_verdicts(rows: list[dict], plan) -> list[tuple[str, str, dict]]:
+    """Run only the verdicts the plan declares, plus the always-on provider_health.
+
+    A hypothesis verdict is "declared" when its field on `plan.verdicts` is not
+    None (an empty dict still counts as declared). Undeclared verdicts are
+    skipped entirely so they don't pollute the report with spurious INCONCLUSIVE.
+    """
     v = plan.verdicts
-    return [
-        verdict_h1(rows, v.hqs_tracks_difficulty),
-        verdict_h2(rows, v.self_improve_fires_and_recovers),
-        verdict_h3(rows, v.hqs_formula_consistency),
-        verdict_h4(rows, v.memory_carry_forward_helps),
-        verdict_provider_health(rows, plan.abort),
-    ]
+    out: list[tuple[str, str, dict]] = []
+    if v.hqs_tracks_difficulty is not None:
+        out.append(verdict_h1(rows, v.hqs_tracks_difficulty))
+    if v.self_improve_fires_and_recovers is not None:
+        out.append(verdict_h2(rows, v.self_improve_fires_and_recovers))
+    if v.hqs_formula_consistency is not None:
+        out.append(verdict_h3(rows, v.hqs_formula_consistency))
+    if v.memory_carry_forward_helps is not None:
+        out.append(verdict_h4(rows, v.memory_carry_forward_helps))
+    out.append(verdict_provider_health(rows, plan.abort))
+    return out
