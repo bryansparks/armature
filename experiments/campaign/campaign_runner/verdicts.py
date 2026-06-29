@@ -108,21 +108,40 @@ def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:
     latency/valid/success terms wash out the memory benefit (the v2 FAIL with
     headroom). Coverage is the honest signal: warm runs build on prior
     briefings and cover NEW sub-problems, so their judge quorum should exceed
-    cold. Deterministic from rows so replay reproduces it."""
-    cold = [r["quorum_ours"] for r in rows if r.get("memory_mode") == "cold"
-            and r.get("quorum_ours") is not None]
-    warm = [r["quorum_ours"] for r in rows if r.get("memory_mode") == "warm"
-            and r.get("quorum_ours") is not None]
+    cold. Deterministic from rows so replay reproduces it.
+
+    #118: excludes ``model_failed`` runs (degenerate judge self-contradiction
+    or empty researcher briefing) so H4 measures memory coverage, not model
+    reliability. ``n_excluded_cold`` / ``n_excluded_warm`` record how many rows
+    of each arm were skipped as model-failed outliers."""
+    cold, warm = [], []
+    n_excluded_cold = 0
+    n_excluded_warm = 0
+    for r in rows:
+        if r.get("memory_mode") == "cold":
+            if r.get("model_failed"):
+                n_excluded_cold += 1
+                continue
+            if r.get("quorum_ours") is not None:
+                cold.append(r["quorum_ours"])
+        elif r.get("memory_mode") == "warm":
+            if r.get("model_failed"):
+                n_excluded_warm += 1
+                continue
+            if r.get("quorum_ours") is not None:
+                warm.append(r["quorum_ours"])
     if not cold or not warm:
         return ("memory_carry_forward_helps", INCON,
-                {"n_cold": len(cold), "n_warm": len(warm), "signal": "quorum"})
+                {"n_cold": len(cold), "n_warm": len(warm), "signal": "quorum",
+                 "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
     diffs = [w - c for w in warm for c in cold]
     mean_diff, lo, hi = stats.bootstrap_ci(diffs, seed=12345, n=2000)
     ok = mean_diff >= th.get("warm_minus_cold_mean_ge", 0.05) and lo >= th.get("bootstrap_ci_lower_ge", 0.0)
     return ("memory_carry_forward_helps", PASS if ok else FAIL,
             {"mean_diff": round(mean_diff, 4), "ci_low": round(lo, 4),
              "ci_high": round(hi, 4), "n_cold": len(cold), "n_warm": len(warm),
-             "signal": "quorum"})
+             "signal": "quorum",
+             "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
 
 
 def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:

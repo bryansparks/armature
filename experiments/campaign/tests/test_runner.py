@@ -448,6 +448,79 @@ def test_row_from_run_logs_gap_and_flags_for_account_scoped(tmp_path, monkeypatc
     assert any(g["want"] == "funded provider account" and g["severity"] == "high" for g in gaps)
 
 
+def _seed_trace_row(db, run_id, role_type, outputs_json, quorum_score=0.9,
+                    stage_id="s1", workflow_name="wf"):
+    """Insert a trace row carrying outputs_json (the column the model_failed
+    detector reads). Reuses the proven trace_io_ddl shape from _fake_trace_db."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    con.executescript(trace_io_ddl.replace("CREATE TABLE traces",
+                                           "CREATE TABLE IF NOT EXISTS traces"))
+    con.execute(
+        "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,"
+        "quorum_score,latency_ms,success,output_valid,escalation_count,outputs_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, workflow_name, stage_id, role_type, "m", "2026-01-01T00:00:01",
+         quorum_score, 1000.0, 1, 1, 0, outputs_json))
+    con.commit(); con.close()
+
+
+def test_row_from_run_sets_model_failed_true_for_self_contradictory_judge(tmp_path):
+    """A judge row with accept=True and confidence<0.5 is a self-contradictory
+    model failure → _row_from_run sets row["model_failed"] is True."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0","issues":"[]"}',
+                    quorum_score=0.0, stage_id="judge")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher",
+                    '{"content":"' + ("x" * 200) + '"}',
+                    quorum_score=0.85, stage_id="researcher")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is True
+
+
+def test_row_from_run_sets_model_failed_true_for_empty_researcher(tmp_path):
+    """A researcher row whose content is < 40 chars is an empty briefing →
+    model_failed True, even when the judge is fine."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher", '{"content":"too short briefing"}',
+                    quorum_score=0.05, stage_id="researcher")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0.9","issues":"[]"}',
+                    quorum_score=0.9, stage_id="judge")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is True
+
+
+def test_row_from_run_sets_model_failed_false_for_clean_run(tmp_path):
+    """A clean run: judge accept=True confidence=0.9 AND a 200-char researcher
+    content → model_failed is False."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_trace_row(r.sb.trace_db, "r1", "researcher",
+                    '{"content":"' + ("y" * 200) + '"}',
+                    quorum_score=0.85, stage_id="researcher")
+    _seed_trace_row(r.sb.trace_db, "r1", "judge",
+                    '{"accept":"True","confidence":"0.9","issues":"[]"}',
+                    quorum_score=0.9, stage_id="judge")
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["model_failed"] is False
+
+
 def test_circuit_breaker_aborts_after_k_consecutive(tmp_path, monkeypatch):
     """K=2 consecutive account-scoped runs → aborted=True, run stops, _finalize
     writes aborted/abort_reason; a good run between resets the streak."""

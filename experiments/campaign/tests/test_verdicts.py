@@ -126,6 +126,49 @@ def test_h4_inconclusive_when_no_quorum():
     assert result == "INCONCLUSIVE"
 
 
+def test_h4_excludes_model_failed_rows_and_records_exclusions():
+    """#118: H4 must exclude model_failed runs so it measures memory coverage,
+    not model reliability. Detail records n_excluded_cold / n_excluded_warm."""
+    rows = [
+        _row("c1", lever="none", memory_mode="cold", quorum=0.95),
+        _row("c2", lever="none", memory_mode="cold", quorum=0.97),
+        _row("c3", lever="none", memory_mode="cold", quorum=0.0),   # model_failed
+        _row("w1", lever="none", memory_mode="warm", quorum=0.95),
+        _row("w2", lever="none", memory_mode="warm", quorum=0.94),
+        _row("w3", lever="none", memory_mode="warm", quorum=0.05),  # model_failed
+    ]
+    rows[2]["model_failed"] = True
+    rows[5]["model_failed"] = True
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    # H4 computed over the 2-vs-2 clean rows only (cold [0.95,0.97],
+    # warm [0.95,0.94]); the model_failed outliers are NOT in the compared set.
+    assert detail["n_cold"] == 2
+    assert detail["n_warm"] == 2
+    assert detail["n_excluded_cold"] == 1
+    assert detail["n_excluded_warm"] == 1
+    # mean_diff over clean rows only: mean(warm) - mean(cold)
+    # = ((0.95+0.94)/2) - ((0.95+0.97)/2) = 0.945 - 0.96 = -0.015
+    assert abs(detail["mean_diff"] - round(0.945 - 0.96, 4)) < 1e-6
+
+
+def test_h4_model_failed_row_not_in_compared_set():
+    """A model_failed row must not contribute to the cold/warm lists even if it
+    is the only row of its arm (→ INCONCLUSIVE, not a contaminated comparison)."""
+    rows = [
+        _row("c1", lever="none", memory_mode="cold", quorum=0.95),
+        _row("c2", lever="none", memory_mode="cold", quorum=0.97),
+        _row("w1", lever="none", memory_mode="warm", quorum=0.05),  # model_failed
+    ]
+    rows[2]["model_failed"] = True
+    _name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
+    assert result == "INCONCLUSIVE"
+    assert detail["n_warm"] == 0
+    assert detail["n_excluded_warm"] == 1
+    assert detail["n_cold"] == 2
+
+
 def _arow(run_id, scoped=False, kind=None, model="m"):
     return {"run_id": run_id, "account_scoped": scoped,
             "account_scoped_kind": kind, "account_scoped_model": model if scoped else None}
