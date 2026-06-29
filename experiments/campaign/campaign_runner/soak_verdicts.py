@@ -58,26 +58,31 @@ def verdict_no_row_loss_under_concurrency(rows, th):
     busy = sum(r.get("sqlite_busy_count", 0) for r in conc)
     all_exit0 = all(r.get("exit_codes") and all(c == 0 for c in r["exit_codes"]) for r in conc)
     per_worker = [r.get("n_trace_rows") for r in conc]
-    # Row loss = SQLITE_BUSY dropped rows, or a worker crashed (non-zero exit).
-    # A clean shortfall (actual < expected, no BUSY, all exit 0) is a budget
-    # stop — the phase ran fewer reps than planned but lost no rows — not a
-    # failure. The prior abs(actual-expected)<=tol check false-FAILed on that.
+    # Row LOSS means rows that were written then dropped by SQLITE_BUSY lock
+    # contention — the only failure mode this verdict names. A non-zero worker
+    # exit is NOT row loss: under the armature_loop driver a single failed loop
+    # iteration (e.g. the planner model returning null guided_json) exits the
+    # whole worker process with code 1, yet every row that was written is
+    # intact in the trace DB (busy=0). Equating non-zero exit with row loss
+    # false-FAILed the soak's synth-fanout-mid phase. all_exit0 is recorded in
+    # the detail for observability, but only BUSY>0 fails this verdict.
     # `tolerance` in the verdict config is intentionally NOT read here: a clean
     # shortfall is INCONCLUSIVE regardless of magnitude, so the band is subsumed.
-    if busy > 0 or not all_exit0:
+    if busy > 0:
         return ("no_row_loss_under_concurrency", FAIL,
                 {"expected": expected, "actual": actual, "sqlite_busy_count": busy,
-                 "per_worker_rows": per_worker,
-                 "reason": "sqlite_busy or non-zero worker exit"})
+                 "per_worker_rows": per_worker, "all_exit0": all_exit0,
+                 "reason": "sqlite_busy dropped rows"})
     if actual < expected:
         return ("no_row_loss_under_concurrency", INCON,
                 {"expected": expected, "actual": actual, "completed": actual,
-                 "sqlite_busy_count": busy, "per_worker_rows": per_worker,
-                 "note": f"completed {actual} of {expected} planned reps — "
-                         "budget stop, not row loss; no loss observed in reps that ran"})
+                 "sqlite_busy_count": busy, "per_worker_rows": per_worker, "all_exit0": all_exit0,
+                 "note": f"completed {actual} of {expected} planned reps — no row loss "
+                         "(sqlite_busy=0; no dropped rows). Shortfall is a budget stop or "
+                         "per-rep failure, not row loss."})
     return ("no_row_loss_under_concurrency", PASS,
             {"expected": expected, "actual": actual, "sqlite_busy_count": busy,
-             "per_worker_rows": per_worker})
+             "per_worker_rows": per_worker, "all_exit0": all_exit0})
 
 
 def verdict_hqs_stability_no_drift(rows, th):

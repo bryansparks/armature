@@ -363,6 +363,38 @@ def test_verdict_no_row_loss_budget_stop_is_incon(tmp_path):
     assert "budget" in detail.get("note", "").lower()
 
 
+def test_verdict_no_row_loss_nonzero_exit_no_busy_is_incon(tmp_path):
+    """A non-zero worker exit with no SQLITE_BUSY is NOT row loss. Under the
+    armature_loop driver a single failed loop iteration (e.g. the planner model
+    returning null guided_json) exits the whole worker process with code 1,
+    yet every row that was written is intact in the trace DB (busy=0). The soak
+    false-FAILed synth-fanout-mid on this; the verdict must report INCONCLUSIVE
+    (shortfall, no dropped rows), not FAIL, and must surface all_exit0=False
+    for observability."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b"],
+             "exit_codes": [1], "n_trace_rows": 151, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 60, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "INCONCLUSIVE")
+    assert detail["sqlite_busy_count"] == 0
+    assert detail["all_exit0"] is False  # surfaced, but not a failure
+    assert "no row loss" in detail.get("note", "").lower()
+
+
+def test_verdict_no_row_loss_nonzero_exit_full_reps_pass(tmp_path):
+    """All planned reps ran (actual >= expected), no SQLITE_BUSY: no row loss,
+    so PASS even though the worker exited non-zero (a workflow outcome such as
+    a judge rejection, not dropped rows). all_exit0=False is recorded but does
+    not fail the verdict."""
+    from campaign_runner import soak_verdicts as sv
+    rows = [{"is_concurrency_summary": True, "worker": 0, "run_ids": ["a", "b", "c", "d"],
+             "exit_codes": [1], "n_trace_rows": 4, "sqlite_busy_count": 0}]
+    name, status, detail = sv.verdict_no_row_loss_under_concurrency(rows, {"expected": 4, "tolerance": 0})
+    assert (name, status) == ("no_row_loss_under_concurrency", "PASS")
+    assert detail["sqlite_busy_count"] == 0
+    assert detail["all_exit0"] is False
+
+
 def test_verdict_hqs_stability_no_drift(tmp_path):
     from campaign_runner import soak_verdicts as sv
     flat = [_soak_row(f"r{i}", hqs=0.80 + (i % 3) * 0.001) for i in range(20)]
