@@ -393,12 +393,14 @@ class CampaignRunner:
             db_path.unlink()
         if not trace_rows:
             return
-        # Backward compat: older recordings predate the error_kind field on
-        # TraceRow, so their asdict dicts lack the key. The named-param INSERT
-        # below binds :error_kind, so normalize missing keys to None rather
-        # than forcing every old recording to be re-captured.
+        # Backward compat: older recordings predate the error_kind and
+        # outputs_json fields on TraceRow, so their asdict dicts lack the keys.
+        # The named-param INSERT below binds :error_kind / :outputs_json, so
+        # normalize missing keys to None rather than forcing every old recording
+        # to be re-captured.
         for r in trace_rows:
             r.setdefault("error_kind", None)
+            r.setdefault("outputs_json", None)
         con = sqlite3.connect(str(db_path))
         try:
             con.execute(
@@ -407,14 +409,16 @@ class CampaignRunner:
                 "role_type TEXT, model TEXT, input_tokens INTEGER, "
                 "output_tokens INTEGER, latency_ms REAL, success INTEGER, "
                 "output_valid INTEGER, quorum_score REAL, escalation_count INTEGER, "
-                "error_kind TEXT)")
+                "error_kind TEXT, outputs_json TEXT)")
             con.executemany(
                 "INSERT INTO traces (run_id, workflow_name, stage_id, role_type, "
                 "model, input_tokens, output_tokens, latency_ms, success, "
-                "output_valid, quorum_score, escalation_count, error_kind) "
+                "output_valid, quorum_score, escalation_count, error_kind, "
+                "outputs_json) "
                 "VALUES (:run_id, :workflow_name, :stage_id, :role_type, :model, "
                 ":input_tokens, :output_tokens, :latency_ms, :success, "
-                ":output_valid, :quorum_score, :escalation_count, :error_kind)",
+                ":output_valid, :quorum_score, :escalation_count, :error_kind, "
+                ":outputs_json)",
                 trace_rows)
             con.commit()
         finally:

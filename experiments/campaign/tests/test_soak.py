@@ -1086,6 +1086,64 @@ def test_replay_reconstructs_trace_db_so_verdicts_reproduce(tmp_path, monkeypatc
     assert vs["agent_spawn_count"] == "PASS"
 
 
+def test_replay_reconstructs_trace_db_preserves_outputs_json(tmp_path, monkeypatch):
+    """The reconstructed trace DB must carry the outputs_json column so a future
+    verdict that recomputes model_failed from read_rows_by_run on the replay
+    sandbox DB gets the recorded values, not the "{}" default. TraceRow carries
+    outputs_json (added with the model_failed detector); the reconstruction must
+    not silently drop it."""
+    import sqlite3
+    from campaign_runner import runner, record
+    from campaign_runner.plan import load_plan
+    from campaign_runner.sandbox import Sandbox
+
+    plan_p = tmp_path / "plan.yml"
+    plan_p.write_text(textwrap.dedent("""
+        name: soak-oj
+        description: x
+        workflow: src.yml
+        budget: {max_runs: 10}
+        phases:
+          - id: main
+            lever: none
+            inputs: {topic: q}
+            repeats: 1
+        soak_verdicts: {no_unclean_exits: {allowed_failures: 0},
+                         trace_db_integrity: {allow_null_run_id: 0},
+                         agent_spawn_count: {min_total: 1}}
+        verdicts: {}
+    """))
+    plan = load_plan(plan_p)
+    src = tmp_path / "src.yml"
+    src.write_text("name: src-wf\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    sb = Sandbox(plan, root=tmp_path / "out")
+    rec = record.Recording(sb.dir / "recording")
+
+    judge_out = '{"accept": "True", "confidence": "0", "issues": "[]"}'
+    rec.record_run("r1", ["armature", "run"], "", "", 0,
+                   [{"run_id": "r1", "workflow_name": "wf", "stage_id": "s",
+                     "role_type": "judge", "model": "m", "input_tokens": 10,
+                     "output_tokens": 20, "latency_ms": 100.0, "success": True,
+                     "output_valid": True, "quorum_score": 0.0,
+                     "escalation_count": 0, "outputs_json": judge_out}],
+                   {}, {}, tag="main",
+                   hqs_armature={"authoritative": 0.8, "dashboard": None})
+
+    class FakeDrv:
+        def __init__(self, sb, rec): pass
+    monkeypatch.setattr(runner, "CliDriver", FakeDrv)
+
+    r.replay(sb.dir / "recording")
+    con = sqlite3.connect(str(r.sb.trace_db))
+    cols = {row[1] for row in con.execute("PRAGMA table_info(traces)")}
+    val = con.execute(
+        "SELECT outputs_json FROM traces WHERE role_type='judge'").fetchone()[0]
+    con.close()
+    assert "outputs_json" in cols
+    assert val == judge_out
+
+
 def test_provider_health_always_on_in_soak_verdicts():
     from campaign_runner import soak_verdicts
     from campaign_runner.plan import CampaignPlan, SoakVerdicts, Phase
