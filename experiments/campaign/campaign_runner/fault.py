@@ -62,20 +62,42 @@ def apply_lever(phase: Phase, *, phase_index: int, rep: int,
         _break_judge_tier(working_spec)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     elif phase.lever == "memory_cold_warm":
-        mf = str(phase.inputs.get("memory_fresh", "false")).strip().lower()
-        if mf == "alternate":
-            # interleave cold/warm by rep parity so the H4 verdict is not
-            # confounded by phase ordering: even rep = cold (fresh=true, ignore
-            # prior memory but still capture), odd rep = warm (fresh=false, inject).
-            fresh = (rep % 2 == 0)
-        else:
-            fresh = (mf == "true")
+        # interleave cold/warm by rep parity so the H4 verdict is not
+        # confounded by phase ordering: even rep = cold (fresh=true, ignore
+        # prior memory but still capture), odd rep = warm (fresh=false, inject).
+        fresh = _fresh_for_memory(phase.inputs, rep)
         _set_memory_fresh(working_spec, fresh)
         ctx = {"phase_index": phase_index, "rep": rep, "seed": rng_seed}
     else:  # "none"
         ctx = {"phase_index": phase_index, "rep": rep}
 
     return {k: _render(v, ctx) for k, v in phase.inputs.items()}
+
+
+def _fresh_for_memory(inputs: dict, rep: int) -> bool:
+    """The memory.fresh value the memory_cold_warm lever sets for a given rep.
+    Single source of truth for the cold/warm alternation convention so the live
+    apply_lever and zero-cost replay derivation (memory_mode_for) cannot drift:
+    'alternate' -> cold on even rep, warm on odd; otherwise fresh iff the
+    memory_fresh input is 'true'. A static string, so the rendered inputs the
+    recording carries equal the declared phase.inputs."""
+    mf = str((inputs or {}).get("memory_fresh", "false")).strip().lower()
+    if mf == "alternate":
+        return (rep % 2 == 0)
+    return (mf == "true")
+
+
+def memory_mode_for(lever: str | None, inputs: dict, rep: int) -> str | None:
+    """Derive the memory_mode label ('cold'/'warm'/None) for a run from the
+    phase lever + inputs + rep index WITHOUT a spec — the replay-path mirror of
+    what apply_lever + memory_mode compute live. Used by replay() to reconstruct
+    the H4 cold/warm split from an OLD recording whose meta predates
+    forward-captured memory_mode. Returns None for any lever that does not
+    exercise memory, matching fault.memory_mode's None for a spec with no
+    memory block."""
+    if lever != "memory_cold_warm":
+        return None
+    return "cold" if _fresh_for_memory(inputs, rep) else "warm"
 
 
 def memory_mode(path: Path) -> str | None:

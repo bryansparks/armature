@@ -214,9 +214,15 @@ class CampaignRunner:
                 spec_before = ws.read_text()
                 inputs = fault.apply_lever(phase, phase_index=pi, rep=rep, corpus=corpus,
                                            working_spec=ws, rng_seed=1000)
+                # Resolve memory_mode once from the spec the lever just mutated
+                # (ground truth) and forward-capture it in the recording meta so
+                # zero-cost replay can restore the H4 cold/warm split without
+                # re-inspecting a spec it never ran. Older recordings that predate
+                # this field are derived by rep parity in replay() instead.
+                mm = fault.memory_mode(ws)
                 out = self.drv.run(ws, inputs, workflow_name=wf_name,
                                    meta={"phase_id": phase.id, "lever": phase.lever,
-                                         "inputs": inputs})
+                                         "inputs": inputs, "memory_mode": mm})
                 llm_calls += 1
                 improve_log, recovery, spec_diff = [], None, ""
                 if phase.self_improve and phase.self_improve.enabled:
@@ -226,7 +232,7 @@ class CampaignRunner:
                     spec_diff = self._diff(spec_before, ws.read_text())
                 rows.append(self._row_from_run(out.run_id, phase.id, phase.lever, inputs,
                                                out.exit_code, improve_log, recovery,
-                                               spec_diff, fault.memory_mode(ws),
+                                               spec_diff, mm,
                                                run_stderr=out.stderr, gaps=gaps,
                                                hqs_arm=out.hqs_armature,
                                                workflow_name=wf_name))
@@ -329,6 +335,10 @@ class CampaignRunner:
         # instead of silently dropping to INCONCLUSIVE in a fresh replay
         # sandbox that never ran Armature.
         all_trace_rows: list[dict] = []
+        # Per-phase main-run ordinal so the cold/warm alternation can be
+        # derived for OLD recordings whose meta predates forward-captured
+        # memory_mode (cold = even rep, warm = odd rep — fault.memory_mode_for).
+        phase_rep: dict[str, int] = {}
         for r in rec.replay():
             all_trace_rows.extend(r.get("trace_rows") or [])
             if r.get("tag") == "concurrency":
@@ -357,8 +367,17 @@ class CampaignRunner:
             # Restore phase context from the recording's meta so replayed rows
             # carry the same lever/inputs the live rows did — verdicts read these.
             # Fall back to "replay"/{} for older recordings that predate meta.
+            pid = meta.get("phase_id", "replay")
+            rep = phase_rep.get(pid, 0)
+            phase_rep[pid] = rep + 1
+            # memory_mode: prefer the forward-captured ground truth in meta; for
+            # older recordings that lack it, derive cold/warm by rep parity from
+            # the lever + inputs (fault.memory_mode_for) so H4's split reproduces.
+            mm = meta.get("memory_mode")
+            if mm is None:
+                mm = fault.memory_mode_for(meta.get("lever"), meta.get("inputs", {}), rep)
             rows.append({"run_id": r["run_id"],
-                         "phase_id": meta.get("phase_id", "replay"),
+                         "phase_id": pid,
                          "lever": meta.get("lever", "replay"),
                          "inputs": meta.get("inputs", {}),
                          "exit_code": r["exit_code"],
@@ -367,7 +386,7 @@ class CampaignRunner:
                                           "rolling": None, "dashboard": arm_dash,
                                           "feedback": None},
                          "improve_log": [], "recovery_hqs_ours": None,
-                         "spec_diff": "", "memory_mode": None,
+                         "spec_diff": "", "memory_mode": mm,
                          "agents_run": trace_io.count_agent_spawns(tr),
                          "workflow_name": tr[0].workflow_name if tr else "",
                          "account_scoped": bool(acct),
