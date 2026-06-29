@@ -115,10 +115,12 @@ class Phase(BaseModel):
 
 
 class Verdicts(BaseModel):
-    hqs_tracks_difficulty: dict = Field(default_factory=dict)
-    self_improve_fires_and_recovers: dict = Field(default_factory=dict)
-    hqs_formula_consistency: dict = Field(default_factory=dict)
-    memory_carry_forward_helps: dict = Field(default_factory=dict)
+    # None => plan does not declare this verdict (all_verdicts skips it);
+    # a dict (possibly empty) => declared, all_verdicts runs it.
+    hqs_tracks_difficulty: dict | None = None
+    self_improve_fires_and_recovers: dict | None = None
+    hqs_formula_consistency: dict | None = None
+    memory_carry_forward_helps: dict | None = None
 
 
 class CampaignPlan(BaseModel):

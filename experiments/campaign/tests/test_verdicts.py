@@ -189,3 +189,76 @@ def test_provider_health_always_on_in_all_verdicts():
              "improve_log": [], "inputs": {}, "memory_mode": None, "lever": "none"}]
     names = [v[0] for v in verdicts.all_verdicts(rows, plan)]
     assert "provider_health" in names
+
+
+def test_all_verdicts_runs_only_declared(tmp_path):
+    """#117: all_verdicts must skip verdicts the plan does not declare.
+
+    A plan that declares only `memory_carry_forward_helps` should yield that
+    verdict plus the always-on `provider_health` — and none of the other three
+    hypotheses. Declared-but-empty still counts as declared.
+    """
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts: {memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"memory_carry_forward_helps", "provider_health"}
+    # the three undeclared hypotheses must be absent
+    assert "hqs_tracks_difficulty" not in names
+    assert "self_improve_fires_and_recovers" not in names
+    assert "hqs_formula_consistency" not in names
+
+
+def test_all_verdicts_runs_two_declared_plus_provider(tmp_path):
+    """Second case: declare hqs_tracks_difficulty + hqs_formula_consistency only."""
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t2
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts:
+          hqs_tracks_difficulty: {spearman_le: -0.5, p_le: 0.05}
+          hqs_formula_consistency: {max_abs_delta_le: 0.02}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"hqs_tracks_difficulty", "hqs_formula_consistency", "provider_health"}
+    assert "self_improve_fires_and_recovers" not in names
+    assert "memory_carry_forward_helps" not in names
+
+
+def test_all_verdicts_declared_empty_counts_as_declared(tmp_path):
+    """A verdict declared with an empty dict still runs (counts as declared)."""
+    import textwrap
+    from campaign_runner.verdicts import all_verdicts
+    from campaign_runner.plan import load_plan
+
+    p = tmp_path / "plan.yml"
+    p.write_text(textwrap.dedent("""
+        name: t3
+        description: x
+        workflow: specs/campaign_research_brief.yml
+        budget: {max_runs: 5}
+        phases: [{id: a, lever: none, inputs: {topic: q}, repeats: 1}]
+        verdicts: {hqs_tracks_difficulty: {}}
+    """))
+    plan = load_plan(p)
+    names = {v[0] for v in all_verdicts([], plan)}
+    assert names == {"hqs_tracks_difficulty", "provider_health"}

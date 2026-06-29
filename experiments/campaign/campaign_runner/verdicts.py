@@ -172,11 +172,21 @@ def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:
 
 
 def all_verdicts(rows: list[dict], plan) -> list[tuple[str, str, dict]]:
+    """Run only the verdicts the plan declares, plus the always-on provider_health.
+
+    A hypothesis verdict is "declared" when its field on `plan.verdicts` is not
+    None (an empty dict still counts as declared). Undeclared verdicts are
+    skipped entirely so they don't pollute the report with spurious INCONCLUSIVE.
+    """
     v = plan.verdicts
-    return [
-        verdict_h1(rows, v.hqs_tracks_difficulty),
-        verdict_h2(rows, v.self_improve_fires_and_recovers),
-        verdict_h3(rows, v.hqs_formula_consistency),
-        verdict_h4(rows, v.memory_carry_forward_helps),
-        verdict_provider_health(rows, plan.abort),
-    ]
+    out: list[tuple[str, str, dict]] = []
+    if v.hqs_tracks_difficulty is not None:
+        out.append(verdict_h1(rows, v.hqs_tracks_difficulty))
+    if v.self_improve_fires_and_recovers is not None:
+        out.append(verdict_h2(rows, v.self_improve_fires_and_recovers))
+    if v.hqs_formula_consistency is not None:
+        out.append(verdict_h3(rows, v.hqs_formula_consistency))
+    if v.memory_carry_forward_helps is not None:
+        out.append(verdict_h4(rows, v.memory_carry_forward_helps))
+    out.append(verdict_provider_health(rows, plan.abort))
+    return out
