@@ -31,6 +31,7 @@ USER-GUIDE.html
 BUILD_FIRST_WORKFLOW.html
 
 # Launch/marketing internals (not for public repo)
+PRESENTATION.md
 LAUNCH_CONTENT.md
 LAUNCH_CONTENT_ENHANCED.md
 LAUNCH_CHECKLIST.md

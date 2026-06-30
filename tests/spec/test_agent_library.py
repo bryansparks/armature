@@ -258,3 +258,113 @@ def test_example_fixture_loads(tmp_path):
     assert stage.role.name == "Echo"
     assert stage.agent is None
     assert "plain_language" in spec.skill_library
+
+
+# ─── loader merge: agent block rules are a non-overridable floor ──────────────
+
+def _write_agent(tmp_path, body):
+    d = tmp_path / "agents" / "echo"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "agent.yaml").write_text(body, encoding="utf-8")
+
+
+def _wf(tmp_path, extra=""):
+    (tmp_path / "wf.yaml").write_text(
+        "name: t\nversion: '1.0'\n"
+        "agent_library:\n  echo:\n    path: agents/echo/agent.yaml\n"
+        f"{extra}"
+        "stages:\n  - id: s1\n    agent: echo\n    depends_on: []\n",
+        encoding="utf-8",
+    )
+    return tmp_path / "wf.yaml"
+
+
+def test_resolve_merges_agent_block_rules(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: forbidden\n")
+    spec = load_spec(_wf(tmp_path))
+    rules = spec.safety_rules
+    assert any(r.tool == "merge_pr" and r.action == "block" for r in rules)
+
+
+def test_resolve_agent_block_drops_workflow_allow(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: forbidden\n")
+    spec = load_spec(_wf(tmp_path, extra=
+        "safety_rules:\n  - tool: merge_pr\n    condition:\n      field: cmd\n      op: contains\n      value: x\n    action: allow\n    message: ok\n"))
+    rules = spec.safety_rules
+    assert not any(r.tool == "merge_pr" and r.action == "allow" for r in rules)
+    assert any(r.tool == "merge_pr" and r.action == "block" for r in rules)
+
+
+def test_resolve_agent_block_ordered_before_surviving_rules(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: forbidden\n")
+    spec = load_spec(_wf(tmp_path, extra=
+        "safety_rules:\n  - tool: merge_pr\n    condition:\n      field: cmd\n      op: contains\n      value: x\n    action: warn\n    message: be careful\n"))
+    rules = spec.safety_rules
+    block_idx = next(i for i, r in enumerate(rules) if r.tool == "merge_pr" and r.action == "block")
+    warn_idx = next(i for i, r in enumerate(rules) if r.tool == "merge_pr" and r.action == "warn")
+    assert block_idx < warn_idx
+
+
+def test_resolve_keeps_unconditional_workflow_block_dedups(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: from bundle\n")
+    spec = load_spec(_wf(tmp_path, extra=
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: from wf\n"))
+    blocks = [r for r in spec.safety_rules if r.tool == "merge_pr" and r.action == "block"]
+    assert len(blocks) == 1  # deduped by (tool, condition)
+
+
+def test_resolve_dominates_conditional_workflow_block(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: from bundle\n")
+    spec = load_spec(_wf(tmp_path, extra=
+        "safety_rules:\n  - tool: merge_pr\n    condition:\n      field: cmd\n      op: contains\n      value: force\n    action: block\n    message: from wf\n"))
+    rules = spec.safety_rules
+    blocks = [r for r in rules if r.tool == "merge_pr" and r.action == "block"]
+    assert len(blocks) == 2  # both: unconditional (agent) + conditional (workflow)
+    # agent's unconditional block must come first
+    assert blocks[0].condition is None
+
+
+def test_resolve_agent_no_safety_rules_leaves_spec_untouched(tmp_path):
+    _write_agent(tmp_path, "role:\n  name: Echo\n  type: worker\n  description: hi\n")
+    spec = load_spec(_wf(tmp_path, extra=
+        "safety_rules:\n  - tool: x\n    condition: null\n    action: warn\n    message: m\n"))
+    assert [r.tool for r in spec.safety_rules] == ["x"]
+
+
+def test_resolve_agent_safety_idempotent_across_stages(tmp_path):
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: forbidden\n")
+    (tmp_path / "wf.yaml").write_text(
+        "name: t\nversion: '1.0'\n"
+        "agent_library:\n  echo:\n    path: agents/echo/agent.yaml\n"
+        "stages:\n  - id: s1\n    agent: echo\n    depends_on: []\n"
+        "  - id: s2\n    agent: echo\n    depends_on: [s1]\n", encoding="utf-8")
+    spec = load_spec(tmp_path / "wf.yaml")
+    blocks = [r for r in spec.safety_rules if r.tool == "merge_pr" and r.action == "block"]
+    assert len(blocks) == 1  # not duplicated across two references
+
+
+def test_resolve_subagent_spec_inherits_safety(tmp_path):
+    """Item #2: a child subagent_spec workflow referencing the agent via
+    agent_library also gets the block rules merged at load."""
+    _write_agent(tmp_path,
+        "role:\n  name: Echo\n  type: worker\n  description: hi\n"
+        "safety_rules:\n  - tool: merge_pr\n    condition: null\n    action: block\n    message: forbidden\n")
+    child = tmp_path / "child.yaml"
+    child.write_text(
+        "name: child\nversion: '1.0'\n"
+        "agent_library:\n  echo:\n    path: agents/echo/agent.yaml\n"
+        "stages:\n  - id: c1\n    agent: echo\n    depends_on: []\n", encoding="utf-8")
+    spec = load_spec(child)
+    assert any(r.tool == "merge_pr" and r.action == "block" for r in spec.safety_rules)

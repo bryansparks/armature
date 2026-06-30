@@ -118,3 +118,21 @@ def test_tool_blocked_is_exception():
     exc = ToolBlocked("shell", "rm -rf /tmp", "destructive command")
     assert isinstance(exc, Exception)
     assert "shell" in str(exc)
+
+
+async def test_none_condition_matches_every_call():
+    """A block rule with condition=None applies to every call of its tool.
+
+    Regression guard: cabinet's old {field:'_', op:'truthy'} condition never
+    matched (args.get('_') is None -> False), so unconditional block rules were
+    silently no-ops. condition=None must match every call.
+    """
+    registry = HookRegistry()
+    rule = ToolSafetyRule(tool="shell", condition=None, action="block", message="forbidden")
+    SafetyHookBuilder.register(registry, [rule])
+    with pytest.raises(ToolBlocked):
+        await registry.run_pre_tool("shell", {"cmd": "ls"}, {})
+    # and it does not over-match other tools
+    other = HookRegistry()
+    SafetyHookBuilder.register(other, [rule])
+    assert await other.run_pre_tool("other_tool", {"cmd": "ls"}, {}) == HookDecision.ALLOW

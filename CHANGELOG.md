@@ -10,6 +10,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+---
+
+## [0.5.0] - 2026-06-29
+
+### Added
+
+- **`CompiledAgent` bundles may carry `safety_rules`** (`list[ToolSafetyRule]`), merged into the referencing workflow's `safety_rules` at load. Agent `block` rules are a non-overridable floor: workflow `allow` on a blocked tool is dropped and the agent's block is ordered to fire first. Enables `armature-cabinet` 0.2.0 to enforce `brakes.forbidden_actions` from the bundle.
+- **`ToolSafetyRule.condition` is now optional** (`None` = applies to every call of the tool). Previously an unconditional rule required a condition that always matched, and the only practical spelling (`{field:"_", op:"truthy"}`) never matched at all.
+
+### Changed
+
+- `_resolve_agent_references` merges bundle `safety_rules` into the spec.
+- Bumped version to 0.5.0 (additive minor bump over the released v0.4.0) and reconciled the stale `armature/__init__.py` (`__version__` was `0.3.5`) with `pyproject.toml`.
+
+---
+
+## [0.4.0] — 2026-06-29
+
+### Added
+
 - **Pluggable adapter factory + LoRA adapter skills** — `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter artifact is passed to the provider at runtime and the skill text is omitted from the prompt to save context; on `none` tiers the configured `fallback` policy applies. Includes `mock`, `s2l`, `trace`, `local`, `remote`, and `merged` backends; `AdapterRegistry` for versioned local storage; `MergedAdapterFactory` for parameter-space adapter merging; CLI commands `armature adapter create/promote/merge/eval`; and `watch --tune` skeleton. The pattern is developed from the **Skill-to-LoRA** paper (Zhang & Qi, CUHK, June 2026 — [arXiv:2606.16769](https://arxiv.org/abs/2606.16769)).
 - Example `examples/07_lora_adapter.yml` demonstrating a mock-backed TDD skill adapter end-to-end.
 - `--registry` option on `armature run` and `Harness.from_spec(...)` so workflows can use a custom adapter registry without relying on the default `~/.armature/adapters`.

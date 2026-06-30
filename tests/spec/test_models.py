@@ -4,7 +4,7 @@ from armature.spec.models import (
     SafetyCondition, ToolSafetyRule, LoopConfig, OnFailConfig,
     ModelTiers, RoleTypeDefaults, FileState, TraceConfig,
     MemoryCapture, MemoryConfig, ToolModule, ToolCallConfig,
-    Signature,
+    Signature, CompiledAgent,
 )
 import pytest
 
@@ -369,3 +369,21 @@ def test_harness_spec_has_self_improvement_field():
     spec = HarnessSpec(name="wf", stages=[])
     assert hasattr(spec, "self_improvement")
     assert isinstance(spec.self_improvement, SelfImprovementConfig)
+
+
+def test_compiled_agent_carries_safety_rules():
+    agent = CompiledAgent(
+        role=Role(name="X", type=RoleType.WORKER, description="d"),
+        safety_rules=[ToolSafetyRule(tool="merge_pr", condition=None, action="block")],
+    )
+    assert len(agent.safety_rules) == 1
+    assert agent.safety_rules[0].tool == "merge_pr"
+    # round-trips through pydantic
+    dumped = agent.model_dump()
+    again = CompiledAgent.model_validate(dumped)
+    assert again.safety_rules[0].tool == "merge_pr"
+
+
+def test_compiled_agent_safety_rules_default_empty():
+    agent = CompiledAgent(role=Role(name="X", type=RoleType.WORKER, description="d"))
+    assert agent.safety_rules == []

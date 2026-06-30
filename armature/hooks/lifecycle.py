@@ -74,6 +74,8 @@ class HookRegistry:
 
 
 def _evaluate_condition(condition, args: dict) -> bool:
+    if condition is None:
+        return True  # no condition => matches every call of this tool
     raw = args.get(condition.field)
     value = str(raw) if raw is not None else None
 
