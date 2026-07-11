@@ -421,3 +421,28 @@ async def test_extractor_stores_results_in_knowledge_store(tmp_path):
     stored = await store.load("wf")
     assert len(stored) == 1
     assert stored[0].source_run_id == "r1"
+
+
+async def test_knowledge_record_round_trips_type_provenance_and_id(tmp_path):
+    """record() persists type/provenance/source_*; load() returns them with id."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rec = KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers dark mode", confidence=0.9,
+        source_run_id="r1", source_stage_id="researcher", source_capture_key="brief",
+        type=MemoryType.PREFERENCE,
+        provenance=[{"run_id": "r1", "stage_id": "researcher", "capture_key": "brief"}],
+    )
+    rid = await store.record(rec)
+    assert rid is not None
+
+    results = await store.load("wf")
+    assert len(results) == 1
+    out = results[0]
+    assert out.id == rid
+    assert out.type == MemoryType.PREFERENCE
+    assert out.source_stage_id == "researcher"
+    assert out.source_capture_key == "brief"
+    assert out.provenance == [{"run_id": "r1", "stage_id": "researcher", "capture_key": "brief"}]
