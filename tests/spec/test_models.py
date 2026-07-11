@@ -235,6 +235,30 @@ def test_memory_config_defaults():
     assert mc.db is None
 
 
+def test_memory_config_defaults_preserve_existing_behavior():
+    """New fields default so existing specs are unchanged."""
+    cfg = MemoryConfig()
+    assert cfg.reconcile is True
+    assert cfg.reconcile_llm is False
+
+
+def test_memory_config_round_trips_reconcile_fields():
+    import yaml
+    raw = """
+enabled: true
+extract_knowledge: true
+reconcile: true
+reconcile_llm: false
+capture:
+  - {stage: researcher, key: brief, max_entries: 5}
+"""
+    cfg = yaml.safe_load(raw)
+    parsed = MemoryConfig(**cfg)
+    assert parsed.reconcile is True
+    assert parsed.reconcile_llm is False
+    assert parsed.capture[0].stage == "researcher"
+
+
 def test_harness_spec_memory_none_by_default():
     spec = HarnessSpec(
         name="wf",

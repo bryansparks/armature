@@ -203,6 +203,9 @@ class MemoryConfig(BaseModel):
     db: str | None = None             # override db path; defaults to ~/.armature/memory/{name}.db
     extract_knowledge: bool = False   # run KnowledgeExtractor post-run to build long-term facts
     inject_knowledge_as: str = "_knowledge"  # context key for injected knowledge facts
+    # ── Memory pyramid (Phase 1): reconciled, provenance-linked records ──
+    reconcile: bool = True               # dedup/update/supersede/merge on extraction
+    reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (Phase 1: unused)
 
 
 class ToolModule(BaseModel):

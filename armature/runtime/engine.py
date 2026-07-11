@@ -218,10 +218,20 @@ class Harness:
                 from armature.state.extractor import KnowledgeExtractor
                 knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
                 self._knowledge_store = KnowledgeStore(knowledge_path)
+                embedder = None
+                try:
+                    from armature.state.embedder import LocalEmbedder
+                    if LocalEmbedder.is_available():
+                        embedder = LocalEmbedder()
+                except Exception:
+                    embedder = None
                 self._knowledge_extractor = KnowledgeExtractor(
                     model=self._spec.model_tiers.small.model
                     if self._spec.model_tiers.small else "gpt-4o-mini",
                     knowledge_store=self._knowledge_store,
+                    embedder=embedder,
+                    reconcile=mem_cfg.reconcile,
+                    reconcile_llm=mem_cfg.reconcile_llm,
                 )
             else:
                 self._knowledge_store = None
