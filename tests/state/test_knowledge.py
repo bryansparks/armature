@@ -446,3 +446,28 @@ async def test_knowledge_record_round_trips_type_provenance_and_id(tmp_path):
     assert out.source_stage_id == "researcher"
     assert out.source_capture_key == "brief"
     assert out.provenance == [{"run_id": "r1", "stage_id": "researcher", "capture_key": "brief"}]
+
+
+async def test_superseded_rows_excluded_from_load_search_and_semantic(tmp_path):
+    """Rows with superseded_by set are hidden from load/search/semantic_search."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    old_id = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers light theme", confidence=0.7, source_run_id="r1",
+    ))
+    new_id = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers dark theme", confidence=0.95, source_run_id="r2",
+    ))
+    import aiosqlite
+    async with aiosqlite.connect(tmp_path / "k.db") as db:
+        await db.execute("UPDATE knowledge SET superseded_by=? WHERE id=?", (new_id, old_id))
+        await db.commit()
+
+    loaded = await store.load("wf")
+    assert len(loaded) == 1
+    assert loaded[0].id == new_id
+
+    found = await store.search("wf", "theme")
+    assert all(r.id != old_id for r in found)

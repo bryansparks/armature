@@ -180,7 +180,7 @@ class KnowledgeStore:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM knowledge WHERE workflow_name=? ORDER BY timestamp DESC",
+                "SELECT * FROM knowledge WHERE workflow_name=? AND superseded_by IS NULL ORDER BY timestamp DESC",
                 (workflow_name,),
             )
             rows = await cursor.fetchall()
@@ -198,6 +198,7 @@ class KnowledgeStore:
                        JOIN knowledge k ON k.id = f.rowid
                        WHERE f.fact MATCH ?
                          AND k.workflow_name = ?
+                         AND k.superseded_by IS NULL
                        ORDER BY f.rank
                        LIMIT ?""",
                     (query, workflow_name, top_k),
@@ -206,7 +207,7 @@ class KnowledgeStore:
                 # FTS5 query syntax error — fall back to substring match
                 pattern = f"%{query.lower()}%"
                 cursor = await db.execute(
-                    "SELECT * FROM knowledge WHERE workflow_name=? AND LOWER(fact) LIKE ? "
+                    "SELECT * FROM knowledge WHERE workflow_name=? AND superseded_by IS NULL AND LOWER(fact) LIKE ? "
                     "ORDER BY confidence DESC, timestamp DESC LIMIT ?",
                     (workflow_name, pattern, top_k),
                 )
@@ -235,7 +236,8 @@ class KnowledgeStore:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM knowledge WHERE workflow_name=? AND embedding IS NOT NULL",
+                "SELECT * FROM knowledge WHERE workflow_name=? AND embedding IS NOT NULL "
+                "AND superseded_by IS NULL ORDER BY confidence DESC, timestamp DESC LIMIT 500",
                 (workflow_name,),
             )
             rows = await cursor.fetchall()
