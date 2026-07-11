@@ -471,3 +471,70 @@ async def test_superseded_rows_excluded_from_load_search_and_semantic(tmp_path):
 
     found = await store.search("wf", "theme")
     assert all(r.id != old_id for r in found)
+
+
+async def test_get_by_id_returns_record(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rid = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="a fact", confidence=0.8, source_run_id="r1"))
+    got = await store.get_by_id(rid)
+    assert got is not None and got.id == rid and got.fact == "a fact"
+    assert await store.get_by_id(999999) is None
+
+
+async def test_update_record_bumps_confidence_provenance_and_updated_at(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rid = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="a fact", confidence=0.7, source_run_id="r1",
+        provenance=[{"run_id": "r1"}]))
+    await store.update_record(rid, confidence=0.9, provenance=[{"run_id": "r1"}, {"run_id": "r2"}])
+    got = await store.get_by_id(rid)
+    assert got.confidence == 0.9
+    assert {"run_id": "r2"} in got.provenance
+    assert got.updated_at is not None
+
+
+async def test_set_superseded_marks_old_row(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    old = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="old fact", confidence=0.5, source_run_id="r1"))
+    new = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="new fact", confidence=0.95, source_run_id="r2"))
+    await store.set_superseded(old, new)
+    got = await store.get_by_id(old)
+    assert got.superseded_by == new
+
+
+async def test_find_neighbors_unions_bm25_and_semantic(tmp_path):
+    """find_neighbors returns the union of BM25 + semantic hits, deduped by id."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()  # defined earlier in test_knowledge.py
+    for fact in ["dogs are loyal animals", "cats are independent pets", "python is a programming language"]:
+        await store.record(KnowledgeRecord(
+            workflow_name="wf", entity="e", fact=fact, confidence=0.8, source_run_id="r1"),
+            embedder=embedder)
+    cand = KnowledgeRecord(workflow_name="wf", entity="e", fact="canine companions", confidence=0.9, source_run_id="r2")
+    neighbors = await store.find_neighbors("wf", cand, embedder=embedder, k=10)
+    ids = [n.id for n in neighbors]
+    assert len(ids) == len(set(ids))  # deduped
+    assert any("dog" in n.fact for n in neighbors)
+
+
+async def test_find_neighbors_without_embedder_uses_bm25_only(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="prefers concise answers", confidence=0.9, source_run_id="r1"))
+    cand = KnowledgeRecord(workflow_name="wf", entity="e", fact="prefers concise answers", confidence=0.9, source_run_id="r2")
+    neighbors = await store.find_neighbors("wf", cand, embedder=None, k=10)
+    assert len(neighbors) == 1
+    assert "concise" in neighbors[0].fact

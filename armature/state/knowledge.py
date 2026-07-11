@@ -254,6 +254,68 @@ class KnowledgeStore:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [rec for _, rec in scored[:top_k]]
 
+    async def get_by_id(self, rid: int) -> "KnowledgeRecord | None":
+        if not self._path.exists():
+            return None
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM knowledge WHERE id=?", (rid,))
+            row = await cursor.fetchone()
+        return self._row_to_record(row) if row else None
+
+    async def update_record(
+        self,
+        rid: int,
+        *,
+        confidence: float | None = None,
+        provenance: list[dict] | None = None,
+        updated_at: str | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list = []
+        if confidence is not None:
+            sets.append("confidence=?"); params.append(confidence)
+        if provenance is not None:
+            sets.append("provenance=?"); params.append(json.dumps(provenance) if provenance else None)
+        if updated_at is not None:
+            sets.append("updated_at=?"); params.append(updated_at)
+        elif sets:
+            # Auto-stamp when other fields are being updated and caller didn't supply one.
+            sets.append("updated_at=?"); params.append(datetime.now(timezone.utc).isoformat())
+        if not sets:
+            return
+        params.append(rid)
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(f"UPDATE knowledge SET {', '.join(sets)} WHERE id=?", params)
+            await db.commit()
+
+    async def set_superseded(self, old_id: int, new_id: int) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "UPDATE knowledge SET superseded_by=? WHERE id=?", (new_id, old_id)
+            )
+            await db.commit()
+
+    async def find_neighbors(
+        self,
+        workflow_name: str,
+        candidate: "KnowledgeRecord",
+        embedder: "LocalEmbedder | None" = None,
+        k: int = 10,
+    ) -> list["KnowledgeRecord"]:
+        sem: list[KnowledgeRecord] = []
+        if embedder is not None:
+            try:
+                sem = await self.semantic_search(workflow_name, candidate.fact, embedder, top_k=k)
+            except Exception:
+                sem = []
+        bm = await self.search(workflow_name, candidate.fact, top_k=k)
+        seen: dict[int, KnowledgeRecord] = {}
+        for r in sem + bm:
+            if r.id is not None and r.id not in seen:
+                seen[r.id] = r
+        return list(seen.values())
+
     @staticmethod
     def _row_to_record(r: "aiosqlite.Row") -> KnowledgeRecord:
         prov_raw = r["provenance"] if "provenance" in r.keys() else None
