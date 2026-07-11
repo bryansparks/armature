@@ -423,6 +423,91 @@ async def test_extractor_stores_results_in_knowledge_store(tmp_path):
     assert stored[0].source_run_id == "r1"
 
 
+_LABELED_RESPONSE = (
+    '[{"entity": "domain", "fact": "CO2 is rising significantly", "confidence": 0.9, '
+    '"source_stage": "researcher", "source_key": "brief", "type": "fact"}]'
+)
+
+
+async def test_extractor_threads_provenance_from_labeled_memories():
+    """extract() labels memories by stage/key and threads them into record.provenance."""
+    from armature.state.extractor import KnowledgeExtractor
+
+    extractor = KnowledgeExtractor(model="claude-haiku-4-5-20251001", reconcile=False)
+    captured = {}
+
+    async def mock_completion(**kwargs):
+        captured["messages"] = kwargs.get("messages", [])
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = _LABELED_RESPONSE
+        return resp
+
+    with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+        records = await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+
+    prompt_text = " ".join(m["content"] for m in captured["messages"])
+    assert "researcher" in prompt_text and "brief" in prompt_text  # memories labeled
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.source_stage_id == "researcher"
+    assert rec.source_capture_key == "brief"
+    assert rec.type.value == "fact"
+    assert any(p.get("run_id") == "r1" and p.get("stage_id") == "researcher" for p in rec.provenance)
+
+
+async def test_extractor_drops_unmatched_source_label():
+    """If the LLM cites a stage/key not in the memories, source fields are nulled."""
+    from armature.state.extractor import KnowledgeExtractor
+
+    extractor = KnowledgeExtractor(model="claude-haiku-4-5-20251001", reconcile=False)
+    bad_response = (
+        '[{"entity": "x", "fact": "y", "confidence": 0.9, '
+        '"source_stage": "hallucinated_stage", "source_key": "no"}]'
+    )
+
+    async def mock_completion(**kwargs):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = bad_response
+        return resp
+
+    with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+        records = await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+
+    assert len(records) == 1
+    assert records[0].source_stage_id is None
+    assert records[0].source_capture_key is None
+
+
+async def test_extractor_reconcile_path_calls_reconciler(tmp_path):
+    """With reconcile=True + a knowledge_store, extract() delegates writes to Reconciler."""
+    from armature.state.extractor import KnowledgeExtractor
+    from armature.state.knowledge import KnowledgeStore
+    from unittest.mock import AsyncMock
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    extractor = KnowledgeExtractor(
+        model="claude-haiku-4-5-20251001", knowledge_store=store, reconcile=True
+    )
+    # Spy on Reconciler.reconcile_batch
+    with patch("armature.state.extractor.Reconciler") as RMock:
+        instance = RMock.return_value
+        instance.reconcile_batch = AsyncMock()
+        async def mock_completion(**kwargs):
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = _LABELED_RESPONSE
+            return resp
+        with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+            await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+    instance.reconcile_batch.assert_awaited_once()
+    candidates = instance.reconcile_batch.await_args.args[0]
+    assert len(candidates) == 1
+    assert candidates[0].source_stage_id == "researcher"
+
+
 async def test_knowledge_record_round_trips_type_provenance_and_id(tmp_path):
     """record() persists type/provenance/source_*; load() returns them with id."""
     from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
