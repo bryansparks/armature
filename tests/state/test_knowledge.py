@@ -539,12 +539,13 @@ async def test_superseded_rows_excluded_from_load_search_and_semantic(tmp_path):
 
     store = KnowledgeStore(tmp_path / "k.db")
     await store.init()
+    embedder = _FakeEmbedder()
     old_id = await store.record(KnowledgeRecord(
         workflow_name="wf", entity="user", fact="prefers light theme", confidence=0.7, source_run_id="r1",
-    ))
+    ), embedder=embedder)
     new_id = await store.record(KnowledgeRecord(
         workflow_name="wf", entity="user", fact="prefers dark theme", confidence=0.95, source_run_id="r2",
-    ))
+    ), embedder=embedder)
     import aiosqlite
     async with aiosqlite.connect(tmp_path / "k.db") as db:
         await db.execute("UPDATE knowledge SET superseded_by=? WHERE id=?", (new_id, old_id))
@@ -556,6 +557,11 @@ async def test_superseded_rows_excluded_from_load_search_and_semantic(tmp_path):
 
     found = await store.search("wf", "theme")
     assert all(r.id != old_id for r in found)
+
+    # semantic_search must also exclude the superseded row.
+    sem = await store.semantic_search("wf", "theme", embedder=embedder, top_k=5)
+    assert all(r.id != old_id for r in sem)
+    assert len(sem) == 1 and sem[0].id == new_id
 
 
 async def test_get_by_id_returns_record(tmp_path):
