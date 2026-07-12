@@ -242,6 +242,31 @@ class Harness:
             self._knowledge_store = None
             self._knowledge_extractor = None
 
+        # ── Memory pyramid (Phase 2): register navigation tools ──
+        self._navigation_embedder = None
+        if self._memory_config is not None and self._memory_config.navigation_tools:
+            # search_records/get_records need a KnowledgeStore even when extraction is off
+            if self._knowledge_store is None:
+                from armature.state.knowledge import KnowledgeStore
+                knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
+                self._knowledge_store = KnowledgeStore(knowledge_path)
+            try:
+                from armature.state.embedder import LocalEmbedder
+                if LocalEmbedder.is_available():
+                    self._navigation_embedder = LocalEmbedder()
+            except Exception:
+                self._navigation_embedder = None
+            from armature.registry.memory_tools import register_memory_tools
+            register_memory_tools(
+                self._registry,
+                memory_store=self._memory_store,
+                knowledge_store=self._knowledge_store,
+                trace_store=self._traces,
+                embedder=self._navigation_embedder,
+                workflow_name=self._spec.name,
+                run_id=self._run_id,
+            )
+
         if self._spec.checkpoint:
             from armature.runtime.checkpoint import CheckpointStore
             self._checkpoint: "CheckpointStore | None" = CheckpointStore(
@@ -454,6 +479,15 @@ class Harness:
                             mission_context=mission_ctx,
                             on_token=self._on_token if stage.response_stage else None,
                             adapter_registry=self._adapter_registry,
+                            navigation_tools=bool(
+                                self._memory_config is not None
+                                and self._memory_config.navigation_tools
+                            ),
+                            knowledge_key=(
+                                self._memory_config.inject_knowledge_as
+                                if self._memory_config is not None
+                                else "_knowledge"
+                            ),
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()

@@ -206,6 +206,8 @@ class MemoryConfig(BaseModel):
     # ── Memory pyramid (Phase 1): reconciled, provenance-linked records ──
     reconcile: bool = True               # dedup/update/supersede/merge on extraction
     reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (Phase 1: unused)
+    # ── Memory pyramid (Phase 2): active navigation tools ──
+    navigation_tools: bool = False       # register memory.* read tools for this run
 
 
 class ToolModule(BaseModel):

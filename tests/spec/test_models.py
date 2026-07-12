@@ -411,3 +411,18 @@ def test_compiled_agent_carries_safety_rules():
 def test_compiled_agent_safety_rules_default_empty():
     agent = CompiledAgent(role=Role(name="X", type=RoleType.WORKER, description="d"))
     assert agent.safety_rules == []
+
+
+def test_memory_config_navigation_tools_default_false():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.navigation_tools is False
+
+
+def test_memory_config_navigation_tools_round_trip():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig(navigation_tools=True)
+    dumped = cfg.model_dump()
+    assert dumped["navigation_tools"] is True
+    restored = MemoryConfig(**dumped)
+    assert restored.navigation_tools is True

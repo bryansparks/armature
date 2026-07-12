@@ -135,6 +135,8 @@ class LLMNode(BaseNode):
         mission_context: str = "",
         on_token=None,
         adapter_registry: AdapterRegistry | None = None,
+        navigation_tools: bool = False,
+        knowledge_key: str = "_knowledge",
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -152,6 +154,8 @@ class LLMNode(BaseNode):
         self._mission_context = mission_context
         self._on_token = on_token  # async (chunk: str) -> None; enables token streaming
         self._adapter_registry = adapter_registry
+        self._navigation_tools = navigation_tools  # Phase 2: gate _knowledge suppression (Task 4)
+        self._knowledge_key = knowledge_key        # Phase 2: context key to suppress (Task 4)
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
