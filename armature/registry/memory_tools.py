@@ -162,17 +162,14 @@ def register_memory_tools(
         reversibility=Reversibility.FULL,
         handler=lambda args: _search_records(args, knowledge_store, embedder, workflow_name),
         parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
-                "type": {
-                    "type": "string",
-                    "enum": ["fact", "event", "instruction", "preference"],
-                    "description": "Optional record-type filter",
-                },
-                "top_k": {"type": "integer", "description": "Max results (default 5)"},
+            "query": {"type": "string", "description": "Search query"},
+            "type": {
+                "type": "string",
+                "enum": ["fact", "event", "instruction", "preference"],
+                "description": "Optional record-type filter",
+                "optional": True,
             },
-            "required": ["query"],
+            "top_k": {"type": "integer", "description": "Max results (default 5)", "optional": True},
         },
     ))
     registry.register(ToolDescriptor(
@@ -183,12 +180,8 @@ def register_memory_tools(
         reversibility=Reversibility.FULL,
         handler=lambda args: _get_records(args, knowledge_store, workflow_name),
         parameters={
-            "type": "object",
-            "properties": {
-                "ids": {"type": "array", "items": {"type": "integer"},
-                         "description": "Record ids to fetch"},
-            },
-            "required": ["ids"],
+            "ids": {"type": "array", "items": {"type": "integer"},
+                     "description": "Record ids to fetch"},
         },
     ))
     registry.register(ToolDescriptor(
@@ -202,11 +195,8 @@ def register_memory_tools(
         reversibility=Reversibility.FULL,
         handler=lambda args: _read_track(args, track_store, workflow_name),
         parameters={
-            "type": "object",
-            "properties": {
-                "track_id": {"type": "string", "description": "Optional specific track slug"},
-                "list": {"type": "boolean", "description": "If true, list all tracks (default)"},
-            },
+            "track_id": {"type": "string", "description": "Optional specific track slug", "optional": True},
+            "list": {"type": "boolean", "description": "If true, list all tracks (default)", "optional": True},
         },
     ))
     registry.register(ToolDescriptor(
@@ -216,7 +206,7 @@ def register_memory_tools(
         permission=PermissionLevel.READ_ONLY,
         reversibility=Reversibility.FULL,
         handler=lambda args: _read_profile(args, profile_store, workflow_name),
-        parameters={"type": "object", "properties": {}},
+        parameters={},
     ))
     registry.register(ToolDescriptor(
         name="memory.search_conversation",
@@ -226,13 +216,9 @@ def register_memory_tools(
         reversibility=Reversibility.FULL,
         handler=lambda args: _search_conversation(args, memory_store, workflow_name),
         parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Keyword to search for"},
-                "stage_id": {"type": "string", "description": "Optional stage filter"},
-                "top_k": {"type": "integer", "description": "Max results (default 10)"},
-            },
-            "required": ["query"],
+            "query": {"type": "string", "description": "Keyword to search for"},
+            "stage_id": {"type": "string", "description": "Optional stage filter", "optional": True},
+            "top_k": {"type": "integer", "description": "Max results (default 10)", "optional": True},
         },
     ))
     registry.register(ToolDescriptor(
@@ -243,10 +229,7 @@ def register_memory_tools(
         reversibility=Reversibility.FULL,
         handler=lambda args: _get_run_trace(args, trace_store, run_id),
         parameters={
-            "type": "object",
-            "properties": {
-                "run_id": {"type": "string", "description": "Run id (defaults to current run)"},
-                "stage_id": {"type": "string", "description": "Optional stage filter"},
-            },
+            "run_id": {"type": "string", "description": "Run id (defaults to current run)", "optional": True},
+            "stage_id": {"type": "string", "description": "Optional stage filter", "optional": True},
         },
     ))

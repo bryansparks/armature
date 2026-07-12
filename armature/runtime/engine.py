@@ -1046,6 +1046,11 @@ class Harness:
                     {"entity": k.entity, "fact": k.fact, "confidence": k.confidence}
                     for k in knowledge
                 ]
+                if mem_cfg.navigation_tools:
+                    context["_memory_index"] = await self._knowledge_store.index_summary(
+                        self._spec.name
+                    )
+                    self._provenance["_memory_index"] = "memory_index"
 
         tracer = get_tracer()
         with tracer.start_as_current_span(

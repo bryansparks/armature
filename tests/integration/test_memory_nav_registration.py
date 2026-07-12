@@ -51,3 +51,24 @@ def test_navigation_tools_works_without_extract_knowledge(tmp_path):
     names = {d["name"] for d in h._registry.descriptors()}
     assert "memory.search_records" in names
     assert h._knowledge_store is not None
+
+async def test_memory_index_injected_when_navigation_tools(tmp_path):
+    # Pre-seed the knowledge db with one record so index_summary is non-empty.
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
+    h = _harness_with_nav(tmp_path, navigation_tools=True, extract_knowledge=True)
+    await h._knowledge_store.init()
+    await h._knowledge_store.record(KnowledgeRecord(
+        workflow_name="nav_reg", entity="e", fact="f", confidence=0.9,
+        source_run_id="r0", type=MemoryType.FACT))
+    # Stub the LLM so the run completes without network.
+    from unittest.mock import MagicMock, patch
+    async def mock_completion(**kwargs):
+        r = MagicMock(); r.choices = [MagicMock()]
+        r.choices[0].message.content = "done"
+        r.choices[0].message.tool_calls = None
+        r.usage.prompt_tokens = 10; r.usage.completion_tokens = 5
+        return r
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        ctx = await h.run({"topic": "x"})
+    assert "_memory_index" in ctx
+    assert ctx["_memory_index"]["records_by_type"].get("fact") == 1

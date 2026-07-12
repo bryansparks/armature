@@ -316,6 +316,54 @@ class KnowledgeStore:
                 seen[r.id] = r
         return list(seen.values())
 
+    async def index_summary(self, workflow_name: str) -> dict:
+        """Lightweight navigation table-of-contents for `_memory_index`.
+
+        Returns records-by-type counts, up to 20 track titles+ids, and profile
+        char count + first 200 chars. Tracks/profile are empty until Phase 3.
+        """
+        if not self._path.exists():
+            return {"records_by_type": {}, "tracks": [],
+                    "profile_chars": 0, "profile_preview": ""}
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT type, COUNT(*) AS n FROM knowledge "
+                "WHERE workflow_name=? AND superseded_by IS NULL GROUP BY type",
+                (workflow_name,),
+            )
+            by_type = {r["type"]: r["n"] for r in await cur.fetchall()}
+            tracks: list[dict] = []
+            try:
+                cur = await db.execute(
+                    "SELECT track_id, title FROM topic_tracks "
+                    "WHERE workflow_name=? ORDER BY updated_at DESC LIMIT 20",
+                    (workflow_name,),
+                )
+                tracks = [{"track_id": r["track_id"], "title": r["title"]}
+                          for r in await cur.fetchall()]
+            except Exception:
+                pass
+            profile_chars = 0
+            profile_preview = ""
+            try:
+                cur = await db.execute(
+                    "SELECT content FROM team_profile WHERE workflow_name=?",
+                    (workflow_name,),
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    profile_chars = len(row["content"])
+                    profile_preview = row["content"][:200]
+            except Exception:
+                pass
+        return {
+            "records_by_type": by_type,
+            "tracks": tracks,
+            "profile_chars": profile_chars,
+            "profile_preview": profile_preview,
+        }
+
     @staticmethod
     def _row_to_record(r: "aiosqlite.Row") -> KnowledgeRecord:
         prov_raw = r["provenance"] if "provenance" in r.keys() else None

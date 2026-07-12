@@ -629,3 +629,29 @@ async def test_find_neighbors_without_embedder_uses_bm25_only(tmp_path):
     neighbors = await store.find_neighbors("wf", cand, embedder=None, k=10)
     assert len(neighbors) == 1
     assert "concise" in neighbors[0].fact
+
+
+async def test_index_summary_counts_by_type(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="a", fact="fact one", confidence=0.9,
+        source_run_id="r1", type=MemoryType.FACT))
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="b", fact="an event", confidence=0.9,
+        source_run_id="r1", type=MemoryType.EVENT))
+    summary = await store.index_summary("wf")
+    assert summary["records_by_type"]["fact"] == 1
+    assert summary["records_by_type"]["event"] == 1
+    assert summary["tracks"] == []
+    assert summary["profile_chars"] == 0
+    assert summary["profile_preview"] == ""
+
+
+async def test_index_summary_missing_db_returns_empty():
+    from armature.state.knowledge import KnowledgeStore
+    store = KnowledgeStore(Path("/nonexistent/does_not_exist.db"))
+    summary = await store.index_summary("wf")
+    assert summary == {"records_by_type": {}, "tracks": [],
+                       "profile_chars": 0, "profile_preview": ""}
