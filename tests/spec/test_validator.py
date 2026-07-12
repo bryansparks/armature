@@ -590,3 +590,75 @@ def test_guided_json_no_model_tiers_no_warning():
     errors = validate_spec(spec, strict=False)
     warning_codes = {e.code for e in errors if e.severity == "warning"}
     assert "GUIDED_JSON_LOW_TIER_RISK" not in warning_codes
+
+
+# ── Memory pyramid (Phase 2): validator warnings + harness-injected _memory_index ──
+
+def test_validator_memory_index_is_harness_injected():
+    from armature.spec.validator import _harness_injected_keys_set
+    # _memory_index must be in the harness-injected set so stages can reference it.
+    assert "_memory_index" in _harness_injected_keys_set()
+
+
+def test_nav_tools_without_extract_warns():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" in codes
+    nav_err = [e for e in errors if e.code == "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT"][0]
+    assert nav_err.severity == "warning"
+
+
+def test_reconcile_llm_without_extract_warns():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(reconcile_llm=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small"))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT" in codes
+    assert [e for e in errors if e.code == "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT"][0].severity == "warning"
+
+
+def test_nav_tools_with_extract_no_warning():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=True),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" not in codes
+    assert "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT" not in codes
