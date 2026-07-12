@@ -409,6 +409,29 @@ def test_strict_false_returns_errors_without_raising():
     assert len(errors) > 0
 
 
+def test_strict_mode_does_not_raise_on_warnings():
+    """Warnings (severity='warning') must not raise in strict mode — only errors do."""
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="wf", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    # strict=True must NOT raise: the only finding is a warning
+    # (MEMORY_NAV_TOOLS_REQUIRES_EXTRACT), not an error.
+    errors = validate_spec(spec, strict=True)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" in codes
+    assert all(e.severity == "warning" for e in errors)
+
+
 # ── Contract.outputs validation ───────────────────────────────────────────────
 
 def test_contract_output_missing_stage_detected():

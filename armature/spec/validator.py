@@ -482,7 +482,9 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     stage_id=None,
                 ))
 
-    if strict and errors:
-        raise SpecValidationError(errors)
+    if strict:
+        hard_errors = [e for e in errors if e.severity != "warning"]
+        if hard_errors:
+            raise SpecValidationError(hard_errors)
 
     return errors
