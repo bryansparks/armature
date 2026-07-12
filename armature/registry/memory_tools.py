@@ -87,6 +87,53 @@ async def _get_records(args, knowledge_store, _workflow_name):
     return {"records": out}
 
 
+async def _read_track(args, track_store, workflow_name):
+    if track_store is None:
+        return {"tracks": []}
+    list_only = bool(args.get("list", False))
+    track_id = args.get("track_id")
+    # Phase 3 will populate track_store; Phase 2 returns empty.
+    return {"tracks": []}
+
+
+async def _read_profile(args, profile_store, workflow_name):
+    if profile_store is None:
+        return {"content": None}
+    # Phase 3 will populate profile_store; Phase 2 returns null.
+    return {"content": None}
+
+
+async def _search_conversation(args, memory_store, workflow_name):
+    if memory_store is None:
+        return {"captures": []}
+    query = args.get("query", "")
+    stage_id = args.get("stage_id")
+    top_k = int(args.get("top_k", 10))
+    rows = await memory_store.search_conversation(workflow_name, query, stage_id=stage_id, top_k=top_k)
+    return {"captures": rows}
+
+
+async def _get_run_trace(args, trace_store, run_id):
+    if trace_store is None:
+        return {"traces": []}
+    rid = args.get("run_id") or run_id
+    stage_id = args.get("stage_id")
+    traces = await trace_store.query_by_run(rid)
+    out: list[dict] = []
+    for t in traces:
+        if stage_id and t.stage_id != stage_id:
+            continue
+        out.append({
+            "stage_id": t.stage_id,
+            "role_type": t.role_type,
+            "model": t.model,
+            "success": t.success,
+            "outputs": t.outputs,
+            "timestamp": t.timestamp,
+        })
+    return {"traces": out}
+
+
 def register_memory_tools(
     registry: ToolRegistry,
     *,
@@ -142,5 +189,64 @@ def register_memory_tools(
                          "description": "Record ids to fetch"},
             },
             "required": ["ids"],
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="memory.read_track",
+        description=(
+            "Read an L2 topic track. With list=true (default) returns track "
+            "titles+ids (≤20). With track_id set, returns the full track. "
+            "Returns empty until the curator writes tracks (Phase 3)."
+        ),
+        permission=PermissionLevel.READ_ONLY,
+        reversibility=Reversibility.FULL,
+        handler=lambda args: _read_track(args, track_store, workflow_name),
+        parameters={
+            "type": "object",
+            "properties": {
+                "track_id": {"type": "string", "description": "Optional specific track slug"},
+                "list": {"type": "boolean", "description": "If true, list all tracks (default)"},
+            },
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="memory.read_profile",
+        description="Read the L3 team profile (markdown, ≤2000 chars). "
+                    "Returns {\"content\": null} until the curator writes a profile (Phase 3).",
+        permission=PermissionLevel.READ_ONLY,
+        reversibility=Reversibility.FULL,
+        handler=lambda args: _read_profile(args, profile_store, workflow_name),
+        parameters={"type": "object", "properties": {}},
+    ))
+    registry.register(ToolDescriptor(
+        name="memory.search_conversation",
+        description="Keyword scan over L0 raw stage captures (this workflow's "
+                    "captured outputs). Optional stage_id filter.",
+        permission=PermissionLevel.READ_ONLY,
+        reversibility=Reversibility.FULL,
+        handler=lambda args: _search_conversation(args, memory_store, workflow_name),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword to search for"},
+                "stage_id": {"type": "string", "description": "Optional stage filter"},
+                "top_k": {"type": "integer", "description": "Max results (default 10)"},
+            },
+            "required": ["query"],
+        },
+    ))
+    registry.register(ToolDescriptor(
+        name="memory.get_run_trace",
+        description="Pull a prior run's stage outputs (defaults to current run). "
+                    "The Armature analog of NapMem's raw-conversation access.",
+        permission=PermissionLevel.READ_ONLY,
+        reversibility=Reversibility.FULL,
+        handler=lambda args: _get_run_trace(args, trace_store, run_id),
+        parameters={
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "Run id (defaults to current run)"},
+                "stage_id": {"type": "string", "description": "Optional stage filter"},
+            },
         },
     ))

@@ -130,3 +130,110 @@ async def test_search_records_no_store_returns_empty():
     )
     result = await reg.dispatch("memory.search_records", {"query": "x"})
     assert result["records"] == []
+
+
+async def test_search_conversation_scans_l0(tmp_path):
+    from armature.state.memory import MemoryStore
+    from armature.registry.memory_tools import register_memory_tools
+
+    mem = MemoryStore(tmp_path / "mem.db"); await mem.init()
+    await mem.record("wf", "researcher", "summary", "the auth pattern is oauth2")
+    await mem.record("wf", "writer", "draft", "final report on unrelated topic")
+
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=mem, knowledge_store=None, trace_store=None,
+        embedder=None, workflow_name="wf", run_id="r1",
+    )
+    result = await reg.dispatch("memory.search_conversation", {"query": "oauth"})
+    caps = result["captures"]
+    assert len(caps) == 1
+    assert caps[0]["stage_id"] == "researcher"
+    assert "oauth" in caps[0]["value"]
+
+
+async def test_search_conversation_stage_filter(tmp_path):
+    from armature.state.memory import MemoryStore
+    from armature.registry.memory_tools import register_memory_tools
+
+    mem = MemoryStore(tmp_path / "mem.db"); await mem.init()
+    await mem.record("wf", "researcher", "summary", "oauth2 auth pattern")
+    await mem.record("wf", "writer", "draft", "oauth2 mention in draft")
+
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=mem, knowledge_store=None, trace_store=None,
+        embedder=None, workflow_name="wf", run_id="r1",
+    )
+    result = await reg.dispatch(
+        "memory.search_conversation", {"query": "oauth", "stage_id": "writer"})
+    assert len(result["captures"]) == 1
+    assert result["captures"][0]["stage_id"] == "writer"
+
+
+async def test_read_track_returns_null_when_no_store():
+    from armature.registry.memory_tools import register_memory_tools
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=None, knowledge_store=None, trace_store=None,
+        embedder=None, workflow_name="wf", run_id="r1",
+    )
+    result = await reg.dispatch("memory.read_track", {})
+    assert result == {"tracks": []}
+
+
+async def test_read_profile_returns_null_when_no_store():
+    from armature.registry.memory_tools import register_memory_tools
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=None, knowledge_store=None, trace_store=None,
+        embedder=None, workflow_name="wf", run_id="r1",
+    )
+    result = await reg.dispatch("memory.read_profile", {})
+    assert result == {"content": None}
+
+
+async def test_get_run_trace_uses_trace_store(tmp_path):
+    from armature.state.traces import TraceStore, TraceRecord
+    from armature.registry.memory_tools import register_memory_tools
+
+    ts = TraceStore(tmp_path / "tr.db"); await ts.init()
+    await ts.record(TraceRecord(
+        run_id="r9", workflow_name="wf", stage_id="s1", role_type="worker",
+        model="m", input_tokens=1, output_tokens=1, latency_ms=10, success=True,
+        output_valid=True, outputs={"content": "hello"}, tools_declared=[],
+        tools_called=[], spec_version="v", inputs_hash="h", policy_version="p",
+    ))
+
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=None, knowledge_store=None, trace_store=ts,
+        embedder=None, workflow_name="wf", run_id="r9",
+    )
+    result = await reg.dispatch("memory.get_run_trace", {})
+    assert result["traces"]
+    assert result["traces"][0]["stage_id"] == "s1"
+    assert result["traces"][0]["outputs"]["content"] == "hello"
+
+
+async def test_get_run_trace_stage_filter(tmp_path):
+    from armature.state.traces import TraceStore, TraceRecord
+    from armature.registry.memory_tools import register_memory_tools
+
+    ts = TraceStore(tmp_path / "tr.db"); await ts.init()
+    for sid in ("s1", "s2"):
+        await ts.record(TraceRecord(
+            run_id="r9", workflow_name="wf", stage_id=sid, role_type="worker",
+            model="m", input_tokens=1, output_tokens=1, latency_ms=10, success=True,
+            output_valid=True, outputs={"content": sid}, tools_declared=[],
+            tools_called=[], spec_version="v", inputs_hash="h", policy_version="p",
+        ))
+
+    reg = ToolRegistry()
+    register_memory_tools(
+        reg, memory_store=None, knowledge_store=None, trace_store=ts,
+        embedder=None, workflow_name="wf", run_id="r9",
+    )
+    result = await reg.dispatch("memory.get_run_trace", {"stage_id": "s2"})
+    assert len(result["traces"]) == 1
+    assert result["traces"][0]["stage_id"] == "s2"
