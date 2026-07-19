@@ -101,47 +101,88 @@ def verdict_h3(rows: list[dict], th: dict) -> tuple[str, str, dict]:
 
 
 def verdict_h4(rows: list[dict], th: dict) -> tuple[str, str, dict]:
-    """Memory + carry-forward helps: warm judge coverage (avg quorum) > cold.
+    """Memory + carry-forward helps: judge coverage (avg quorum) under passive
+    injection (warm) and active navigation (nav) beats no memory (cold).
 
-    v3 judges on raw avg_quorum (judge coverage) per run, NOT aggregate HQS.
-    In aggregate HQS avg_quorum carries only 0.20 weight and the
-    latency/valid/success terms wash out the memory benefit (the v2 FAIL with
-    headroom). Coverage is the honest signal: warm runs build on prior
-    briefings and cover NEW sub-problems, so their judge quorum should exceed
-    cold. Deterministic from rows so replay reproduces it.
+    v3 judges on raw avg_quorum per run, NOT aggregate HQS (the v2 latency mask).
+    v4 extends to a 3rd arm: active navigation. Buckets cold/warm/nav, computes
+    pairwise warm−cold, nav−cold, nav−warm coverage diffs with bootstrap CIs,
+    and reports per-arm mean researcher latency + input tokens (the latency /
+    efficiency signal — navigation should match warm's coverage WITHOUT warm's
+    ~5x latency tax). Excludes model_failed rows.
 
-    #118: excludes ``model_failed`` runs (degenerate judge self-contradiction
-    or empty researcher briefing) so H4 measures memory coverage, not model
-    reliability. ``n_excluded_cold`` / ``n_excluded_warm`` record how many rows
-    of each arm were skipped as model-failed outliers."""
-    cold, warm = [], []
-    n_excluded_cold = 0
-    n_excluded_warm = 0
+    Falls back to the 2-arm warm−cold verdict when no nav rows are present, so
+    old recordings replay identically."""
+    arms: dict[str, list[float]] = {"cold": [], "warm": [], "nav": []}
+    lat: dict[str, list[float]] = {"cold": [], "warm": [], "nav": []}
+    tok: dict[str, list[float]] = {"cold": [], "warm": [], "nav": []}
+    n_excluded = {"cold": 0, "warm": 0, "nav": 0}
     for r in rows:
-        if r.get("memory_mode") == "cold":
-            if r.get("model_failed"):
-                n_excluded_cold += 1
-                continue
-            if r.get("quorum_ours") is not None:
-                cold.append(r["quorum_ours"])
-        elif r.get("memory_mode") == "warm":
-            if r.get("model_failed"):
-                n_excluded_warm += 1
-                continue
-            if r.get("quorum_ours") is not None:
-                warm.append(r["quorum_ours"])
-    if not cold or not warm:
-        return ("memory_carry_forward_helps", INCON,
-                {"n_cold": len(cold), "n_warm": len(warm), "signal": "quorum",
-                 "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
-    diffs = [w - c for w in warm for c in cold]
-    mean_diff, lo, hi = stats.bootstrap_ci(diffs, seed=12345, n=2000)
-    ok = mean_diff >= th.get("warm_minus_cold_mean_ge", 0.05) and lo >= th.get("bootstrap_ci_lower_ge", 0.0)
-    return ("memory_carry_forward_helps", PASS if ok else FAIL,
-            {"mean_diff": round(mean_diff, 4), "ci_low": round(lo, 4),
-             "ci_high": round(hi, 4), "n_cold": len(cold), "n_warm": len(warm),
-             "signal": "quorum",
-             "n_excluded_cold": n_excluded_cold, "n_excluded_warm": n_excluded_warm})
+        mode = r.get("memory_mode")
+        if mode not in arms:
+            continue
+        if r.get("model_failed"):
+            n_excluded[mode] += 1
+            continue
+        q = r.get("quorum_ours")
+        if q is not None:
+            arms[mode].append(q)
+        lt = r.get("researcher_latency_ms")
+        if lt is not None:
+            lat[mode].append(lt)
+        tk = r.get("researcher_input_tokens")
+        if tk is not None:
+            tok[mode].append(tk)
+
+    def _mean(xs): return sum(xs) / len(xs) if xs else None
+
+    def _pair(a, b):
+        if not arms[a] or not arms[b]:
+            return None
+        diffs = [x - y for x in arms[a] for y in arms[b]]
+        m, lo, hi = stats.bootstrap_ci(diffs, seed=12345, n=2000)
+        return {"mean": m, "ci_low": lo, "ci_high": hi}
+
+    wc = _pair("warm", "cold")
+    nc = _pair("nav", "cold")
+    nw = _pair("nav", "warm")
+
+    detail = {
+        "signal": "quorum",
+        "n_cold": len(arms["cold"]), "n_warm": len(arms["warm"]), "n_nav": len(arms["nav"]),
+        "n_excluded": n_excluded,
+        "mean_quorum_cold": _mean(arms["cold"]), "mean_quorum_warm": _mean(arms["warm"]),
+        "mean_quorum_nav": _mean(arms["nav"]),
+        "mean_latency_cold": _mean(lat["cold"]), "mean_latency_warm": _mean(lat["warm"]),
+        "mean_latency_nav": _mean(lat["nav"]),
+        "mean_input_tokens_cold": _mean(tok["cold"]), "mean_input_tokens_warm": _mean(tok["warm"]),
+        "mean_input_tokens_nav": _mean(tok["nav"]),
+    }
+
+    # 2-arm fallback: no nav rows -> original warm−cold verdict (replay fidelity).
+    if not arms["nav"]:
+        if wc is None:
+            return ("memory_carry_forward_helps", INCON,
+                    {**detail, "n_warm": len(arms["warm"]), "n_cold": len(arms["cold"])})
+        ok = wc["mean"] >= th.get("warm_minus_cold_mean_ge", 0.05) and \
+             wc["ci_low"] >= th.get("bootstrap_ci_lower_ge", 0.0)
+        detail.update({"mean_diff": round(wc["mean"], 4), "ci_low": round(wc["ci_low"], 4),
+                       "ci_high": round(wc["ci_high"], 4)})
+        return ("memory_carry_forward_helps", PASS if ok else FAIL, detail)
+
+    # 3-arm: require warm−cold AND nav−cold AND nav−warm gates.
+    if wc is None or nc is None or nw is None:
+        return ("memory_carry_forward_helps", INCON, detail)
+    detail.update({
+        "warm_minus_cold_mean": round(wc["mean"], 4), "warm_minus_cold_ci_low": round(wc["ci_low"], 4),
+        "nav_minus_cold_mean": round(nc["mean"], 4), "nav_minus_cold_ci_low": round(nc["ci_low"], 4),
+        "nav_minus_warm_mean": round(nw["mean"], 4), "nav_minus_warm_ci_low": round(nw["ci_low"], 4),
+    })
+    ok = (wc["mean"] >= th.get("warm_minus_cold_mean_ge", 0.05)
+          and wc["ci_low"] >= th.get("bootstrap_ci_lower_ge", 0.0)
+          and nc["mean"] >= th.get("nav_minus_cold_mean_ge", 0.05)
+          and nw["mean"] >= th.get("nav_minus_warm_mean_ge", 0.0))
+    return ("memory_carry_forward_helps", PASS if ok else FAIL, detail)
 
 
 def verdict_provider_health(rows: list[dict], abort) -> tuple[str, str, dict]:
