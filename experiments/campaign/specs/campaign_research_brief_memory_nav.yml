@@ -118,6 +118,20 @@ stages:
         Topic: {{ topic }}
     output_mode: text
     depends_on: []
+    # signature.input whitelist: the researcher navigates ACTIVELY via
+    # memory.* tools + the _memory_index ToC. Excluding _memory here makes the
+    # llm.py signature.input filter (line ~451) drop the passive L0 dump (up to
+    # 8 prior briefings) from the researcher's user message — so the nav arm is
+    # a clean "navigation instead of warm" condition, not "warm + navigation".
+    # Without this, _memory is serialized into the user message anyway (the
+    # prompt template merely doesn't render {{ _memory }}, but json.dumps sends
+    # the whole context), and nav's input_tokens ≈ warm's — the ~4x efficiency
+    # advantage the thesis predicts never materializes. Mirrors the curator's
+    # signature.input (which already excludes _memory).
+    signature:
+      input:
+        topic: Research topic
+        _memory_index: Navigation index of accumulated memory (tracks + profile + record counts)
 
   - id: judge
     role:
