@@ -426,3 +426,34 @@ def test_memory_config_navigation_tools_round_trip():
     assert dumped["navigation_tools"] is True
     restored = MemoryConfig(**dumped)
     assert restored.navigation_tools is True
+
+
+def test_memory_config_phase3_defaults():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.curator_stage is None
+    assert cfg.track_budget == 20
+    assert cfg.profile_budget == 2000
+    assert cfg.track_char_budget == 2000
+    assert cfg.track_refresh_threshold == 10
+    assert cfg.profile_refresh_threshold == 3
+
+
+def test_memory_config_phase3_round_trip():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig(
+        curator_stage="curator",
+        track_budget=15,
+        profile_budget=3000,
+        track_char_budget=1500,
+        track_refresh_threshold=5,
+        profile_refresh_threshold=2,
+    )
+    dumped = cfg.model_dump()
+    restored = MemoryConfig(**dumped)
+    assert restored.curator_stage == "curator"
+    assert restored.track_budget == 15
+    assert restored.profile_budget == 3000
+    assert restored.track_char_budget == 1500
+    assert restored.track_refresh_threshold == 5
+    assert restored.profile_refresh_threshold == 2

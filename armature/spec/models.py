@@ -208,6 +208,13 @@ class MemoryConfig(BaseModel):
     reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (Phase 1: unused)
     # ── Memory pyramid (Phase 2): active navigation tools ──
     navigation_tools: bool = False       # register memory.* read tools for this run
+    # ── Memory pyramid (Phase 3): curator + L2/L3 write tools ──
+    curator_stage: str | None = None        # post_run stage id that writes tracks/profile
+    track_budget: int = 20                  # max tracks per workflow
+    profile_budget: int = 2000              # max chars for the team profile
+    track_char_budget: int = 2000           # max chars per track summary
+    track_refresh_threshold: int = 10       # new live records before tracks refreshed
+    profile_refresh_threshold: int = 3      # track count (or 50 new records) before profile refreshed
 
 
 class ToolModule(BaseModel):
