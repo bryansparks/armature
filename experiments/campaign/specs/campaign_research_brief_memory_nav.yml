@@ -65,6 +65,17 @@ memory:
   enabled: true
   fresh: false             # default warm/nav; the lever flips this per run
   inject_as: _memory
+  # Share the warm spec's L0 memory DB so the nav arm navigates the compare
+  # phase's accumulated captures (the NapMem scenario: navigation over a large
+  # accumulated memory vs. passive injection of 10 facts). Without this, the nav
+  # spec's workflow name (`-nav`) would get its own empty DB and the nav arm
+  # could never beat warm on coverage. `~` expands against the sandbox HOME, so
+  # this resolves to <sandbox>/.armature/memory/campaign-research-brief-memory.db
+  # — the same path the warm spec defaults to (engine.py memory DB path =
+  # ~/.armature/memory/<spec.name>.db). The knowledge DB is derived as
+  # <mem_path>_knowledge.db, so nav's extractor (extract_knowledge: true) also
+  # shares/reconciles into the warm spec's knowledge DB.
+  db: ~/.armature/memory/campaign-research-brief-memory.db
   capture:
     - stage: researcher
       key: content
