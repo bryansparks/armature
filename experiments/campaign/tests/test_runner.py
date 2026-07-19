@@ -591,6 +591,62 @@ def test_row_from_run_sets_model_failed_false_for_clean_run(tmp_path):
     assert row["model_failed"] is False
 
 
+def _seed_cost_trace_row(db, run_id, stage_id, role_type, latency_ms,
+                         input_tokens, quorum_score=0.9, workflow_name="wf"):
+    """Insert a trace row carrying explicit latency_ms + input_tokens so the
+    researcher-cost aggregation in _row_from_run has something to sum. Mirrors
+    the trace_io_ddl shape used by _seed_trace_row."""
+    import sqlite3
+    con = sqlite3.connect(db)
+    con.executescript(trace_io_ddl.replace("CREATE TABLE traces",
+                                           "CREATE TABLE IF NOT EXISTS traces"))
+    con.execute(
+        "INSERT INTO traces (run_id,workflow_name,stage_id,role_type,model,timestamp,"
+        "quorum_score,latency_ms,input_tokens,success,output_valid,escalation_count,"
+        "outputs_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, workflow_name, stage_id, role_type, "m", "2026-01-01T00:00:01",
+         quorum_score, latency_ms, input_tokens, 1, 1, 0, "{}"))
+    con.commit(); con.close()
+
+
+def test_row_from_run_sums_researcher_latency_and_input_tokens(tmp_path):
+    """_row_from_run must add researcher_latency_ms + researcher_input_tokens,
+    summed over the run's researcher-stage trace rows. Non-researcher rows are
+    excluded from the sum. None when no researcher rows exist."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    # Two researcher rows (latency/tokens get summed) + one judge row (excluded).
+    _seed_cost_trace_row(r.sb.trace_db, "r1", "researcher", "researcher",
+                         latency_ms=1200.0, input_tokens=500)
+    _seed_cost_trace_row(r.sb.trace_db, "r1", "researcher", "researcher",
+                         latency_ms=800.0, input_tokens=300)
+    _seed_cost_trace_row(r.sb.trace_db, "r1", "judge", "judge",
+                         latency_ms=5000.0, input_tokens=9999)
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["researcher_latency_ms"] == 2000.0
+    assert row["researcher_input_tokens"] == 800
+
+
+def test_row_from_run_researcher_cost_none_when_no_researcher_rows(tmp_path):
+    """When a run has no researcher-stage rows, both researcher-cost fields are
+    None (not 0) so downstream reporters can distinguish absent from free."""
+    plan = _plan(tmp_path)
+    src = tmp_path / "src.yml"
+    src.write_text("name: sample-workflow\nversion: '1.0'\nstages: []\n")
+    r = runner.CampaignRunner(plan, src, root=tmp_path / "out")
+    _seed_cost_trace_row(r.sb.trace_db, "r1", "judge", "judge",
+                         latency_ms=5000.0, input_tokens=9999)
+    row = r._row_from_run("r1", "p", "none", {}, 1, [], None, "", None,
+                          run_stderr="", gaps=None, hqs_arm=None,
+                          workflow_name="wf")
+    assert row["researcher_latency_ms"] is None
+    assert row["researcher_input_tokens"] is None
+
+
 def test_circuit_breaker_aborts_after_k_consecutive(tmp_path, monkeypatch):
     """K=2 consecutive account-scoped runs → aborted=True, run stops, _finalize
     writes aborted/abort_reason; a good run between resets the streak."""
