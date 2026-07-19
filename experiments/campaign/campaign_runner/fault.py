@@ -88,27 +88,40 @@ def _fresh_for_memory(inputs: dict, rep: int) -> bool:
 
 
 def memory_mode_for(lever: str | None, inputs: dict, rep: int) -> str | None:
-    """Derive the memory_mode label ('cold'/'warm'/None) for a run from the
+    """Derive the memory_mode label ('cold'/'warm'/'nav'/None) for a run from the
     phase lever + inputs + rep index WITHOUT a spec — the replay-path mirror of
     what apply_lever + memory_mode compute live. Used by replay() to reconstruct
     the H4 cold/warm split from an OLD recording whose meta predates
     forward-captured memory_mode. Returns None for any lever that does not
     exercise memory, matching fault.memory_mode's None for a spec with no
-    memory block."""
+    memory block.
+
+    A forward-captured `memory_mode` in inputs/meta takes precedence: the nav
+    phase uses lever='none' (no cold/warm signal), so its label must be carried
+    forward from the live recording rather than re-derived from the lever."""
+    # Forward-captured label takes precedence (replay of nav-phase rows whose
+    # lever is "none" and so carry no cold/warm signal).
+    captured = (inputs or {}).get("memory_mode")
+    if captured in ("cold", "warm", "nav"):
+        return captured
     if lever != "memory_cold_warm":
         return None
     return "cold" if _fresh_for_memory(inputs, rep) else "warm"
 
 
 def memory_mode(path: Path) -> str | None:
-    """Label a working spec's run 'cold' or 'warm' from its `memory.fresh` field.
+    """Label a working spec's run 'cold', 'warm', or 'nav' from its `memory` block.
 
+    'nav'   -> memory.navigation_tools is truthy (the run uses memory navigation
+               tools — the third arm of the H4 campaign). Checked first because
+               a nav spec also carries fresh:false, which would otherwise label
+               it 'warm'.
     'cold'  -> memory.fresh is true  (prior memories ignored this run; a clean
                baseline that still captures, so it populates the shared DB).
     'warm'  -> memory.fresh is false (prior memories injected at run start).
     None    -> the spec has no `memory` block (memory is not exercised).
 
-    Drives the H4 verdict's cold/warm split. Pure reader — never mutates.
+    Drives the H4 verdict's cold/warm/nav split. Pure reader — never mutates.
     """
     import yaml
     try:
@@ -117,6 +130,8 @@ def memory_mode(path: Path) -> str | None:
         return None
     mem = (spec or {}).get("memory")
     if isinstance(mem, dict):
+        if mem.get("navigation_tools"):
+            return "nav"
         return "cold" if mem.get("fresh") else "warm"
     return None
 
