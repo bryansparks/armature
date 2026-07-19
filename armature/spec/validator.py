@@ -242,6 +242,20 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             harness_injected_keys.add(spec.memory.inject_knowledge_as)
         if spec.memory.navigation_tools:
             harness_injected_keys.add("_memory_index")
+        if spec.memory.curator_stage:
+            harness_injected_keys.add("_memory_index_refresh_hint")
+
+    # ── Memory pyramid: navigation requires memory.enabled ──
+    if spec.memory and not spec.memory.enabled and spec.memory.navigation_tools:
+        errors.append(SpecError(
+            code="MEMORY_NAV_TOOLS_REQUIRES_ENABLED",
+            message=(
+                "memory.navigation_tools is True but memory.enabled is False; "
+                "navigation tools will not be registered. Set enabled: true or "
+                "navigation_tools: false."
+            ),
+            severity="warning",
+        ))
 
     # ── Memory pyramid (Phase 2): memory-config misconfig warnings ──
     if spec.memory and spec.memory.enabled:
@@ -267,6 +281,61 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     "reconcile_llm: false."
                 ),
                 severity="warning",
+            ))
+
+        # ── Memory pyramid (Phase 3): curator + budget validation ──
+        if spec.memory.curator_stage:
+            curator = next(
+                (s for s in spec.stages if s.id == spec.memory.curator_stage), None
+            )
+            if curator is None:
+                errors.append(SpecError(
+                    code="MEMORY_CURATOR_STAGE_MISSING",
+                    message=(
+                        f"memory.curator_stage references stage "
+                        f"'{spec.memory.curator_stage}' which does not exist."
+                    ),
+                    severity="error",
+                ))
+            else:
+                if not curator.post_run:
+                    errors.append(SpecError(
+                        code="MEMORY_CURATOR_NOT_POST_RUN",
+                        message=(
+                            f"memory.curator_stage '{spec.memory.curator_stage}' is not "
+                            f"post_run: true; the curator must run after normal stages."
+                        ),
+                        stage_id=curator.id,
+                        severity="error",
+                    ))
+                declared = set(curator.role.tools) if curator.role and curator.role.tools else set()
+                if "memory.write_track" not in declared or "memory.write_profile" not in declared:
+                    errors.append(SpecError(
+                        code="MEMORY_CURATOR_MISSING_TOOLS",
+                        message=(
+                            f"curator stage '{spec.memory.curator_stage}' should declare "
+                            f"memory.write_track and memory.write_profile in role.tools."
+                        ),
+                        stage_id=curator.id,
+                        severity="warning",
+                    ))
+        if spec.memory.track_budget < 1 or spec.memory.track_budget > 20:
+            errors.append(SpecError(
+                code="MEMORY_BUDGET_OUT_OF_RANGE",
+                message=(
+                    f"memory.track_budget must be between 1 and 20 "
+                    f"(got {spec.memory.track_budget})."
+                ),
+                severity="error",
+            ))
+        if spec.memory.profile_budget < 1 or spec.memory.profile_budget > 5000:
+            errors.append(SpecError(
+                code="MEMORY_BUDGET_OUT_OF_RANGE",
+                message=(
+                    f"memory.profile_budget must be between 1 and 5000 "
+                    f"(got {spec.memory.profile_budget})."
+                ),
+                severity="error",
             ))
 
     # Warn when a post_run stage has no signature filter and the workflow has fan_out
