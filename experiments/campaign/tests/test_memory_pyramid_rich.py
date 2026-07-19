@@ -333,7 +333,10 @@ async def test_reconcile_dedups_across_two_warm_runs(tmp_path, monkeypatch):
 
     shared_db = tmp_path / "shared.db"
 
+    run_idx = [0]
+
     async def run_warm(monkeypatch):
+        run_idx[0] += 1
         spec = load_spec(WARM_SPEC)
         spec.memory.db = str(shared_db)
         spec.memory.extract_knowledge = True  # populate L1 (test-only mutation)
@@ -351,7 +354,9 @@ async def test_reconcile_dedups_across_two_warm_runs(tmp_path, monkeypatch):
             return _extractor_fact_response(entity="topic", fact="the same fact")
 
         _patch_both(monkeypatch, fake)
-        h = Harness(spec, session_dir=tmp_path / f"warm-{local}", use_cache=False)
+        # Distinct session_dir per run (the L1 knowledge DB is shared via
+        # spec.memory.db; the session_dir isolates trace/run metadata by run).
+        h = Harness(spec, session_dir=tmp_path / f"warm-{run_idx[0]}", use_cache=False)
         await h.run({"topic": "the core design problems of distributed systems"})
         return h
 

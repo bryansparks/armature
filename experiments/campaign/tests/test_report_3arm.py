@@ -163,10 +163,15 @@ def test_three_arm_chip_flips_when_threshold_tightens():
         [("memory_carry_forward_helps", "FAIL", detail)], tight)
 
     def _navwarm_chip(html):
-        # find the nav-warm row and grab its chip span. The row label is
-        # `nav&minus;warm` (report.py:151); the chip is a PASS/FAIL span after it.
-        m = re.search(r"nav&minus;warm.*?(PASS|FAIL)", html, re.S)
-        assert m, "nav-warm row not found in 3-arm html"
+        # Grab the nav-warm CHIP from the diff table — not the overall H4 verdict.
+        # Anchoring on `<b>nav&minus;warm</b>` skips the thesis paragraph's
+        # `nav&minus;warm` (wrapped as `<b>Headline gate: nav&minus;warm &ge; 0</b>`,
+        # so `<b>nav&minus;warm</b>` does not match it). Requiring `</span>` after
+        # the label skips the meta line's overall-H4 verdict `<b>{result}</b>`
+        # (which is wrapped in `<b>`, not `<span>`). Without both anchors the regex
+        # reads the verdict string this test injects, making the assertion vacuous.
+        m = re.search(r"<b>nav&minus;warm</b>.*?(PASS|FAIL)</span>", html, re.S)
+        assert m, "nav-warm chip row not found in 3-arm html"
         return m.group(1)
 
     # Under loose thresholds, nav-warm (mean 0.0 >= 0.0) -> PASS chip.
