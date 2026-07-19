@@ -1,12 +1,12 @@
-"""Memory-navigation tools (Phase 2 — read tools only).
+"""Memory-navigation tools (Phase 2/3 — read + curator write tools).
 
 `register_memory_tools` is a per-run factory called by `Harness.__init__`
 (gated by `MemoryConfig.navigation_tools`). Handlers close over per-run store
 handles; `ToolRegistry` is per-Harness so there is no cross-run leakage.
 
-Write tools (`memory.write_track`, `memory.write_profile`) and the curator
-stage arrive in Phase 3. `read_track` / `read_profile` return null gracefully
-until Phase 3 populates L2/L3.
+Read tools are always registered. Write tools (`memory.write_track`,
+`memory.write_profile`) are registered only when `curator_stage` is set and
+the corresponding L2/L3 store is provided.
 """
 from __future__ import annotations
 from typing import Any
@@ -90,17 +90,41 @@ async def _get_records(args, knowledge_store, _workflow_name):
 async def _read_track(args, track_store, workflow_name):
     if track_store is None:
         return {"tracks": []}
-    list_only = bool(args.get("list", False))
     track_id = args.get("track_id")
-    # Phase 3 will populate track_store; Phase 2 returns empty.
-    return {"tracks": []}
+    if track_id:
+        return {"track": await track_store.get_track(workflow_name, track_id)}
+    return {"tracks": await track_store.list_tracks(workflow_name)}
 
 
 async def _read_profile(args, profile_store, workflow_name):
     if profile_store is None:
         return {"content": None}
-    # Phase 3 will populate profile_store; Phase 2 returns null.
-    return {"content": None}
+    return {"content": await profile_store.get_profile(workflow_name)}
+
+
+async def _write_track(args, track_store, workflow_name, track_char_budget, track_budget):
+    if track_store is None:
+        return {"error": "track store unavailable"}
+    return await track_store.upsert_track(
+        workflow_name=workflow_name,
+        track_id=args["track_id"],
+        title=args["title"],
+        summary=args["summary"],
+        narrative=args.get("narrative"),
+        evidence_links=args.get("evidence_links") or [],
+        char_budget=track_char_budget,
+        track_budget=track_budget,
+    )
+
+
+async def _write_profile(args, profile_store, workflow_name, profile_budget):
+    if profile_store is None:
+        return {"error": "profile store unavailable"}
+    return await profile_store.upsert_profile(
+        workflow_name=workflow_name,
+        content=args["content"],
+        char_budget=profile_budget,
+    )
 
 
 async def _search_conversation(args, memory_store, workflow_name):
@@ -145,11 +169,16 @@ def register_memory_tools(
     run_id: str,
     track_store=None,
     profile_store=None,
+    curator_stage: str | None = None,
+    track_budget: int = 20,
+    track_char_budget: int = 2000,
+    profile_budget: int = 2000,
 ) -> None:
     """Register memory-navigation tools on `registry` for one run.
 
-    `track_store` / `profile_store` are accepted for forward compatibility
-    with Phase 3 (write tools + curator); unused in Phase 2.
+    Read tools are always registered. `memory.write_track` / `memory.write_profile`
+    are registered only when `curator_stage` is set (and the corresponding store
+    is provided) — a spec without a curator can read tracks/profile but not write.
     """
     registry.register(ToolDescriptor(
         name="memory.search_records",
@@ -233,3 +262,46 @@ def register_memory_tools(
             "stage_id": {"type": "string", "description": "Optional stage filter", "optional": True},
         },
     ))
+
+    # ── Phase 3: write tools (curator only) ──
+    if curator_stage is not None:
+        if track_store is not None:
+            registry.register(ToolDescriptor(
+                name="memory.write_track",
+                description=(
+                    "Create or update an L2 topic track (a ≤ char_budget markdown "
+                    "summary citing L1 record ids). Upserts on track_id. Evidence "
+                    "links to superseded or nonexistent records are dropped and "
+                    "reported back. The 21st distinct track in a workflow is rejected."
+                ),
+                permission=PermissionLevel.WORKSPACE,
+                reversibility=Reversibility.PARTIAL,
+                handler=lambda args: _write_track(
+                    args, track_store, workflow_name, track_char_budget, track_budget),
+                parameters={
+                    "track_id": {"type": "string", "description": "Stable slug; upserts existing track"},
+                    "title": {"type": "string", "description": "Human-readable track title"},
+                    "summary": {"type": "string", "description": "Track body (≤ track_char_budget chars)"},
+                    "narrative": {"type": "string", "description": "Optional longer markdown", "optional": True},
+                    "evidence_links": {
+                        "type": "array", "items": {"type": "integer"},
+                        "description": "knowledge record ids cited", "optional": True,
+                    },
+                },
+            ))
+        if profile_store is not None:
+            registry.register(ToolDescriptor(
+                name="memory.write_profile",
+                description=(
+                    "Create or replace the L3 team profile (a ≤ profile_budget markdown "
+                    "capturing stable team attributes: domain, constraints, recurring "
+                    "failure modes). Upserts on workflow_name."
+                ),
+                permission=PermissionLevel.WORKSPACE,
+                reversibility=Reversibility.PARTIAL,
+                handler=lambda args: _write_profile(
+                    args, profile_store, workflow_name, profile_budget),
+                parameters={
+                    "content": {"type": "string", "description": "Profile markdown (≤ profile_budget chars)"},
+                },
+            ))

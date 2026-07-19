@@ -2,6 +2,26 @@ from __future__ import annotations
 import pytest
 from armature.registry.registry import ToolRegistry
 from armature.registry.memory_tools import reciprocal_rank_fusion
+from armature.permissions.permissions import PermissionLevel, Reversibility
+
+
+async def _fresh_registry():
+    return ToolRegistry()
+
+
+def _descriptor(registry: ToolRegistry, name: str):
+    # Note: registry.descriptors() returns only {name,description,parameters}
+    # (no handler). Use registry.get() to access the ToolDescriptor.handler so
+    # tests can invoke it directly.
+    desc = registry.get(name)
+    if desc is None:
+        return None
+    return {
+        "name": desc.name,
+        "description": desc.description,
+        "parameters": desc.parameters,
+        "handler": desc.handler,
+    }
 
 
 def _make_record(rid, fact, entity="e", confidence=0.5, type_="fact", superseded_by=None):
@@ -237,3 +257,137 @@ async def test_get_run_trace_stage_filter(tmp_path):
     result = await reg.dispatch("memory.get_run_trace", {"stage_id": "s2"})
     assert len(result["traces"]) == 1
     assert result["traces"][0]["stage_id"] == "s2"
+
+
+# ── Phase 3: read-tool wiring + write-tool registration ──
+
+async def test_read_track_returns_track_when_id(tmp_path):
+    from armature.state.tracks import TrackStore
+    from armature.registry.memory_tools import register_memory_tools
+    ts = TrackStore(tmp_path / "k.db")
+    await ts.init()
+    await ts.upsert_track("wf", "auth", "Auth", "s", None, [], 2000, 20)
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", track_store=ts)
+    desc = _descriptor(reg, "memory.read_track")
+    out = await desc["handler"]({"track_id": "auth"})
+    assert out["track"]["track_id"] == "auth"
+
+
+async def test_read_track_lists_when_no_id(tmp_path):
+    from armature.state.tracks import TrackStore
+    from armature.registry.memory_tools import register_memory_tools
+    ts = TrackStore(tmp_path / "k.db")
+    await ts.init()
+    await ts.upsert_track("wf", "a", "A", "s", None, [], 2000, 20)
+    await ts.upsert_track("wf", "b", "B", "s", None, [], 2000, 20)
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", track_store=ts)
+    out = await _descriptor(reg, "memory.read_track")["handler"]({})
+    assert {t["track_id"] for t in out["tracks"]} == {"a", "b"}
+
+
+async def test_read_track_empty_when_store_none():
+    from armature.registry.memory_tools import register_memory_tools
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1")
+    out = await _descriptor(reg, "memory.read_track")["handler"]({})
+    assert out == {"tracks": []}
+
+
+async def test_read_profile_returns_content(tmp_path):
+    from armature.state.profile import ProfileStore
+    from armature.registry.memory_tools import register_memory_tools
+    ps = ProfileStore(tmp_path / "k.db")
+    await ps.init()
+    await ps.upsert_profile("wf", "body", 2000)
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", profile_store=ps)
+    out = await _descriptor(reg, "memory.read_profile")["handler"]({})
+    assert out["content"] == "body"
+
+
+async def test_read_profile_null_when_store_none():
+    from armature.registry.memory_tools import register_memory_tools
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1")
+    out = await _descriptor(reg, "memory.read_profile")["handler"]({})
+    assert out == {"content": None}
+
+
+async def test_write_track_dispatch(tmp_path):
+    from armature.state.tracks import TrackStore
+    from armature.registry.memory_tools import register_memory_tools
+    ts = TrackStore(tmp_path / "k.db")
+    await ts.init()
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", track_store=ts,
+                          profile_store=None, curator_stage="curator")
+    desc = _descriptor(reg, "memory.write_track")
+    out = await desc["handler"]({
+        "track_id": "t", "title": "T", "summary": "s", "evidence_links": [],
+    })
+    assert out["track_id"] == "t"
+    # write_profile is NOT registered here because profile_store=None; that
+    # gating is covered by test_write_profile_dispatch and
+    # test_write_tools_not_registered_without_curator_stage.
+
+
+async def test_write_profile_dispatch(tmp_path):
+    from armature.state.profile import ProfileStore
+    from armature.registry.memory_tools import register_memory_tools
+    ps = ProfileStore(tmp_path / "k.db")
+    await ps.init()
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", profile_store=ps,
+                          track_store=None, curator_stage="curator")
+    out = await _descriptor(reg, "memory.write_profile")["handler"]({"content": "body"})
+    assert "updated_at" in out
+
+
+async def test_write_tools_not_registered_without_curator_stage(tmp_path):
+    from armature.state.tracks import TrackStore
+    from armature.state.profile import ProfileStore
+    from armature.registry.memory_tools import register_memory_tools
+    ts = TrackStore(tmp_path / "k.db"); await ts.init()
+    ps = ProfileStore(tmp_path / "k.db"); await ps.init()
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1",
+                          track_store=ts, profile_store=ps, curator_stage=None)
+    assert _descriptor(reg, "memory.write_track") is None
+    assert _descriptor(reg, "memory.write_profile") is None
+    # read tools still present
+    assert _descriptor(reg, "memory.read_track") is not None
+
+
+async def test_write_tool_permissions_workspace_partial(tmp_path):
+    from armature.state.tracks import TrackStore
+    from armature.registry.memory_tools import register_memory_tools
+    ts = TrackStore(tmp_path / "k.db"); await ts.init()
+    reg = await _fresh_registry()
+    register_memory_tools(reg, memory_store=None, knowledge_store=None,
+                          trace_store=None, embedder=None,
+                          workflow_name="wf", run_id="r1", track_store=ts,
+                          curator_stage="curator")
+    # PermissionLevel/Reversibility are stored on the descriptor; descriptors() only
+    # returns name/description/parameters, so verify by inspecting the registry's
+    # internal tool objects directly.
+    tools = [t for t in reg._tools.values() if t.name == "memory.write_track"]
+    assert tools and tools[0].permission == PermissionLevel.WORKSPACE
+    assert tools[0].reversibility == Reversibility.PARTIAL
