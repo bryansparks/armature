@@ -204,6 +204,9 @@ class Harness:
         self._behaviors = make_default_behavior_registry()
 
         mem_cfg = self._spec.memory
+        # Shared embedder between the knowledge extractor and navigation tools.
+        # Constructed once (in the extract block or the nav block) and reused.
+        self._embedder: "LocalEmbedder | None" = None
         if mem_cfg and mem_cfg.enabled:
             from armature.state.memory import MemoryStore
             if mem_cfg.db:
@@ -218,18 +221,17 @@ class Harness:
                 from armature.state.extractor import KnowledgeExtractor
                 knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
                 self._knowledge_store = KnowledgeStore(knowledge_path)
-                embedder = None
                 try:
                     from armature.state.embedder import LocalEmbedder
                     if LocalEmbedder.is_available():
-                        embedder = LocalEmbedder()
+                        self._embedder = LocalEmbedder()
                 except Exception:
-                    embedder = None
+                    self._embedder = None
                 self._knowledge_extractor = KnowledgeExtractor(
                     model=self._spec.model_tiers.small.model
                     if self._spec.model_tiers.small else "gpt-4o-mini",
                     knowledge_store=self._knowledge_store,
-                    embedder=embedder,
+                    embedder=self._embedder,
                     reconcile=mem_cfg.reconcile,
                     reconcile_llm=mem_cfg.reconcile_llm,
                 )
@@ -242,29 +244,46 @@ class Harness:
             self._knowledge_store = None
             self._knowledge_extractor = None
 
-        # ── Memory pyramid (Phase 2): register navigation tools ──
-        self._navigation_embedder = None
+        # ── Memory pyramid (Phase 2/3): register navigation tools ──
+        self._track_store = None
+        self._profile_store = None
         if self._memory_config is not None and self._memory_config.navigation_tools:
-            # search_records/get_records need a KnowledgeStore even when extraction is off
+            # Derive the knowledge DB path once; shared by KnowledgeStore,
+            # TrackStore, and ProfileStore so all pyramid layers co-locate.
             if self._knowledge_store is None:
                 from armature.state.knowledge import KnowledgeStore
                 knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
                 self._knowledge_store = KnowledgeStore(knowledge_path)
-            try:
-                from armature.state.embedder import LocalEmbedder
-                if LocalEmbedder.is_available():
-                    self._navigation_embedder = LocalEmbedder()
-            except Exception:
-                self._navigation_embedder = None
+            else:
+                knowledge_path = self._knowledge_store._path
+            # Reuse the extractor's embedder if present; else try to construct one.
+            if self._embedder is None:
+                try:
+                    from armature.state.embedder import LocalEmbedder
+                    if LocalEmbedder.is_available():
+                        self._embedder = LocalEmbedder()
+                except Exception:
+                    self._embedder = None
+            # L2/L3 stores share the knowledge DB file.
+            from armature.state.tracks import TrackStore
+            from armature.state.profile import ProfileStore
+            self._track_store = TrackStore(knowledge_path)
+            self._profile_store = ProfileStore(knowledge_path)
             from armature.registry.memory_tools import register_memory_tools
             register_memory_tools(
                 self._registry,
                 memory_store=self._memory_store,
                 knowledge_store=self._knowledge_store,
                 trace_store=self._traces,
-                embedder=self._navigation_embedder,
+                embedder=self._embedder,
                 workflow_name=self._spec.name,
                 run_id=self._run_id,
+                track_store=self._track_store,
+                profile_store=self._profile_store,
+                curator_stage=self._memory_config.curator_stage,
+                track_budget=self._memory_config.track_budget,
+                track_char_budget=self._memory_config.track_char_budget,
+                profile_budget=self._memory_config.profile_budget,
             )
 
         if self._spec.checkpoint:
@@ -1039,6 +1058,10 @@ class Harness:
 
             if self._knowledge_store is not None:
                 await self._knowledge_store.init()
+                if self._track_store is not None:
+                    await self._track_store.init()
+                if self._profile_store is not None:
+                    await self._profile_store.init()
                 knowledge = await self._knowledge_store.search(
                     self._spec.name, query=self._spec.name, top_k=10
                 )
@@ -1125,6 +1148,27 @@ class Harness:
                     )
                 except Exception:
                     pass  # extraction must never block execution
+
+            # ── Memory pyramid (Phase 3): refresh hint for the curator ──
+            if (self._memory_config is not None and self._memory_config.curator_stage
+                    and self._track_store is not None and self._knowledge_store is not None):
+                try:
+                    last_ts = await self._track_store.last_updated_at(self._spec.name)
+                    new_records = await self._knowledge_store.count_since(self._spec.name, last_ts)
+                    track_count = await self._track_store.count(self._spec.name)
+                    mc = self._memory_config
+                    context["_memory_index_refresh_hint"] = {
+                        "refresh_tracks": new_records >= mc.track_refresh_threshold,
+                        "refresh_profile": (
+                            track_count >= mc.profile_refresh_threshold
+                            or new_records >= 50
+                        ),
+                        "new_records_since_tracks": new_records,
+                        "track_count": track_count,
+                    }
+                    self._provenance["_memory_index_refresh_hint"] = "memory_refresh_hint"
+                except Exception:
+                    pass  # refresh hint must never block execution
 
             # Compute failure-signature diagnostics from this run's traces
             from armature.state.diagnostics import DiagnosticAnalyzer
