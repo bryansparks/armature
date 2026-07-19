@@ -25,6 +25,18 @@ class Sandbox:
         """A subprocess env with HOME redirected to the sandbox dir."""
         env = dict(os.environ)
         env["HOME"] = str(self.dir)
+        # Ensure `python -m armature` (the campaign subprocess form) imports the
+        # worktree's armature — the build with the memory pyramid — not the
+        # main-checkout install the bare `armature` console script resolves to.
+        # `python -m armature` puts cwd on sys.path[0]; if the campaign is
+        # launched from outside the worktree root, cwd alone would not find the
+        # worktree package and Python would fall back to the editable install
+        # (main checkout, no Phase 3). Prepending the worktree root
+        # (self.dir.parent, since self.dir = <root>/<plan.name>) to PYTHONPATH
+        # makes the worktree build win regardless of the subprocess cwd.
+        worktree_root = str(self.dir.parent)
+        existing = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = worktree_root + (os.pathsep + existing if existing else "")
         if extra:
             env.update(extra)
         return env
