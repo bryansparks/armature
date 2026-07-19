@@ -482,6 +482,7 @@ class CampaignRunner:
                 "abort_reason": self.abort_reason,
                 "report": "report.html"}
         (self.sb.dir / "meta.json").write_text(json.dumps(meta, default=str))
+        _h4_th = self.plan.verdicts.memory_carry_forward_helps or {}
         report = render_report(
             campaign={"name": self.plan.name, "description": self.plan.description,
                       "purpose": purpose, "git_sha": meta["git_sha"], "date": date_str,
@@ -495,7 +496,8 @@ class CampaignRunner:
             rows=rows, verdicts=vs, gaps=gaps,
             reproduce_cmd=f"python experiments/campaign/run.py {self.plan.name} "
                           f"--replay {self.recording.dir if self.recording else '<recording>'}",
-            out_path=self.sb.dir / "report.html")
+            out_path=self.sb.dir / "report.html",
+            verdict_thresholds=_h4_th)
         return CampaignResult(rows=rows, verdicts=vs, gaps=gaps,
                               report_path=report, campaign_jsonl=self.campaign_jsonl,
                               gaps_jsonl=self.gaps_jsonl)

@@ -104,8 +104,88 @@ def _tiers_html(tiers: list[dict]) -> str:
             f"{body}</table>")
 
 
+def _fmt(x, digits=4):
+    return f"{x:.{digits}f}" if isinstance(x, (int, float)) else "—"
+
+
+def _chip(ok: bool) -> str:
+    color = "#2e7d32" if ok else "#c62828"
+    label = "PASS" if ok else "FAIL"
+    return f"<span style='color:{color};font-weight:bold'>{label}</span>"
+
+
+def _three_arm_html(verdicts: list[tuple[str, str, dict]], th: dict) -> str:
+    """3-arm cold/warm/nav comparison for the memory_carry_forward_helps verdict.
+    Renders bar charts (per-arm coverage, latency, input tokens), a pairwise
+    diff table (warm-cold, nav-cold, nav-warm) with bootstrap CIs + per-gate
+    PASS/FAIL chips, and n_excluded per arm. Returns '' when the H4 verdict is
+    2-arm (no nav fields) or absent — the existing verdict table covers those."""
+    h4 = next((v for v in verdicts if v[0] == "memory_carry_forward_helps"), None)
+    if h4 is None:
+        return ""
+    _name, result, d = h4
+    if "nav_minus_cold_mean" not in d:
+        return ""  # 2-arm fallback — nothing 3-arm to show
+
+    arms = ["cold", "warm", "nav"]
+    quorum = [d.get(f"mean_quorum_{a}") for a in arms]
+    latency = [d.get(f"mean_latency_{a}") for a in arms]
+    tokens = [d.get(f"mean_input_tokens_{a}") for a in arms]
+
+    def _bars(vals, title):
+        clean = [(v if isinstance(v, (int, float)) else 0.0) for v in vals]
+        return f"<h3>{title}</h3>" + svgplot.bar(arms, clean)
+
+    quorum_svg = _bars(quorum, "Mean judge quorum (coverage)")
+    latency_svg = _bars(latency, "Mean researcher latency (ms)")
+    tokens_svg = _bars(tokens, "Mean researcher input tokens")
+
+    pairs = [
+        ("warm&minus;cold", d.get("warm_minus_cold_mean"), d.get("warm_minus_cold_ci_low"),
+         th.get("warm_minus_cold_mean_ge", 0.05),
+         (d.get("warm_minus_cold_mean", 0) >= th.get("warm_minus_cold_mean_ge", 0.05)
+          and d.get("warm_minus_cold_ci_low", 0) >= th.get("bootstrap_ci_lower_ge", 0.0))),
+        ("nav&minus;cold", d.get("nav_minus_cold_mean"), d.get("nav_minus_cold_ci_low"),
+         th.get("nav_minus_cold_mean_ge", 0.05),
+         (d.get("nav_minus_cold_mean", 0) >= th.get("nav_minus_cold_mean_ge", 0.05))),
+        ("nav&minus;warm", d.get("nav_minus_warm_mean"), d.get("nav_minus_warm_ci_low"),
+         th.get("nav_minus_warm_mean_ge", 0.0),
+         (d.get("nav_minus_warm_mean", 0) >= th.get("nav_minus_warm_mean_ge", 0.0))),
+    ]
+    diff_rows = "\n".join(
+        f"<tr><td><b>{label}</b></td>"
+        f"<td style='text-align:right'>{_fmt(mean)}</td>"
+        f"<td style='text-align:right'>{_fmt(lo)}</td>"
+        f"<td style='text-align:right'>{_fmt(thr)}</td>"
+        f"<td style='text-align:center'>{_chip(ok)}</td></tr>"
+        for label, mean, lo, thr, ok in pairs)
+
+    nexc = d.get("n_excluded") or {}
+    nexc_line = ", ".join(f"{a}: {nexc.get(a, 0)}" for a in arms)
+    ns = ", ".join(f"{a}={d.get(f'n_{a}', 0)}" for a in arms)
+
+    thesis = ("<p><em>Thesis under test:</em> active navigation (nav) recovers passive "
+              "injection's (warm) coverage benefit WITHOUT its ~5&times; researcher-latency "
+              "tax. <b>Headline gate: nav&minus;warm &ge; 0</b> (navigation matches or beats "
+              "warm on coverage). The latency + token charts are the efficiency signal — "
+              "nav should match warm's coverage at substantially lower latency/tokens.</p>")
+
+    return (f"<h2>3-arm comparison (cold vs warm vs nav)</h2>"
+            f"{thesis}"
+            f"<p class='meta'>Runs: {ns} &middot; model_failed excluded: {nexc_line} "
+            f"&middot; overall H4: <b>{result}</b></p>"
+            f"<table><tr><th>3-arm bar charts</th></tr>"
+            f"<tr><td>{quorum_svg}</td></tr>"
+            f"<tr><td>{latency_svg}</td></tr>"
+            f"<tr><td>{tokens_svg}</td></tr></table>"
+            f"<h3>Pairwise coverage diffs (bootstrap CI)</h3>"
+            f"<table><tr><th>comparison</th><th>mean</th><th>CI low</th>"
+            f"<th>threshold</th><th>gate</th></tr>{diff_rows}</table>")
+
+
 def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str, str, dict]],
-                  gaps: list[dict], reproduce_cmd: str, out_path: Path) -> Path:
+                  gaps: list[dict], reproduce_cmd: str, out_path: Path,
+                  verdict_thresholds: dict | None = None) -> Path:
     auth_series = [r["hqs_ours"]["authoritative"] for r in rows
                    if (r.get("hqs_ours") or {}).get("authoritative") is not None]
     dash_series = [r["hqs_ours"]["dashboard"] for r in rows
@@ -150,6 +230,7 @@ def render_report(*, campaign: dict, rows: list[dict], verdicts: list[tuple[str,
     workflow_html = escape(campaign.get("workflow", ""))
     sha = escape(campaign.get("git_sha", ""))
     tiers_html = _tiers_html(campaign.get("tiers", []) or [])
+    three_arm = _three_arm_html(verdicts, verdict_thresholds or {})
     html = f"""<!doctype html><html><head><meta charset='utf-8'>
 <title>Campaign report — {name}</title>
 <style>body{{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem}}
@@ -177,6 +258,7 @@ table{{border-collapse:collapse}} td,th{{border:1px solid #ddd;padding:.3em .6em
 <h2>Verdict table</h2>
 <table><tr><th>Hypothesis</th><th>Result</th><th>Detail</th></tr>
 {_verdict_rows_html(verdicts)}</table>
+{three_arm}
 <h2>Observability gaps</h2>
 <ul>{gaps_html}</ul>
 {narrative(verdicts, rows, campaign)}
@@ -207,6 +289,47 @@ def _kind(name: str, path: str) -> str:
     if n.startswith("h1") or "hypothesis" in n:
         return "Hypothesis (HQS dynamics)"
     return "Campaign"
+
+
+def build_3arm_preview(*, out_path: Path) -> Path:
+    """Generate a PREVIEW report.html with synthetic 3-arm data so the report
+    format is visible before a live campaign run (OpenRouter credits required
+    for the real run). The data is illustrative, not measured. Watermarked."""
+    campaign = {
+        "name": "cold-vs-warm (PREVIEW — synthetic data)",
+        "description": "PREVIEW of the 3-arm report format. Data is synthetic; "
+                       "the live campaign run is deferred to OpenRouter credits.",
+        "purpose": "Preview the 3-arm cold/warm/nav comparison report section.",
+        "date": "2026-07-19 (PREVIEW)", "workflow": "specs/campaign_research_brief_memory_nav.yml",
+        "git_sha": "preview", "totals": {"runs": 30},
+    }
+    rows = [{"run_id": f"r{i}", "hqs_ours": {"authoritative": 0.7, "dashboard": 0.7},
+             "hqs_armature": {"authoritative": 0.7}} for i in range(3)]
+    detail = {
+        "signal": "quorum", "n_cold": 10, "n_warm": 10, "n_nav": 10,
+        "n_excluded": {"cold": 0, "warm": 1, "nav": 0},
+        "mean_quorum_cold": 0.50, "mean_quorum_warm": 0.86, "mean_quorum_nav": 0.85,
+        "mean_latency_cold": 1200.0, "mean_latency_warm": 6000.0, "mean_latency_nav": 1400.0,
+        "mean_input_tokens_cold": 200.0, "mean_input_tokens_warm": 1000.0, "mean_input_tokens_nav": 250.0,
+        "warm_minus_cold_mean": 0.36, "warm_minus_cold_ci_low": 0.30,
+        "nav_minus_cold_mean": 0.35, "nav_minus_cold_ci_low": 0.28,
+        "nav_minus_warm_mean": -0.01, "nav_minus_warm_ci_low": -0.05,
+    }
+    verdicts = [("memory_carry_forward_helps", "FAIL", detail),
+                ("provider_health", "PASS", {"abort_reason": None})]
+    th = {"warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+          "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0}
+    banner = ("<div style='border:2px solid #f57c00;background:#fff3e0;padding:1em;margin:1em 0'>"
+              "<b>⚠ PREVIEW — synthetic data.</b> This is what the 3-arm report will look like "
+              "after the live campaign run (deferred to OpenRouter credits). Numbers are "
+              "illustrative; the real run will populate them from measured rows.</div>")
+    out = Path(out_path)
+    render_report(campaign=campaign, rows=rows, verdicts=verdicts, gaps=[],
+                  reproduce_cmd="python -m armature loop experiments/campaign/plans/cold_vs_warm.yml  # (live run deferred to credits)",
+                  out_path=out, verdict_thresholds=th)
+    text = out.read_text()
+    out.write_text(text.replace("<h1>Campaign report", banner + "<h1>Campaign report", 1))
+    return out
 
 
 def build_index(out_dir: Path) -> Path:
