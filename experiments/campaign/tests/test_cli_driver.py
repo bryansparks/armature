@@ -35,7 +35,12 @@ def test_run_invokes_armature_and_captures_run_id(tmp_path, monkeypatch):
     def fake_run(cmd, **kw):
         captured.setdefault("cmds", []).append(cmd)
         captured["env"] = kw.get("env")
-        sub = cmd[1] if len(cmd) > 1 else ""
+        # argv is now [sys.executable, "-m", "armature", <sub>, ...]; older
+        # tests written for ["armature", <sub>, ...] expect sub at cmd[1].
+        if len(cmd) > 1 and cmd[1] == "-m":
+            sub = cmd[3] if len(cmd) > 3 else ""
+        else:
+            sub = cmd[1] if len(cmd) > 1 else ""
         # the driver passes --output <out.json>; write a fake result there
         if sub == "run":
             captured["run_cmd"] = cmd
