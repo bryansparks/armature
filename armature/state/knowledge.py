@@ -364,6 +364,26 @@ class KnowledgeStore:
             "profile_preview": profile_preview,
         }
 
+    async def count_since(self, workflow_name: str, since: str | None) -> int:
+        """Count live records for `workflow_name` newer than `since` (or all live if None)."""
+        if not self._path.exists():
+            return 0
+        async with aiosqlite.connect(self._path) as db:
+            if since is None:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM knowledge "
+                    "WHERE workflow_name=? AND superseded_by IS NULL",
+                    (workflow_name,),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM knowledge "
+                    "WHERE workflow_name=? AND superseded_by IS NULL AND timestamp > ?",
+                    (workflow_name, since),
+                )
+            row = await cur.fetchone()
+            return int(row[0]) if row is not None else 0
+
     @staticmethod
     def _row_to_record(r: "aiosqlite.Row") -> KnowledgeRecord:
         prov_raw = r["provenance"] if "provenance" in r.keys() else None

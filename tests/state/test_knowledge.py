@@ -655,3 +655,30 @@ async def test_index_summary_missing_db_returns_empty():
     summary = await store.index_summary("wf")
     assert summary == {"records_by_type": {}, "tracks": [],
                        "profile_chars": 0, "profile_preview": ""}
+
+
+async def test_count_since_counts_live_records(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    ks = KnowledgeStore(tmp_path / "k.db")
+    await ks.init()
+    rid = await ks.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="f", confidence=0.8, source_run_id="r1"))
+    assert await ks.count_since("wf", None) == 1
+    # since = a far-future timestamp → 0
+    assert await ks.count_since("wf", "2099-01-01T00:00:00+00:00") == 0
+
+
+async def test_count_since_excludes_superseded(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    ks = KnowledgeStore(tmp_path / "k.db")
+    await ks.init()
+    rid = await ks.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="f", confidence=0.8, source_run_id="r1"))
+    await ks.set_superseded(rid, 999)
+    assert await ks.count_since("wf", None) == 0
+
+
+async def test_count_since_missing_db_returns_zero(tmp_path):
+    from armature.state.knowledge import KnowledgeStore
+    ks = KnowledgeStore(tmp_path / "missing.db")
+    assert await ks.count_since("wf", None) == 0
