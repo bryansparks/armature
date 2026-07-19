@@ -216,16 +216,16 @@ def register_memory_tools(
     registry.register(ToolDescriptor(
         name="memory.read_track",
         description=(
-            "Read an L2 topic track. With list=true (default) returns track "
-            "titles+ids (≤20). With track_id set, returns the full track. "
-            "Returns empty until the curator writes tracks (Phase 3)."
+            "Read an L2 topic track. With track_id set, returns the full "
+            "track ({\"track\": {...}}). Without track_id, lists all tracks "
+            "({\"tracks\": [...]}): titles+summaries+evidence_links (≤20). "
+            "Returns {\"tracks\": []} until the curator writes tracks."
         ),
         permission=PermissionLevel.READ_ONLY,
         reversibility=Reversibility.FULL,
         handler=lambda args: _read_track(args, track_store, workflow_name),
         parameters={
-            "track_id": {"type": "string", "description": "Optional specific track slug", "optional": True},
-            "list": {"type": "boolean", "description": "If true, list all tracks (default)", "optional": True},
+            "track_id": {"type": "string", "description": "Optional specific track slug; omit to list all tracks", "optional": True},
         },
     ))
     registry.register(ToolDescriptor(
