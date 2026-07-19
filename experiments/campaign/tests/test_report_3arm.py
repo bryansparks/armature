@@ -84,3 +84,92 @@ def test_preview_generator_writes_watermarked_html(tmp_path):
     assert "PREVIEW" in text
     assert "<svg" in text
     assert "synthetic" in text.lower() or "preview" in text.lower()
+
+
+# ── Task 7c: 3-arm rows -> verdict -> report integration (Test C) ──
+
+
+def _arm(mode, quorums, *, latency, tokens):
+    """Build H4 rows for one memory arm with explicit latency + tokens so the
+    per-arm means are deterministic (the report integration test asserts them)."""
+    return [
+        {"memory_mode": mode, "quorum_ours": q, "model_failed": False,
+         "researcher_latency_ms": latency, "researcher_input_tokens": tokens}
+        for q in quorums
+    ]
+
+
+def test_three_arm_rows_to_verdict_to_report_integration(tmp_path):
+    """Realistic 3-arm rows -> verdict_h4 -> render_report: the 3-arm section
+    renders and the verdict's per-arm means match the rows."""
+    from campaign_runner import verdicts, report
+
+    rows = [
+        *_arm("cold", [0.50, 0.55], latency=1200, tokens=200),
+        *_arm("warm", [0.85, 0.88], latency=6000, tokens=1000),
+        *_arm("nav",  [0.85, 0.88], latency=1400, tokens=250),
+    ]
+    th = {"warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+          "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0}
+    name, result, detail = verdicts.verdict_h4(rows, th)
+    assert name == "memory_carry_forward_helps"
+    # nav matches warm (mean 0.865 == 0.865) -> nav_minus_warm_mean == 0.0
+    # which satisfies nav_minus_warm_mean_ge=0.0 -> PASS.
+    assert result == "PASS"
+    assert detail["mean_quorum_nav"] == 0.865  # mean of [0.85, 0.88]
+    assert detail["mean_latency_nav"] == 1400
+    assert detail["mean_input_tokens_nav"] == 250
+
+    # And the report renders the 3-arm section from this verdict.
+    out = tmp_path / "report.html"
+    campaign = {"name": "c", "description": "d", "purpose": "p",
+                "date": "2026-07-19", "workflow": "specs/x.yml",
+                "git_sha": "abc", "totals": {"runs": 6}}
+    report.render_report(campaign=campaign, rows=rows,
+                         verdicts=[(name, result, detail)], gaps=[],
+                         reproduce_cmd="...", out_path=out,
+                         verdict_thresholds=th)
+    text = out.read_text()
+    assert "3-arm comparison" in text.lower()
+    assert "<svg" in text
+
+
+# ── Task 7c: report chip fidelity (Test E) ──
+
+
+def test_three_arm_chip_flips_when_threshold_tightens():
+    """Tighten nav_minus_warm_mean_ge so a nav that barely matches warm flips
+    the nav-warm chip from PASS to FAIL — the chips reflect the thresholds,
+    not hardcoded labels."""
+    import re
+    from campaign_runner import report
+
+    detail = {
+        "signal": "quorum", "n_cold": 10, "n_warm": 10, "n_nav": 10,
+        "n_excluded": {"cold": 0, "warm": 0, "nav": 0},
+        "mean_quorum_cold": 0.50, "mean_quorum_warm": 0.86, "mean_quorum_nav": 0.86,
+        "mean_latency_cold": 1200.0, "mean_latency_warm": 6000.0, "mean_latency_nav": 1400.0,
+        "mean_input_tokens_cold": 200.0, "mean_input_tokens_warm": 1000.0, "mean_input_tokens_nav": 250.0,
+        "warm_minus_cold_mean": 0.36, "warm_minus_cold_ci_low": 0.30,
+        "nav_minus_cold_mean": 0.36, "nav_minus_cold_ci_low": 0.30,
+        "nav_minus_warm_mean": 0.0, "nav_minus_warm_ci_low": -0.02,
+    }
+    loose = {"warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+             "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0}
+    tight = {**loose, "nav_minus_warm_mean_ge": 0.05}  # require nav to BEAT warm by 0.05
+    html_loose = report._three_arm_html(
+        [("memory_carry_forward_helps", "PASS", detail)], loose)
+    html_tight = report._three_arm_html(
+        [("memory_carry_forward_helps", "FAIL", detail)], tight)
+
+    def _navwarm_chip(html):
+        # find the nav-warm row and grab its chip span. The row label is
+        # `nav&minus;warm` (report.py:151); the chip is a PASS/FAIL span after it.
+        m = re.search(r"nav&minus;warm.*?(PASS|FAIL)", html, re.S)
+        assert m, "nav-warm row not found in 3-arm html"
+        return m.group(1)
+
+    # Under loose thresholds, nav-warm (mean 0.0 >= 0.0) -> PASS chip.
+    assert _navwarm_chip(html_loose) == "PASS"
+    # Under tight thresholds, nav-warm (mean 0.0 < 0.05) -> FAIL chip.
+    assert _navwarm_chip(html_tight) == "FAIL"
