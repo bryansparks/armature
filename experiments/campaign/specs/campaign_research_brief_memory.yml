@@ -102,21 +102,36 @@ stages:
         relevant sub-problems of the topic are each stated correctly and
         grounded, with no fabrication.
 
-        Score `confidence` as the breadth of distinct, correct, non-repetitive,
-        non-fabricated sub-problems covered, on this scale:
-          - 1-2 distinct points  -> confidence ~0.15-0.25
-          - 3-4                  -> ~0.40-0.55
-          - 5-6                  -> ~0.65-0.80
-          - 7-8+                 -> ~0.85-1.00
-        Subtract ~0.15 for any fabricated or clearly incorrect claim, and ~0.05
-        per point that merely repeats an obvious surface fact with no real
-        content. A briefing covering the same few obvious points scores LOW; one
-        covering many distinct sub-problems scores HIGH. Do NOT give high
-        confidence to a briefing merely for being well-written — reward BREADTH
-        of correct coverage. `accept` is true iff confidence >= 0.5 and no
-        fabricated claim is present. List each defect / fabricated / incorrect
-        claim in `issues` (one per line); if there are none, return an empty
-        issues list.
+        Follow these steps:
+          1. Read the briefing and identify every distinct sub-problem it claims
+             is a core design problem of the topic.
+          2. For each sub-problem, decide whether it is (a) relevant to the
+             topic, (b) correctly stated, and (c) non-fabricated. Drop any that
+             fail one of these three checks.
+          3. Count the remaining, valid sub-problems. This count determines
+             `confidence`:
+               - 0 valid points            -> confidence 0.0
+               - 1-2 distinct points       -> confidence ~0.15-0.25
+               - 3-4 distinct points       -> confidence ~0.40-0.55
+               - 5-6 distinct points       -> confidence ~0.65-0.80
+               - 7-8+ distinct points      -> confidence ~0.85-1.00
+          4. Subtract ~0.15 from the mapped confidence for any fabricated or
+             clearly incorrect claim, and ~0.05 per point that merely repeats an
+             obvious surface fact with no real content.
+          5. Set `accept` to true iff confidence >= 0.5 AND there are no
+             fabricated claims. If confidence < 0.5, `accept` MUST be false.
+
+        A briefing that rehashes the same few obvious points (consensus,
+        partitions, clock sync, partial failure) scores LOW even if it is
+        well-written. A briefing covering many distinct sub-problems scores HIGH.
+        Do NOT give high confidence merely for polished prose — reward BREADTH
+        of correct, grounded coverage.
+
+        Before returning, write a short private scratch list of the valid
+        sub-problems you counted. Then emit ONLY the JSON result.
+
+        List each defect / fabricated / incorrect claim in `issues` (one per
+        line); if there are none, return an empty issues list.
         Briefing:
         {{ researcher.content }}
         Topic: {{ topic }}

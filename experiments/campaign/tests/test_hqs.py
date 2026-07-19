@@ -43,3 +43,70 @@ def test_divergence_flags_drift():
     d = hqs.divergence(ours, armature)
     assert d["authoritative"] == 0.0
     assert abs(d["dashboard"] - 0.09) < 1e-9
+
+
+def _judge_row(outputs_json="{}", quorum=0.9, out_tokens=325, success=True,
+                 output_valid=True):
+    return trace_io.TraceRow(
+        run_id="r", workflow_name="wf", stage_id="judge", role_type="judge",
+        model="m", input_tokens=1000, output_tokens=out_tokens, latency_ms=1000.0,
+        success=success, output_valid=output_valid, quorum_score=quorum,
+        escalation_count=0, outputs_json=outputs_json)
+
+
+def _researcher_row(outputs_json="{}", out_tokens=5000, success=True,
+                    output_valid=True):
+    return trace_io.TraceRow(
+        run_id="r", workflow_name="wf", stage_id="researcher",
+        role_type="researcher", model="m", input_tokens=500, output_tokens=out_tokens,
+        latency_ms=10000.0, success=success, output_valid=output_valid,
+        quorum_score=None, escalation_count=0, outputs_json=outputs_json)
+
+
+def test_model_failed_detects_self_contradictory_judge():
+    judge = _judge_row('{"accept": true, "confidence": 0.0, "issues": []}',
+                       quorum=0.0)
+    researcher = _researcher_row('{"content": "' + "x" * 200 + '"}')
+    assert hqs.is_model_failed([judge, researcher]) is True
+
+
+def test_model_failed_detects_empty_researcher():
+    judge = _judge_row('{"accept": false, "confidence": 0.05, "issues": ["empty"]}',
+                       quorum=0.05)
+    researcher = _researcher_row('{"content": "too short"}')
+    assert hqs.is_model_failed([judge, researcher]) is True
+
+
+def test_model_failed_clean_run_returns_false():
+    judge = _judge_row('{"accept": true, "confidence": 0.9, "issues": []}')
+    researcher = _researcher_row('{"content": "' + "y" * 200 + '"}')
+    assert hqs.is_model_failed([judge, researcher]) is False
+
+
+def test_model_failed_fallback_judge_quorum_zero_with_missing_outputs_json():
+    """Old recordings lack outputs_json. A successful judge row with quorum 0.0
+    is the degenerate self-contradiction pattern and must be flagged."""
+    judge = _judge_row("{}", quorum=0.0)
+    researcher = _researcher_row("{}", out_tokens=5000)
+    assert hqs.is_model_failed([judge, researcher]) is True
+
+
+def test_model_failed_fallback_researcher_zero_tokens_with_missing_outputs_json():
+    """Old recordings lack outputs_json. A researcher with zero output tokens
+    produced no briefing and must be flagged."""
+    judge = _judge_row("{}", quorum=0.95)
+    researcher = _researcher_row("{}", out_tokens=0)
+    assert hqs.is_model_failed([judge, researcher]) is True
+
+
+def test_model_failed_fallback_does_not_flag_legitimate_low_quorum():
+    """A successful judge row with quorum 0.0 but real outputs_json that says
+    accept=false is a legitimate rejection, not a model failure."""
+    judge = _judge_row('{"accept": false, "confidence": 0.0, "issues": ["bad"]}',
+                       quorum=0.0)
+    researcher = _researcher_row('{"content": "' + "z" * 200 + '"}')
+    assert hqs.is_model_failed([judge, researcher]) is False
+
+
+def test_model_failed_no_rows_returns_false():
+    assert hqs.is_model_failed([]) is False
