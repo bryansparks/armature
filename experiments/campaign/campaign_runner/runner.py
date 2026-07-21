@@ -86,6 +86,18 @@ class CampaignRunner:
         rows = trace_io.read_rows_by_run(self.sb.trace_db, run_id) if run_id else []
         agents_run = trace_io.count_agent_spawns(rows)
         quorum_ours = hqs.avg_quorum(rows)
+        # researcher_latency_ms / researcher_input_tokens: sum over the run's
+        # researcher-stage trace rows. None when the run has no researcher rows
+        # (so the verdict reporter can distinguish absent from free — Task 5).
+        # Fan-out partitions each write their own row, so this naturally sums
+        # every researcher invocation in the run.
+        researcher_rows = [r for r in rows if getattr(r, "stage_id", None) == "researcher"]
+        researcher_latency_ms = (
+            sum(r.latency_ms for r in researcher_rows
+                if getattr(r, "latency_ms", None) is not None) or None)
+        researcher_input_tokens = (
+            sum(r.input_tokens for r in researcher_rows
+                if getattr(r, "input_tokens", None) is not None) or None)
         # model_failed: degenerate judge/researcher output (self-contradictory
         # judge verdict or empty researcher briefing). Computed from the run's
         # trace rows via the shared hqs.is_model_failed helper so replay()
@@ -139,7 +151,9 @@ class CampaignRunner:
                 "account_scoped_kind": acct[0].error_kind if acct else None,
                 "account_scoped_model": acct[0].model if acct else None,
                 "quorum_ours": quorum_ours,
-                "model_failed": model_failed}
+                "model_failed": model_failed,
+                "researcher_latency_ms": researcher_latency_ms,
+                "researcher_input_tokens": researcher_input_tokens}
 
     def _abort_k(self) -> int:
         return self.plan.abort.on_consecutive_account_errors if self.plan.abort else 3
@@ -468,6 +482,7 @@ class CampaignRunner:
                 "abort_reason": self.abort_reason,
                 "report": "report.html"}
         (self.sb.dir / "meta.json").write_text(json.dumps(meta, default=str))
+        _h4_th = self.plan.verdicts.memory_carry_forward_helps or {}
         report = render_report(
             campaign={"name": self.plan.name, "description": self.plan.description,
                       "purpose": purpose, "git_sha": meta["git_sha"], "date": date_str,
@@ -481,7 +496,8 @@ class CampaignRunner:
             rows=rows, verdicts=vs, gaps=gaps,
             reproduce_cmd=f"python experiments/campaign/run.py {self.plan.name} "
                           f"--replay {self.recording.dir if self.recording else '<recording>'}",
-            out_path=self.sb.dir / "report.html")
+            out_path=self.sb.dir / "report.html",
+            verdict_thresholds=_h4_th)
         return CampaignResult(rows=rows, verdicts=vs, gaps=gaps,
                               report_path=report, campaign_jsonl=self.campaign_jsonl,
                               gaps_jsonl=self.gaps_jsonl)

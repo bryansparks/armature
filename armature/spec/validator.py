@@ -23,6 +23,11 @@ class SpecValidationError(ValueError):
         super().__init__(f"Spec validation failed ({len(errors)} error(s)):\n{lines}")
 
 
+def _harness_injected_keys_set() -> set[str]:
+    """Static accessor for tests — the base set always injected by the harness."""
+    return {"run_id", "_transcript", "_diagnostics", "_stale_memory_keys", "_memory_index"}
+
+
 def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
     """Validate a HarnessSpec and return a list of errors (empty = valid).
 
@@ -227,6 +232,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         "_transcript",      # available in post_run stages
         "_diagnostics",     # available in post_run stages
         "_stale_memory_keys",  # injected when memory has stale entries
+        "_memory_index",       # injected when navigation_tools is True (Phase 2)
     }
     if spec.continuation:
         harness_injected_keys.add(spec.continuation.inject_as)
@@ -234,6 +240,46 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         harness_injected_keys.add(spec.memory.inject_as)
         if spec.memory.inject_knowledge_as:
             harness_injected_keys.add(spec.memory.inject_knowledge_as)
+        if spec.memory.navigation_tools:
+            harness_injected_keys.add("_memory_index")
+
+    # ── Memory pyramid: navigation requires memory.enabled ──
+    if spec.memory and not spec.memory.enabled and spec.memory.navigation_tools:
+        errors.append(SpecError(
+            code="MEMORY_NAV_TOOLS_REQUIRES_ENABLED",
+            message=(
+                "memory.navigation_tools is True but memory.enabled is False; "
+                "navigation tools will not be registered. Set enabled: true or "
+                "navigation_tools: false."
+            ),
+            severity="warning",
+        ))
+
+    # ── Memory pyramid (Phase 2): memory-config misconfig warnings ──
+    if spec.memory and spec.memory.enabled:
+        if spec.memory.navigation_tools and not spec.memory.extract_knowledge:
+            errors.append(SpecError(
+                code="MEMORY_NAV_TOOLS_REQUIRES_EXTRACT",
+                message=(
+                    "memory.navigation_tools is True but extract_knowledge is False; "
+                    "the L1 knowledge store will be empty so memory.search_records / "
+                    "memory.get_records return nothing. Set extract_knowledge: true "
+                    "or treat navigation as L0-only (memory.search_conversation / "
+                    "memory.get_run_trace)."
+                ),
+                severity="warning",
+            ))
+        if spec.memory.reconcile_llm and not spec.memory.extract_knowledge:
+            errors.append(SpecError(
+                code="MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT",
+                message=(
+                    "memory.reconcile_llm is True but extract_knowledge is False; "
+                    "the reconciler only runs during extraction, so the LLM "
+                    "tie-breaker never fires. Set extract_knowledge: true or "
+                    "reconcile_llm: false."
+                ),
+                severity="warning",
+            ))
 
     # Warn when a post_run stage has no signature filter and the workflow has fan_out
     # stages — the full _transcript will be enormous and will likely overflow context.
@@ -448,7 +494,9 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     stage_id=None,
                 ))
 
-    if strict and errors:
-        raise SpecValidationError(errors)
+    if strict:
+        hard_errors = [e for e in errors if e.severity != "warning"]
+        if hard_errors:
+            raise SpecValidationError(hard_errors)
 
     return errors

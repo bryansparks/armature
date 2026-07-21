@@ -204,6 +204,9 @@ class Harness:
         self._behaviors = make_default_behavior_registry()
 
         mem_cfg = self._spec.memory
+        # Shared embedder between the knowledge extractor and navigation tools.
+        # Constructed once (in the extract block or the nav block) and reused.
+        self._embedder: "LocalEmbedder | None" = None
         if mem_cfg and mem_cfg.enabled:
             from armature.state.memory import MemoryStore
             if mem_cfg.db:
@@ -218,10 +221,19 @@ class Harness:
                 from armature.state.extractor import KnowledgeExtractor
                 knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
                 self._knowledge_store = KnowledgeStore(knowledge_path)
+                try:
+                    from armature.state.embedder import LocalEmbedder
+                    if LocalEmbedder.is_available():
+                        self._embedder = LocalEmbedder()
+                except Exception:
+                    self._embedder = None
                 self._knowledge_extractor = KnowledgeExtractor(
                     model=self._spec.model_tiers.small.model
                     if self._spec.model_tiers.small else "gpt-4o-mini",
                     knowledge_store=self._knowledge_store,
+                    embedder=self._embedder,
+                    reconcile=mem_cfg.reconcile,
+                    reconcile_llm=mem_cfg.reconcile_llm,
                 )
             else:
                 self._knowledge_store = None
@@ -231,6 +243,33 @@ class Harness:
             self._memory_config = None
             self._knowledge_store = None
             self._knowledge_extractor = None
+
+        # ── Memory navigation tools (read-only over L0/L1) ──
+        if self._memory_config is not None and self._memory_config.navigation_tools:
+            # Ensure a knowledge store exists even if extract_knowledge is false;
+            # navigation tools query L1 when available.
+            if self._knowledge_store is None:
+                from armature.state.knowledge import KnowledgeStore
+                knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
+                self._knowledge_store = KnowledgeStore(knowledge_path)
+            # Reuse the extractor's embedder if present; else try to construct one.
+            if self._embedder is None:
+                try:
+                    from armature.state.embedder import LocalEmbedder
+                    if LocalEmbedder.is_available():
+                        self._embedder = LocalEmbedder()
+                except Exception:
+                    self._embedder = None
+            from armature.registry.memory_tools import register_memory_tools
+            register_memory_tools(
+                self._registry,
+                memory_store=self._memory_store,
+                knowledge_store=self._knowledge_store,
+                trace_store=self._traces,
+                embedder=self._embedder,
+                workflow_name=self._memory_workflow_name,
+                run_id=self._run_id,
+            )
 
         if self._spec.checkpoint:
             from armature.runtime.checkpoint import CheckpointStore
@@ -288,6 +327,18 @@ class Harness:
 
     @property
     def name(self) -> str:
+        return self._spec.name
+
+    @property
+    def _memory_workflow_name(self) -> str:
+        """Workflow name used to namespace memory records (L0/L1).
+
+        Defaults to the spec's `name`, but `memory.workflow_name` can override it
+        so a variant spec shares another workflow's accumulated memory without
+        changing its trace/workflow identity.
+        """
+        if self._memory_config is not None:
+            return self._memory_config.workflow_name or self._spec.name
         return self._spec.name
 
     @classmethod
@@ -444,6 +495,15 @@ class Harness:
                             mission_context=mission_ctx,
                             on_token=self._on_token if stage.response_stage else None,
                             adapter_registry=self._adapter_registry,
+                            navigation_tools=bool(
+                                self._memory_config is not None
+                                and self._memory_config.navigation_tools
+                            ),
+                            knowledge_key=(
+                                self._memory_config.inject_knowledge_as
+                                if self._memory_config is not None
+                                else "_knowledge"
+                            ),
                         )
                         result = await _llm_node.execute(context)
                         await self._ensure_traces()
@@ -544,7 +604,7 @@ class Harness:
                     if value is not None:
                         try:
                             await self._memory_store.record(
-                                workflow_name=self._spec.name,
+                                workflow_name=self._memory_workflow_name,
                                 stage_id=stage.id,
                                 capture_key=cap.key,
                                 value=value,
@@ -984,7 +1044,7 @@ class Harness:
                 memories: dict = {}
                 stale_keys: set = set()
             else:
-                memories, stale_keys = await self._memory_store.load(self._spec.name)
+                memories, stale_keys = await self._memory_store.load(self._memory_workflow_name)
             context[mem_cfg.inject_as] = memories
             self._provenance[mem_cfg.inject_as] = "memory"
             if stale_keys:
@@ -996,12 +1056,17 @@ class Harness:
             if self._knowledge_store is not None:
                 await self._knowledge_store.init()
                 knowledge = await self._knowledge_store.search(
-                    self._spec.name, query=self._spec.name, top_k=10
+                    self._memory_workflow_name, query=self._spec.name, top_k=10
                 )
                 context[mem_cfg.inject_knowledge_as] = [
                     {"entity": k.entity, "fact": k.fact, "confidence": k.confidence}
                     for k in knowledge
                 ]
+                if mem_cfg.navigation_tools:
+                    context["_memory_index"] = await self._knowledge_store.index_summary(
+                        self._memory_workflow_name
+                    )
+                    self._provenance["_memory_index"] = "memory_index"
 
         tracer = get_tracer()
         with tracer.start_as_current_span(
@@ -1068,10 +1133,10 @@ class Harness:
             # Post-run knowledge extraction (non-blocking)
             if self._knowledge_extractor is not None and self._memory_store is not None:
                 try:
-                    updated_memories, _ = await self._memory_store.load(self._spec.name)
+                    updated_memories, _ = await self._memory_store.load(self._memory_workflow_name)
                     await self._knowledge_extractor.extract(
                         updated_memories,
-                        workflow_name=self._spec.name,
+                        workflow_name=self._memory_workflow_name,
                         run_id=self._run_id,
                     )
                 except Exception:

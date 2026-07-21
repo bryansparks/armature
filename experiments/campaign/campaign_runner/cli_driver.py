@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,7 +43,7 @@ class CliDriver:
         self.record = record
 
     def _armature(self, args: list[str], *, capture_output: bool = True) -> subprocess.CompletedProcess:
-        return subprocess.run(["armature", *args], env=self.sb.env(),
+        return subprocess.run([sys.executable, "-m", "armature", *args], env=self.sb.env(),
                                capture_output=capture_output, text=True)
 
     def run(self, working_spec: Path, inputs: dict, workflow_name: str = "",
@@ -84,7 +85,7 @@ class CliDriver:
                           if run_id else [])
             dashboard_json = ({"current_hqs": hqs_armature["dashboard"]}
                               if hqs_armature else {})
-            self.record.record_run(run_id, ["armature", *args], cp.stdout, cp.stderr,
+            self.record.record_run(run_id, [sys.executable, "-m", "armature", *args], cp.stdout, cp.stderr,
                                     cp.returncode, trace_rows,
                                     {}, dashboard_json, tag=tag,
                                     hqs_armature=hqs_armature, meta=meta)

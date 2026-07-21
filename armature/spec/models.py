@@ -201,8 +201,18 @@ class MemoryConfig(BaseModel):
     capture: list[MemoryCapture] = Field(default_factory=list)
     inject_as: str = "_memory"        # context key injected at run start
     db: str | None = None             # override db path; defaults to ~/.armature/memory/{name}.db
+    workflow_name: str | None = None  # override the namespace for memory records;
+                                      # defaults to the spec's `name`. Use this to let
+                                      # a variant spec read/write another workflow's
+                                      # accumulated memories while keeping its own trace
+                                      # workflow identity.
     extract_knowledge: bool = False   # run KnowledgeExtractor post-run to build long-term facts
     inject_knowledge_as: str = "_knowledge"  # context key for injected knowledge facts
+    # ── Reconciled, provenance-linked L1 records ──
+    reconcile: bool = True               # dedup/update/supersede/merge on extraction
+    reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (currently unused)
+    # ── Active navigation tools (read-only) ──
+    navigation_tools: bool = False       # register memory.* read tools for this run
 
 
 class ToolModule(BaseModel):

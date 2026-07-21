@@ -1,7 +1,9 @@
 """KnowledgeStore — persists LLM-extracted facts across workflow runs."""
 from __future__ import annotations
 import aiosqlite
+import json
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,25 +13,47 @@ if TYPE_CHECKING:
     from armature.state.embedder import LocalEmbedder
 
 
+class MemoryType(str, Enum):
+    FACT = "fact"
+    EVENT = "event"
+    INSTRUCTION = "instruction"
+    PREFERENCE = "preference"
+
+
 class KnowledgeRecord(BaseModel):
     workflow_name: str
     entity: str
     fact: str
     confidence: float
     source_run_id: str
+    source_stage_id: str | None = None
+    source_capture_key: str | None = None
+    source_msg_id: str | None = None
+    type: MemoryType = MemoryType.FACT
+    provenance: list[dict] = Field(default_factory=list)
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str | None = None
+    superseded_by: int | None = None
+    id: int | None = None
 
 
 _CREATE_SQL = """
     CREATE TABLE IF NOT EXISTS knowledge (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        workflow_name TEXT NOT NULL,
-        entity        TEXT NOT NULL,
-        fact          TEXT NOT NULL,
-        confidence    REAL NOT NULL,
-        source_run_id TEXT NOT NULL,
-        timestamp     TEXT NOT NULL,
-        embedding     BLOB
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        workflow_name      TEXT NOT NULL,
+        entity             TEXT NOT NULL,
+        fact               TEXT NOT NULL,
+        confidence         REAL NOT NULL,
+        source_run_id      TEXT NOT NULL,
+        source_stage_id   TEXT,
+        source_capture_key TEXT,
+        source_msg_id      TEXT,
+        type               TEXT NOT NULL DEFAULT 'fact',
+        provenance         TEXT,
+        timestamp          TEXT NOT NULL,
+        updated_at         TEXT,
+        superseded_by      INTEGER,
+        embedding          BLOB
     )
 """
 
@@ -41,6 +65,12 @@ _CREATE_FTS_SQL = """
     )
 """
 
+_INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_wf_type    ON knowledge(workflow_name, type)    WHERE superseded_by IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_wf_entity  ON knowledge(workflow_name, entity) WHERE superseded_by IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by)         WHERE superseded_by IS NOT NULL",
+]
+
 
 class KnowledgeStore:
     def __init__(self, db_path: Path | str):
@@ -49,20 +79,45 @@ class KnowledgeStore:
     async def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self._path) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
             await db.execute(_CREATE_SQL)
             await db.execute(_CREATE_FTS_SQL)
-            # Migrate existing tables that lack the embedding column
-            try:
-                await db.execute("ALTER TABLE knowledge ADD COLUMN embedding BLOB")
-            except Exception:
-                pass
+            cur = await db.execute("PRAGMA user_version")
+            version = (await cur.fetchone())[0]
+            if version < 1:
+                # Add new columns idempotently (legacy DBs pre-date them).
+                for col, ddl in [
+                    ("type", "TEXT NOT NULL DEFAULT 'fact'"),
+                    ("source_stage_id", "TEXT"),
+                    ("source_capture_key", "TEXT"),
+                    ("source_msg_id", "TEXT"),
+                    ("provenance", "TEXT"),
+                    ("updated_at", "TEXT"),
+                    ("superseded_by", "INTEGER"),
+                ]:
+                    try:
+                        await db.execute(f"ALTER TABLE knowledge ADD COLUMN {col} {ddl}")
+                    except Exception:
+                        pass  # column already exists
+                await db.execute("UPDATE knowledge SET type='fact' WHERE type IS NULL OR type=''")
+                await db.execute(
+                    "UPDATE knowledge SET provenance = json_array(json_object('run_id', source_run_id)) "
+                    "WHERE provenance IS NULL"
+                )
+                # FTS5 external-content pointers are invalidated by ALTER; rebuild.
+                await db.execute("DROP TABLE IF EXISTS knowledge_fts")
+                await db.execute(_CREATE_FTS_SQL)
+                await db.execute("INSERT INTO knowledge_fts(rowid, fact) SELECT id, fact FROM knowledge")
+                for idx in _INDEXES:
+                    await db.execute(idx)
+                await db.execute("PRAGMA user_version = 1")
             await db.commit()
 
     async def record(
         self,
         record: KnowledgeRecord,
         embedder: "LocalEmbedder | None" = None,
-    ) -> None:
+    ) -> int:
         emb_bytes: bytes | None = None
         if embedder is not None:
             try:
@@ -72,19 +127,24 @@ class KnowledgeStore:
             except Exception:
                 pass  # embedding failure is non-fatal
 
+        prov_json = json.dumps(record.provenance) if record.provenance else None
         async with aiosqlite.connect(self._path) as db:
             cur = await db.execute(
                 "INSERT INTO knowledge "
-                "(workflow_name, entity, fact, confidence, source_run_id, timestamp, embedding) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (record.workflow_name, record.entity, record.fact,
-                 record.confidence, record.source_run_id, record.timestamp, emb_bytes),
+                "(workflow_name, entity, fact, confidence, source_run_id, source_stage_id, "
+                " source_capture_key, source_msg_id, type, provenance, timestamp, embedding) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (record.workflow_name, record.entity, record.fact, record.confidence,
+                 record.source_run_id, record.source_stage_id, record.source_capture_key,
+                 record.source_msg_id, record.type.value, prov_json, record.timestamp, emb_bytes),
             )
+            row_id = cur.lastrowid
             await db.execute(
                 "INSERT INTO knowledge_fts(rowid, fact) VALUES (?, ?)",
-                (cur.lastrowid, record.fact),
+                (row_id, record.fact),
             )
             await db.commit()
+        return row_id
 
     async def load(self, workflow_name: str) -> list[KnowledgeRecord]:
         if not self._path.exists():
@@ -92,7 +152,7 @@ class KnowledgeStore:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM knowledge WHERE workflow_name=? ORDER BY timestamp DESC",
+                "SELECT * FROM knowledge WHERE workflow_name=? AND superseded_by IS NULL ORDER BY timestamp DESC",
                 (workflow_name,),
             )
             rows = await cursor.fetchall()
@@ -110,6 +170,7 @@ class KnowledgeStore:
                        JOIN knowledge k ON k.id = f.rowid
                        WHERE f.fact MATCH ?
                          AND k.workflow_name = ?
+                         AND k.superseded_by IS NULL
                        ORDER BY f.rank
                        LIMIT ?""",
                     (query, workflow_name, top_k),
@@ -118,7 +179,7 @@ class KnowledgeStore:
                 # FTS5 query syntax error — fall back to substring match
                 pattern = f"%{query.lower()}%"
                 cursor = await db.execute(
-                    "SELECT * FROM knowledge WHERE workflow_name=? AND LOWER(fact) LIKE ? "
+                    "SELECT * FROM knowledge WHERE workflow_name=? AND superseded_by IS NULL AND LOWER(fact) LIKE ? "
                     "ORDER BY confidence DESC, timestamp DESC LIMIT ?",
                     (workflow_name, pattern, top_k),
                 )
@@ -147,7 +208,8 @@ class KnowledgeStore:
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT * FROM knowledge WHERE workflow_name=? AND embedding IS NOT NULL",
+                "SELECT * FROM knowledge WHERE workflow_name=? AND embedding IS NOT NULL "
+                "AND superseded_by IS NULL ORDER BY confidence DESC, timestamp DESC LIMIT 500",
                 (workflow_name,),
             )
             rows = await cursor.fetchall()
@@ -164,13 +226,141 @@ class KnowledgeStore:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [rec for _, rec in scored[:top_k]]
 
+    async def get_by_id(self, rid: int) -> "KnowledgeRecord | None":
+        if not self._path.exists():
+            return None
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM knowledge WHERE id=?", (rid,))
+            row = await cursor.fetchone()
+        return self._row_to_record(row) if row else None
+
+    async def update_record(
+        self,
+        rid: int,
+        *,
+        confidence: float | None = None,
+        provenance: list[dict] | None = None,
+        updated_at: str | None = None,
+    ) -> None:
+        sets: list[str] = []
+        params: list = []
+        if confidence is not None:
+            sets.append("confidence=?"); params.append(confidence)
+        if provenance is not None:
+            sets.append("provenance=?"); params.append(json.dumps(provenance) if provenance else None)
+        if updated_at is not None:
+            sets.append("updated_at=?"); params.append(updated_at)
+        elif sets:
+            # Auto-stamp when other fields are being updated and caller didn't supply one.
+            sets.append("updated_at=?"); params.append(datetime.now(timezone.utc).isoformat())
+        if not sets:
+            return
+        params.append(rid)
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(f"UPDATE knowledge SET {', '.join(sets)} WHERE id=?", params)
+            await db.commit()
+
+    async def set_superseded(self, old_id: int, new_id: int) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                "UPDATE knowledge SET superseded_by=? WHERE id=?", (new_id, old_id)
+            )
+            await db.commit()
+
+    async def find_neighbors(
+        self,
+        workflow_name: str,
+        candidate: "KnowledgeRecord",
+        embedder: "LocalEmbedder | None" = None,
+        k: int = 10,
+    ) -> list["KnowledgeRecord"]:
+        sem: list[KnowledgeRecord] = []
+        if embedder is not None:
+            try:
+                sem = await self.semantic_search(workflow_name, candidate.fact, embedder, top_k=k)
+            except Exception:
+                sem = []
+        bm = await self.search(workflow_name, candidate.fact, top_k=k)
+        seen: dict[int, KnowledgeRecord] = {}
+        for r in sem + bm:
+            if r.id is not None and r.id not in seen:
+                seen[r.id] = r
+        return list(seen.values())
+
+    async def index_summary(self, workflow_name: str) -> dict:
+        """Lightweight navigation table-of-contents for `_memory_index`.
+
+        Returns records-by-type counts and total live L1 record count.
+        Navigation-enabled stages use this to decide whether to call
+        memory.search_records / memory.get_records.
+        """
+        if not self._path.exists():
+            return {"records_by_type": {}, "total_records": 0}
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT type, COUNT(*) AS n FROM knowledge "
+                "WHERE workflow_name=? AND superseded_by IS NULL GROUP BY type",
+                (workflow_name,),
+            )
+            by_type = {r["type"]: r["n"] for r in await cur.fetchall()}
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM knowledge "
+                "WHERE workflow_name=? AND superseded_by IS NULL",
+                (workflow_name,),
+            )
+            total = (await cur.fetchone())["n"]
+        return {
+            "records_by_type": by_type,
+            "total_records": total,
+        }
+
+    async def count_since(self, workflow_name: str, since: str | None) -> int:
+        """Count live records for `workflow_name` newer than `since` (or all live if None)."""
+        if not self._path.exists():
+            return 0
+        async with aiosqlite.connect(self._path) as db:
+            if since is None:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM knowledge "
+                    "WHERE workflow_name=? AND superseded_by IS NULL",
+                    (workflow_name,),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM knowledge "
+                    "WHERE workflow_name=? AND superseded_by IS NULL AND timestamp > ?",
+                    (workflow_name, since),
+                )
+            row = await cur.fetchone()
+            return int(row[0]) if row is not None else 0
+
     @staticmethod
     def _row_to_record(r: "aiosqlite.Row") -> KnowledgeRecord:
+        prov_raw = r["provenance"] if "provenance" in r.keys() else None
+        try:
+            provenance = json.loads(prov_raw) if prov_raw else []
+        except (ValueError, TypeError):
+            provenance = []
+        type_raw = r["type"] if "type" in r.keys() else "fact"
+        try:
+            mtype = MemoryType(type_raw)
+        except ValueError:
+            mtype = MemoryType.FACT
         return KnowledgeRecord(
+            id=r["id"],
             workflow_name=r["workflow_name"],
             entity=r["entity"],
             fact=r["fact"],
             confidence=r["confidence"],
             source_run_id=r["source_run_id"],
+            source_stage_id=r["source_stage_id"] if "source_stage_id" in r.keys() else None,
+            source_capture_key=r["source_capture_key"] if "source_capture_key" in r.keys() else None,
+            source_msg_id=r["source_msg_id"] if "source_msg_id" in r.keys() else None,
+            type=mtype,
+            provenance=provenance,
             timestamp=r["timestamp"],
+            updated_at=r["updated_at"] if "updated_at" in r.keys() else None,
+            superseded_by=r["superseded_by"] if "superseded_by" in r.keys() else None,
         )

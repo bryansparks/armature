@@ -1,0 +1,148 @@
+name: campaign-research-brief-memory-nav
+version: "1.0"
+description: "Nav-enabled research-brief workflow for the H4 3-way cold/warm/nav test. Uses active read-only navigation (memory.search_records / memory.search_conversation) over L0/L1 instead of receiving a passive _memory dump."
+mission: >
+  You are a research analyst covering a BROAD, multi-aspect technical topic across
+  repeated runs. The topic spans many distinct sub-problems; no single briefing
+  can cover them all. Each run, produce a briefing that covers as many DISTINCT
+  relevant sub-problems as you can, each stated correctly in one grounded sentence.
+  When prior memory is available, use the read-only memory navigation tools to pull
+  only the sub-problems already covered, then make your briefing ADDITIVE: cover NEW
+  sub-problems not already addressed, referencing and extending what was
+  established — do not repeat points already covered. Do not fabricate; omit a
+  sub-problem rather than invent one.
+
+  Armature's cross-run memory has two layers: L0 raw stage captures and L1
+  reconciled knowledge records. Navigation-enabled stages query these layers on
+  demand rather than receiving a passive dump. We removed topic tracks and team
+  profiles (L2/L3) because they added complexity without improving measured HQS.
+
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+
+  medium:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 8192
+
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.3
+    max_tokens: 16384
+
+role_type_defaults:
+  worker: small
+  orchestrator: medium
+  researcher: medium
+  judge: large
+
+contracts:
+  inputs:
+    - name: topic
+  max_iterations: 40
+  max_llm_calls: 200
+  timeout_hours: 1.0
+
+memory:
+  enabled: true
+  fresh: false
+  inject_as: _memory
+  # Share the warm spec's memory namespace so the nav arm navigates the compare
+  # phase's accumulated captures. The DB path alone is not enough: Armature
+  # namespaces records inside the DB by `workflow_name`. `workflow_name`
+  # overrides that namespace to the warm spec's name, so nav reads warm's
+  # accumulated L0/L1 records while keeping its own trace workflow identity.
+  db: ~/.armature/memory/campaign-research-brief-memory.db
+  workflow_name: campaign-research-brief-memory
+  capture:
+    - stage: researcher
+      key: content
+      max_entries: 8
+  extract_knowledge: true
+  inject_knowledge_as: _knowledge
+  navigation_tools: true
+
+stages:
+  - id: researcher
+    role:
+      name: Researcher
+      type: researcher
+      tools:
+        - memory.search_records
+        - memory.search_conversation
+        - memory.get_run_trace
+      description: |
+        Research the following BROAD topic and produce a briefing that covers
+        as many DISTINCT relevant sub-problems as you can identify. BREADTH is
+        the goal: cover more distinct sub-problems (each correctly stated)
+        rather than going deep on a few. For each, give one correct, grounded
+        sentence. Do not fabricate.
+        {% if _memory_index is defined and _memory_index %}
+        A navigation index of accumulated memory is available. Use
+        memory.search_records (over extracted L1 facts) and
+        memory.search_conversation / memory.get_run_trace (over L0 raw captures)
+        to pull only the prior sub-problems already covered, then make this
+        briefing ADDITIVE: cover NEW sub-problems NOT already addressed.
+        Index: {{ _memory_index }}
+        {% else %}
+        No prior memory index is available — produce a fresh briefing from
+        scratch, covering as many distinct sub-problems as you can identify.
+        {% endif %}
+        Topic: {{ topic }}
+    output_mode: text
+    depends_on: []
+    # Excluding _memory drops the passive L0 dump from the researcher's user
+    # message, so nav is a clean "navigation instead of warm" condition.
+    signature:
+      input:
+        topic: Research topic
+        _memory_index: Navigation index of accumulated L0/L1 memory
+
+  - id: judge
+    role:
+      name: Judge
+      type: judge
+      description: |
+        Assess the researcher's briefing on a BROAD, multi-aspect topic. The
+        decisive quality dimension is COVERAGE BREADTH: how many DISTINCT,
+        relevant sub-problems of the topic are each stated correctly and
+        grounded, with no fabrication.
+
+        Score `confidence` as the breadth of distinct, correct, non-repetitive,
+        non-fabricated sub-problems covered, on this scale:
+          - 1-2 distinct points  -> confidence ~0.15-0.25
+          - 3-4                  -> ~0.40-0.55
+          - 5-6                  -> ~0.65-0.80
+          - 7-8+                 -> ~0.85-1.00
+        Subtract ~0.15 for any fabricated or clearly incorrect claim, and ~0.05
+        per point that merely repeats an obvious surface fact with no real
+        content. A briefing covering the same few obvious points scores LOW; one
+        covering many distinct sub-problems scores HIGH. Do NOT give high
+        confidence to a briefing merely for being well-written — reward BREADTH
+        of correct coverage. `accept` is true iff confidence >= 0.5 and no
+        fabricated claim is present. List each defect / fabricated / incorrect
+        claim in `issues` (one per line); if there are none, return an empty
+        issues list.
+        Briefing:
+        {{ researcher.content }}
+        Topic: {{ topic }}
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [accept, confidence, issues]
+      properties:
+        accept: {type: boolean}
+        confidence: {type: number, minimum: 0.0, maximum: 1.0}
+        issues: {type: array, items: {type: string}}
+    on_fail:
+      loop: {stage: judge, max: 2}
+    depends_on: [researcher]

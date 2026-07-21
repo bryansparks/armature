@@ -40,5 +40,20 @@ phases:
     repeats: 20
     fresh_db: true
 
+  # Navigation arm: same broad topic, same shared memory DB, but the researcher
+  # navigates the pyramid (memory.* tools) instead of receiving a passive dump.
+  # lever: none — the nav spec's memory.navigation_tools:true makes
+  # fault.memory_mode label these rows "nav". No per-rep spec mutation.
+  - id: nav
+    lever: none
+    workflow: specs/campaign_research_brief_memory_nav.yml
+    inputs: {topic: "the core design problems of distributed systems"}
+    repeats: 10
+    fresh_db: false   # share the memory DB the compare phase populated
+
 verdicts:
-  memory_carry_forward_helps: {warm_minus_cold_mean_ge: 0.05, bootstrap_ci_lower_ge: 0.0}
+  memory_carry_forward_helps:
+    warm_minus_cold_mean_ge: 0.05
+    bootstrap_ci_lower_ge: 0.0
+    nav_minus_cold_mean_ge: 0.05
+    nav_minus_warm_mean_ge: 0.0

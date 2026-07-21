@@ -59,6 +59,12 @@ def is_model_failed(rows: list[TraceRow]) -> bool:
          ``content`` (or ``text``) is empty or shorter than 40 chars. A real
          briefing is 200+ chars; the observed empty case was ~15.
 
+    Fallback for older recordings whose trace rows lack ``outputs_json``: we use
+    the observable signals above to keep H4 honest on replay. The trace-row
+    default for missing ``outputs_json`` is ``"{}"``, which a real judge or
+    researcher output never is for these stages, so ``"{}"`` is treated as
+    "missing".
+
     Coerces the stringified values the model emits defensively: ``accept`` may
     be ``"True"``/``"False"`` or bool; ``confidence`` may be ``"0"``/``"0.05"``
     or a number. A confidence that fails to parse as float does NOT by itself
@@ -68,6 +74,7 @@ def is_model_failed(rows: list[TraceRow]) -> bool:
     Replay-deterministic: computed from trace rows alone, so ``_row_from_run``
     and ``replay()`` produce the same flag from the same recorded rows.
     """
+    missing_outputs = "{}"
     for r in rows:
         if r.role_type == "judge":
             try:
@@ -79,6 +86,18 @@ def is_model_failed(rows: list[TraceRow]) -> bool:
             acc = out.get("accept")
             conf = out.get("confidence")
             if acc is None or conf is None:
+                # Fallback for recordings that did not capture outputs_json: a
+                # successful, valid judge row with quorum_score 0.0 is the
+                # degenerate self-contradiction pattern we observed (accept=True,
+                # confidence=0). A legitimate rejection would set accept=False,
+                # but without outputs_json we cannot distinguish; we err toward
+                # excluding the outlier so H4 measures memory coverage, not model
+                # reliability.
+                if (r.outputs_json == missing_outputs
+                        and r.quorum_score == 0.0
+                        and r.success
+                        and r.output_valid):
+                    return True
                 continue
             accept_true = str(acc).strip().lower() in ("true", "1")
             try:
@@ -98,6 +117,10 @@ def is_model_failed(rows: list[TraceRow]) -> bool:
             if content is None:
                 content = out.get("text")
             if content is None:
+                # Fallback for recordings that did not capture outputs_json: a
+                # researcher row with zero output tokens produced no briefing.
+                if r.outputs_json == missing_outputs and r.output_tokens == 0:
+                    return True
                 continue
             if len(str(content).strip()) < 40:
                 return True

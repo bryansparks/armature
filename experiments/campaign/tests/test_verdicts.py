@@ -128,7 +128,7 @@ def test_h4_inconclusive_when_no_quorum():
 
 def test_h4_excludes_model_failed_rows_and_records_exclusions():
     """#118: H4 must exclude model_failed runs so it measures memory coverage,
-    not model reliability. Detail records n_excluded_cold / n_excluded_warm."""
+    not model reliability. Detail records n_excluded as a dict {cold, warm, nav}."""
     rows = [
         _row("c1", lever="none", memory_mode="cold", quorum=0.95),
         _row("c2", lever="none", memory_mode="cold", quorum=0.97),
@@ -145,8 +145,8 @@ def test_h4_excludes_model_failed_rows_and_records_exclusions():
     # warm [0.95,0.94]); the model_failed outliers are NOT in the compared set.
     assert detail["n_cold"] == 2
     assert detail["n_warm"] == 2
-    assert detail["n_excluded_cold"] == 1
-    assert detail["n_excluded_warm"] == 1
+    assert detail["n_excluded"]["cold"] == 1
+    assert detail["n_excluded"]["warm"] == 1
     # mean_diff over clean rows only: mean(warm) - mean(cold)
     # = ((0.95+0.94)/2) - ((0.95+0.97)/2) = 0.945 - 0.96 = -0.015
     assert abs(detail["mean_diff"] - round(0.945 - 0.96, 4)) < 1e-6
@@ -165,8 +165,63 @@ def test_h4_model_failed_row_not_in_compared_set():
         "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0})
     assert result == "INCONCLUSIVE"
     assert detail["n_warm"] == 0
-    assert detail["n_excluded_warm"] == 1
+    assert detail["n_excluded"]["warm"] == 1
     assert detail["n_cold"] == 2
+
+
+def _arm(mode, quorums):
+    """Build H4 rows for one memory arm with plausible latency/token values so
+    the per-arm mean latency / input-token assertions have data."""
+    latency = {"cold": 1000, "warm": 5000, "nav": 1200}.get(mode, 1000)
+    tokens = {"cold": 200, "warm": 1000, "nav": 250}.get(mode, 200)
+    return [
+        {"memory_mode": mode, "quorum_ours": q, "model_failed": False,
+         "researcher_latency_ms": latency, "researcher_input_tokens": tokens}
+        for q in quorums
+    ]
+
+
+def test_verdict_h4_three_arm_nav_beats_cold_and_matches_warm():
+    rows = [
+        *_arm("cold", [0.5, 0.55, 0.5]),
+        *_arm("warm", [0.85, 0.88, 0.85]),
+        *_arm("nav",  [0.85, 0.88, 0.85]),
+    ]
+    name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+        "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0,
+    })
+    assert name == "memory_carry_forward_helps"
+    assert result == "PASS"
+    assert detail["n_cold"] == 3 and detail["n_warm"] == 3 and detail["n_nav"] == 3
+    assert "nav_minus_cold_mean" in detail and "nav_minus_warm_mean" in detail
+    assert "mean_latency_cold" in detail and "mean_latency_warm" in detail and "mean_latency_nav" in detail
+
+
+def test_verdict_h4_falls_back_to_two_arm_when_no_nav():
+    """Old recordings (no nav rows) replay identically to the v3 2-arm verdict."""
+    rows = [*_arm("cold", [0.5, 0.55]), *_arm("warm", [0.85, 0.88])]
+    name, result, detail = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+        "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0,
+    })
+    assert "n_nav" not in detail or detail["n_nav"] == 0
+    assert "mean_diff" in detail  # the original 2-arm field
+    # PASS on the 2-arm gate
+    assert result == "PASS"
+
+
+def test_verdict_h4_nav_does_not_beat_warm_fails():
+    rows = [
+        *_arm("cold", [0.5, 0.55]),
+        *_arm("warm", [0.85, 0.88]),
+        *_arm("nav",  [0.6, 0.62]),   # nav beats cold but well below warm
+    ]
+    _, result, _ = verdicts.verdict_h4(rows, {
+        "warm_minus_cold_mean_ge": 0.05, "bootstrap_ci_lower_ge": 0.0,
+        "nav_minus_cold_mean_ge": 0.05, "nav_minus_warm_mean_ge": 0.0,
+    })
+    assert result == "FAIL"  # nav_minus_warm < 0
 
 
 def _arow(run_id, scoped=False, kind=None, model="m"):

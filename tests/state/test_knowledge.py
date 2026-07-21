@@ -421,3 +421,261 @@ async def test_extractor_stores_results_in_knowledge_store(tmp_path):
     stored = await store.load("wf")
     assert len(stored) == 1
     assert stored[0].source_run_id == "r1"
+
+
+_LABELED_RESPONSE = (
+    '[{"entity": "domain", "fact": "CO2 is rising significantly", "confidence": 0.9, '
+    '"source_stage": "researcher", "source_key": "brief", "type": "fact"}]'
+)
+
+
+async def test_extractor_threads_provenance_from_labeled_memories():
+    """extract() labels memories by stage/key and threads them into record.provenance."""
+    from armature.state.extractor import KnowledgeExtractor
+
+    extractor = KnowledgeExtractor(model="claude-haiku-4-5-20251001", reconcile=False)
+    captured = {}
+
+    async def mock_completion(**kwargs):
+        captured["messages"] = kwargs.get("messages", [])
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = _LABELED_RESPONSE
+        return resp
+
+    with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+        records = await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+
+    prompt_text = " ".join(m["content"] for m in captured["messages"])
+    assert "researcher" in prompt_text and "brief" in prompt_text  # memories labeled
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.source_stage_id == "researcher"
+    assert rec.source_capture_key == "brief"
+    assert rec.type.value == "fact"
+    assert any(p.get("run_id") == "r1" and p.get("stage_id") == "researcher" for p in rec.provenance)
+
+
+async def test_extractor_drops_unmatched_source_label():
+    """If the LLM cites a stage/key not in the memories, source fields are nulled."""
+    from armature.state.extractor import KnowledgeExtractor
+
+    extractor = KnowledgeExtractor(model="claude-haiku-4-5-20251001", reconcile=False)
+    bad_response = (
+        '[{"entity": "x", "fact": "y", "confidence": 0.9, '
+        '"source_stage": "hallucinated_stage", "source_key": "no"}]'
+    )
+
+    async def mock_completion(**kwargs):
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = bad_response
+        return resp
+
+    with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+        records = await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+
+    assert len(records) == 1
+    assert records[0].source_stage_id is None
+    assert records[0].source_capture_key is None
+
+
+async def test_extractor_reconcile_path_calls_reconciler(tmp_path):
+    """With reconcile=True + a knowledge_store, extract() delegates writes to Reconciler."""
+    from armature.state.extractor import KnowledgeExtractor
+    from armature.state.knowledge import KnowledgeStore
+    from unittest.mock import AsyncMock
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    extractor = KnowledgeExtractor(
+        model="claude-haiku-4-5-20251001", knowledge_store=store, reconcile=True
+    )
+    # Spy on Reconciler.reconcile_batch
+    with patch("armature.state.extractor.Reconciler") as RMock:
+        instance = RMock.return_value
+        instance.reconcile_batch = AsyncMock()
+        async def mock_completion(**kwargs):
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = _LABELED_RESPONSE
+            return resp
+        with patch("armature.state.extractor.litellm_completion", side_effect=mock_completion):
+            await extractor.extract(_MEMORIES, workflow_name="wf", run_id="r1")
+    instance.reconcile_batch.assert_awaited_once()
+    candidates = instance.reconcile_batch.await_args.args[0]
+    assert len(candidates) == 1
+    assert candidates[0].source_stage_id == "researcher"
+
+
+async def test_knowledge_record_round_trips_type_provenance_and_id(tmp_path):
+    """record() persists type/provenance/source_*; load() returns them with id."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rec = KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers dark mode", confidence=0.9,
+        source_run_id="r1", source_stage_id="researcher", source_capture_key="brief",
+        type=MemoryType.PREFERENCE,
+        provenance=[{"run_id": "r1", "stage_id": "researcher", "capture_key": "brief"}],
+    )
+    rid = await store.record(rec)
+    assert rid is not None
+
+    results = await store.load("wf")
+    assert len(results) == 1
+    out = results[0]
+    assert out.id == rid
+    assert out.type == MemoryType.PREFERENCE
+    assert out.source_stage_id == "researcher"
+    assert out.source_capture_key == "brief"
+    assert out.provenance == [{"run_id": "r1", "stage_id": "researcher", "capture_key": "brief"}]
+
+
+async def test_superseded_rows_excluded_from_load_search_and_semantic(tmp_path):
+    """Rows with superseded_by set are hidden from load/search/semantic_search."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()
+    old_id = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers light theme", confidence=0.7, source_run_id="r1",
+    ), embedder=embedder)
+    new_id = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="user", fact="prefers dark theme", confidence=0.95, source_run_id="r2",
+    ), embedder=embedder)
+    import aiosqlite
+    async with aiosqlite.connect(tmp_path / "k.db") as db:
+        await db.execute("UPDATE knowledge SET superseded_by=? WHERE id=?", (new_id, old_id))
+        await db.commit()
+
+    loaded = await store.load("wf")
+    assert len(loaded) == 1
+    assert loaded[0].id == new_id
+
+    found = await store.search("wf", "theme")
+    assert all(r.id != old_id for r in found)
+
+    # semantic_search must also exclude the superseded row.
+    sem = await store.semantic_search("wf", "theme", embedder=embedder, top_k=5)
+    assert all(r.id != old_id for r in sem)
+    assert len(sem) == 1 and sem[0].id == new_id
+
+
+async def test_get_by_id_returns_record(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rid = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="a fact", confidence=0.8, source_run_id="r1"))
+    got = await store.get_by_id(rid)
+    assert got is not None and got.id == rid and got.fact == "a fact"
+    assert await store.get_by_id(999999) is None
+
+
+async def test_update_record_bumps_confidence_provenance_and_updated_at(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    rid = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="a fact", confidence=0.7, source_run_id="r1",
+        provenance=[{"run_id": "r1"}]))
+    await store.update_record(rid, confidence=0.9, provenance=[{"run_id": "r1"}, {"run_id": "r2"}])
+    got = await store.get_by_id(rid)
+    assert got.confidence == 0.9
+    assert {"run_id": "r2"} in got.provenance
+    assert got.updated_at is not None
+
+
+async def test_set_superseded_marks_old_row(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    old = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="old fact", confidence=0.5, source_run_id="r1"))
+    new = await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="new fact", confidence=0.95, source_run_id="r2"))
+    await store.set_superseded(old, new)
+    got = await store.get_by_id(old)
+    assert got.superseded_by == new
+
+
+async def test_find_neighbors_unions_bm25_and_semantic(tmp_path):
+    """find_neighbors returns the union of BM25 + semantic hits, deduped by id."""
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    embedder = _FakeEmbedder()  # defined earlier in test_knowledge.py
+    for fact in ["dogs are loyal animals", "cats are independent pets", "python is a programming language"]:
+        await store.record(KnowledgeRecord(
+            workflow_name="wf", entity="e", fact=fact, confidence=0.8, source_run_id="r1"),
+            embedder=embedder)
+    cand = KnowledgeRecord(workflow_name="wf", entity="e", fact="canine companions", confidence=0.9, source_run_id="r2")
+    neighbors = await store.find_neighbors("wf", cand, embedder=embedder, k=10)
+    ids = [n.id for n in neighbors]
+    assert len(ids) == len(set(ids))  # deduped
+    assert any("dog" in n.fact for n in neighbors)
+
+
+async def test_find_neighbors_without_embedder_uses_bm25_only(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="prefers concise answers", confidence=0.9, source_run_id="r1"))
+    cand = KnowledgeRecord(workflow_name="wf", entity="e", fact="prefers concise answers", confidence=0.9, source_run_id="r2")
+    neighbors = await store.find_neighbors("wf", cand, embedder=None, k=10)
+    assert len(neighbors) == 1
+    assert "concise" in neighbors[0].fact
+
+
+async def test_index_summary_counts_by_type(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord, MemoryType
+    store = KnowledgeStore(tmp_path / "k.db")
+    await store.init()
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="a", fact="fact one", confidence=0.9,
+        source_run_id="r1", type=MemoryType.FACT))
+    await store.record(KnowledgeRecord(
+        workflow_name="wf", entity="b", fact="an event", confidence=0.9,
+        source_run_id="r1", type=MemoryType.EVENT))
+    summary = await store.index_summary("wf")
+    assert summary["records_by_type"]["fact"] == 1
+    assert summary["records_by_type"]["event"] == 1
+    assert summary["total_records"] == 2
+
+
+async def test_index_summary_missing_db_returns_empty():
+    from armature.state.knowledge import KnowledgeStore
+    store = KnowledgeStore(Path("/nonexistent/does_not_exist.db"))
+    summary = await store.index_summary("wf")
+    assert summary == {"records_by_type": {}, "total_records": 0}
+
+
+async def test_count_since_counts_live_records(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    ks = KnowledgeStore(tmp_path / "k.db")
+    await ks.init()
+    rid = await ks.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="f", confidence=0.8, source_run_id="r1"))
+    assert await ks.count_since("wf", None) == 1
+    # since = a far-future timestamp → 0
+    assert await ks.count_since("wf", "2099-01-01T00:00:00+00:00") == 0
+
+
+async def test_count_since_excludes_superseded(tmp_path):
+    from armature.state.knowledge import KnowledgeStore, KnowledgeRecord
+    ks = KnowledgeStore(tmp_path / "k.db")
+    await ks.init()
+    rid = await ks.record(KnowledgeRecord(
+        workflow_name="wf", entity="e", fact="f", confidence=0.8, source_run_id="r1"))
+    await ks.set_superseded(rid, 999)
+    assert await ks.count_since("wf", None) == 0
+
+
+async def test_count_since_missing_db_returns_zero(tmp_path):
+    from armature.state.knowledge import KnowledgeStore
+    ks = KnowledgeStore(tmp_path / "missing.db")
+    assert await ks.count_since("wf", None) == 0

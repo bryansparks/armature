@@ -409,6 +409,29 @@ def test_strict_false_returns_errors_without_raising():
     assert len(errors) > 0
 
 
+def test_strict_mode_does_not_raise_on_warnings():
+    """Warnings (severity='warning') must not raise in strict mode — only errors do."""
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="wf", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    # strict=True must NOT raise: the only finding is a warning
+    # (MEMORY_NAV_TOOLS_REQUIRES_EXTRACT), not an error.
+    errors = validate_spec(spec, strict=True)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" in codes
+    assert all(e.severity == "warning" for e in errors)
+
+
 # ── Contract.outputs validation ───────────────────────────────────────────────
 
 def test_contract_output_missing_stage_detected():
@@ -590,3 +613,107 @@ def test_guided_json_no_model_tiers_no_warning():
     errors = validate_spec(spec, strict=False)
     warning_codes = {e.code for e in errors if e.severity == "warning"}
     assert "GUIDED_JSON_LOW_TIER_RISK" not in warning_codes
+
+
+# ── Memory pyramid (Phase 2): validator warnings + harness-injected _memory_index ──
+
+def test_validator_memory_index_is_harness_injected():
+    from armature.spec.validator import _harness_injected_keys_set
+    # _memory_index must be in the harness-injected set so stages can reference it.
+    assert "_memory_index" in _harness_injected_keys_set()
+
+
+def test_nav_tools_without_extract_warns():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" in codes
+    nav_err = [e for e in errors if e.code == "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT"][0]
+    assert nav_err.severity == "warning"
+
+
+def test_reconcile_llm_without_extract_warns():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(reconcile_llm=True, extract_knowledge=False),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small"))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT" in codes
+    assert [e for e in errors if e.code == "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT"][0].severity == "warning"
+
+
+def test_nav_tools_with_extract_no_warning():
+    from armature.spec.validator import validate_spec
+    from armature.spec.models import (
+        HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
+        MemoryConfig, Contract,
+    )
+    spec = HarnessSpec(
+        name="w", version="1.0",
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+        contracts=Contract(inputs=[{"name": "topic"}]),
+        memory=MemoryConfig(navigation_tools=True, extract_knowledge=True),
+        stages=[Stage(id="worker", role=Role(
+            name="Worker", type=RoleType.WORKER, description="do {{ topic }}",
+            model_tier="small", tools=["memory.search_records"]))],
+    )
+    errors = validate_spec(spec, strict=False)
+    codes = [e.code for e in errors]
+    assert "MEMORY_NAV_TOOLS_REQUIRES_EXTRACT" not in codes
+    assert "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT" not in codes
+
+
+# ── Memory navigation: nav-requires-enabled ───────
+
+def _spec_with_memory(**memory_kw):
+    from armature.spec.models import MemoryConfig
+    spec = _valid_spec()
+    spec.memory = MemoryConfig(enabled=True, **memory_kw)
+    return spec
+
+
+def test_nav_tools_requires_enabled_warning():
+    from armature.spec.models import MemoryConfig
+    spec = _valid_spec()
+    spec.memory = MemoryConfig(enabled=False, navigation_tools=True)
+    errors = validate_spec(spec, strict=False)
+    assert "MEMORY_NAV_TOOLS_REQUIRES_ENABLED" in codes(errors)
+
+
+def test_memory_index_in_harness_keys_when_navigation_tools():
+    from armature.spec.models import MemoryConfig, Signature
+    spec = _valid_spec()
+    spec.memory = MemoryConfig(enabled=True, navigation_tools=True,
+                                extract_knowledge=True)
+    st = _valid_stage("nav_worker")
+    st.depends_on = ["s"]
+    st.role = Role(name="NavWorker", type=RoleType.WORKER, description="d",
+                   tools=["memory.search_records"])
+    st.signature = Signature(input={"_memory_index": "navigation index"})
+    spec.stages.append(st)
+    errors = validate_spec(spec, strict=False)
+    assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import sys
 from dataclasses import asdict
 from pathlib import Path
 
@@ -66,11 +67,11 @@ def run_workers(sb, spec_path: Path, conc, phase_id: str, recording=None) -> lis
     cmds: list[tuple[int, list[str]]] = []
     for w in range(conc.workers):
         if conc.driver == "armature_loop":
-            cmds.append((w, ["armature", "loop", str(spec_path),
+            cmds.append((w, [sys.executable, "-m", "armature", "loop", str(spec_path),
                              "--max-iterations", str(conc.reps_per_worker), "--quiet"]))
         else:
             for _ in range(conc.reps_per_worker):
-                cmds.append((w, ["armature", "run", str(spec_path), "--force", "--quiet"]))
+                cmds.append((w, [sys.executable, "-m", "armature", "run", str(spec_path), "--force", "--quiet"]))
 
     rows_before = _count_rows(sb.trace_db)
     procs = [subprocess.Popen(c, env=sb.env(),
@@ -123,7 +124,7 @@ def run_workers(sb, spec_path: Path, conc, phase_id: str, recording=None) -> lis
 
     if recording is not None:
         for s, trs in zip(summaries, recorded_trace_rows):
-            recording.record_run(None, ["armature", conc.driver, str(spec_path)], "", "",
+            recording.record_run(None, [sys.executable, "-m", "armature", conc.driver, str(spec_path)], "", "",
                                  s["exit_code"], trs, {}, {}, tag="concurrency",
                                  meta={"summary": s})
     return summaries

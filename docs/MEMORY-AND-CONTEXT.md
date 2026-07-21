@@ -4,11 +4,11 @@ How agentic workflows remember, orient, and build knowledge across calls, stages
 
 ---
 
-Memory is the central unsolved problem of production AI agents. A workflow that forgets everything on each activation is a stateless function, not an agent. A workflow that remembers too much is brittle, expensive, and slow. Armature addresses this with four distinct memory mechanisms, each operating at a different time horizon and serving a different purpose. Together they give a workflow a working memory for the current run, a rolling episodic memory across recent runs, a persistent knowledge base of extracted facts, and shared mission context that keeps every stage pointed in the same direction.
+Memory is the central unsolved problem of production AI agents. A workflow that forgets everything on each activation is a stateless function, not an agent. A workflow that remembers too much is brittle, expensive, and slow. Armature addresses this with five distinct memory mechanisms, each operating at a different time horizon and serving a different purpose. Together they give a workflow a working memory for the current run, a rolling episodic memory across recent runs, a persistent knowledge base of extracted facts, active on-demand navigation over stored memory, and shared mission context that keeps every stage pointed in the same direction.
 
 ---
 
-## The four memory layers
+## The five memory layers
 
 | Layer | What it stores | Scope | Injected as |
 |-------|---------------|-------|-------------|
@@ -16,6 +16,7 @@ Memory is the central unsolved problem of production AI agents. A workflow that 
 | **Continuation** | Selected outputs from the previous activation | Cross-run, declared | `prior_run` (configurable) |
 | **MemoryStore** | Rolling captures of named stage outputs | Cross-run, rolling window | `_memory` (configurable) |
 | **KnowledgeStore** | LLM-extracted entity/fact/confidence records | Persistent, cumulative | `_knowledge` (configurable) |
+| **Memory navigation** | Read-only tools that search L0/L1 on demand | Cross-run, opt-in | `memory.*` tools + `_memory_index` |
 
 Each layer is independent. You can use one, some, or all of them in the same workflow.
 
@@ -120,6 +121,7 @@ mission: Track narrative evolution across daily content ingestion.
 memory:
   enabled: true
   db: ~/.armature/memory.db        # default location
+  workflow_name: content-monitor   # optional: namespace for stored records
   fresh: false                      # true = ignore prior memories this run
   inject_as: _memory                # default
 
@@ -134,6 +136,10 @@ memory:
   extract_knowledge: true           # also run KnowledgeExtractor (see Layer 4)
   inject_knowledge_as: _knowledge   # default
 ```
+
+### Namespacing and cross-spec sharing
+
+Records inside a memory DB are keyed by `workflow_name`. By default this is the spec's top-level `name`, but `memory.workflow_name` overrides it. Use the override when a variant spec (for example, a navigation-enabled version of the same workflow) needs to read and write the same accumulated memory as the original while keeping its own trace/workflow identity.
 
 ### What gets injected
 
@@ -254,9 +260,59 @@ Use both together: MemoryStore gives agents access to recent raw signals; Knowle
 
 ---
 
+## Layer 5: Memory navigation — active, on-demand retrieval
+
+`MemoryStore` and `KnowledgeStore` inject memory passively: every run receives a pre-selected slice of prior captures or facts. For some workflows that is exactly right. For others, the fixed dump is either too noisy or too small, and the agent is better served by **querying memory itself**.
+
+Memory navigation makes stored memory searchable at run time via read-only tools:
+
+- `memory.search_records` — hybrid keyword + semantic search over extracted L1 facts (`KnowledgeStore`).
+- `memory.get_records` — fetch specific L1 records by id after a search.
+- `memory.search_conversation` — keyword search over raw L0 captures (`MemoryStore`).
+- `memory.get_run_trace` — pull a prior run's stage outputs from the trace store.
+
+When `memory.navigation_tools: true` is set, the engine registers these tools for any stage that declares them in `role.tools`, and injects a lightweight `_memory_index` table-of-contents into the stage context so the agent knows what memory is available. Stages that declare a `memory.*` tool no longer receive the full passive `_knowledge` dump for that stage; they pull only what they need. Stages that do not opt in continue to receive `_knowledge` exactly as before.
+
+```yaml
+memory:
+  enabled: true
+  extract_knowledge: true
+  navigation_tools: true
+
+stages:
+  - id: researcher
+    role:
+      type: researcher
+      tools:
+        - memory.search_records
+        - memory.search_conversation
+      description: |
+        {% if _memory_index is defined and _memory_index %}
+        Prior memory index: {{ _memory_index }}
+        Use memory.search_records / memory.search_conversation to find what is
+        already known, then extend it with new information.
+        {% endif %}
+        Topic: {{ topic }}
+```
+
+### Why navigation is opt-in
+
+Navigation trades a small amount of extra latency (one or more tool calls) for a large reduction in passive context. It works best when the agent can make targeted queries — for example, "what do we already know about X?" — rather than needing the full history every time. It is strictly additive: workflows that do not enable it behave byte-for-byte as they did before.
+
+### What we explored and set aside
+
+The original design also proposed two higher layers built on top of L1:
+
+- **L2 topic tracks** — compressed markdown summaries written by a curator stage.
+- **L3 team profile** — a single long-running markdown document capturing stable workflow attributes.
+
+We implemented these and ran a cold-vs-warm-vs-navigation evaluation, but the results showed that the curator/write overhead and the extra latency from pulling tracks and profiles canceled the coverage gains we hoped for. The agentic harness got little additional benefit from L2/L3 compared to navigation over the raw L0/L1 layers alone. We therefore removed topic tracks, team profiles, and the curator write tools, keeping only the read-only navigation tools over L0/L1. The documentation for the original four-layer pyramid lives on as a design note; the shipped enhancement is the two-layer navigation model described here.
+
+---
+
 ## Context isolation — scoping memory to what a stage needs
 
-All four memory layers inject data into the shared context. In complex workflows, this can create noise: a worker stage deep in a fan-out shouldn't see every key accumulated by every prior stage. `isolated: true` + `signature.input` lets a stage declare exactly which context keys it receives:
+All five memory layers inject data into the shared context. In complex workflows, this can create noise: a worker stage deep in a fan-out shouldn't see every key accumulated by every prior stage. `isolated: true` + `signature.input` lets a stage declare exactly which context keys it receives:
 
 ```yaml
   - id: review_each
@@ -399,10 +455,11 @@ The workflow builds institutional knowledge automatically, run by run.
 | How do I pass last run's outputs to the next run? | Continuation |
 | How do I give my workflow a rolling history of recent runs? | MemoryStore |
 | How do I accumulate structured knowledge across many runs? | KnowledgeStore |
+| How do I let an agent query memory on demand instead of receiving a fixed dump? | Memory navigation |
 | How do I prevent context pollution in fan-out workers? | Context isolation |
 
-These are not competing choices. A production workflow that runs for weeks benefits from all four layers simultaneously — mission for orientation, continuation for immediate prior state, MemoryStore for recent history, and KnowledgeStore for accumulated domain understanding.
+These are not competing choices. A production workflow that runs for weeks benefits from all five layers simultaneously — mission for orientation, continuation for immediate prior state, MemoryStore for recent history, KnowledgeStore for accumulated domain understanding, and memory navigation for targeted retrieval.
 
 ---
 
-*Memory is what separates agents from scripts. Armature gives you four levels of it, each suited to a different time horizon and a different kind of knowledge.*
+*Memory is what separates agents from scripts. Armature gives you five levels of it, each suited to a different time horizon and a different kind of knowledge.*

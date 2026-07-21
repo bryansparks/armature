@@ -135,6 +135,8 @@ class LLMNode(BaseNode):
         mission_context: str = "",
         on_token=None,
         adapter_registry: AdapterRegistry | None = None,
+        navigation_tools: bool = False,
+        knowledge_key: str = "_knowledge",
     ):
         if stage.role is None:
             raise ValueError(f"Stage '{stage.id}' has no role — cannot create LLMNode")
@@ -152,6 +154,8 @@ class LLMNode(BaseNode):
         self._mission_context = mission_context
         self._on_token = on_token  # async (chunk: str) -> None; enables token streaming
         self._adapter_registry = adapter_registry
+        self._navigation_tools = navigation_tools  # Phase 2: gate _knowledge suppression (Task 4)
+        self._knowledge_key = knowledge_key        # Phase 2: context key to suppress (Task 4)
 
     def _resolve_skills(self) -> list[SkillDef]:
         """Return SkillDef objects for each skill ID listed in role.skills."""
@@ -402,6 +406,17 @@ class LLMNode(BaseNode):
         else:
             stage_tools = []
 
+        # ── Memory pyramid (Phase 2): suppress the passive _knowledge dump for
+        # stages that declare a memory.* tool — they navigate actively instead.
+        stage_context = context
+        if (
+            self._navigation_tools
+            and tools_declared
+            and any(name.startswith("memory.") for name in tools_declared)
+        ):
+            stage_context = dict(context)
+            stage_context.pop(self._knowledge_key, None)
+
         output_schema = self._stage.output_schema if self._stage.output_mode.value == "guided_json" else None
 
         examples: list[dict] = []
@@ -421,7 +436,7 @@ class LLMNode(BaseNode):
         system_prompt = self._assembler.build(
             role=role,
             tools=stage_tools,
-            context=context,
+            context=stage_context,
             signature=self._stage.signature,
             output_schema=output_schema,
             examples=examples,
@@ -435,9 +450,9 @@ class LLMNode(BaseNode):
         # applies to ## Current Context — prevents large upstream outputs from leaking in.
         sig = self._stage.signature
         if sig and sig.input:
-            visible_context = {k: v for k, v in context.items() if k in sig.input}
+            visible_context = {k: v for k, v in stage_context.items() if k in sig.input}
         else:
-            visible_context = context
+            visible_context = stage_context
 
         messages = [
             {"role": "system", "content": system_prompt},

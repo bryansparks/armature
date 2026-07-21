@@ -11,6 +11,9 @@ htmlcov/
 # Auto-memory (local only, never public)
 memory/
 
+# Superpowers SDD scratch (task briefs, review packages, progress ledger)
+.superpowers/
+
 # Internal architecture and scratch files (not for public repo)
 examples/dangerous-pretzel/
 VISION.md
@@ -43,6 +46,7 @@ SUB-AGENTS-PLAN.md
 # Local tooling artifacts
 .benchmarks/
 PRE-LAUNCH-READINESS.md
+report-full.png
 
 # Standalone site — hosted on armature.now, not GitHub Pages
 site/

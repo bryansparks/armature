@@ -295,3 +295,30 @@ def test_memory_cold_warm_alternate_preserves_block_scalar_jinja(tmp_path):
     expected = before.replace("  fresh: false\n", "  fresh: true\n")
     assert after == expected
     assert "\\" not in after
+
+
+# ── memory_mode recognizes the "nav" arm (memory.navigation_tools) ───────
+
+def test_memory_mode_labels_nav(tmp_path):
+    spec = tmp_path / "spec.yml"
+    spec.write_text(
+        "name: t\nmemory:\n  enabled: true\n  navigation_tools: true\n"
+        "  extract_knowledge: true\n  curator_stage: researcher\n")
+    assert fault.memory_mode(spec) == "nav"
+
+
+def test_memory_mode_nav_takes_precedence_over_warm(tmp_path):
+    """navigation_tools:true -> 'nav' even though fresh:false would be 'warm'."""
+    spec = tmp_path / "spec.yml"
+    spec.write_text(
+        "name: t\nmemory:\n  enabled: true\n  fresh: false\n  navigation_tools: true\n")
+    assert fault.memory_mode(spec) == "nav"
+
+
+def test_memory_mode_for_nav_via_meta():
+    """Replay path: lever=='none' gives no cold/warm signal, so 'nav' must come
+    from the forward-captured memory_mode in inputs/meta."""
+    assert fault.memory_mode_for("none", {"memory_mode": "nav"}, 0) == "nav"
+    # existing behavior preserved:
+    assert fault.memory_mode_for("none", {}, 0) is None
+    assert fault.memory_mode_for("memory_cold_warm", {"memory_fresh": "alternate"}, 0) == "cold"

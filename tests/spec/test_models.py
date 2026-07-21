@@ -235,6 +235,30 @@ def test_memory_config_defaults():
     assert mc.db is None
 
 
+def test_memory_config_defaults_preserve_existing_behavior():
+    """New fields default so existing specs are unchanged."""
+    cfg = MemoryConfig()
+    assert cfg.reconcile is True
+    assert cfg.reconcile_llm is False
+
+
+def test_memory_config_round_trips_reconcile_fields():
+    import yaml
+    raw = """
+enabled: true
+extract_knowledge: true
+reconcile: true
+reconcile_llm: false
+capture:
+  - {stage: researcher, key: brief, max_entries: 5}
+"""
+    cfg = yaml.safe_load(raw)
+    parsed = MemoryConfig(**cfg)
+    assert parsed.reconcile is True
+    assert parsed.reconcile_llm is False
+    assert parsed.capture[0].stage == "researcher"
+
+
 def test_harness_spec_memory_none_by_default():
     spec = HarnessSpec(
         name="wf",
@@ -387,3 +411,36 @@ def test_compiled_agent_carries_safety_rules():
 def test_compiled_agent_safety_rules_default_empty():
     agent = CompiledAgent(role=Role(name="X", type=RoleType.WORKER, description="d"))
     assert agent.safety_rules == []
+
+
+def test_memory_config_navigation_tools_default_false():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.navigation_tools is False
+
+
+def test_memory_config_navigation_tools_round_trip():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig(navigation_tools=True)
+    dumped = cfg.model_dump()
+    assert dumped["navigation_tools"] is True
+    restored = MemoryConfig(**dumped)
+    assert restored.navigation_tools is True
+
+
+def test_memory_config_navigation_defaults():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig()
+    assert cfg.navigation_tools is False
+    assert cfg.extract_knowledge is False
+    assert cfg.reconcile is True
+
+
+def test_memory_config_navigation_round_trip():
+    from armature.spec.models import MemoryConfig
+    cfg = MemoryConfig(navigation_tools=True, extract_knowledge=True, reconcile=False)
+    dumped = cfg.model_dump()
+    restored = MemoryConfig(**dumped)
+    assert restored.navigation_tools is True
+    assert restored.extract_knowledge is True
+    assert restored.reconcile is False

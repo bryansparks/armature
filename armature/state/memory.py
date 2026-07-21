@@ -110,3 +110,42 @@ class MemoryStore:
                 "DELETE FROM memories WHERE workflow_name=?", (workflow_name,)
             )
             await db.commit()
+
+    async def search_conversation(
+        self, workflow_name: str, query: str,
+        stage_id: str | None = None, top_k: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Keyword scan over L0 raw captures (`memories.value`), newest first.
+
+        `value` is stored JSON-serialized; the raw serialized string is returned
+        so the agent can read it. Optional `stage_id` filter restricts the scan.
+        """
+        if not self._path.exists():
+            return []
+        pattern = f"%{query.lower()}%"
+        async with aiosqlite.connect(self._path) as db:
+            db.row_factory = aiosqlite.Row
+            if stage_id:
+                cursor = await db.execute(
+                    "SELECT stage_id, capture_key, value, timestamp FROM memories "
+                    "WHERE workflow_name=? AND stage_id=? AND LOWER(value) LIKE ? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (workflow_name, stage_id, pattern, top_k),
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT stage_id, capture_key, value, timestamp FROM memories "
+                    "WHERE workflow_name=? AND LOWER(value) LIKE ? "
+                    "ORDER BY timestamp DESC LIMIT ?",
+                    (workflow_name, pattern, top_k),
+                )
+            rows = await cursor.fetchall()
+        return [
+            {
+                "stage_id": r["stage_id"],
+                "capture_key": r["capture_key"],
+                "value": r["value"],
+                "timestamp": r["timestamp"],
+            }
+            for r in rows
+        ]

@@ -316,6 +316,10 @@ The accountability paper. AHE introduces the prediction-verification loop: every
 
 Identifies three system-level failure modes — which it terms "exposure without access," "stale-but-confident," and "confident-but-unchecked": memory that is present but unreachable, aging memory trusted without warning, and tool side effects assumed rather than verified. Armature answers with staleness penalties, context provenance tracking, post-condition verification, its own drift score (regression detection across improvement cycles), and component governance (auto-apply vs. human-review classification for spec changes).
 
+**[NapMem] From Passive Retrieval to Active Memory Navigation** — July 2026 ([arXiv:2607.05794](https://arxiv.org/abs/2607.05794))
+
+Reframes long-term memory from "passively retrieved context" into "a structured action space the agent navigates." NapMem organizes memory as a linked multi-granularity pyramid and exposes it through memory tools. Armature ports the structural thesis — raw stage captures (L0), reconciled entity/fact records (L1), and read-only navigation tools — while leaving out the RL-trained policy, which is not portable to a harness. The result is `memory.navigation_tools`: stages can query MemoryStore and KnowledgeStore on demand instead of receiving a fixed passive dump.
+
 **[AGT] Microsoft Agent Governance Toolkit** — 2025
 
 Five governance primitives borrowed directly: reversibility classification for every tool call (`FULL / PARTIAL / NONE`), tamper-evident SHA-256 hashing of trace inputs and the governing policy, a `require_approval` gate wired into the tool-call path, and `safety_mode: strict` (fail-closed — deny on no-match).
@@ -350,6 +354,7 @@ The paper behind continual adapter learning. C-LoRA keeps a single LoRA adapter 
 | Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th HQS component, SLR `low_skill_activation` diagnostic | ✅ |
 | AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
 | System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
+| NapMem ([arXiv:2607.05794](https://arxiv.org/abs/2607.05794)) | Active memory navigation: `memory.*` read-only tools, `_memory_index`, per-stage `_knowledge` suppression | ✅ |
 | AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
 | The Log is the Agent | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
 | KYA | Static spec risk score, rogue signal counter, only-tighten safety rule validation | ✅ |
