@@ -79,15 +79,17 @@ async def seed_store(store: TraceStore, traces: list[TraceRecord]) -> None:
 
 # ── resolve_trigger_overrides ────────────────────────────────────────────────
 
-def _spec_with_trigger(*, target_hqs=None, min_traces=None):
+def _spec_with_trigger(*, target_hqs=None, min_traces=None, drift_threshold=None):
     from armature.spec.models import HarnessSpec
     si_yaml = ""
-    if target_hqs is not None or min_traces is not None:
+    if target_hqs is not None or min_traces is not None or drift_threshold is not None:
         parts = ["self_improvement:"]
         if target_hqs is not None:
             parts.append(f"  target_hqs: {target_hqs}")
         if min_traces is not None:
             parts.append(f"  min_traces: {min_traces}")
+        if drift_threshold is not None:
+            parts.append(f"  drift_threshold: {drift_threshold}")
         si_yaml = "\n".join(parts) + "\n"
     yaml = f"""\
 name: test-wf
@@ -109,39 +111,74 @@ version: "1.0"
 
 def test_resolve_trigger_overrides_uses_default_when_spec_and_cli_absent():
     spec = _spec_with_trigger()
-    target, min_t = resolve_trigger_overrides(
-        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    target, min_t, drift_t = resolve_trigger_overrides(
+        None, None, None, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
     )
     assert target == 0.90
     assert min_t == 3
+    assert drift_t == 0.5
 
 
 def test_resolve_trigger_overrides_spec_field_wins_over_default():
-    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
-    target, min_t = resolve_trigger_overrides(
-        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10, drift_threshold=0.4)
+    target, min_t, drift_t = resolve_trigger_overrides(
+        None, None, None, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
     )
     assert target == 0.95
     assert min_t == 10
+    assert drift_t == 0.4
 
 
 def test_resolve_trigger_overrides_cli_flag_wins_over_spec():
-    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
-    target, min_t = resolve_trigger_overrides(
-        0.80, 5, spec, default_target_hqs=0.90, default_min_traces=3
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10, drift_threshold=0.4)
+    target, min_t, drift_t = resolve_trigger_overrides(
+        0.80, 5, 0.3, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
     )
     assert target == 0.80
     assert min_t == 5
+    assert drift_t == 0.3
 
 
 def test_resolve_trigger_overrides_spec_partial_override():
-    # spec sets only target_hqs; min_traces falls through to default
+    # spec sets only target_hqs; min_traces + drift_threshold fall through to default
     spec = _spec_with_trigger(target_hqs=0.75)
-    target, min_t = resolve_trigger_overrides(
-        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    target, min_t, drift_t = resolve_trigger_overrides(
+        None, None, None, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
     )
     assert target == 0.75
     assert min_t == 3
+    assert drift_t == 0.5
+
+
+def test_resolve_trigger_overrides_drift_threshold_default_when_absent():
+    spec = _spec_with_trigger()
+    _, _, drift_t = resolve_trigger_overrides(
+        None, None, None, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
+    )
+    assert drift_t == 0.5
+
+
+def test_resolve_trigger_overrides_drift_threshold_spec_wins():
+    spec = _spec_with_trigger(drift_threshold=0.6)
+    _, _, drift_t = resolve_trigger_overrides(
+        None, None, None, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
+    )
+    assert drift_t == 0.6
+
+
+def test_resolve_trigger_overrides_drift_threshold_cli_wins():
+    spec = _spec_with_trigger(drift_threshold=0.6)
+    _, _, drift_t = resolve_trigger_overrides(
+        None, None, 0.35, spec, default_target_hqs=0.90, default_min_traces=3,
+        default_drift_threshold=0.5,
+    )
+    assert drift_t == 0.35
 
 
 # ── ImprovementReport structure ───────────────────────────────────────────────
@@ -863,6 +900,174 @@ async def test_drift_score_logged_to_jsonl(tmp_path):
     await runner.analyze()
     entry = json.loads(log_file.read_text().strip())
     assert "drift_score" in entry
+
+
+# ── #5: drift_score as an implicit trigger (RED) ───────────────────────────────
+
+
+async def test_drift_trigger_fires_when_hqs_healthy_but_drift_high(tmp_path):
+    """HQS ≥ target but drift ≥ threshold → needs_improvement, triggered_by_drift."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    # Prior cycle "fixed" high_escalation:analyst — it is currently failing again.
+    log_file.write_text(json.dumps({"verified_fixes": ["high_escalation:analyst"]}) + "\n")
+    store = TraceStore(db)
+    # Healthy HQS (quorum 0.95, valid, success) but high escalation reappears.
+    # high_escalation only costs the happy-path term (0.10), so HQS ≈ 0.89 ≥ 0.85.
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r2", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r3", quorum_score=0.95, escalation_count=2),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.85, min_traces=1, drift_threshold=0.5,
+        auto_apply=False, log_path=log_file,
+    )
+    with patch("armature.synthesis.improve.SpecRefiner.refine", _NO_REFINE):
+        report = await runner.analyze()
+    assert report.needs_improvement is True
+    assert report.triggered_by_drift is True
+
+
+async def test_drift_trigger_inert_when_drift_below_threshold(tmp_path):
+    """HQS ≥ target and drift < threshold → no improvement needed."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    # A verified fix that is NOT currently failing → drift 0.0.
+    log_file.write_text(json.dumps({"verified_fixes": ["stage_failed:other_stage"]}) + "\n")
+    store = TraceStore(db)
+    await seed_store(store, [make_trace(run_id="r1", quorum_score=0.92)])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, drift_threshold=0.5,
+        auto_apply=False, log_path=log_file,
+    )
+    report = await runner.analyze()
+    assert report.needs_improvement is False
+    assert report.triggered_by_drift is False
+
+
+async def test_drift_trigger_not_set_when_hqs_drives_improvement(tmp_path):
+    """HQS < target (regardless of drift) → triggered_by_drift False (HQS-driven)."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    log_file.write_text(json.dumps({"verified_fixes": ["output_invalid:analyst"]}) + "\n")
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, drift_threshold=0.5,
+        auto_apply=False, log_path=log_file,
+    )
+    with patch("armature.synthesis.improve.SpecRefiner.refine", _NO_REFINE):
+        report = await runner.analyze()
+    assert report.needs_improvement is True
+    assert report.triggered_by_drift is False  # HQS-driven, not drift-driven
+
+
+async def test_drift_triggered_proposal_forces_review_and_suppresses_auto_apply(tmp_path):
+    """Drift-triggered proposal: even with auto_apply=True, no apply — pending written."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    log_file.write_text(json.dumps({"verified_fixes": ["high_escalation:analyst"]}) + "\n")
+    store = TraceStore(db)
+    # Healthy HQS, reappearing high_escalation:analyst → drift = 1.0.
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r2", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r3", quorum_score=0.95, escalation_count=2),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.85, min_traces=1, drift_threshold=0.5,
+        auto_apply=True, log_path=log_file,
+    )
+    # Refiner proposes a description-only change (allowed surface, auto-apply eligible).
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
+        report = await runner.analyze()
+
+    assert report.triggered_by_drift is True
+    assert report.escalated_oscillation is True
+    assert report.applied is False
+    assert report.requires_review is True
+    assert report.pending_path is not None
+    assert report.pending_path.exists()  # .pending.yaml written
+    assert spec_file.read_text() == _MINIMAL_SPEC_YAML  # spec unchanged
+
+
+async def test_hqs_triggered_path_still_auto_applies(tmp_path):
+    """Regression guard: HQS-driven proposal with auto_apply=True still applies."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    # No prior verified fixes → drift 0.0; low HQS drives improvement.
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, drift_threshold=0.5,
+        auto_apply=True, log_path=log_file,
+    )
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_SPEC_YAML)
+        report = await runner.analyze()
+
+    assert report.triggered_by_drift is False
+    assert report.escalated_oscillation is False
+    assert report.applied is True  # happy path preserved
+    assert "Include specific evidence" in spec_file.read_text()
+
+
+async def test_drift_log_entry_records_trigger_fields(tmp_path):
+    """_write_log records triggered_by_drift, drift_threshold, escalated_oscillation."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    log_file.write_text(json.dumps({"verified_fixes": ["high_escalation:analyst"]}) + "\n")
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r2", quorum_score=0.95, escalation_count=2),
+        make_trace(run_id="r3", quorum_score=0.95, escalation_count=2),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.85, min_traces=1, drift_threshold=0.5,
+        auto_apply=True, log_path=log_file,
+    )
+    with patch("armature.synthesis.improve.SpecRefiner.refine", _NO_REFINE):
+        await runner.analyze()
+    # The last log line is this cycle's entry.
+    lines = [l for l in log_file.read_text().splitlines() if l.strip()]
+    entry = json.loads(lines[-1])
+    assert entry["triggered_by_drift"] is True
+    assert entry["drift_threshold"] == 0.5
+    assert "escalated_oscillation" in entry
+
+
+async def test_improvement_report_drift_trigger_fields_default():
+    """ImprovementReport.escalated_oscillation / triggered_by_drift default False."""
+    report = ImprovementReport(
+        workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
+        n_traces=1, hqs_before=0.8, needs_improvement=False,
+        applied=False, diagnostics=[],
+    )
+    assert report.escalated_oscillation is False
+    assert report.triggered_by_drift is False
 
 
 # ── Phase F: Component Governance (RED) ─────────────────────────────────────

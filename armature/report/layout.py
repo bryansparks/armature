@@ -97,6 +97,7 @@ def render_json(data: DashboardData) -> dict[str, Any]:
                 "verified_fixes": c.verified_fixes,
                 "missed_predictions": c.missed_predictions,
                 "unexpected_regressions": c.unexpected_regressions,
+                "escalated_oscillation": c.escalated_oscillation,
             }
             for c in data.improvement_cycles
         ],

@@ -400,6 +400,16 @@ def test_self_improvement_config_accepts_trigger_overrides():
     assert cfg.min_traces == 10
 
 
+def test_self_improvement_config_drift_threshold_default_none():
+    cfg = SelfImprovementConfig()
+    assert cfg.drift_threshold is None
+
+
+def test_self_improvement_config_accepts_drift_threshold():
+    cfg = SelfImprovementConfig(drift_threshold=0.5)
+    assert cfg.drift_threshold == 0.5
+
+
 def test_harness_spec_has_self_improvement_field():
     from armature.spec.models import HarnessSpec
     spec = HarnessSpec(name="wf", stages=[])

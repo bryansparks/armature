@@ -595,14 +595,15 @@ def run(
             typer.echo("\nAuto-improve: analyzing traces...")
 
         _si_spec = _load_spec_for_improve(spec)
-        _eff_target_hqs, _eff_min_traces = resolve_trigger_overrides(
-            None, None, _si_spec,
+        _eff_target_hqs, _eff_min_traces, _eff_drift_threshold = resolve_trigger_overrides(
+            None, None, None, _si_spec,
             default_target_hqs=0.75, default_min_traces=3,
         )
 
         async def _improve():
             improve_runner = SelfImproveRunner(
                 spec, target_hqs=_eff_target_hqs, min_traces=_eff_min_traces,
+                drift_threshold=_eff_drift_threshold,
             )
             return await improve_runner.analyze()
 
@@ -622,6 +623,12 @@ def run(
             typer.echo(
                 f"Auto-improve: proposal rejected — touched locked surface(s): {surfaces}. Spec unchanged."
             )
+        elif report.escalated_oscillation:
+            typer.echo(
+                f"Auto-improve: oscillation detected (drift={report.drift_score:.2f}) — "
+                f"proposal written to {report.pending_path} for review. Auto-apply suppressed."
+            )
+            typer.echo(f"Consider `armature optimize {spec}` for a broader multi-iteration search.")
         elif report.applied:
             typer.echo(f"Auto-improve: spec updated → {spec}")
         elif report.requires_review:
@@ -919,6 +926,7 @@ def improve(
     model: str = typer.Option(None, "--model", help="LLM for the SpecRefiner (default: auto-detected from the spec's top tier; override with ARMATURE_REFINER_MODEL env var)"),
     target_hqs: float = typer.Option(None, "--target-hqs", help="HQS threshold below which improvement is triggered (default: 0.90, or the spec's self_improvement.target_hqs)"),
     min_traces: int = typer.Option(None, "--min-traces", help="Minimum traces required before analysis (default: 3, or the spec's self_improvement.min_traces)"),
+    drift_threshold: float = typer.Option(None, "--drift-threshold", help="Drift score above which improvement fires regardless of HQS (default: 0.5, or the spec's self_improvement.drift_threshold)"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
     log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL (default: <spec>.improve_log.jsonl)"),
 ):
@@ -933,8 +941,8 @@ def improve(
     db_path = trace_db or Path("~/.armature/traces.db").expanduser()
 
     resolved_spec = load_spec(spec)
-    eff_target_hqs, eff_min_traces = resolve_trigger_overrides(
-        target_hqs, min_traces, resolved_spec,
+    eff_target_hqs, eff_min_traces, eff_drift_threshold = resolve_trigger_overrides(
+        target_hqs, min_traces, drift_threshold, resolved_spec,
         default_target_hqs=0.90, default_min_traces=3,
     )
 
@@ -945,6 +953,7 @@ def improve(
             model=model,
             target_hqs=eff_target_hqs,
             min_traces=eff_min_traces,
+            drift_threshold=eff_drift_threshold,
             auto_apply=apply,
             log_path=log,
         )
@@ -980,6 +989,12 @@ def improve(
             f"Proposal rejected — touched locked surface(s): {surfaces}. "
             f"Spec unchanged. Add the surface to self_improvement.editable_surfaces to allow it."
         )
+    elif report.escalated_oscillation:
+        typer.echo(
+            f"Oscillation detected (drift={report.drift_score:.2f}) — proposal written to "
+            f"{report.pending_path} for review. Auto-apply suppressed to avoid worsening the oscillation."
+        )
+        typer.echo(f"Consider `armature optimize {spec}` for a broader multi-iteration search.")
     elif report.applied:
         typer.echo(f"Applied revised spec → {spec}")
     else:

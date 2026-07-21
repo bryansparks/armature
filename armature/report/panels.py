@@ -173,6 +173,8 @@ def improvement_timeline(data: DashboardData) -> Panel:
                 row_style = ""
 
             drift_text = Text(f"{c.drift_score:.2f}", style="red1 bold" if c.drift_score > 0.5 else "")
+            if c.escalated_oscillation:
+                drift_text = Text(f"{c.drift_score:.2f} ⚠osc", style="red1 bold")
             reg_text = Text(str(c.unexpected_regressions), style="red1 bold" if c.unexpected_regressions > 0 else "")
 
             t.add_row(

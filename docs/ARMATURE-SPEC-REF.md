@@ -405,12 +405,15 @@ self_improvement:
     - timeouts                # stage.timeout_s values
   target_hqs: 0.90            # optional: HQS threshold below which improvement fires (default: CLI default — 0.90 for `improve`, 0.75 for `run --auto-improve`)
   min_traces: 3               # optional: minimum traces required before analysis (default: CLI default — 3)
+  drift_threshold: 0.5        # optional: drift score that fires improvement even when HQS ≥ target (default 0.5)
 ```
 
 Surfaces NOT listed are locked — the refiner's system prompt explicitly names them as off-limits, and a proposal that touches a locked surface is rejected (not applied).
 Default: `[descriptions, retry_counts, timeouts]`. `schemas` and `model_tiers` require human review due to cascading effects.
 
 `target_hqs` / `min_traces` make the spec the single source of truth for *when* self-improvement fires. A CLI flag (`--target-hqs`, `--min-traces`) overrides the spec; when neither is set, the CLI default applies.
+
+`drift_threshold` fires improvement when the system is **oscillating** — previously-fixed failures reappearing — even if HQS is healthy. `drift_score` is the fraction of current failures that are regressions of past `verified_fixes` (0.0–1.0; inert until cycle 2+ when `verified_fixes` first exist). Drift-triggered proposals **always require review** — auto-apply is suppressed to avoid worsening the oscillation (the proposal is written to `<spec>.pending.yaml`). A CLI flag (`--drift-threshold`) overrides the spec.
 
 Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfImproveRunner` to generate multiple candidates and pick the best coverage match.
 

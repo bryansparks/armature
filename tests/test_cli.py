@@ -412,7 +412,7 @@ def test_auto_improve_flag_appears_in_run_help():
     assert "--auto-improve" in plain(result.output)
 
 
-def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None, rejected_locked_surfaces=None, proposed_spec=None):
+def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None, rejected_locked_surfaces=None, proposed_spec=None, escalated_oscillation=False, triggered_by_drift=False):
     from armature.synthesis.improve import ImprovementReport
     return ImprovementReport(
         workflow_name="echo-workflow",
@@ -425,6 +425,8 @@ def _make_improve_report(*, applied=False, needs_improvement=True, requires_revi
         pending_path=pending_path,
         rejected_locked_surfaces=rejected_locked_surfaces or [],
         proposed_spec=proposed_spec,
+        escalated_oscillation=escalated_oscillation,
+        triggered_by_drift=triggered_by_drift,
         diagnostics=[],
     )
 
@@ -502,14 +504,16 @@ def test_auto_improve_not_triggered_without_flag():
         mock_cls.assert_not_called()
 
 
-def _write_spec_with_self_improvement(path, *, target_hqs=None, min_traces=None):
+def _write_spec_with_self_improvement(path, *, target_hqs=None, min_traces=None, drift_threshold=None):
     si = ""
-    if target_hqs is not None or min_traces is not None:
+    if target_hqs is not None or min_traces is not None or drift_threshold is not None:
         si = "self_improvement:\n"
         if target_hqs is not None:
             si += f"  target_hqs: {target_hqs}\n"
         if min_traces is not None:
             si += f"  min_traces: {min_traces}\n"
+        if drift_threshold is not None:
+            si += f"  drift_threshold: {drift_threshold}\n"
     path.write_text(
         f"""\
 name: echo-workflow
@@ -601,3 +605,82 @@ def test_auto_improve_prints_rejection_when_locked_surface_touched(tmp_path):
     assert result.exit_code == 0, result.output
     assert "rejected" in result.output.lower()
     assert "model_tiers" in result.output
+
+
+def test_auto_improve_escalates_on_drift(tmp_path):
+    """run --auto-improve: drift-triggered escalation prints pending path + optimize hint."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from pathlib import Path
+
+    spec_path = tmp_path / "echo-drift.yaml"
+    _write_spec_with_self_improvement(spec_path)
+
+    report = _make_improve_report(
+        applied=False,
+        needs_improvement=True,
+        requires_review=True,
+        pending_path=Path("/tmp/echo.pending.yaml"),
+        escalated_oscillation=True,
+        triggered_by_drift=True,
+    )
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["run", str(spec_path), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "oscillat" in out
+    assert "optimize" in out
+    assert "review" in out or "pending" in out
+
+
+def test_auto_improve_honors_spec_drift_threshold_when_declared(tmp_path):
+    """run --auto-improve sources drift_threshold from the spec when present."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-dt.yaml"
+    _write_spec_with_self_improvement(spec_path, target_hqs=0.95, min_traces=7, drift_threshold=0.6)
+
+    report = _make_improve_report(applied=True)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(app, ["run", str(spec_path), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_cls.call_args
+    assert kwargs["drift_threshold"] == 0.6
+
+
+def test_improve_command_prints_oscillation_escalation_when_drift_triggered(tmp_path):
+    """`armature improve` prints oscillation + optimize hint when escalated_oscillation."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from pathlib import Path
+
+    spec_path = tmp_path / "echo-improve.yaml"
+    _write_spec_with_self_improvement(spec_path)
+
+    report = _make_improve_report(
+        applied=False,
+        needs_improvement=True,
+        requires_review=True,
+        pending_path=Path("/tmp/echo.pending.yaml"),
+        proposed_spec=MagicMock(),
+        escalated_oscillation=True,
+        triggered_by_drift=True,
+    )
+    # Fake report needs a drift_score for the formatted output.
+    report.drift_score = 0.75
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["improve", str(spec_path), "--no-apply"])
+
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "oscillat" in out
+    assert "optimize" in out
