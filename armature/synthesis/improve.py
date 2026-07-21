@@ -84,12 +84,14 @@ def _resolve_refiner_model(spec: HarnessSpec) -> str:
 def resolve_trigger_overrides(
     cli_target_hqs: float | None,
     cli_min_traces: int | None,
+    cli_drift_threshold: float | None,
     spec: "HarnessSpec",
     *,
     default_target_hqs: float,
     default_min_traces: int,
-) -> tuple[float, int]:
-    """Return (target_hqs, min_traces) honoring CLI flag > spec field > default."""
+    default_drift_threshold: float = 0.5,
+) -> tuple[float, int, float]:
+    """Return (target_hqs, min_traces, drift_threshold) honoring CLI flag > spec field > default."""
     si = spec.self_improvement
     target_hqs = cli_target_hqs if cli_target_hqs is not None else (
         si.target_hqs if si.target_hqs is not None else default_target_hqs
@@ -97,7 +99,10 @@ def resolve_trigger_overrides(
     min_traces = cli_min_traces if cli_min_traces is not None else (
         si.min_traces if si.min_traces is not None else default_min_traces
     )
-    return target_hqs, min_traces
+    drift_threshold = cli_drift_threshold if cli_drift_threshold is not None else (
+        si.drift_threshold if si.drift_threshold is not None else default_drift_threshold
+    )
+    return target_hqs, min_traces, drift_threshold
 
 
 # ── SpecRefiner ───────────────────────────────────────────────────────────────
@@ -381,6 +386,11 @@ class ImprovementReport:
     # not applied and not written to pending.
     rejected_locked_surfaces: list[str] = field(default_factory=list)
     rejected_proposals: int = 0
+    # #5 drift trigger — set when the cycle fired because drift_score crossed the
+    # threshold while HQS was healthy (oscillation). Such proposals are forced to
+    # review (auto-apply suppressed) to avoid worsening the oscillation.
+    triggered_by_drift: bool = False
+    escalated_oscillation: bool = False
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -580,6 +590,7 @@ class SelfImproveRunner:
         auto_apply: bool = True,
         log_path: Path | str | None = None,
         n_proposals: int = 1,
+        drift_threshold: float = 0.5,
     ) -> None:
         self._spec_path = Path(spec_path)
         if trace_db:
@@ -589,6 +600,7 @@ class SelfImproveRunner:
         self._model = model  # None → resolved from spec + env in analyze()
         self._target_hqs = target_hqs
         self._min_traces = min_traces
+        self._drift_threshold = drift_threshold
         self._auto_apply = auto_apply
         if log_path:
             self._log_path = Path(log_path)
@@ -623,20 +635,38 @@ class SelfImproveRunner:
         regression_risk_count = 0
         rejected_locked_surfaces: list[str] = []
         rejected_proposals = 0
+        triggered_by_drift = False
+        escalated_oscillation = False
+        drift_score = 0.0
+
+        # Drift score: fraction of current failures that were previously "fixed".
+        # Computed against the union of all prior cycles' verified_fixes so it
+        # detects oscillation (a fixed issue reappearing) across the whole log.
+        ever_verified = _load_all_verified_fixes(self._log_path)
 
         if n > 0:
             hqs_result = self._compute_hqs(traces)
             hqs_before = hqs_result.hqs
             diagnostics = DiagnosticAnalyzer(traces).analyze()
-            needs_improvement = n >= self._min_traces and hqs_before < self._target_hqs
+            curr_diag_keys = self._diag_keys(diagnostics)
+            regressed = curr_diag_keys & ever_verified
+            drift_score = len(regressed) / max(len(curr_diag_keys), 1) if curr_diag_keys else 0.0
+            # #5: drift is an implicit trigger independent of HQS. A workflow can
+            # oscillate (fix A → break B → fix B → break A) while staying above
+            # target_hqs; drift_score is the canonical signal for that. When drift
+            # crosses the threshold, improvement fires even with healthy HQS.
+            triggered_by_drift = (
+                (hqs_before is None or hqs_before >= self._target_hqs)
+                and drift_score >= self._drift_threshold
+            )
+            needs_improvement = (
+                n >= self._min_traces
+                and (hqs_before < self._target_hqs or drift_score >= self._drift_threshold)
+            )
+        else:
+            curr_diag_keys = set()
 
         # Compute verification against previous cycle's predictions
-        curr_diag_keys = self._diag_keys(diagnostics)
-
-        # Drift score: fraction of current failures that were previously "fixed"
-        ever_verified = _load_all_verified_fixes(self._log_path)
-        regressed = curr_diag_keys & ever_verified
-        drift_score = len(regressed) / max(len(curr_diag_keys), 1) if curr_diag_keys else 0.0
 
         verified_fixes, missed_predictions, unexpected_regressions = self._verify_predictions(
             prev_diag_keys=set(prev_entry.get("diagnostics_keys", [])) if prev_entry else set(),
@@ -714,6 +744,19 @@ class SelfImproveRunner:
                     rejected_proposals = 1
                     # Locked-surface violation: do not apply, do not write pending.
                     # proposed_spec stays set so the caller can inspect what was rejected.
+                elif triggered_by_drift:
+                    # #5: drift-triggered proposals always require review — auto-apply
+                    # is suppressed even when self._auto_apply is set and the change
+                    # would otherwise be auto-eligible. Oscillation is the symptom of
+                    # blind auto-apply; auto-applying here would worsen the latency
+                    # churn (H4-v2 constraint). Write the proposal to .pending.yaml.
+                    pending_path = self._spec_path.with_suffix("").with_name(
+                        self._spec_path.stem + ".pending.yaml"
+                    )
+                    pending_path.write_text(proposed_yaml, encoding="utf-8")
+                    requires_review = True
+                    escalated_oscillation = True
+                    _pending_path = pending_path
                 elif self._auto_apply:
                     _, review_changes = _classify_changes(spec, result.spec)
                     if review_changes:
@@ -746,6 +789,9 @@ class SelfImproveRunner:
             n_proposals_generated=n_proposals_generated,
             rejected_locked_surfaces=rejected_locked_surfaces,
             rejected_proposals=rejected_proposals,
+            triggered_by_drift=triggered_by_drift,
+            drift_threshold=self._drift_threshold,
+            escalated_oscillation=escalated_oscillation,
         )
 
         return ImprovementReport(
@@ -771,6 +817,8 @@ class SelfImproveRunner:
             regression_risk_count=regression_risk_count,
             rejected_locked_surfaces=rejected_locked_surfaces,
             rejected_proposals=rejected_proposals,
+            triggered_by_drift=triggered_by_drift,
+            escalated_oscillation=escalated_oscillation,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -870,6 +918,9 @@ class SelfImproveRunner:
         n_proposals_generated: int = 0,
         rejected_locked_surfaces: list[str] | None = None,
         rejected_proposals: int = 0,
+        triggered_by_drift: bool = False,
+        drift_threshold: float = 0.5,
+        escalated_oscillation: bool = False,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -897,6 +948,10 @@ class SelfImproveRunner:
             "n_proposals_generated": n_proposals_generated,
             "rejected_locked_surfaces": rejected_locked_surfaces or [],
             "rejected_proposals": rejected_proposals,
+            # #5 drift-trigger audit trail
+            "triggered_by_drift": triggered_by_drift,
+            "drift_threshold": drift_threshold,
+            "escalated_oscillation": escalated_oscillation,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

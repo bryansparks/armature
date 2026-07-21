@@ -384,6 +384,11 @@ class SelfImprovementConfig(BaseModel):
     # When set, the spec is the source of truth for when self-improvement fires.
     target_hqs: float | None = None
     min_traces: int | None = None
+    # Drift score (fraction of current failures that are reappearances of
+    # previously-verified fixes) at which improvement fires *regardless of HQS* —
+    # the canonical oscillation signal. When None, the CLI default (0.5) applies.
+    # Drift-triggered proposals always require review (auto-apply is suppressed).
+    drift_threshold: float | None = None
 
 
 class CronTrigger(BaseModel):
