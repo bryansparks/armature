@@ -603,3 +603,113 @@ async def test_optimizer_diagnostics_failure_does_not_block(tmp_path):
     # diagnostics_json is simply absent — optimization is not blocked.
     inputs = mock_run.call_args.args[0] if mock_run.call_args.args else mock_run.call_args[0][0]
     assert "diagnostics_json" not in inputs
+
+
+# ── #7-B: shared history, improve→optimize (RED) ──────────────────────────────
+
+
+def _write_improve_log(path, entries):
+    import json as _json
+    path.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+
+
+async def test_optimizer_injects_improve_history_json(tmp_path):
+    """optimize() feeds improve's prior-cycle log as improve_history_json."""
+    spec_path = tmp_path / "mywf.yaml"
+    spec_path.write_text("name: mywf\nversion: \"1.0\"\nstages: []\n")
+    log_path = tmp_path / "mywf.improve_log.jsonl"
+    _write_improve_log(log_path, [
+        {"timestamp": "2026-07-01T00:00:00Z", "hqs_before": 0.6, "applied": True,
+         "verified_fixes": ["output_invalid:analyst"], "missed_predictions": [],
+         "unexpected_regressions": [], "drift_score": 0.0},
+        {"timestamp": "2026-07-02T00:00:00Z", "hqs_before": 0.7, "applied": False,
+         "verified_fixes": [], "missed_predictions": ["stage_failed:writer"],
+         "unexpected_regressions": ["low_confidence:judge"], "drift_score": 0.6},
+    ])
+    runner = OptimizerRunner(target_spec_path=spec_path, trace_db_path=tmp_path / "traces.db")
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    inputs = captured["inputs"]
+    assert "improve_history_json" in inputs
+    hist = json.loads(inputs["improve_history_json"])
+    assert isinstance(hist, list)
+    assert len(hist) == 2
+    verified = [e for e in hist if e["verified_fixes"]]
+    assert verified and verified[0]["verified_fixes"] == ["output_invalid:analyst"]
+    missed = [e for e in hist if e["missed_predictions"]]
+    assert missed and missed[0]["missed_predictions"] == ["stage_failed:writer"]
+    assert missed[0]["unexpected_regressions"] == ["low_confidence:judge"]
+
+
+async def test_optimizer_improve_history_absent_when_no_log(tmp_path):
+    """No improve log file → improve_history_json not injected; optimize still runs."""
+    spec_path = tmp_path / "mywf.yaml"
+    spec_path.write_text("name: mywf\nversion: \"1.0\"\nstages: []\n")
+    runner = OptimizerRunner(target_spec_path=spec_path, trace_db_path=tmp_path / "traces.db")
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    assert "improve_history_json" not in captured["inputs"]
+
+
+async def test_optimizer_improve_history_malformed_does_not_block(tmp_path):
+    """A malformed log line is skipped; valid lines still flow through."""
+    spec_path = tmp_path / "mywf.yaml"
+    spec_path.write_text("name: mywf\nversion: \"1.0\"\nstages: []\n")
+    log_path = tmp_path / "mywf.improve_log.jsonl"
+    # One valid entry, one garbage line.
+    log_path.write_text(
+        '{"timestamp":"2026-07-01T00:00:00Z","verified_fixes":["output_invalid:analyst"],'
+        '"missed_predictions":[],"unexpected_regressions":[]}\n'
+        "this is not json: [[[\n"
+    )
+    runner = OptimizerRunner(target_spec_path=spec_path, trace_db_path=tmp_path / "traces.db")
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            result = await runner.optimize()
+
+    assert isinstance(result, OptimizationResult)
+    hist = json.loads(captured["inputs"]["improve_history_json"])
+    assert len(hist) == 1  # only the valid line
+    assert hist[0]["verified_fixes"] == ["output_invalid:analyst"]
+
+
+async def test_optimizer_improve_history_empty_log_not_injected(tmp_path):
+    """An empty/whitespace-only log → improve_history_json not injected."""
+    spec_path = tmp_path / "mywf.yaml"
+    spec_path.write_text("name: mywf\nversion: \"1.0\"\nstages: []\n")
+    log_path = tmp_path / "mywf.improve_log.jsonl"
+    log_path.write_text("   \n\n  \n")
+    runner = OptimizerRunner(target_spec_path=spec_path, trace_db_path=tmp_path / "traces.db")
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    assert "improve_history_json" not in captured["inputs"]

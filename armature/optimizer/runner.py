@@ -38,6 +38,40 @@ class LoopResult(BaseModel):
     rejected_count: int
 
 
+def _load_improve_history(spec_path: Path, limit: int = 10) -> list[dict]:
+    """Read ``<spec>.improve_log.jsonl`` and return compact per-cycle summaries.
+
+    Lets ``optimize`` consume ``improve``'s prior-cycle history so it doesn't
+    re-propose verified fixes and can target ``improve``'s missed predictions.
+    Advisory: a missing file or malformed line is skipped silently — never
+    raises. Field names match ``SelfImproveRunner._write_log``'s entry dict.
+    """
+    log_path = spec_path.parent / f"{spec_path.stem}.improve_log.jsonl"
+    if not log_path.exists():
+        return []
+    summaries: list[dict] = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        summaries.append({
+            "timestamp": e.get("timestamp", ""),
+            "hqs_before": e.get("hqs_before"),
+            "applied": e.get("applied", False),
+            "verified_fixes": e.get("verified_fixes", []),
+            "missed_predictions": e.get("missed_predictions", []),
+            "unexpected_regressions": e.get("unexpected_regressions", []),
+            "drift_score": e.get("drift_score", 0.0),
+            "triggered_by_drift": e.get("triggered_by_drift", False),
+            "escalated_oscillation": e.get("escalated_oscillation", False),
+            "latency_risk": e.get("latency_risk", 0.0),
+        })
+    return summaries[-limit:]
+
+
 class OptimizerRunner:
     MIN_TRACES = 5
 
@@ -85,6 +119,18 @@ class OptimizerRunner:
             workflow_inputs["diagnostics_json"] = json.dumps(
                 [d.model_dump() for d in diagnostics], default=str
             )
+        except Exception:
+            pass
+
+        # #7-B: feed improve's prior-cycle history so the meta-workflow doesn't
+        # re-propose verified fixes and targets improve's missed predictions.
+        # Advisory — never block optimization on a log-read failure.
+        try:
+            improve_history = _load_improve_history(self._target_spec_path)
+            if improve_history:
+                workflow_inputs["improve_history_json"] = json.dumps(
+                    improve_history, default=str
+                )
         except Exception:
             pass
 
