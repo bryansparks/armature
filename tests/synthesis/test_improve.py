@@ -2295,6 +2295,126 @@ def test_build_refiner_suggestions_includes_post_run_improvement_suggestions():
     assert "Tighten the judge prompt" in s
 
 
+# ── _build_refiner_suggestions optimizer-proposals (#7 reverse) ──────────────
+
+def _opt_proposal(*, accepted: bool, score: float, rationale: str):
+    from armature.optimizer.history import ProposalRecord
+    return ProposalRecord(
+        proposal_id="pid",
+        workflow_name="test-wf",
+        proposed_diff="--- a\n+++ b\n",
+        rationale=rationale,
+        confidence=0.8,
+        accepted=accepted,
+        score=score,
+        feedback="ok",
+    )
+
+
+def test_build_refiner_suggestions_includes_optimizer_proposals():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    props = [
+        _opt_proposal(accepted=True, score=0.88, rationale="Add guided_json to analyst."),
+        _opt_proposal(accepted=False, score=0.30, rationale="Bump model tier — too costly."),
+    ]
+    s = _build_refiner_suggestions(None, [], props)
+    assert s is not None
+    assert "Prior A/B-tested proposals" in s
+    assert "armature optimize" in s
+    assert "[ACCEPTED score=0.88]" in s
+    assert "[REJECTED score=0.30]" in s
+    assert "Add guided_json to analyst." in s
+    assert "Bump model tier" in s
+
+
+def test_build_refiner_suggestions_no_optimizer_section_when_empty():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    # No prior-cycle feedback, no post-run suggestions, no optimizer proposals → None.
+    assert _build_refiner_suggestions(None, [], []) is None
+    assert _build_refiner_suggestions(None, [], None) is None
+
+
+async def test_load_optimizer_proposals_absent_when_no_db(tmp_path):
+    from armature.synthesis.improve import _load_optimizer_proposals
+    db = tmp_path / "missing.db"
+    result = await _load_optimizer_proposals(db, "test-wf")
+    assert result == []
+    # improve must never create the DB file — only optimize writes it.
+    assert not db.exists()
+
+
+async def test_load_optimizer_proposals_absent_when_none(tmp_path):
+    from armature.synthesis.improve import _load_optimizer_proposals
+    assert await _load_optimizer_proposals(None, "test-wf") == []
+
+
+async def test_load_optimizer_proposals_reads_store(tmp_path):
+    from armature.synthesis.improve import _load_optimizer_proposals
+    from armature.optimizer.history import ProposalStore, ProposalRecord
+    db = tmp_path / "proposals.db"
+    store = ProposalStore(db)
+    await store.init()
+    await store.record(ProposalRecord(
+        proposal_id="p1", workflow_name="test-wf",
+        proposed_diff="d1", rationale="r1", confidence=0.7,
+        accepted=True, score=0.9, feedback="f1",
+    ))
+    await store.record(ProposalRecord(
+        proposal_id="p2", workflow_name="other-wf",  # different stem → must NOT match
+        proposed_diff="d2", rationale="r2", confidence=0.6,
+        accepted=False, score=0.2, feedback="f2",
+    ))
+    result = await _load_optimizer_proposals(db, "test-wf")
+    assert len(result) == 1
+    assert result[0].workflow_name == "test-wf"
+    assert result[0].rationale == "r1"
+
+
+async def test_analyze_feeds_optimizer_proposals_to_refiner(tmp_path):
+    """A seeded ProposalStore flows into the refiner prompt as refiner_suggestions."""
+    from armature.optimizer.history import ProposalStore, ProposalRecord
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    proposal_db = tmp_path / "proposals.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    # Seed optimize's A/B history for this workflow stem ("wf").
+    pstore = ProposalStore(proposal_db)
+    await pstore.init()
+    await pstore.record(ProposalRecord(
+        proposal_id="p1", workflow_name="wf", proposed_diff="d",
+        rationale="Switch analyst to guided_json.", confidence=0.8,
+        accepted=False, score=0.25, feedback="rejected",
+    ))
+
+    runner = SelfImproveRunner(
+        spec_file, db, auto_apply=False, log_path=tmp_path / "improve.log.jsonl",
+        proposal_db_path=proposal_db,
+    )
+
+    captured = {}
+
+    from armature.spec.loader import load_spec
+    revised_spec = load_spec(spec_file)
+
+    async def fake_refine(*, spec_yaml, diagnostics, hqs, refiner_suggestions=None,
+                          editable_surfaces=None):
+        captured["refiner_suggestions"] = refiner_suggestions
+        return RefinerResult(spec=revised_spec, yaml_text="", predicted_fixes=[])
+
+    with patch("armature.synthesis.improve.SpecRefiner") as MockRefiner:
+        MockRefiner.return_value.refine = fake_refine
+        await runner.analyze()
+
+    s = captured.get("refiner_suggestions")
+    assert s is not None
+    assert "Prior A/B-tested proposals" in s
+    assert "Switch analyst to guided_json." in s
+    assert "[REJECTED score=0.25]" in s
+
+
 async def test_analyze_feeds_missed_predictions_back_to_refiner(tmp_path):
     """A prior cycle's missed_predictions appear in the next cycle's refiner prompt."""
     spec_file = tmp_path / "wf.yaml"

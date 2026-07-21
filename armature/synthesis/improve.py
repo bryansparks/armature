@@ -572,7 +572,8 @@ def _latency_risk(old_spec: "HarnessSpec", new_spec: "HarnessSpec") -> float:
 
 
 def _build_refiner_suggestions(
-    prev_entry: dict | None, traces: list
+    prev_entry: dict | None, traces: list,
+    optimizer_proposals: list | None = None,
 ) -> str | None:
     """Build the refiner_suggestions string from prior-cycle verification feedback
     and any post-run ``improvement_suggestions`` captured in traces.
@@ -581,6 +582,10 @@ def _build_refiner_suggestions(
     previous predicted fixes were missed or caused unexpected regressions, plus
     any explicit suggestions a post-run analyst stage emitted. Returns None when
     there is nothing to feed back (so the prompt stays unchanged).
+
+    ``optimizer_proposals`` (reverse direction of #7) carries A/B-tested proposals
+    from ``armature optimize``'s ProposalStore so the refiner doesn't re-propose
+    diffs the meta-workflow already scored and can build on accepted ones.
     """
     prev = prev_entry or {}
     lines: list[str] = []
@@ -619,7 +624,46 @@ def _build_refiner_suggestions(
         for s in suggestions:
             lines.append(f"- {s}")
 
+    if optimizer_proposals:
+        if lines:
+            lines.append("")
+        lines.append("Prior A/B-tested proposals from `armature optimize`:")
+        for p in optimizer_proposals:
+            verdict = "ACCEPTED" if getattr(p, "accepted", False) else "REJECTED"
+            score = getattr(p, "score", None)
+            score_str = f" score={score:.2f}" if isinstance(score, (int, float)) else ""
+            lines.append(f"- [{verdict}{score_str}] {getattr(p, 'rationale', '')}")
+
     return "\n".join(lines) if lines else None
+
+
+async def _load_optimizer_proposals(
+    proposal_db_path: Path | str | None, workflow_stem: str, limit: int = 10
+) -> list:
+    """Read ``armature optimize``'s A/B proposal history for a workflow stem.
+
+    Reverse direction of #7: lets ``improve``'s refiner see the diffs the
+    meta-workflow already A/B-tested (accepted/rejected, score, rationale) so it
+    doesn't re-propose rejected diffs and can build on accepted ones. Keyed by the
+    spec file stem — the same key ``OptimizerRunner`` uses (``target_spec_path.stem``).
+
+    Advisory: a missing DB or any read error returns an empty list — never blocks
+    improvement. The DB is **only** read here, never created — the file-existence
+    guard means ``improve`` never materializes ``~/.armature/proposals.db``; only
+    ``optimize`` (which must write) does.
+    """
+    if not proposal_db_path:
+        return []
+    path = Path(proposal_db_path)
+    if not path.exists():
+        return []
+    try:
+        from armature.optimizer.history import ProposalStore
+        store = ProposalStore(path)
+        await store.init()  # idempotent — table already exists when optimize ran
+        return await store.load_history(workflow_stem, limit=limit)
+    except Exception:
+        return []
 
 
 def _load_all_verified_fixes(log_path: Path) -> set[str]:
@@ -672,6 +716,7 @@ class SelfImproveRunner:
         log_path: Path | str | None = None,
         n_proposals: int = 1,
         drift_threshold: float = 0.5,
+        proposal_db_path: Path | str | None = None,
     ) -> None:
         self._spec_path = Path(spec_path)
         if trace_db:
@@ -689,6 +734,11 @@ class SelfImproveRunner:
             stem = self._spec_path.stem
             self._log_path = self._spec_path.parent / f"{stem}.improve_log.jsonl"
         self._n_proposals = n_proposals
+        # Reverse direction of #7: read optimize's A/B-tested proposals so the
+        # refiner doesn't re-propose scored diffs. CLI supplies the default
+        # (~/.armature/proposals.db); None → no read (keeps programmatic/test use
+        # free of the ProposalStore).
+        self._proposal_db_path = Path(proposal_db_path) if proposal_db_path else None
 
     async def analyze(self) -> ImprovementReport:
         # Load previous cycle's predictions for verification
@@ -764,7 +814,13 @@ class SelfImproveRunner:
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
             # Close the loop: feed prior-cycle verification feedback and any post-run
             # analyst suggestions into the refiner so it can correct missed predictions.
-            refiner_suggestions = _build_refiner_suggestions(prev_entry, traces)
+            # Reverse direction of #7: also surface optimize's A/B-tested proposals.
+            optimizer_proposals = await _load_optimizer_proposals(
+                self._proposal_db_path, self._spec_path.stem
+            )
+            refiner_suggestions = _build_refiner_suggestions(
+                prev_entry, traces, optimizer_proposals
+            )
 
             if self._n_proposals > 1:
                 candidates = await refiner.refine_many(
