@@ -376,6 +376,11 @@ class ImprovementReport:
     # K-proposal fields
     n_proposals_generated: int = 0
     regression_risk_count: int = 0
+    # Editable-surfaces gate — surfaces a proposal touched that were NOT in the
+    # spec's editable_surfaces (locked). Such proposals are rejected (dropped),
+    # not applied and not written to pending.
+    rejected_locked_surfaces: list[str] = field(default_factory=list)
+    rejected_proposals: int = 0
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -434,6 +439,45 @@ def _classify_changes(
         auto["model_tiers_block"] = "modified"
 
     return auto, review
+
+
+def _touched_surfaces(old_spec: "HarnessSpec", new_spec: "HarnessSpec") -> set[str]:
+    """Return the set of EditableSurface values touched by old_spec → new_spec.
+
+    Structural changes (stage add/remove, safety_rules) map to no surface — they
+    are governed by `_classify_changes` (always review), not by the
+    `editable_surfaces` lock. This is the set the lock gate checks: any surface
+    touched but not in the spec's editable_surfaces is a locked-surface violation.
+    """
+    from armature.spec.models import EditableSurface
+
+    touched: set[str] = set()
+
+    old_ids = {s.id for s in old_spec.stages}
+    new_ids = {s.id for s in new_spec.stages}
+    old_stages = {s.id: s for s in old_spec.stages}
+    new_stages = {s.id: s for s in new_spec.stages}
+
+    for sid in old_ids & new_ids:
+        old_s = old_stages[sid]
+        new_s = new_stages[sid]
+        if old_s.role and new_s.role:
+            if old_s.role.description != new_s.role.description:
+                touched.add(EditableSurface.DESCRIPTIONS.value)
+            if old_s.role.model_tier != new_s.role.model_tier:
+                touched.add(EditableSurface.MODEL_TIERS.value)
+        if old_s.output_schema != new_s.output_schema:
+            touched.add(EditableSurface.SCHEMAS.value)
+        if old_s.timeout_s != new_s.timeout_s:
+            touched.add(EditableSurface.TIMEOUTS.value)
+        if old_s.on_fail != new_s.on_fail:
+            touched.add(EditableSurface.RETRY_COUNTS.value)
+
+    # Global model_tiers block change also touches the model_tiers surface.
+    if old_spec.model_tiers.model_dump() != new_spec.model_tiers.model_dump():
+        touched.add(EditableSurface.MODEL_TIERS.value)
+
+    return touched
 
 
 def _load_all_verified_fixes(log_path: Path) -> set[str]:
@@ -526,6 +570,8 @@ class SelfImproveRunner:
         predicted_regressions: list[str] = []
         n_proposals_generated = 0
         regression_risk_count = 0
+        rejected_locked_surfaces: list[str] = []
+        rejected_proposals = 0
 
         if n > 0:
             hqs_result = self._compute_hqs(traces)
@@ -564,13 +610,27 @@ class SelfImproveRunner:
                     n_proposals=self._n_proposals,
                 )
                 n_proposals_generated = len(candidates)
+                # Hard gate: drop any candidate that touches a surface not in
+                # editable_surfaces (a locked surface). The lock is binding — a
+                # refiner that ignores "DO NOT modify" has its work discarded.
+                allowed_candidates = [
+                    c for c in candidates
+                    if _touched_surfaces(spec, c.spec) <= set(editable_surfaces)
+                ]
+                rejected_proposals = len(candidates) - len(allowed_candidates)
+                if rejected_proposals:
+                    rejected_locked_surfaces = sorted({
+                        surf
+                        for c in candidates
+                        for surf in (_touched_surfaces(spec, c.spec) - set(editable_surfaces))
+                    })
                 healthy = _healthy_stage_ids(traces, diagnostics)
                 safe_candidates = [
-                    c for c in candidates
+                    c for c in allowed_candidates
                     if not _proposal_regression_risk(c, spec, healthy)
                 ]
-                regression_risk_count = len(candidates) - len(safe_candidates)
-                result = _pick_best_proposal(safe_candidates or candidates, diagnostics)
+                regression_risk_count = len(allowed_candidates) - len(safe_candidates)
+                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics)
             else:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
@@ -592,7 +652,14 @@ class SelfImproveRunner:
                 proposed_yaml = result.yaml_text
                 predicted_fixes = result.predicted_fixes
                 predicted_regressions = result.predicted_regressions
-                if self._auto_apply:
+                # Hard gate (single proposal): reject if it touches a locked surface.
+                violations = _touched_surfaces(spec, result.spec) - set(editable_surfaces)
+                if violations:
+                    rejected_locked_surfaces = sorted(violations)
+                    rejected_proposals = 1
+                    # Locked-surface violation: do not apply, do not write pending.
+                    # proposed_spec stays set so the caller can inspect what was rejected.
+                elif self._auto_apply:
                     _, review_changes = _classify_changes(spec, result.spec)
                     if review_changes:
                         pending_path = self._spec_path.with_suffix("").with_name(
@@ -622,6 +689,8 @@ class SelfImproveRunner:
             drift_score=drift_score,
             regression_risk_count=regression_risk_count,
             n_proposals_generated=n_proposals_generated,
+            rejected_locked_surfaces=rejected_locked_surfaces,
+            rejected_proposals=rejected_proposals,
         )
 
         return ImprovementReport(
@@ -645,6 +714,8 @@ class SelfImproveRunner:
             pending_path=_pending_path,
             n_proposals_generated=n_proposals_generated,
             regression_risk_count=regression_risk_count,
+            rejected_locked_surfaces=rejected_locked_surfaces,
+            rejected_proposals=rejected_proposals,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -742,6 +813,8 @@ class SelfImproveRunner:
         drift_score: float = 0.0,
         regression_risk_count: int = 0,
         n_proposals_generated: int = 0,
+        rejected_locked_surfaces: list[str] | None = None,
+        rejected_proposals: int = 0,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -767,6 +840,8 @@ class SelfImproveRunner:
             "drift_score": drift_score,
             "regression_risk_count": regression_risk_count,
             "n_proposals_generated": n_proposals_generated,
+            "rejected_locked_surfaces": rejected_locked_surfaces or [],
+            "rejected_proposals": rejected_proposals,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

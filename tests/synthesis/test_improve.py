@@ -1602,3 +1602,194 @@ stages:
     # All proposals were risky — fallback to full candidates set, still produces a proposal
     assert report.regression_risk_count == 2
     assert report.proposed_spec is not None
+
+
+# ── editable_surfaces hard gate (#3) ──────────────────────────────────────────
+
+_MODEL_TIERS_BLOCK = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+"""
+
+_BASE_TIER_SPEC = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+
+# Revised spec swaps the stage's model_tier (small -> large) — touches model_tiers.
+_REVISED_TIER_SPEC = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+
+# A spec that explicitly allows model_tiers.
+_BASE_TIER_SPEC_ALLOW = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}self_improvement:
+  editable_surfaces: [descriptions, model_tiers]
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+
+
+async def _seed_low_hqs(store):
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+
+def test_touched_surfaces_detects_description_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"
+    f.write_text(_BASE_TIER_SPEC)
+    g = tmp_path / "r.yaml"
+    g.write_text(_BASE_TIER_SPEC.replace("Analyze the topic.", "Analyze the topic thoroughly."))
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"descriptions"}
+
+
+def test_touched_surfaces_detects_model_tier_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"; f.write_text(_BASE_TIER_SPEC)
+    g = tmp_path / "r.yaml"; g.write_text(_REVISED_TIER_SPEC)
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"model_tiers"}
+
+
+def test_touched_surfaces_detects_schema_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    base = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+"""
+    rev = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+    output_schema: {type: object, required: [x]}
+"""
+    f = tmp_path / "s.yaml"; f.write_text(base)
+    g = tmp_path / "r.yaml"; g.write_text(rev)
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"schemas"}
+
+
+def test_touched_surfaces_empty_when_unchanged(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"; f.write_text(_BASE_TIER_SPEC)
+    assert _touched_surfaces(load_spec(f), load_spec(f)) == set()
+
+
+async def test_locked_surface_rejected_single_proposal(tmp_path):
+    """A tier change with MODEL_TIERS locked (default) is rejected: not applied, not pending."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is False
+    assert report.requires_review is False
+    assert report.rejected_locked_surfaces == ["model_tiers"]
+    assert spec_file.read_text() == _BASE_TIER_SPEC  # spec unchanged
+    assert not (spec_file.parent / "wf.pending.yaml").exists()  # no pending file
+    assert report.proposed_spec is not None  # proposal still surfaced for inspection
+
+
+async def test_allowed_surface_applied_single_proposal(tmp_path):
+    """A tier change with MODEL_TIERS explicitly allowed is auto-applied."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC_ALLOW)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is True
+    assert report.rejected_locked_surfaces == []
+    assert "model_tier: large" in spec_file.read_text()
+
+
+async def test_locked_surface_rejected_in_multi_proposal(tmp_path):
+    """Multi-proposal: a candidate touching a locked surface is dropped before selection."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    # Two candidates: one touches model_tiers (locked), one touches only descriptions (allowed).
+    clean_candidate = _BASE_TIER_SPEC.replace("Analyze the topic.", "Analyze the topic with care.")
+    locked_candidate = _REVISED_TIER_SPEC
+    responses = [_make_llm_response(locked_candidate), _make_llm_response(clean_candidate)]
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True, n_proposals=2)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock, side_effect=responses):
+        report = await runner.analyze()
+
+    # The clean (descriptions-only) candidate is applied; the locked one is rejected.
+    assert report.applied is True
+    assert report.rejected_proposals == 1
+    assert report.rejected_locked_surfaces == ["model_tiers"]
+    assert "with care" in spec_file.read_text()
+
+
+async def test_all_proposals_locked_yields_no_application(tmp_path):
+    """If every candidate touches a locked surface, nothing is applied and all are rejected."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True, n_proposals=2)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is False
+    assert report.proposed_spec is None
+    assert report.rejected_proposals == 2
+    assert spec_file.read_text() == _BASE_TIER_SPEC

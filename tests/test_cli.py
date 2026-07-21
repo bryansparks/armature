@@ -412,7 +412,7 @@ def test_auto_improve_flag_appears_in_run_help():
     assert "--auto-improve" in plain(result.output)
 
 
-def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None):
+def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None, rejected_locked_surfaces=None, proposed_spec=None):
     from armature.synthesis.improve import ImprovementReport
     return ImprovementReport(
         workflow_name="echo-workflow",
@@ -423,6 +423,8 @@ def _make_improve_report(*, applied=False, needs_improvement=True, requires_revi
         applied=applied,
         requires_review=requires_review,
         pending_path=pending_path,
+        rejected_locked_surfaces=rejected_locked_surfaces or [],
+        proposed_spec=proposed_spec,
         diagnostics=[],
     )
 
@@ -574,3 +576,28 @@ def test_auto_improve_uses_default_when_spec_omits_trigger_fields(tmp_path):
     _, kwargs = mock_cls.call_args
     assert kwargs["target_hqs"] == 0.75
     assert kwargs["min_traces"] == 3
+
+
+def test_auto_improve_prints_rejection_when_locked_surface_touched(tmp_path):
+    """When a proposal touches a locked surface, output says it was rejected."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-reject.yaml"
+    _write_spec_with_self_improvement(spec_path)
+
+    # A rejected proposal still surfaces proposed_spec for inspection.
+    report = _make_improve_report(
+        applied=False,
+        needs_improvement=True,
+        rejected_locked_surfaces=["model_tiers"],
+        proposed_spec=MagicMock(),
+    )
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["run", str(spec_path), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0, result.output
+    assert "rejected" in result.output.lower()
+    assert "model_tiers" in result.output

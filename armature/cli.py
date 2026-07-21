@@ -617,6 +617,11 @@ def run(
 
         if not report.needs_improvement:
             typer.echo("Auto-improve: workflow is healthy — no improvement needed.")
+        elif report.rejected_locked_surfaces:
+            surfaces = ", ".join(report.rejected_locked_surfaces)
+            typer.echo(
+                f"Auto-improve: proposal rejected — touched locked surface(s): {surfaces}. Spec unchanged."
+            )
         elif report.applied:
             typer.echo(f"Auto-improve: spec updated → {spec}")
         elif report.requires_review:
@@ -969,7 +974,13 @@ def improve(
         typer.echo("Refiner could not produce a valid revised spec.", err=True)
         return
 
-    if report.applied:
+    if report.rejected_locked_surfaces:
+        surfaces = ", ".join(report.rejected_locked_surfaces)
+        typer.echo(
+            f"Proposal rejected — touched locked surface(s): {surfaces}. "
+            f"Spec unchanged. Add the surface to self_improvement.editable_surfaces to allow it."
+        )
+    elif report.applied:
         typer.echo(f"Applied revised spec → {spec}")
     else:
         typer.echo("Proposed revision available (--no-apply was set — spec not written).")
