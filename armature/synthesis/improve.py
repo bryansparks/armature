@@ -222,7 +222,7 @@ class SpecRefiner:
             f"Quality metrics:\n{hqs_lines}"
         )
         if refiner_suggestions:
-            user_content += f"\n\nPost-run analysis suggestions:\n{refiner_suggestions}"
+            user_content += f"\n\nContext from previous cycles and post-run analysis:\n{refiner_suggestions}"
 
         system_prompt = _make_refiner_system_prompt(editable_surfaces, diversity_hint)
 
@@ -480,6 +480,57 @@ def _touched_surfaces(old_spec: "HarnessSpec", new_spec: "HarnessSpec") -> set[s
     return touched
 
 
+def _build_refiner_suggestions(
+    prev_entry: dict | None, traces: list
+) -> str | None:
+    """Build the refiner_suggestions string from prior-cycle verification feedback
+    and any post-run ``improvement_suggestions`` captured in traces.
+
+    Closes the prediction-verification loop: the refiner learns which of its
+    previous predicted fixes were missed or caused unexpected regressions, plus
+    any explicit suggestions a post-run analyst stage emitted. Returns None when
+    there is nothing to feed back (so the prompt stays unchanged).
+    """
+    prev = prev_entry or {}
+    lines: list[str] = []
+
+    missed = prev.get("missed_predictions") or []
+    unexpected = prev.get("unexpected_regressions") or []
+    verified = prev.get("verified_fixes") or []
+    drift = float(prev.get("drift_score") or 0.0)
+
+    if missed or unexpected or verified or drift > 0.0:
+        lines.append("Previous-cycle feedback:")
+        if missed:
+            lines.append("- Missed predictions (predicted to fix, still failing): "
+                         + ", ".join(missed))
+        if unexpected:
+            lines.append("- Unexpected regressions (new failures not predicted): "
+                         + ", ".join(unexpected))
+        if verified:
+            lines.append("- Verified fixes (predicted and resolved): "
+                         + ", ".join(verified))
+        if drift > 0.0:
+            lines.append(f"- Drift score: {drift:.2f} (previously fixed issues reappeared — "
+                         "the system may be oscillating; consider a different lever).")
+
+    # Post-run analyst stages emit improvement_suggestions in their trace outputs.
+    suggestions = []
+    for t in traces:
+        outs = getattr(t, "outputs", None) or {}
+        s = outs.get("improvement_suggestions")
+        if s:
+            suggestions.append(str(s).strip())
+    if suggestions:
+        if lines:
+            lines.append("")
+        lines.append("Post-run analysis suggestions:")
+        for s in suggestions:
+            lines.append(f"- {s}")
+
+    return "\n".join(lines) if lines else None
+
+
 def _load_all_verified_fixes(log_path: Path) -> set[str]:
     """Read all JSONL log entries and collect every verified_fix ever recorded."""
     if not log_path.exists():
@@ -599,13 +650,16 @@ class SelfImproveRunner:
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
             hqs_obj = self._compute_hqs(traces) if traces else None
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
+            # Close the loop: feed prior-cycle verification feedback and any post-run
+            # analyst suggestions into the refiner so it can correct missed predictions.
+            refiner_suggestions = _build_refiner_suggestions(prev_entry, traces)
 
             if self._n_proposals > 1:
                 candidates = await refiner.refine_many(
                     spec_yaml=spec_yaml,
                     diagnostics=diagnostics,
                     hqs=hqs_obj,
-                    refiner_suggestions=None,
+                    refiner_suggestions=refiner_suggestions,
                     editable_surfaces=editable_surfaces,
                     n_proposals=self._n_proposals,
                 )
@@ -636,6 +690,7 @@ class SelfImproveRunner:
                     spec_yaml=spec_yaml,
                     diagnostics=diagnostics,
                     hqs=hqs_obj,
+                    refiner_suggestions=refiner_suggestions,
                     editable_surfaces=editable_surfaces,
                 )
                 n_proposals_generated = 1 if result is not None else 0

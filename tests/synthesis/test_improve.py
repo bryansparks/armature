@@ -1793,3 +1793,96 @@ async def test_all_proposals_locked_yields_no_application(tmp_path):
     assert report.proposed_spec is None
     assert report.rejected_proposals == 2
     assert spec_file.read_text() == _BASE_TIER_SPEC
+
+
+# ── _build_refiner_suggestions (#2) ──────────────────────────────────────────
+
+def test_build_refiner_suggestions_none_when_no_feedback():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    assert _build_refiner_suggestions(None, []) is None
+    assert _build_refiner_suggestions({}, []) is None
+
+
+def test_build_refiner_suggestions_includes_missed_predictions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": ["output_invalid:analyst"], "unexpected_regressions": [],
+            "verified_fixes": [], "drift_score": 0.0}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "output_invalid:analyst" in s
+    assert "missed" in s.lower() or "still failing" in s.lower()
+
+
+def test_build_refiner_suggestions_includes_unexpected_regressions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": [], "unexpected_regressions": ["low_confidence:judge"],
+            "verified_fixes": [], "drift_score": 0.0}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "low_confidence:judge" in s
+    assert "regress" in s.lower() or "unexpected" in s.lower()
+
+
+def test_build_refiner_suggestions_flags_high_drift():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": [], "unexpected_regressions": [], "verified_fixes": [], "drift_score": 0.5}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "drift" in s.lower() or "oscillat" in s.lower()
+
+
+def test_build_refiner_suggestions_includes_post_run_improvement_suggestions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {}
+    tr = make_trace(stage_id="self_analyst")
+    tr.outputs = {"improvement_suggestions": "Tighten the judge prompt to require evidence."}
+    s = _build_refiner_suggestions(prev, [tr])
+    assert s is not None
+    assert "Tighten the judge prompt" in s
+
+
+async def test_analyze_feeds_missed_predictions_back_to_refiner(tmp_path):
+    """A prior cycle's missed_predictions appear in the next cycle's refiner prompt."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    # Pre-write a prior log entry with a missed prediction.
+    prev_entry = {
+        "timestamp": "2026-07-20T00:00:00+00:00",
+        "workflow_name": "test-wf",
+        "n_traces": 3,
+        "hqs_before": 0.40,
+        "target_hqs": 0.90,
+        "needs_improvement": True,
+        "applied": True,
+        "diagnostics": [],
+        "diagnostics_keys": ["output_invalid:analyst"],
+        "predicted_fixes": ["output_invalid:analyst"],
+        "predicted_regressions": [],
+        "verified_fixes": [],
+        "missed_predictions": ["output_invalid:analyst"],
+        "unexpected_regressions": [],
+        "drift_score": 0.0,
+        "regression_risk_count": 0,
+        "n_proposals_generated": 1,
+    }
+    log_file.write_text(json.dumps(prev_entry) + "\n")
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file)
+
+    captured = []
+    async def mock_llm(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        report = await runner.analyze()
+
+    user_msgs = [m["content"] for m in captured if m.get("role") == "user"]
+    assert user_msgs, "expected at least one user message captured"
+    assert "output_invalid:analyst" in user_msgs[0]
+    assert "missed" in user_msgs[0].lower() or "still failing" in user_msgs[0].lower()
