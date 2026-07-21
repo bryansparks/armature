@@ -388,6 +388,18 @@ def test_self_improvement_config_explicit():
     assert cfg.editable_surfaces == [EditableSurface.SCHEMAS, EditableSurface.MODEL_TIERS]
 
 
+def test_self_improvement_config_trigger_fields_default_none():
+    cfg = SelfImprovementConfig()
+    assert cfg.target_hqs is None
+    assert cfg.min_traces is None
+
+
+def test_self_improvement_config_accepts_trigger_overrides():
+    cfg = SelfImprovementConfig(target_hqs=0.95, min_traces=10)
+    assert cfg.target_hqs == 0.95
+    assert cfg.min_traces == 10
+
+
 def test_harness_spec_has_self_improvement_field():
     from armature.spec.models import HarnessSpec
     spec = HarnessSpec(name="wf", stages=[])

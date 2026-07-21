@@ -3,7 +3,13 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
-from armature.synthesis.improve import SelfImproveRunner, SpecRefiner, ImprovementReport, RefinerResult
+from armature.synthesis.improve import (
+    SelfImproveRunner,
+    SpecRefiner,
+    ImprovementReport,
+    RefinerResult,
+    resolve_trigger_overrides,
+)
 from armature.state.traces import TraceStore, TraceRecord
 from armature.state.diagnostics import DiagnosticCode
 
@@ -69,6 +75,73 @@ async def seed_store(store: TraceStore, traces: list[TraceRecord]) -> None:
     await store.init()
     for t in traces:
         await store.record(t)
+
+
+# ── resolve_trigger_overrides ────────────────────────────────────────────────
+
+def _spec_with_trigger(*, target_hqs=None, min_traces=None):
+    from armature.spec.models import HarnessSpec
+    si_yaml = ""
+    if target_hqs is not None or min_traces is not None:
+        parts = ["self_improvement:"]
+        if target_hqs is not None:
+            parts.append(f"  target_hqs: {target_hqs}")
+        if min_traces is not None:
+            parts.append(f"  min_traces: {min_traces}")
+        si_yaml = "\n".join(parts) + "\n"
+    yaml = f"""\
+name: test-wf
+version: "1.0"
+{si_yaml}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze.
+"""
+    from armature.spec.loader import load_spec
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    os.write(fd, yaml.encode())
+    os.close(fd)
+    return load_spec(Path(path))
+
+
+def test_resolve_trigger_overrides_uses_default_when_spec_and_cli_absent():
+    spec = _spec_with_trigger()
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.90
+    assert min_t == 3
+
+
+def test_resolve_trigger_overrides_spec_field_wins_over_default():
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.95
+    assert min_t == 10
+
+
+def test_resolve_trigger_overrides_cli_flag_wins_over_spec():
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
+    target, min_t = resolve_trigger_overrides(
+        0.80, 5, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.80
+    assert min_t == 5
+
+
+def test_resolve_trigger_overrides_spec_partial_override():
+    # spec sets only target_hqs; min_traces falls through to default
+    spec = _spec_with_trigger(target_hqs=0.75)
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.75
+    assert min_t == 3
 
 
 # ── ImprovementReport structure ───────────────────────────────────────────────
@@ -869,6 +942,131 @@ stages:
     assert len(review) > 0
 
 
+async def test_classify_changes_routes_model_tier_to_auto(tmp_path):
+    """A role.model_tier change is detected and routed to auto (not silently omitted)."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    model_tiers = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+"""
+    old_yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+    new_yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert any(k.startswith("model_tier:") for k in auto)
+    assert len(review) == 0
+
+
+async def test_classify_changes_detects_global_model_tiers_block_change(tmp_path):
+    """A change to the model_tiers definitions (not a per-stage assignment) is detected → auto."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    old_yaml = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    new_yaml = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert any("model_tiers" in k for k in auto)
+    assert len(review) == 0
+
+
+async def test_classify_changes_no_model_tier_false_positive_when_unchanged(tmp_path):
+    """No model_tier change → no model_tier entry in auto."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    model_tiers = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+"""
+    yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+    f = tmp_path / "spec.yaml"
+    f.write_text(yaml)
+    spec = load_spec(f)
+    auto, review = _classify_changes(spec, spec)
+    assert not any("model_tier" in k for k in auto)
+    assert not any("model_tiers" in k for k in auto)
+    assert len(auto) == 0
+    assert len(review) == 0
+
+
 async def test_requires_review_flag_on_improvement_report():
     report = ImprovementReport(
         workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
@@ -1404,3 +1602,287 @@ stages:
     # All proposals were risky — fallback to full candidates set, still produces a proposal
     assert report.regression_risk_count == 2
     assert report.proposed_spec is not None
+
+
+# ── editable_surfaces hard gate (#3) ──────────────────────────────────────────
+
+_MODEL_TIERS_BLOCK = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+"""
+
+_BASE_TIER_SPEC = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+
+# Revised spec swaps the stage's model_tier (small -> large) — touches model_tiers.
+_REVISED_TIER_SPEC = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+
+# A spec that explicitly allows model_tiers.
+_BASE_TIER_SPEC_ALLOW = f"""\
+name: test-wf
+version: "1.0"
+{_MODEL_TIERS_BLOCK}self_improvement:
+  editable_surfaces: [descriptions, model_tiers]
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+
+
+async def _seed_low_hqs(store):
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+
+
+def test_touched_surfaces_detects_description_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"
+    f.write_text(_BASE_TIER_SPEC)
+    g = tmp_path / "r.yaml"
+    g.write_text(_BASE_TIER_SPEC.replace("Analyze the topic.", "Analyze the topic thoroughly."))
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"descriptions"}
+
+
+def test_touched_surfaces_detects_model_tier_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"; f.write_text(_BASE_TIER_SPEC)
+    g = tmp_path / "r.yaml"; g.write_text(_REVISED_TIER_SPEC)
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"model_tiers"}
+
+
+def test_touched_surfaces_detects_schema_change(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    base = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+"""
+    rev = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+    output_schema: {type: object, required: [x]}
+"""
+    f = tmp_path / "s.yaml"; f.write_text(base)
+    g = tmp_path / "r.yaml"; g.write_text(rev)
+    assert _touched_surfaces(load_spec(f), load_spec(g)) == {"schemas"}
+
+
+def test_touched_surfaces_empty_when_unchanged(tmp_path):
+    from armature.synthesis.improve import _touched_surfaces
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"; f.write_text(_BASE_TIER_SPEC)
+    assert _touched_surfaces(load_spec(f), load_spec(f)) == set()
+
+
+async def test_locked_surface_rejected_single_proposal(tmp_path):
+    """A tier change with MODEL_TIERS locked (default) is rejected: not applied, not pending."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is False
+    assert report.requires_review is False
+    assert report.rejected_locked_surfaces == ["model_tiers"]
+    assert spec_file.read_text() == _BASE_TIER_SPEC  # spec unchanged
+    assert not (spec_file.parent / "wf.pending.yaml").exists()  # no pending file
+    assert report.proposed_spec is not None  # proposal still surfaced for inspection
+
+
+async def test_allowed_surface_applied_single_proposal(tmp_path):
+    """A tier change with MODEL_TIERS explicitly allowed is auto-applied."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC_ALLOW)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is True
+    assert report.rejected_locked_surfaces == []
+    assert "model_tier: large" in spec_file.read_text()
+
+
+async def test_locked_surface_rejected_in_multi_proposal(tmp_path):
+    """Multi-proposal: a candidate touching a locked surface is dropped before selection."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    # Two candidates: one touches model_tiers (locked), one touches only descriptions (allowed).
+    clean_candidate = _BASE_TIER_SPEC.replace("Analyze the topic.", "Analyze the topic with care.")
+    locked_candidate = _REVISED_TIER_SPEC
+    responses = [_make_llm_response(locked_candidate), _make_llm_response(clean_candidate)]
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True, n_proposals=2)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock, side_effect=responses):
+        report = await runner.analyze()
+
+    # The clean (descriptions-only) candidate is applied; the locked one is rejected.
+    assert report.applied is True
+    assert report.rejected_proposals == 1
+    assert report.rejected_locked_surfaces == ["model_tiers"]
+    assert "with care" in spec_file.read_text()
+
+
+async def test_all_proposals_locked_yields_no_application(tmp_path):
+    """If every candidate touches a locked surface, nothing is applied and all are rejected."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_BASE_TIER_SPEC)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True, n_proposals=2)
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_TIER_SPEC)
+        report = await runner.analyze()
+
+    assert report.applied is False
+    assert report.proposed_spec is None
+    assert report.rejected_proposals == 2
+    assert spec_file.read_text() == _BASE_TIER_SPEC
+
+
+# ── _build_refiner_suggestions (#2) ──────────────────────────────────────────
+
+def test_build_refiner_suggestions_none_when_no_feedback():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    assert _build_refiner_suggestions(None, []) is None
+    assert _build_refiner_suggestions({}, []) is None
+
+
+def test_build_refiner_suggestions_includes_missed_predictions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": ["output_invalid:analyst"], "unexpected_regressions": [],
+            "verified_fixes": [], "drift_score": 0.0}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "output_invalid:analyst" in s
+    assert "missed" in s.lower() or "still failing" in s.lower()
+
+
+def test_build_refiner_suggestions_includes_unexpected_regressions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": [], "unexpected_regressions": ["low_confidence:judge"],
+            "verified_fixes": [], "drift_score": 0.0}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "low_confidence:judge" in s
+    assert "regress" in s.lower() or "unexpected" in s.lower()
+
+
+def test_build_refiner_suggestions_flags_high_drift():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {"missed_predictions": [], "unexpected_regressions": [], "verified_fixes": [], "drift_score": 0.5}
+    s = _build_refiner_suggestions(prev, [])
+    assert s is not None
+    assert "drift" in s.lower() or "oscillat" in s.lower()
+
+
+def test_build_refiner_suggestions_includes_post_run_improvement_suggestions():
+    from armature.synthesis.improve import _build_refiner_suggestions
+    prev = {}
+    tr = make_trace(stage_id="self_analyst")
+    tr.outputs = {"improvement_suggestions": "Tighten the judge prompt to require evidence."}
+    s = _build_refiner_suggestions(prev, [tr])
+    assert s is not None
+    assert "Tighten the judge prompt" in s
+
+
+async def test_analyze_feeds_missed_predictions_back_to_refiner(tmp_path):
+    """A prior cycle's missed_predictions appear in the next cycle's refiner prompt."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await _seed_low_hqs(store)
+
+    # Pre-write a prior log entry with a missed prediction.
+    prev_entry = {
+        "timestamp": "2026-07-20T00:00:00+00:00",
+        "workflow_name": "test-wf",
+        "n_traces": 3,
+        "hqs_before": 0.40,
+        "target_hqs": 0.90,
+        "needs_improvement": True,
+        "applied": True,
+        "diagnostics": [],
+        "diagnostics_keys": ["output_invalid:analyst"],
+        "predicted_fixes": ["output_invalid:analyst"],
+        "predicted_regressions": [],
+        "verified_fixes": [],
+        "missed_predictions": ["output_invalid:analyst"],
+        "unexpected_regressions": [],
+        "drift_score": 0.0,
+        "regression_risk_count": 0,
+        "n_proposals_generated": 1,
+    }
+    log_file.write_text(json.dumps(prev_entry) + "\n")
+
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file)
+
+    captured = []
+    async def mock_llm(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _make_llm_response(_REVISED_SPEC_YAML)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        report = await runner.analyze()
+
+    user_msgs = [m["content"] for m in captured if m.get("role") == "user"]
+    assert user_msgs, "expected at least one user message captured"
+    assert "output_invalid:analyst" in user_msgs[0]
+    assert "missed" in user_msgs[0].lower() or "still failing" in user_msgs[0].lower()
