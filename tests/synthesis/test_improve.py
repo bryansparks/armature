@@ -3,7 +3,13 @@ import json
 import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
-from armature.synthesis.improve import SelfImproveRunner, SpecRefiner, ImprovementReport, RefinerResult
+from armature.synthesis.improve import (
+    SelfImproveRunner,
+    SpecRefiner,
+    ImprovementReport,
+    RefinerResult,
+    resolve_trigger_overrides,
+)
 from armature.state.traces import TraceStore, TraceRecord
 from armature.state.diagnostics import DiagnosticCode
 
@@ -69,6 +75,73 @@ async def seed_store(store: TraceStore, traces: list[TraceRecord]) -> None:
     await store.init()
     for t in traces:
         await store.record(t)
+
+
+# ── resolve_trigger_overrides ────────────────────────────────────────────────
+
+def _spec_with_trigger(*, target_hqs=None, min_traces=None):
+    from armature.spec.models import HarnessSpec
+    si_yaml = ""
+    if target_hqs is not None or min_traces is not None:
+        parts = ["self_improvement:"]
+        if target_hqs is not None:
+            parts.append(f"  target_hqs: {target_hqs}")
+        if min_traces is not None:
+            parts.append(f"  min_traces: {min_traces}")
+        si_yaml = "\n".join(parts) + "\n"
+    yaml = f"""\
+name: test-wf
+version: "1.0"
+{si_yaml}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze.
+"""
+    from armature.spec.loader import load_spec
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    os.write(fd, yaml.encode())
+    os.close(fd)
+    return load_spec(Path(path))
+
+
+def test_resolve_trigger_overrides_uses_default_when_spec_and_cli_absent():
+    spec = _spec_with_trigger()
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.90
+    assert min_t == 3
+
+
+def test_resolve_trigger_overrides_spec_field_wins_over_default():
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.95
+    assert min_t == 10
+
+
+def test_resolve_trigger_overrides_cli_flag_wins_over_spec():
+    spec = _spec_with_trigger(target_hqs=0.95, min_traces=10)
+    target, min_t = resolve_trigger_overrides(
+        0.80, 5, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.80
+    assert min_t == 5
+
+
+def test_resolve_trigger_overrides_spec_partial_override():
+    # spec sets only target_hqs; min_traces falls through to default
+    spec = _spec_with_trigger(target_hqs=0.75)
+    target, min_t = resolve_trigger_overrides(
+        None, None, spec, default_target_hqs=0.90, default_min_traces=3
+    )
+    assert target == 0.75
+    assert min_t == 3
 
 
 # ── ImprovementReport structure ───────────────────────────────────────────────

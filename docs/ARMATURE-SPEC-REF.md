@@ -403,10 +403,14 @@ self_improvement:
     - model_tiers             # role.model_tier assignments
     - retry_counts            # on_fail.loop.max values
     - timeouts                # stage.timeout_s values
+  target_hqs: 0.90            # optional: HQS threshold below which improvement fires (default: CLI default — 0.90 for `improve`, 0.75 for `run --auto-improve`)
+  min_traces: 3               # optional: minimum traces required before analysis (default: CLI default — 3)
 ```
 
-Surfaces NOT listed are locked — the refiner's system prompt explicitly names them as off-limits.
+Surfaces NOT listed are locked — the refiner's system prompt explicitly names them as off-limits, and a proposal that touches a locked surface is rejected (not applied).
 Default: `[descriptions, retry_counts, timeouts]`. `schemas` and `model_tiers` require human review due to cascading effects.
+
+`target_hqs` / `min_traces` make the spec the single source of truth for *when* self-improvement fires. A CLI flag (`--target-hqs`, `--min-traces`) overrides the spec; when neither is set, the CLI default applies.
 
 Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfImproveRunner` to generate multiple candidates and pick the best coverage match.
 

@@ -75,6 +75,31 @@ def _resolve_refiner_model(spec: HarnessSpec) -> str:
     return f"{cfg.provider}/{cfg.model}" if cfg.provider else cfg.model
 
 
+# ── Trigger override resolution ────────────────────────────────────────────────
+# The spec's self_improvement block may declare target_hqs / min_traces. A CLI flag
+# (if not None) wins; otherwise the spec field wins; otherwise the caller's hard
+# default. This makes the spec the single source of truth for *when* improvement
+# fires, while keeping CLI flags as an explicit override.
+
+def resolve_trigger_overrides(
+    cli_target_hqs: float | None,
+    cli_min_traces: int | None,
+    spec: "HarnessSpec",
+    *,
+    default_target_hqs: float,
+    default_min_traces: int,
+) -> tuple[float, int]:
+    """Return (target_hqs, min_traces) honoring CLI flag > spec field > default."""
+    si = spec.self_improvement
+    target_hqs = cli_target_hqs if cli_target_hqs is not None else (
+        si.target_hqs if si.target_hqs is not None else default_target_hqs
+    )
+    min_traces = cli_min_traces if cli_min_traces is not None else (
+        si.min_traces if si.min_traces is not None else default_min_traces
+    )
+    return target_hqs, min_traces
+
+
 # ── SpecRefiner ───────────────────────────────────────────────────────────────
 
 _REFINER_BASE = """\

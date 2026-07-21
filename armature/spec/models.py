@@ -380,6 +380,10 @@ class SelfImprovementConfig(BaseModel):
     editable_surfaces: list[EditableSurface] = Field(
         default_factory=lambda: list(_DEFAULT_EDITABLE_SURFACES)
     )
+    # Optional trigger overrides. When None, the CLI path's own default applies.
+    # When set, the spec is the source of truth for when self-improvement fires.
+    target_hqs: float | None = None
+    min_traces: int | None = None
 
 
 class CronTrigger(BaseModel):

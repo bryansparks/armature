@@ -498,3 +498,79 @@ def test_auto_improve_not_triggered_without_flag():
     with patch("armature.synthesis.improve.SelfImproveRunner") as mock_cls:
         runner.invoke(app, ["run", str(ECHO), "--input", "message=hi"])
         mock_cls.assert_not_called()
+
+
+def _write_spec_with_self_improvement(path, *, target_hqs=None, min_traces=None):
+    si = ""
+    if target_hqs is not None or min_traces is not None:
+        si = "self_improvement:\n"
+        if target_hqs is not None:
+            si += f"  target_hqs: {target_hqs}\n"
+        if min_traces is not None:
+            si += f"  min_traces: {min_traces}\n"
+    path.write_text(
+        f"""\
+name: echo-workflow
+version: "1.0"
+description: Minimal end-to-end test workflow using only script adapters
+{si}adapters:
+  echo_message:
+    name: echo_message
+    type: script
+    cmd: "echo 'received: {{{{message}}}}'"
+  check_exit:
+    name: check_exit
+    type: script
+    cmd: "echo 'verified'"
+
+stages:
+  - id: echo
+    adapter: echo_message
+
+  - id: verify
+    depends_on: [echo]
+    adapter: check_exit
+"""
+    )
+    return path
+
+
+def test_auto_improve_honors_spec_target_hqs_when_declared(tmp_path):
+    """run --auto-improve sources target_hqs/min_traces from the spec when present."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-si.yaml"
+    _write_spec_with_self_improvement(spec_path, target_hqs=0.95, min_traces=7)
+
+    report = _make_improve_report(applied=True)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(app, ["run", str(spec_path), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0, result.output
+    mock_cls.assert_called_once()
+    _, kwargs = mock_cls.call_args
+    assert kwargs["target_hqs"] == 0.95
+    assert kwargs["min_traces"] == 7
+
+
+def test_auto_improve_uses_default_when_spec_omits_trigger_fields(tmp_path):
+    """run --auto-improve falls back to 0.75/3 when the spec declares no trigger fields."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-nosi.yaml"
+    _write_spec_with_self_improvement(spec_path)  # no target_hqs/min_traces
+
+    report = _make_improve_report(applied=True)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(app, ["run", str(spec_path), "--input", "message=hi", "--auto-improve"])
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_cls.call_args
+    assert kwargs["target_hqs"] == 0.75
+    assert kwargs["min_traces"] == 3

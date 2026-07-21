@@ -588,13 +588,22 @@ def run(
     # interactive mode: primary output panel + armature last already cover this
 
     if auto_improve:
-        from armature.synthesis.improve import SelfImproveRunner
+        from armature.synthesis.improve import SelfImproveRunner, resolve_trigger_overrides
+        from armature.spec.loader import load_spec as _load_spec_for_improve
 
         if not quiet:
             typer.echo("\nAuto-improve: analyzing traces...")
 
+        _si_spec = _load_spec_for_improve(spec)
+        _eff_target_hqs, _eff_min_traces = resolve_trigger_overrides(
+            None, None, _si_spec,
+            default_target_hqs=0.75, default_min_traces=3,
+        )
+
         async def _improve():
-            improve_runner = SelfImproveRunner(spec, target_hqs=0.75)
+            improve_runner = SelfImproveRunner(
+                spec, target_hqs=_eff_target_hqs, min_traces=_eff_min_traces,
+            )
             return await improve_runner.analyze()
 
         try:
@@ -903,8 +912,8 @@ def improve(
         None, "--traces", help="Path to traces database (default: ~/.armature/traces.db)"
     ),
     model: str = typer.Option(None, "--model", help="LLM for the SpecRefiner (default: auto-detected from the spec's top tier; override with ARMATURE_REFINER_MODEL env var)"),
-    target_hqs: float = typer.Option(0.90, "--target-hqs", help="HQS threshold below which improvement is triggered"),
-    min_traces: int = typer.Option(3, "--min-traces", help="Minimum traces required before analysis"),
+    target_hqs: float = typer.Option(None, "--target-hqs", help="HQS threshold below which improvement is triggered (default: 0.90, or the spec's self_improvement.target_hqs)"),
+    min_traces: int = typer.Option(None, "--min-traces", help="Minimum traces required before analysis (default: 3, or the spec's self_improvement.min_traces)"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
     log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL (default: <spec>.improve_log.jsonl)"),
 ):
@@ -913,17 +922,24 @@ def improve(
         typer.echo(f"Spec not found: {spec}", err=True)
         raise typer.Exit(1)
 
-    from armature.synthesis.improve import SelfImproveRunner
+    from armature.synthesis.improve import SelfImproveRunner, resolve_trigger_overrides
+    from armature.spec.loader import load_spec
 
     db_path = trace_db or Path("~/.armature/traces.db").expanduser()
+
+    resolved_spec = load_spec(spec)
+    eff_target_hqs, eff_min_traces = resolve_trigger_overrides(
+        target_hqs, min_traces, resolved_spec,
+        default_target_hqs=0.90, default_min_traces=3,
+    )
 
     async def _run():
         runner = SelfImproveRunner(
             spec,
             db_path,
             model=model,
-            target_hqs=target_hqs,
-            min_traces=min_traces,
+            target_hqs=eff_target_hqs,
+            min_traces=eff_min_traces,
             auto_apply=apply,
             log_path=log,
         )
