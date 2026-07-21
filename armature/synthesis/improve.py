@@ -418,12 +418,20 @@ def _classify_changes(
         new_s = new_stages[sid]
         if old_s.role and new_s.role and old_s.role.description != new_s.role.description:
             auto[f"description:{sid}"] = "changed"
+        if old_s.role and new_s.role and old_s.role.model_tier != new_s.role.model_tier:
+            auto[f"model_tier:{sid}"] = "changed"
         if old_s.output_schema != new_s.output_schema:
             review[f"output_schema:{sid}"] = "modified"
         if old_s.timeout_s != new_s.timeout_s:
             auto[f"timeout_s:{sid}"] = "changed"
         if old_s.on_fail != new_s.on_fail:
             auto[f"on_fail:{sid}"] = "changed"
+
+    # Global model_tiers block (tier definitions): a change here redefines a tier
+    # for every stage using it, so detect it explicitly rather than letting it
+    # slip through unclassified.
+    if old_spec.model_tiers.model_dump() != new_spec.model_tiers.model_dump():
+        auto["model_tiers_block"] = "modified"
 
     return auto, review
 

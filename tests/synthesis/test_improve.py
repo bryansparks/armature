@@ -942,6 +942,131 @@ stages:
     assert len(review) > 0
 
 
+async def test_classify_changes_routes_model_tier_to_auto(tmp_path):
+    """A role.model_tier change is detected and routed to auto (not silently omitted)."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    model_tiers = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+"""
+    old_yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+    new_yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert any(k.startswith("model_tier:") for k in auto)
+    assert len(review) == 0
+
+
+async def test_classify_changes_detects_global_model_tiers_block_change(tmp_path):
+    """A change to the model_tiers definitions (not a per-stage assignment) is detected → auto."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    old_yaml = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  large:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    new_yaml = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  large:
+    provider: openrouter
+    model: z-ai/glm-5.2
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: large
+      description: Analyze the topic.
+"""
+    old_file = tmp_path / "old.yaml"
+    new_file = tmp_path / "new.yaml"
+    old_file.write_text(old_yaml)
+    new_file.write_text(new_yaml)
+    old_spec = load_spec(old_file)
+    new_spec = load_spec(new_file)
+    auto, review = _classify_changes(old_spec, new_spec)
+    assert any("model_tiers" in k for k in auto)
+    assert len(review) == 0
+
+
+async def test_classify_changes_no_model_tier_false_positive_when_unchanged(tmp_path):
+    """No model_tier change → no model_tier entry in auto."""
+    from armature.synthesis.improve import _classify_changes
+    from armature.spec.loader import load_spec
+
+    model_tiers = """\
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+"""
+    yaml = f"""\
+name: test-wf
+version: "1.0"
+{model_tiers}stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      model_tier: small
+      description: Analyze the topic.
+"""
+    f = tmp_path / "spec.yaml"
+    f.write_text(yaml)
+    spec = load_spec(f)
+    auto, review = _classify_changes(spec, spec)
+    assert not any("model_tier" in k for k in auto)
+    assert not any("model_tiers" in k for k in auto)
+    assert len(auto) == 0
+    assert len(review) == 0
+
+
 async def test_requires_review_flag_on_improvement_report():
     report = ImprovementReport(
         workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
