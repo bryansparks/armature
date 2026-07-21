@@ -37,6 +37,7 @@ class ImprovementCycle:
     predicted_fixes: list[str]
     predicted_regressions: list[str]
     escalated_oscillation: bool = False
+    latency_risk: float = 0.0
 
 
 @dataclass
@@ -169,6 +170,7 @@ def load_improvement_cycles(log_path: Path) -> list[ImprovementCycle]:
             predicted_fixes=entry.get("predicted_fixes", []),
             predicted_regressions=entry.get("predicted_regressions", []),
             escalated_oscillation=bool(entry.get("escalated_oscillation", False)),
+            latency_risk=float(entry.get("latency_risk", 0.0)),
         ))
     # Newest first (last line in JSONL is most recent)
     return list(reversed(cycles))

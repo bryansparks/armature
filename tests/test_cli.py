@@ -412,7 +412,7 @@ def test_auto_improve_flag_appears_in_run_help():
     assert "--auto-improve" in plain(result.output)
 
 
-def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None, rejected_locked_surfaces=None, proposed_spec=None, escalated_oscillation=False, triggered_by_drift=False):
+def _make_improve_report(*, applied=False, needs_improvement=True, requires_review=False, pending_path=None, rejected_locked_surfaces=None, proposed_spec=None, escalated_oscillation=False, triggered_by_drift=False, latency_risk=0.0):
     from armature.synthesis.improve import ImprovementReport
     return ImprovementReport(
         workflow_name="echo-workflow",
@@ -427,6 +427,7 @@ def _make_improve_report(*, applied=False, needs_improvement=True, requires_revi
         proposed_spec=proposed_spec,
         escalated_oscillation=escalated_oscillation,
         triggered_by_drift=triggered_by_drift,
+        latency_risk=latency_risk,
         diagnostics=[],
     )
 
@@ -684,3 +685,26 @@ def test_improve_command_prints_oscillation_escalation_when_drift_triggered(tmp_
     out = result.output.lower()
     assert "oscillat" in out
     assert "optimize" in out
+
+
+def test_improve_command_summary_includes_latency_risk(tmp_path):
+    """`armature improve` summary line surfaces latency_risk."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-latency.yaml"
+    _write_spec_with_self_improvement(spec_path)
+
+    report = _make_improve_report(
+        applied=False,
+        needs_improvement=True,
+        proposed_spec=MagicMock(),
+        latency_risk=1.5,
+    )
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["improve", str(spec_path), "--no-apply"])
+
+    assert result.exit_code == 0, result.output
+    assert "latency_risk: 1.5" in result.output
