@@ -1,30 +1,24 @@
-"""Task 7c — rich memory-pyramid harness suite + credit-gated live test.
+"""Task 7c — rich memory harness suite + credit-gated live test.
 
-Pins every link in the memory-pyramid thesis chain mechanically (mock-LLM,
+Pins every link in the two-layer memory thesis chain mechanically (mock-LLM,
 no credits) and wires a credit-gated live test ([F]) that auto-runs the
 empirical signal when OpenRouter credits return.
 
+Armature's cross-run memory is two layers: L0 raw stage captures and L1
+reconciled knowledge records. Optional read-only navigation tools let stages
+query these layers on demand instead of receiving a passive dump. Topic tracks
+and team profiles (L2/L3) were explored and removed because they added
+complexity without improving measured HQS in the cold-vs-warm campaign.
+
 Tests:
   A — warm populates then nav navigates the SAME shared L1 DB (thesis chain)
-  B — curator persists track + profile; a second nav run reads the track
-  D — Reconciler dedups across two warm runs (live L1 count stays at 1)
+  B — navigation returns more relevant L1 facts than the passive _knowledge dump
+  C — navigation measurably reduces the context bytes a stage receives
+  D — Reconciler dedups across warm runs and the live L1 count stays at 1
   F — credit-gated live nav-vs-cold coverage signal (skipif no API key)
 
 Mock-LLM helpers + the dual-patch trick are copied from `test_nav_spec_smoke.py`
 (kept local rather than imported because `tests/` is not a package on sys.path).
-The accessors used here were verified against `armature/runtime/engine.py`:
-  - knowledge DB path: `h._knowledge_store._path` (engine.py:222,255-258 derives
-    it as `mem_path.with_name(mem_path.stem + "_knowledge.db")`) — preferred
-    over string surgery.
-  - `Harness.run()` returns a `results` dict (stage_id -> stage_result), NOT a
-    RunResult object — so the run id lives on the Harness as `h._run_id`.
-  - trace DB path: `h._traces._path` (a `TraceStore` with `_path`; engine.py:188).
-    `trace_io.read_rows_by_run(db_path, run_id)` takes that path.
-  - `MemoryConfig.fresh` is a settable bool (spec/models.py:200).
-  - warm spec stage order: researcher -> judge (NO extract_knowledge by default
-    — the spec comment says "No knowledge extraction"). Tests A and D set
-    `warm_spec.memory.extract_knowledge = True` so the extractor runs and L1
-    is populated; this is a test-only spec mutation, not a production change.
 """
 from __future__ import annotations
 
@@ -35,8 +29,6 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
-
-# ── Mock-LLM response helpers (copied from test_nav_spec_smoke.py) ──
 
 
 def _plain_response(content: str):
@@ -100,6 +92,29 @@ def _patch_both(monkeypatch, fake):
     monkeypatch.setattr("armature.state.extractor.litellm_completion", fake)
 
 
+async def _seed_knowledge_db(knowledge_store, workflow_name: str, facts: list[tuple[str, str, float]]):
+    """Insert live L1 records directly (used to set up measurement scenarios)."""
+    from armature.state.knowledge import KnowledgeRecord, MemoryType
+    for entity, fact, conf in facts:
+        await knowledge_store.record(KnowledgeRecord(
+            workflow_name=workflow_name,
+            entity=entity,
+            fact=fact,
+            confidence=conf,
+            source_run_id="seed",
+            type=MemoryType.FACT,
+        ))
+
+
+def _user_message_bytes(messages: list) -> int:
+    """Sum JSON bytes of user-role context messages in one LLM call."""
+    total = 0
+    for m in messages or []:
+        if m.get("role") == "user":
+            total += len(json.dumps(m.get("content", "")))
+    return total
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Test A — Shared-DB round-trip (the thesis chain)
 # ──────────────────────────────────────────────────────────────────────
@@ -123,9 +138,6 @@ async def test_warm_populates_then_nav_navigates_shared_db(tmp_path, monkeypatch
     # ── Phase 1: warm run populates the shared knowledge DB ──
     warm_spec = load_spec(WARM_SPEC)
     warm_spec.memory.db = str(shared_db)
-    # The warm spec disables extract_knowledge by default ("No knowledge
-    # extraction"). Turn it on so the KnowledgeExtractor runs and L1 is
-    # populated — the test-only mutation that makes the thesis chain testable.
     warm_spec.memory.extract_knowledge = True
 
     warm_calls = {"i": 0}
@@ -145,8 +157,6 @@ async def test_warm_populates_then_nav_navigates_shared_db(tmp_path, monkeypatch
     hw = Harness(warm_spec, session_dir=tmp_path / "warm", use_cache=False)
     await hw.run({"topic": "the core design problems of distributed systems"})
 
-    # Assert: the shared knowledge DB has >=1 live record with provenance.
-    # Use the Harness's own accessor rather than string surgery on the path.
     knowledge_path = hw._knowledge_store._path
     async with aiosqlite.connect(str(knowledge_path)) as db:
         cur = await db.execute(
@@ -154,9 +164,10 @@ async def test_warm_populates_then_nav_navigates_shared_db(tmp_path, monkeypatch
         (n_live,) = await cur.fetchone()
     assert n_live >= 1, "warm run did not populate the shared knowledge DB"
 
-    # ── Phase 2: nav run against the SAME shared DB, researcher searches ──
+    # ── Phase 2: nav run against the SAME shared DB + namespace, researcher searches ──
     nav_spec = load_spec(NAV_SPEC)
-    nav_spec.memory.db = str(shared_db)  # SAME db — the thesis foundation
+    nav_spec.memory.db = str(shared_db)
+    nav_spec.memory.workflow_name = warm_spec.name
 
     nav_calls = {"i": 0}
     captured_user_ctx: list[dict] = []
@@ -174,149 +185,255 @@ async def test_warm_populates_then_nav_navigates_shared_db(tmp_path, monkeypatch
                 except Exception:
                     pass
         if n == 1:
-            # researcher: issue a memory.search_records tool call
             return _tool_call_response("memory.search_records", {"query": "sub-problem"})
         if n == 2:
-            # researcher: tool returned results -> final text briefing
-            return _plain_response("Briefing informed by memory: A is X, B is Y.")
+            # The nav researcher saw warm's fact via the tool result and now
+            # produces an ADDITIVE briefing: it covers a NEW sub-problem
+            # (distributed consensus) instead of repeating A/B.
+            return _plain_response(
+                "Briefing informed by memory: distributed consensus requires "
+                "quorum agreement among replicas."
+            )
         if n == 3:
-            # judge guided_json
             return _json_content_response({"accept": True, "confidence": 0.85, "issues": []})
-        if n == 4:
-            # extractor
-            return _extractor_fact_response()
-        if n == 5:
-            return _tool_call_response("memory.write_track",
-                {"track_id": "t", "title": "T", "summary": "S.", "evidence_links": []},
-                call_id="tc_t")
-        if n == 6:
-            return _tool_call_response("memory.write_profile",
-                {"content": "Team covers broad topics."}, call_id="tc_p")
-        return _plain_response("done")
+        # extractor: a fact semantically distinct from warm's generic fact so the
+        # Reconciler stores it rather than merging it away.
+        return _extractor_fact_response(
+            entity="topic",
+            fact="distributed consensus requires quorum agreement among replicas",
+        )
 
     _patch_both(monkeypatch, nav_fake)
 
     hn = Harness(nav_spec, session_dir=tmp_path / "nav", use_cache=False)
     await hn.run({"topic": "the core design problems of distributed systems"})
 
-    # Assert: the researcher actually called memory.search_records (a tool-role
-    # message appears in the 2nd ReAct call — the tool was dispatched).
     assert len(captured_messages) >= 2, "expected a search_records tool-call round-trip"
     roles2 = [m["role"] for m in captured_messages[1]]
     assert "tool" in roles2, "memory.search_records was not dispatched by the ReAct loop"
-    # Assert: nav researcher context has _memory_index, NOT _knowledge, and
-    # NOT the passive _memory L0 dump. The researcher is the first stage; its
-    # first LLM call (n=1) is the earliest captured user context. _memory_index
-    # lives in the shared context so the judge sees it too, but only the
-    # researcher (which declares memory.* tools + has a signature.input
-    # whitelist) gets _knowledge and _memory suppressed. We assert against the
-    # researcher's context specifically — checking ALL user contexts would
-    # false-positive on the judge, which legitimately still receives both.
+    tool_contents = " ".join(
+        str(m.get("content", "")) for m in captured_messages[1] if m.get("role") == "tool"
+    )
+    assert "a sub-problem was covered" in tool_contents, (
+        "nav search_records did not return warm's extracted fact — "
+        "memory.workflow_name alias is not being honored"
+    )
     assert captured_user_ctx, "no user context captured"
     researcher_ctx = captured_user_ctx[0]
     assert "_memory_index" in researcher_ctx, \
         "researcher context missing _memory_index (navigation ToC not injected)"
     assert "_knowledge" not in researcher_ctx, \
         "nav researcher received the passive _knowledge dump — suppression failed"
-    # The nav researcher must NOT receive the passive _memory L0 dump either —
-    # navigation is active (tools + _memory_index), not warm+navigation. The
-    # spec's signature.input whitelist drops _memory via the llm.py signature
-    # filter. If this fails, the nav arm is "warm + navigation" instead of
-    # "navigation instead of warm" — a thesis-undermining leak (NEEDS_CONTEXT).
     assert "_memory" not in researcher_ctx, (
         "nav researcher received the passive _memory L0 dump — "
         "signature.input filter not excluding it (thesis-undermining leak)"
     )
 
+    # Validate additive coverage: the nav output extends memory with a new
+    # sub-problem, it does not merely echo what was already in L1.
+    nav_knowledge_path = hn._knowledge_store._path
+    async with aiosqlite.connect(str(nav_knowledge_path)) as db:
+        cur = await db.execute(
+            "SELECT fact FROM knowledge WHERE workflow_name=? AND superseded_by IS NULL",
+            (warm_spec.name,),
+        )
+        facts = {row[0] for row in await cur.fetchall()}
+    assert "distributed consensus requires quorum agreement among replicas" in facts, (
+        f"nav run did not add a new distinct L1 fact — facts={facts!r}"
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────
-# Test B — Curator persistence + read_track round-trip
+# Test B — Navigation relevance beats passive dump (L1 precision)
 # ──────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_curator_persistence_and_read_track_round_trip(tmp_path, monkeypatch):
-    """After a nav run the shared DB has a track + profile; a second nav run
-    reads the track via memory.read_track and the harness dispatches it."""
+async def test_navigation_returns_only_relevant_l1_facts(tmp_path, monkeypatch):
+    """L1 navigation is precise: the agent's query returns matching records, while
+    the passive _knowledge dump uses a fixed query (the workflow name) and
+    injects every fact that matches it regardless of the stage's actual topic.
+
+    Setup: 10 facts in the shared DB, all containing the workflow name so the
+    passive dump finds them; only 3 also mention the topic query.
+    Nav stage's memory.search_records returns only the 3 relevant ones.
+    """
     from armature.spec.loader import load_spec
     from armature.runtime.engine import Harness
 
     shared_db = tmp_path / "shared.db"
+    wf = "campaign-research-brief-memory"
+    base = wf  # passive dump searches by workflow name
+    facts = [
+        # relevant to "distributed systems"
+        ("distributed", f"{base}: distributed systems must handle partial failures", 0.9),
+        ("consensus", f"{base}: consensus protocols are central to distributed systems", 0.85),
+        ("latency", f"{base}: network latency is a fundamental distributed systems constraint", 0.8),
+        # irrelevant noise (match passive query but not nav query)
+        ("gardening", f"{base}: tomatoes need full sun", 0.9),
+        ("cooking", f"{base}: pasta water should be salted", 0.9),
+        ("sports", f"{base}: soccer uses a round ball", 0.9),
+        ("music", f"{base}: pianos have 88 keys", 0.9),
+        ("history", f"{base}: the roman empire fell in 476 ce", 0.9),
+        ("astronomy", f"{base}: jupiter is a gas giant", 0.9),
+        ("art", f"{base}: oil paint dries slowly", 0.9),
+    ]
+
+    # Seed DB before either harness runs.
+    seed_spec = load_spec(WARM_SPEC)
+    seed_spec.memory.db = str(shared_db)
+    seed_spec.memory.extract_knowledge = True
+    seed_h = Harness(seed_spec, session_dir=tmp_path / "seed", use_cache=False)
+    await seed_h._knowledge_store.init()
+    await _seed_knowledge_db(seed_h._knowledge_store, wf, facts)
+
+    captured_passive_ctx: list[dict] = []
+    captured_nav_tool_results: list[str] = []
+
+    # Passive fake: just needs to complete the run while we capture the first
+    # user message (where _knowledge is injected).
+    async def passive_fake(**kwargs):
+        msgs = kwargs.get("messages") or []
+        for m in msgs:
+            if m.get("role") == "user":
+                try:
+                    captured_passive_ctx.append(json.loads(m["content"]))
+                except Exception:
+                    pass
+        return _plain_response("Briefing: A B C")
+
+    _patch_both(monkeypatch, passive_fake)
+
+    # Passive run (extract_knowledge=True so _knowledge is injected).
+    passive_spec = load_spec(WARM_SPEC)
+    passive_spec.memory.db = str(shared_db)
+    passive_spec.memory.extract_knowledge = True
+    hp = Harness(passive_spec, session_dir=tmp_path / "passive", use_cache=False)
+    await hp.run({"topic": "distributed systems"})
+
+    # Nav fake: issue a targeted L1 search, capture the tool result, complete.
+    nav_calls = {"i": 0}
+
+    async def nav_fake(**kwargs):
+        nav_calls["i"] += 1
+        n = nav_calls["i"]
+        msgs = kwargs.get("messages") or []
+        if n == 1:
+            return _tool_call_response("memory.search_records", {"query": "distributed systems"})
+        if n == 2:
+            for m in msgs:
+                if m.get("role") == "tool":
+                    captured_nav_tool_results.append(str(m.get("content", "")))
+            return _plain_response("Briefing informed by memory: D E F")
+        if n == 3:
+            return _json_content_response({"accept": True, "confidence": 0.8, "issues": []})
+        # extractor
+        return _extractor_fact_response(entity="topic", fact="new fact")
+
+    _patch_both(monkeypatch, nav_fake)
+
+    # Nav run.
     nav_spec = load_spec(NAV_SPEC)
     nav_spec.memory.db = str(shared_db)
+    nav_spec.memory.workflow_name = wf
+    hn = Harness(nav_spec, session_dir=tmp_path / "nav", use_cache=False)
+    await hn.run({"topic": "distributed systems"})
 
-    # ── Run 1: researcher text -> judge -> extractor -> curator writes ──
-    calls = {"i": 0}
+    # Passive: all 10 facts were dumped into context.
+    assert captured_passive_ctx, "no passive user context captured"
+    passive_knowledge = captured_passive_ctx[0].get("_knowledge", [])
+    passive_facts = {item.get("fact") for item in passive_knowledge}
+    assert len(passive_facts) == 10, (
+        f"passive dump should inject all 10 facts, got {len(passive_facts)}"
+    )
+    assert any("tomatoes need full sun" in f for f in passive_facts), (
+        "irrelevant fact missing from passive context"
+    )
 
-    async def fake1(**kwargs):
-        calls["i"] += 1
-        n = calls["i"]
+    # Nav: tool result only contains the 3 relevant facts.
+    assert captured_nav_tool_results, "no nav tool result captured"
+    tool_text = " ".join(captured_nav_tool_results).lower()
+    assert "partial failures" in tool_text, "relevant distributed fact missing from nav search"
+    assert "consensus protocols" in tool_text, "relevant distributed fact missing from nav search"
+    assert "network latency" in tool_text, "relevant distributed fact missing from nav search"
+    assert "tomatoes" not in tool_text, "irrelevant fact returned by nav search"
+    assert "pasta" not in tool_text, "irrelevant fact returned by nav search"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Test C — Navigation reduces context bytes vs passive dump
+# ──────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_navigation_reduces_context_bytes(tmp_path, monkeypatch):
+    """Navigation's whole thesis is trading tool-call latency for smaller context.
+    This test measures that trade directly: a nav-enabled stage receives far
+    fewer bytes of injected context than a passive-injection stage with the
+    same L1 records."""
+    from armature.spec.loader import load_spec
+    from armature.runtime.engine import Harness
+
+    shared_db = tmp_path / "shared.db"
+    wf = "campaign-research-brief-memory"
+    # Include the workflow name in every fact so the passive dump (which
+    # queries by workflow name) actually receives the full L1 set.
+    facts = [(f"entity{i}", f"{wf}: fact number {i} about the broad research topic", 0.9)
+             for i in range(10)]
+
+    seed_spec = load_spec(WARM_SPEC)
+    seed_spec.memory.db = str(shared_db)
+    seed_spec.memory.extract_knowledge = True
+    seed_h = Harness(seed_spec, session_dir=tmp_path / "seed", use_cache=False)
+    await seed_h._knowledge_store.init()
+    await _seed_knowledge_db(seed_h._knowledge_store, wf, facts)
+
+    passive_bytes = [0]
+    nav_bytes = [0]
+
+    async def passive_fake(**kwargs):
+        passive_bytes[0] += _user_message_bytes(kwargs.get("messages"))
+        return _plain_response("Briefing")
+
+    _patch_both(monkeypatch, passive_fake)
+
+    passive_spec = load_spec(WARM_SPEC)
+    passive_spec.memory.db = str(shared_db)
+    passive_spec.memory.extract_knowledge = True
+    hp = Harness(passive_spec, session_dir=tmp_path / "passive", use_cache=False)
+    await hp.run({"topic": "broad research topic"})
+
+    nav_calls = {"i": 0}
+
+    async def nav_fake(**kwargs):
+        nav_calls["i"] += 1
+        n = nav_calls["i"]
+        msgs = kwargs.get("messages") or []
         if n == 1:
-            return _plain_response("Briefing: A is X. B is Y. C is Z.")
+            nav_bytes[0] += _user_message_bytes(msgs)
+            return _tool_call_response("memory.search_records", {"query": "topic"})
+        # Tool result bytes are not counted as "injected context" — they are a
+        # response to an explicit agent action. Only count the first nav call.
         if n == 2:
-            return _json_content_response({"accept": True, "confidence": 0.8, "issues": []})
+            return _plain_response("Briefing")
         if n == 3:
-            return _extractor_fact_response()
-        if n == 4:
-            return _tool_call_response("memory.write_track",
-                {"track_id": "coverage", "title": "Coverage",
-                 "summary": "Covered A, B, C.", "evidence_links": []},
-                call_id="tc_track")
-        if n == 5:
-            return _tool_call_response("memory.write_profile",
-                {"content": "Team covers broad topics."}, call_id="tc_profile")
-        return _plain_response("done")
+            return _json_content_response({"accept": True, "confidence": 0.8, "issues": []})
+        return _extractor_fact_response(entity="topic", fact="new fact")
 
-    _patch_both(monkeypatch, fake1)
+    _patch_both(monkeypatch, nav_fake)
 
-    h1 = Harness(nav_spec, session_dir=tmp_path / "run1", use_cache=False)
-    await h1.run({"topic": "the core design problems of distributed systems"})
+    nav_spec = load_spec(NAV_SPEC)
+    nav_spec.memory.db = str(shared_db)
+    nav_spec.memory.workflow_name = wf
+    hn = Harness(nav_spec, session_dir=tmp_path / "nav", use_cache=False)
+    await hn.run({"topic": "broad research topic"})
 
-    # Assert: L2 track + L3 profile persisted to the shared DB.
-    assert await h1._track_store.count(nav_spec.name) >= 1, "curator wrote no track"
-    track = await h1._track_store.get_track(nav_spec.name, "coverage")
-    assert track is not None, "track 'coverage' not found after curator run"
-    # evidence_links may be empty (the mock wrote []); assert what was produced.
-    evidence_links = track.get("evidence_links") or []
-    if evidence_links:
-        # If the curator cited record ids, they must resolve to live L1 rows.
-        async with aiosqlite.connect(str(h1._knowledge_store._path)) as db:
-            placeholders = ",".join("?" for _ in evidence_links)
-            cur = await db.execute(
-                f"SELECT COUNT(*) FROM knowledge WHERE id IN ({placeholders}) "
-                f"AND superseded_by IS NULL",
-                [int(e) for e in evidence_links])
-            (n_resolved,) = await cur.fetchone()
-        assert n_resolved == len(evidence_links), (
-            f"track evidence_links do not all resolve to live knowledge rows: "
-            f"{evidence_links} -> {n_resolved}/{len(evidence_links)} live")
-    assert await h1._profile_store.get_profile(nav_spec.name) is not None, \
-        "curator wrote no profile"
-
-    # ── Run 2: a nav run whose researcher issues memory.read_track ──
-    captured_messages: list[list] = []
-
-    async def fake2(**kwargs):
-        captured_messages.append(kwargs.get("messages") or [])
-        if len(captured_messages) == 1:
-            return _tool_call_response("memory.read_track", {"list": True})
-        return _plain_response("ok")
-
-    _patch_both(monkeypatch, fake2)
-
-    # Re-create the spec so model_dump state is clean (the Harness computes a
-    # spec_version hash at construction; reusing the same mutated object would
-    # carry run1's hash into run2's cache key namespace).
-    nav_spec2 = load_spec(NAV_SPEC)
-    nav_spec2.memory.db = str(shared_db)
-
-    h2 = Harness(nav_spec2, session_dir=tmp_path / "run2", use_cache=False)
-    await h2.run({"topic": "the core design problems of distributed systems"})
-
-    # The read tool was actually dispatched: a tool-role message appears in the
-    # 2nd ReAct call (mirrors test_second_run_reads_track_via_read_track).
-    assert len(captured_messages) >= 2, "expected a read_track tool-call round-trip"
-    roles2 = [m["role"] for m in captured_messages[1]]
-    assert "tool" in roles2, "memory.read_track was not dispatched by the ReAct loop"
+    assert passive_bytes[0] > 0 and nav_bytes[0] > 0, (
+        f"must capture context bytes: passive={passive_bytes[0]} nav={nav_bytes[0]}"
+    )
+    ratio = nav_bytes[0] / passive_bytes[0]
+    assert ratio < 0.5, (
+        f"nav context ({nav_bytes[0]} bytes) not smaller than passive context "
+        f"({passive_bytes[0]} bytes); ratio={ratio:.2%}"
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -324,14 +441,15 @@ async def test_curator_persistence_and_read_track_round_trip(tmp_path, monkeypat
 # ──────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_reconcile_dedups_across_two_warm_runs(tmp_path, monkeypatch):
-    """Two warm runs whose extractor returns the SAME fact both times -> the
-    Reconciler dedups: the live L1 row count stays at 1, not 2. Navigation
-    searches over a clean L1, not a growing pile of duplicates."""
+async def test_reconcile_dedups_across_warm_runs(tmp_path, monkeypatch):
+    """N warm runs whose extractor returns the SAME fact -> the Reconciler
+    dedups: the live L1 row count stays at 1, not N. Navigation searches over a
+    clean L1, not a growing pile of duplicates. Also quantifies the dedup rate."""
     from armature.spec.loader import load_spec
     from armature.runtime.engine import Harness
 
     shared_db = tmp_path / "shared.db"
+    n_runs = 5
 
     run_idx = [0]
 
@@ -350,29 +468,28 @@ async def test_reconcile_dedups_across_two_warm_runs(tmp_path, monkeypatch):
                 return _plain_response("Briefing: A is X. B is Y.")
             if n == 2:
                 return _json_content_response({"accept": True, "confidence": 0.8, "issues": []})
-            # extractor: IDENTICAL fact both runs -> Reconciler SKIP/UPDATE
             return _extractor_fact_response(entity="topic", fact="the same fact")
 
         _patch_both(monkeypatch, fake)
-        # Distinct session_dir per run (the L1 knowledge DB is shared via
-        # spec.memory.db; the session_dir isolates trace/run metadata by run).
         h = Harness(spec, session_dir=tmp_path / f"warm-{run_idx[0]}", use_cache=False)
         await h.run({"topic": "the core design problems of distributed systems"})
         return h
 
     h1 = await run_warm(monkeypatch)
-    h2 = await run_warm(monkeypatch)
+    for _ in range(n_runs - 1):
+        await run_warm(monkeypatch)
 
-    # The knowledge DB path is shared; read it via either Harness's accessor.
     knowledge_path = h1._knowledge_store._path
     async with aiosqlite.connect(str(knowledge_path)) as db:
         cur = await db.execute(
             "SELECT COUNT(*) FROM knowledge WHERE superseded_by IS NULL")
         (n_live,) = await cur.fetchone()
     assert n_live == 1, (
-        f"Reconciler did not dedup the identical fact across two warm runs: "
-        f"live count = {n_live} (expected 1). If this is 2, the Reconciler "
-        f"regressed — report NEEDS_CONTEXT; do not patch production.")
+        f"Reconciler did not dedup the identical fact across {n_runs} warm runs: "
+        f"live count = {n_live} (expected 1).")
+    dedup_rate = (n_runs - n_live) / n_runs
+    assert dedup_rate >= 0.8, (
+        f"Reconciler dedup rate {dedup_rate:.0%} too low for identical facts")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -390,8 +507,8 @@ LIVE = pytest.mark.skipif(
 async def test_live_nav_coverage_beats_cold(tmp_path):
     """Empirical thesis signal: one real nav rep vs one real cold rep. nav's
     judge coverage (avg quorum) should be >= cold's. Directional 1-rep check,
-    NOT a strict verdict — the real campaign (25 reps, cold_vs_warm.yml) is
-    the serious run. Auto-runs when credits return."""
+    NOT a strict verdict — the real campaign (cold_vs_warm.yml) is the
+    serious run. Auto-runs when credits return."""
     from armature.spec.loader import load_spec
     from armature.runtime.engine import Harness
     from campaign_runner import hqs, trace_io
@@ -399,21 +516,15 @@ async def test_live_nav_coverage_beats_cold(tmp_path):
     shared_db = tmp_path / "live.db"
     topic = "the core design problems of distributed systems"
 
-    # Cold rep: warm spec with memory.fresh=True (ignore prior memory, still
-    # captures). MemoryConfig.fresh is a settable bool (spec/models.py:200).
     cold_spec = load_spec(WARM_SPEC)
     cold_spec.memory.db = str(shared_db)
     cold_spec.memory.fresh = True
     hc = Harness(cold_spec, session_dir=tmp_path / "cold")
     await hc.run({"topic": topic})
-    # Harness.run() returns a results dict (stage_id -> result), NOT a
-    # RunResult — the run id lives on the Harness instance (engine.py:143).
     cold_run_id = hc._run_id
     cold_rows = trace_io.read_rows_by_run(hc._traces._path, cold_run_id)
     cold_q = hqs.avg_quorum(cold_rows)
 
-    # Nav rep: nav spec against the SAME shared DB (now populated by cold's
-    # captures). The nav spec's db override points at the shared path.
     nav_spec = load_spec(NAV_SPEC)
     nav_spec.memory.db = str(shared_db)
     hn = Harness(nav_spec, session_dir=tmp_path / "nav")

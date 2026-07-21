@@ -65,35 +65,10 @@ _CREATE_FTS_SQL = """
     )
 """
 
-_CREATE_TRACKS_SQL = """
-    CREATE TABLE IF NOT EXISTS topic_tracks (
-        id              INTEGER PRIMARY KEY AUTOINCREMENT,
-        workflow_name   TEXT NOT NULL,
-        track_id        TEXT NOT NULL,
-        title           TEXT NOT NULL,
-        summary         TEXT NOT NULL,
-        narrative       TEXT,
-        evidence_links  TEXT NOT NULL DEFAULT '[]',
-        char_budget     INTEGER NOT NULL DEFAULT 2000,
-        updated_at      TEXT NOT NULL,
-        UNIQUE(workflow_name, track_id)
-    )
-"""
-
-_CREATE_PROFILE_SQL = """
-    CREATE TABLE IF NOT EXISTS team_profile (
-        workflow_name TEXT PRIMARY KEY,
-        content       TEXT NOT NULL,
-        char_budget   INTEGER NOT NULL DEFAULT 2000,
-        updated_at    TEXT NOT NULL
-    )
-"""
-
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_knowledge_wf_type    ON knowledge(workflow_name, type)    WHERE superseded_by IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_wf_entity  ON knowledge(workflow_name, entity) WHERE superseded_by IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_knowledge_superseded ON knowledge(superseded_by)         WHERE superseded_by IS NOT NULL",
-    "CREATE INDEX IF NOT EXISTS idx_tracks_wf ON topic_tracks(workflow_name)",
 ]
 
 
@@ -133,9 +108,6 @@ class KnowledgeStore:
                 await db.execute("DROP TABLE IF EXISTS knowledge_fts")
                 await db.execute(_CREATE_FTS_SQL)
                 await db.execute("INSERT INTO knowledge_fts(rowid, fact) SELECT id, fact FROM knowledge")
-                # L2/L3 tables (populated in Phase 3; created here so migration is one-shot).
-                await db.execute(_CREATE_TRACKS_SQL)
-                await db.execute(_CREATE_PROFILE_SQL)
                 for idx in _INDEXES:
                     await db.execute(idx)
                 await db.execute("PRAGMA user_version = 1")
@@ -319,12 +291,12 @@ class KnowledgeStore:
     async def index_summary(self, workflow_name: str) -> dict:
         """Lightweight navigation table-of-contents for `_memory_index`.
 
-        Returns records-by-type counts, up to 20 track titles+ids, and profile
-        char count + first 200 chars. Tracks/profile are empty until Phase 3.
+        Returns records-by-type counts and total live L1 record count.
+        Navigation-enabled stages use this to decide whether to call
+        memory.search_records / memory.get_records.
         """
         if not self._path.exists():
-            return {"records_by_type": {}, "tracks": [],
-                    "profile_chars": 0, "profile_preview": ""}
+            return {"records_by_type": {}, "total_records": 0}
         async with aiosqlite.connect(self._path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -333,35 +305,15 @@ class KnowledgeStore:
                 (workflow_name,),
             )
             by_type = {r["type"]: r["n"] for r in await cur.fetchall()}
-            tracks: list[dict] = []
-            try:
-                cur = await db.execute(
-                    "SELECT track_id, title FROM topic_tracks "
-                    "WHERE workflow_name=? ORDER BY updated_at DESC LIMIT 20",
-                    (workflow_name,),
-                )
-                tracks = [{"track_id": r["track_id"], "title": r["title"]}
-                          for r in await cur.fetchall()]
-            except Exception:
-                pass
-            profile_chars = 0
-            profile_preview = ""
-            try:
-                cur = await db.execute(
-                    "SELECT content FROM team_profile WHERE workflow_name=?",
-                    (workflow_name,),
-                )
-                row = await cur.fetchone()
-                if row is not None:
-                    profile_chars = len(row["content"])
-                    profile_preview = row["content"][:200]
-            except Exception:
-                pass
+            cur = await db.execute(
+                "SELECT COUNT(*) AS n FROM knowledge "
+                "WHERE workflow_name=? AND superseded_by IS NULL",
+                (workflow_name,),
+            )
+            total = (await cur.fetchone())["n"]
         return {
             "records_by_type": by_type,
-            "tracks": tracks,
-            "profile_chars": profile_chars,
-            "profile_preview": profile_preview,
+            "total_records": total,
         }
 
     async def count_since(self, workflow_name: str, since: str | None) -> int:

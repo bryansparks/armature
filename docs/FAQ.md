@@ -382,14 +382,15 @@ They compose. The governance stack (safety rules + human gates + strict mode) de
 
 **How does Armature handle agent memory?**
 
-Armature provides four distinct memory layers, each operating at a different time horizon:
+Armature provides five distinct memory mechanisms, each operating at a different time horizon:
 
 1. **Mission context** — the `mission:` string plus a prior-stages breadcrumb is injected automatically into every LLM system prompt. Zero configuration.
 2. **Continuation** — `carry_forward:` keys bring selected structured outputs from the previous run into the current run as `prior_run`. Rolling cross-run memory.
 3. **MemoryStore** — a rolling window of named stage output captures across many runs. Newest-to-oldest, quality-ranked, staleness-aware. Injected as `_memory`.
 4. **KnowledgeStore** — LLM-extracted entity/fact/confidence triples stored in SQLite with FTS5 full-text search. Injected as `_knowledge`. Accumulates indefinitely.
+5. **Memory navigation** — read-only tools (`memory.search_records`, `memory.get_records`, `memory.search_conversation`, `memory.get_run_trace`) that let a stage query MemoryStore and KnowledgeStore on demand instead of receiving a fixed dump. Motivated by NapMem (*From Passive Retrieval to Active Memory Navigation*, arXiv:2607.05794), this layer trades a small number of tool calls for a large reduction in passive context.
 
-See `MEMORY-AND-CONTEXT.md` for the full breakdown of all four layers, configuration examples, and comparisons to RAG and vector stores.
+See `MEMORY-AND-CONTEXT.md` for the full breakdown of all five layers, configuration examples, and comparisons to RAG and vector stores.
 
 **How is Armature's memory different from LangChain's ConversationBufferMemory?**
 

@@ -201,20 +201,18 @@ class MemoryConfig(BaseModel):
     capture: list[MemoryCapture] = Field(default_factory=list)
     inject_as: str = "_memory"        # context key injected at run start
     db: str | None = None             # override db path; defaults to ~/.armature/memory/{name}.db
+    workflow_name: str | None = None  # override the namespace for memory records;
+                                      # defaults to the spec's `name`. Use this to let
+                                      # a variant spec read/write another workflow's
+                                      # accumulated memories while keeping its own trace
+                                      # workflow identity.
     extract_knowledge: bool = False   # run KnowledgeExtractor post-run to build long-term facts
     inject_knowledge_as: str = "_knowledge"  # context key for injected knowledge facts
-    # ── Memory pyramid (Phase 1): reconciled, provenance-linked records ──
+    # ── Reconciled, provenance-linked L1 records ──
     reconcile: bool = True               # dedup/update/supersede/merge on extraction
-    reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (Phase 1: unused)
-    # ── Memory pyramid (Phase 2): active navigation tools ──
+    reconcile_llm: bool = False          # reserved: optional LLM tie-breaker (currently unused)
+    # ── Active navigation tools (read-only) ──
     navigation_tools: bool = False       # register memory.* read tools for this run
-    # ── Memory pyramid (Phase 3): curator + L2/L3 write tools ──
-    curator_stage: str | None = None        # post_run stage id that writes tracks/profile
-    track_budget: int = 20                  # max tracks per workflow
-    profile_budget: int = 2000              # max chars for the team profile
-    track_char_budget: int = 2000           # max chars per track summary
-    track_refresh_threshold: int = 10       # new live records before tracks refreshed
-    profile_refresh_threshold: int = 3      # track count (or 50 new records) before profile refreshed
 
 
 class ToolModule(BaseModel):

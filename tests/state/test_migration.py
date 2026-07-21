@@ -60,12 +60,6 @@ async def test_migration_adds_columns_and_backfills(tmp_path):
         version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
         assert version == 1
 
-        # L2/L3 tables created (empty)
-        tracks = await (await db.execute("SELECT count(*) FROM topic_tracks")).fetchone()
-        assert tracks[0] == 0
-        profile = await (await db.execute("SELECT count(*) FROM team_profile")).fetchone()
-        assert profile[0] == 0
-
 
 async def test_migration_is_idempotent(tmp_path):
     """Running init() twice does not error, duplicate FTS rows, or change user_version."""

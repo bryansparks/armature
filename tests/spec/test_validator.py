@@ -687,62 +687,13 @@ def test_nav_tools_with_extract_no_warning():
     assert "MEMORY_RECONCILE_LLM_WITHOUT_EXTRACT" not in codes
 
 
-# ── Memory pyramid (Phase 3): curator + budgets + nav-requires-enabled ───────
+# ── Memory navigation: nav-requires-enabled ───────
 
 def _spec_with_memory(**memory_kw):
     from armature.spec.models import MemoryConfig
     spec = _valid_spec()
     spec.memory = MemoryConfig(enabled=True, **memory_kw)
     return spec
-
-
-def test_curator_stage_missing_error():
-    from armature.spec.models import MemoryConfig
-    spec = _spec_with_memory(navigation_tools=True, extract_knowledge=True,
-                             curator_stage="nope")
-    errors = validate_spec(spec, strict=False)
-    assert "MEMORY_CURATOR_STAGE_MISSING" in codes(errors)
-
-
-def test_curator_not_post_run_error():
-    from armature.spec.models import MemoryConfig
-    spec = _valid_spec()
-    spec.memory = MemoryConfig(enabled=True, navigation_tools=True,
-                                extract_knowledge=True, curator_stage="worker")
-    # add a normal (non-post_run) stage named "worker" that declares the write tools
-    st = _valid_stage("worker")
-    st.role = Role(name="Worker", type="worker", description="d",
-                   tools=["memory.write_track", "memory.write_profile"])
-    spec.stages.append(st)
-    errors = validate_spec(spec, strict=False)
-    assert "MEMORY_CURATOR_NOT_POST_RUN" in codes(errors)
-
-
-def test_curator_missing_tools_warning():
-    from armature.spec.models import MemoryConfig
-    spec = _valid_spec()
-    spec.memory = MemoryConfig(enabled=True, navigation_tools=True,
-                                extract_knowledge=True, curator_stage="curator")
-    st = _valid_stage("curator")
-    st.post_run = True
-    st.role = Role(name="Curator", type="worker", description="d", tools=[])
-    spec.stages.append(st)
-    errors = validate_spec(spec, strict=False)
-    assert "MEMORY_CURATOR_MISSING_TOOLS" in codes(errors)
-
-
-def test_track_budget_out_of_range_error():
-    from armature.spec.models import MemoryConfig
-    spec = _spec_with_memory(curator_stage="curator", track_budget=25)
-    errors = validate_spec(spec, strict=False)
-    assert "MEMORY_BUDGET_OUT_OF_RANGE" in codes(errors)
-
-
-def test_profile_budget_out_of_range_error():
-    from armature.spec.models import MemoryConfig
-    spec = _spec_with_memory(curator_stage="curator", profile_budget=9999)
-    errors = validate_spec(spec, strict=False)
-    assert "MEMORY_BUDGET_OUT_OF_RANGE" in codes(errors)
 
 
 def test_nav_tools_requires_enabled_warning():
@@ -753,19 +704,16 @@ def test_nav_tools_requires_enabled_warning():
     assert "MEMORY_NAV_TOOLS_REQUIRES_ENABLED" in codes(errors)
 
 
-def test_refresh_hint_in_harness_keys_when_curator():
+def test_memory_index_in_harness_keys_when_navigation_tools():
     from armature.spec.models import MemoryConfig, Signature
     spec = _valid_spec()
     spec.memory = MemoryConfig(enabled=True, navigation_tools=True,
-                                extract_knowledge=True, curator_stage="curator")
-    st = _valid_stage("curator")
-    st.post_run = True
-    # curator depends on the default stage "s" so the signature-input
-    # resolvability check actually runs (it's guarded on depends_on).
+                                extract_knowledge=True)
+    st = _valid_stage("nav_worker")
     st.depends_on = ["s"]
-    st.role = Role(name="Curator", type="worker", description="d",
-                   tools=["memory.write_track", "memory.write_profile"])
-    st.signature = Signature(input={"_memory_index_refresh_hint": "refresh hint"})
+    st.role = Role(name="NavWorker", type=RoleType.WORKER, description="d",
+                   tools=["memory.search_records"])
+    st.signature = Signature(input={"_memory_index": "navigation index"})
     spec.stages.append(st)
     errors = validate_spec(spec, strict=False)
     assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)

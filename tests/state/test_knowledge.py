@@ -644,17 +644,14 @@ async def test_index_summary_counts_by_type(tmp_path):
     summary = await store.index_summary("wf")
     assert summary["records_by_type"]["fact"] == 1
     assert summary["records_by_type"]["event"] == 1
-    assert summary["tracks"] == []
-    assert summary["profile_chars"] == 0
-    assert summary["profile_preview"] == ""
+    assert summary["total_records"] == 2
 
 
 async def test_index_summary_missing_db_returns_empty():
     from armature.state.knowledge import KnowledgeStore
     store = KnowledgeStore(Path("/nonexistent/does_not_exist.db"))
     summary = await store.index_summary("wf")
-    assert summary == {"records_by_type": {}, "tracks": [],
-                       "profile_chars": 0, "profile_preview": ""}
+    assert summary == {"records_by_type": {}, "total_records": 0}
 
 
 async def test_count_since_counts_live_records(tmp_path):

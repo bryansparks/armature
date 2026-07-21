@@ -244,18 +244,14 @@ class Harness:
             self._knowledge_store = None
             self._knowledge_extractor = None
 
-        # ── Memory pyramid (Phase 2/3): register navigation tools ──
-        self._track_store = None
-        self._profile_store = None
+        # ── Memory navigation tools (read-only over L0/L1) ──
         if self._memory_config is not None and self._memory_config.navigation_tools:
-            # Derive the knowledge DB path once; shared by KnowledgeStore,
-            # TrackStore, and ProfileStore so all pyramid layers co-locate.
+            # Ensure a knowledge store exists even if extract_knowledge is false;
+            # navigation tools query L1 when available.
             if self._knowledge_store is None:
                 from armature.state.knowledge import KnowledgeStore
                 knowledge_path = mem_path.with_name(mem_path.stem + "_knowledge.db")
                 self._knowledge_store = KnowledgeStore(knowledge_path)
-            else:
-                knowledge_path = self._knowledge_store._path
             # Reuse the extractor's embedder if present; else try to construct one.
             if self._embedder is None:
                 try:
@@ -264,11 +260,6 @@ class Harness:
                         self._embedder = LocalEmbedder()
                 except Exception:
                     self._embedder = None
-            # L2/L3 stores share the knowledge DB file.
-            from armature.state.tracks import TrackStore
-            from armature.state.profile import ProfileStore
-            self._track_store = TrackStore(knowledge_path)
-            self._profile_store = ProfileStore(knowledge_path)
             from armature.registry.memory_tools import register_memory_tools
             register_memory_tools(
                 self._registry,
@@ -276,14 +267,8 @@ class Harness:
                 knowledge_store=self._knowledge_store,
                 trace_store=self._traces,
                 embedder=self._embedder,
-                workflow_name=self._spec.name,
+                workflow_name=self._memory_workflow_name,
                 run_id=self._run_id,
-                track_store=self._track_store,
-                profile_store=self._profile_store,
-                curator_stage=self._memory_config.curator_stage,
-                track_budget=self._memory_config.track_budget,
-                track_char_budget=self._memory_config.track_char_budget,
-                profile_budget=self._memory_config.profile_budget,
             )
 
         if self._spec.checkpoint:
@@ -342,6 +327,18 @@ class Harness:
 
     @property
     def name(self) -> str:
+        return self._spec.name
+
+    @property
+    def _memory_workflow_name(self) -> str:
+        """Workflow name used to namespace memory records (L0/L1).
+
+        Defaults to the spec's `name`, but `memory.workflow_name` can override it
+        so a variant spec shares another workflow's accumulated memory without
+        changing its trace/workflow identity.
+        """
+        if self._memory_config is not None:
+            return self._memory_config.workflow_name or self._spec.name
         return self._spec.name
 
     @classmethod
@@ -607,7 +604,7 @@ class Harness:
                     if value is not None:
                         try:
                             await self._memory_store.record(
-                                workflow_name=self._spec.name,
+                                workflow_name=self._memory_workflow_name,
                                 stage_id=stage.id,
                                 capture_key=cap.key,
                                 value=value,
@@ -1047,7 +1044,7 @@ class Harness:
                 memories: dict = {}
                 stale_keys: set = set()
             else:
-                memories, stale_keys = await self._memory_store.load(self._spec.name)
+                memories, stale_keys = await self._memory_store.load(self._memory_workflow_name)
             context[mem_cfg.inject_as] = memories
             self._provenance[mem_cfg.inject_as] = "memory"
             if stale_keys:
@@ -1058,12 +1055,8 @@ class Harness:
 
             if self._knowledge_store is not None:
                 await self._knowledge_store.init()
-                if self._track_store is not None:
-                    await self._track_store.init()
-                if self._profile_store is not None:
-                    await self._profile_store.init()
                 knowledge = await self._knowledge_store.search(
-                    self._spec.name, query=self._spec.name, top_k=10
+                    self._memory_workflow_name, query=self._spec.name, top_k=10
                 )
                 context[mem_cfg.inject_knowledge_as] = [
                     {"entity": k.entity, "fact": k.fact, "confidence": k.confidence}
@@ -1071,7 +1064,7 @@ class Harness:
                 ]
                 if mem_cfg.navigation_tools:
                     context["_memory_index"] = await self._knowledge_store.index_summary(
-                        self._spec.name
+                        self._memory_workflow_name
                     )
                     self._provenance["_memory_index"] = "memory_index"
 
@@ -1140,35 +1133,14 @@ class Harness:
             # Post-run knowledge extraction (non-blocking)
             if self._knowledge_extractor is not None and self._memory_store is not None:
                 try:
-                    updated_memories, _ = await self._memory_store.load(self._spec.name)
+                    updated_memories, _ = await self._memory_store.load(self._memory_workflow_name)
                     await self._knowledge_extractor.extract(
                         updated_memories,
-                        workflow_name=self._spec.name,
+                        workflow_name=self._memory_workflow_name,
                         run_id=self._run_id,
                     )
                 except Exception:
                     pass  # extraction must never block execution
-
-            # ── Memory pyramid (Phase 3): refresh hint for the curator ──
-            if (self._memory_config is not None and self._memory_config.curator_stage
-                    and self._track_store is not None and self._knowledge_store is not None):
-                try:
-                    last_ts = await self._track_store.last_updated_at(self._spec.name)
-                    new_records = await self._knowledge_store.count_since(self._spec.name, last_ts)
-                    track_count = await self._track_store.count(self._spec.name)
-                    mc = self._memory_config
-                    context["_memory_index_refresh_hint"] = {
-                        "refresh_tracks": new_records >= mc.track_refresh_threshold,
-                        "refresh_profile": (
-                            track_count >= mc.profile_refresh_threshold
-                            or new_records >= 50
-                        ),
-                        "new_records_since_tracks": new_records,
-                        "track_count": track_count,
-                    }
-                    self._provenance["_memory_index_refresh_hint"] = "memory_refresh_hint"
-                except Exception:
-                    pass  # refresh hint must never block execution
 
             # Compute failure-signature diagnostics from this run's traces
             from armature.state.diagnostics import DiagnosticAnalyzer

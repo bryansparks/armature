@@ -46,6 +46,7 @@ SUB-AGENTS-PLAN.md
 # Local tooling artifacts
 .benchmarks/
 PRE-LAUNCH-READINESS.md
+report-full.png
 
 # Standalone site — hosted on armature.now, not GitHub Pages
 site/

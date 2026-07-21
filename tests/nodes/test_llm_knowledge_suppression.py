@@ -72,7 +72,7 @@ async def test_suppression_off_when_no_memory_tool_declared():
 
 
 async def test_suppression_uses_custom_knowledge_key():
-    node = _make_node(navigation_tools=True, tool_names=["memory.read_track"],
+    node = _make_node(navigation_tools=True, tool_names=["memory.search_records"],
                      knowledge_key="_facts")
     captured = {}
 
