@@ -18,6 +18,14 @@ stages:
 
         Context includes:
         - traces_json: Recent execution traces (stage outcomes, latencies, parse errors)
+        - diagnostics_json (if present): Structured diagnostic codes computed by the
+          same analyzer `armature improve` uses. Each entry has a `code`
+          (stage_failed, output_invalid, low_confidence, high_escalation,
+          postcondition_failed, uncalled_tools), a `stage_id`, `details`, and a
+          `causal_attribution` identifying the root-cause category. When this is present
+          and non-empty, prefer it as the primary signal — do not re-derive failure
+          patterns from raw traces_json except for latency (latency_ms > 2000), which
+          the codes do not cover.
         - proposal_history_json (if present): Prior optimization proposals, whether each
           was accepted, and its quality score. Use this to avoid re-proposing changes that
           were already tried and rejected, and to build on changes that worked.

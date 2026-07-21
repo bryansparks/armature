@@ -3,9 +3,21 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from armature.optimizer.runner import OptimizerRunner, OptimizationResult, ABTestResult
-from armature.state.traces import HqsResult
+from armature.state.traces import HqsResult, TraceRecord
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _trace(*, run_id, stage_id="worker1", role_type="worker", success=True,
+           output_valid=True, quorum_score=None, escalation_count=0,
+           error_type=None):
+    return TraceRecord(
+        run_id=run_id, workflow_name="echo-workflow", stage_id=stage_id,
+        role_type=role_type, model="claude-sonnet", success=success,
+        output_valid=output_valid, quorum_score=quorum_score,
+        escalation_count=escalation_count, error_type=error_type,
+        inputs={}, outputs={"brief": "x"},
+    )
 
 
 def make_mock_harness_result(accept: bool = True):
@@ -512,3 +524,82 @@ async def test_run_loop_no_auto_apply_skips_apply_diff(tmp_path):
             await runner.run_loop(n_iterations=1, auto_apply=False)
 
     mock_apply.assert_not_called()
+
+
+# ── #7-A: shared diagnosis (RED) ──────────────────────────────────────────────
+
+
+async def test_optimizer_injects_diagnostics_json(tmp_path):
+    """optimize() feeds DiagnosticAnalyzer codes into the meta-workflow as diagnostics_json."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    # 5 traces, some failing → stage_failed + output_invalid diagnostics.
+    mock_traces = [
+        _trace(run_id="r1", success=False, error_type="RuntimeError", output_valid=False),
+        _trace(run_id="r2", success=False, error_type="RuntimeError", output_valid=False),
+        _trace(run_id="r3", success=True, output_valid=True, quorum_score=0.95),
+        _trace(run_id="r4", success=True, output_valid=True, quorum_score=0.95),
+        _trace(run_id="r5", success=True, output_valid=True, quorum_score=0.95),
+    ]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = make_mock_harness_result(accept=True)
+
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    inputs = captured["inputs"]
+    assert "diagnostics_json" in inputs
+    diags = json.loads(inputs["diagnostics_json"])
+    assert isinstance(diags, list)
+    codes = {d["code"] for d in diags}
+    assert "stage_failed" in codes
+    assert "output_invalid" in codes
+    # Each entry carries the structured fields improve uses.
+    assert all("stage_id" in d and "details" in d for d in diags)
+
+
+async def test_optimizer_diagnostics_json_empty_when_clean_traces(tmp_path):
+    """All-clean traces → diagnostics_json is an empty list (still injected)."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    assert json.loads(captured["inputs"]["diagnostics_json"]) == []
+
+
+async def test_optimizer_diagnostics_failure_does_not_block(tmp_path):
+    """If DiagnosticAnalyzer raises, optimize() still returns a result (advisory)."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch("armature.optimizer.runner.DiagnosticAnalyzer") as mock_diag_cls:
+            mock_diag_cls.return_value.analyze.side_effect = RuntimeError("boom")
+            with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = make_mock_harness_result(accept=True)
+                result = await runner.optimize()
+
+    assert isinstance(result, OptimizationResult)
+    assert result.accepted is True
+    # diagnostics_json is simply absent — optimization is not blocked.
+    inputs = mock_run.call_args.args[0] if mock_run.call_args.args else mock_run.call_args[0][0]
+    assert "diagnostics_json" not in inputs

@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from pydantic import BaseModel
+from armature.state.diagnostics import DiagnosticAnalyzer
 from armature.state.traces import TraceStore
 
 if TYPE_CHECKING:
@@ -73,6 +74,19 @@ class OptimizerRunner:
             "traces_json": traces_json,
             "spec_yaml": spec_yaml,
         }
+
+        # #7-A: feed improve's structured diagnostics to the meta-workflow so
+        # analyze_traces reasons over the same codes improve uses (stage_failed,
+        # output_invalid, low_confidence, high_escalation, ...) instead of
+        # re-deriving failure patterns from raw traces. Advisory — never block
+        # optimization on a diagnostic failure (mirrors proposal_history_json).
+        try:
+            diagnostics = DiagnosticAnalyzer(traces).analyze()
+            workflow_inputs["diagnostics_json"] = json.dumps(
+                [d.model_dump() for d in diagnostics], default=str
+            )
+        except Exception:
+            pass
 
         if self._metric_fn is not None:
             scores: list[float] = []
