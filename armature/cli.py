@@ -506,10 +506,10 @@ def run(
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable LLM response cache"),
     registry_dir: Path | None = typer.Option(None, "--registry", help="Override adapter registry directory"),
     auto_improve: bool = typer.Option(False, "--auto-improve", help="Analyze traces and auto-apply spec improvements when HQS < 0.75"),
-    proposals: Path = typer.Option(
-        Path("~/.armature/proposals.db").expanduser(),
-        "--proposals",
-        help="Path to optimizer proposal history DB (default: ~/.armature/proposals.db)",
+    improvements: Path = typer.Option(
+        Path("~/.armature/improvements.db").expanduser(),
+        "--improvements",
+        help="Path to unified improvement-history DB (default: ~/.armature/improvements.db)",
     ),
 ):
     """Run a workflow from a YAML spec file."""
@@ -608,7 +608,7 @@ def run(
         async def _improve():
             improve_runner = SelfImproveRunner(
                 spec, target_hqs=_eff_target_hqs, min_traces=_eff_min_traces,
-                drift_threshold=_eff_drift_threshold, proposal_db_path=proposals,
+                drift_threshold=_eff_drift_threshold, improvement_db_path=improvements,
             )
             return await improve_runner.analyze()
 
@@ -684,10 +684,10 @@ def optimize(
     ),
     apply: bool = typer.Option(False, "--apply", help="Apply the proposed diff if accepted"),
     model: str = typer.Option(None, "--model", help="LLM for the optimizer (default: anthropic/claude-opus-4-7; override with ARMATURE_REFINER_MODEL env var)"),
-    proposals: Path = typer.Option(
-        Path("~/.armature/proposals.db").expanduser(),
-        "--proposals",
-        help="Path to proposal history DB (default: ~/.armature/proposals.db)",
+    improvements: Path = typer.Option(
+        Path("~/.armature/improvements.db").expanduser(),
+        "--improvements",
+        help="Path to unified improvement-history DB (default: ~/.armature/improvements.db)",
     ),
 ):
     """Run the Meta-Harness optimizer on a workflow spec."""
@@ -700,7 +700,7 @@ def optimize(
     async def _run():
         runner = OptimizerRunner(
             target_spec_path=spec, trace_db_path=trace_db,
-            proposal_db_path=proposals, model_override=model,
+            improvement_db_path=improvements, model_override=model,
         )
         return await runner.optimize()
 
@@ -946,10 +946,10 @@ def improve(
     drift_threshold: float = typer.Option(None, "--drift-threshold", help="Drift score above which improvement fires regardless of HQS (default: 0.5, or the spec's self_improvement.drift_threshold)"),
     apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply proposed spec (default: apply)"),
     log: Path = typer.Option(None, "--log", help="Path to improvement log JSONL (default: <spec>.improve_log.jsonl)"),
-    proposals: Path = typer.Option(
-        Path("~/.armature/proposals.db").expanduser(),
-        "--proposals",
-        help="Path to optimizer proposal history DB (default: ~/.armature/proposals.db)",
+    improvements: Path = typer.Option(
+        Path("~/.armature/improvements.db").expanduser(),
+        "--improvements",
+        help="Path to unified improvement-history DB (default: ~/.armature/improvements.db)",
     ),
 ):
     """Analyze traces and propose/apply a targeted spec improvement."""
@@ -978,7 +978,7 @@ def improve(
             drift_threshold=eff_drift_threshold,
             auto_apply=apply,
             log_path=log,
-            proposal_db_path=proposals,
+            improvement_db_path=improvements,
         )
         return await runner.analyze()
 
