@@ -781,3 +781,103 @@ def test_run_auto_improve_passes_improvements_path(tmp_path):
     assert result.exit_code == 0, result.output
     _, kwargs = mock_cls.call_args
     assert kwargs["improvement_db_path"] == improvements_db
+
+
+# ── armature tune (Option 2: unified facade) ─────────────────────────────────
+
+def _make_tune_result(*, stop_reason="converged", final_hqs=0.95, escalations=0,
+                      iterations=1, error=None):
+    from armature.tune.runner import TuneResult, TuneIteration
+    from armature.tune.stall import StallVerdict
+    its = [
+        TuneIteration(
+            iteration=i, run_hqs=final_hqs, improve_applied=False,
+            improve_escalated_oscillation=False, stall=StallVerdict(False, None, {}),
+            optimize_ran=False, optimize_accepted=None, optimize_applied=False,
+            llm_calls=0, tokens=0, wall_s=0.0,
+            stop_reason=stop_reason if i == iterations else None,
+        )
+        for i in range(1, iterations + 1)
+    ]
+    return TuneResult(
+        iterations=its, stop_reason=stop_reason, final_hqs=final_hqs,
+        escalations=escalations, llm_calls=0, tokens=0, wall_s=0.0, error=error,
+    )
+
+
+def test_tune_command_wires_args(tmp_path):
+    """`armature tune` flows its flags into TuneRunner kwargs."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-tune.yaml"
+    _write_spec_with_self_improvement(spec_path)
+    improvements_db = tmp_path / "improvements.db"
+
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock(return_value=_make_tune_result())
+
+    with patch("armature.tune.runner.TuneRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(
+            app,
+            ["tune", str(spec_path), "--input", "message=hi",
+             "--target-hqs", "0.95", "--stall-window", "4",
+             "--max-escalations", "3", "--no-apply", "--max-iterations", "5",
+             "--improvements", str(improvements_db)],
+        )
+
+    assert result.exit_code == 0, result.output
+    mock_instance.run.assert_awaited_once()
+    _, kwargs = mock_cls.call_args
+    assert kwargs["target_hqs"] == 0.95
+    assert kwargs["stall_window"] == 4
+    assert kwargs["max_escalations"] == 3
+    assert kwargs["auto_apply"] is False
+    assert kwargs["max_iterations"] == 5
+    assert kwargs["improvement_db"] == improvements_db
+
+
+def test_tune_command_prints_summary_and_writes_output(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import json
+
+    spec_path = tmp_path / "echo-tune2.yaml"
+    _write_spec_with_self_improvement(spec_path)
+    out = tmp_path / "tune.json"
+
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock(return_value=_make_tune_result(
+        stop_reason="converged", final_hqs=0.95, escalations=0, iterations=1,
+    ))
+
+    with patch("armature.tune.runner.TuneRunner", return_value=mock_instance):
+        result = runner.invoke(
+            app, ["tune", str(spec_path), "--input", "message=hi",
+                  "--output", str(out)],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "tune stop=converged" in result.output
+    assert "iterations=1" in result.output
+    assert "escalations=0" in result.output
+    data = json.loads(out.read_text())
+    assert data["stop_reason"] == "converged"
+    assert len(data["iterations"]) == 1
+
+
+def test_tune_command_exits_on_error(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-tune3.yaml"
+    _write_spec_with_self_improvement(spec_path)
+
+    mock_instance = MagicMock()
+    mock_instance.run = AsyncMock(return_value=_make_tune_result(
+        stop_reason="error", error="RuntimeError: kaboom", iterations=0,
+    ))
+
+    with patch("armature.tune.runner.TuneRunner", return_value=mock_instance):
+        result = runner.invoke(app, ["tune", str(spec_path), "--input", "message=hi"])
+
+    assert result.exit_code == 1, result.output
+    assert "Tune error" in result.output
+    assert "kaboom" in result.output
