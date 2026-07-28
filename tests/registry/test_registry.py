@@ -88,3 +88,98 @@ def test_descriptors_includes_parameters():
 def test_descriptors_empty_registry():
     registry = ToolRegistry()
     assert registry.descriptors() == []
+
+
+# ── dispatch chokepoint: safety hooks fire on every dispatch (Claim 1) ──────────
+
+async def test_dispatch_runs_pre_tool_hook_and_blocks():
+    """A block rule on the hook registry must stop dispatch before the handler runs."""
+    from armature.hooks.lifecycle import HookRegistry, SafetyHookBuilder, ToolBlocked
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+
+    hooks = HookRegistry()
+    SafetyHookBuilder.register(hooks, [ToolSafetyRule(
+        tool="echo", action="block",
+        condition=SafetyCondition(field="msg", op="contains", value="forbidden"),
+        message="blocked by rule",
+    )])
+
+    registry = ToolRegistry(hooks=hooks)
+    ran = {"called": False}
+    async def echo(args):
+        ran["called"] = True
+        return {"echo": args.get("msg")}
+    registry.register(ToolDescriptor(
+        name="echo", description="Echoes input",
+        permission=PermissionLevel.READ_ONLY, handler=echo,
+    ))
+
+    with pytest.raises(ToolBlocked):
+        await registry.dispatch("echo", {"msg": "forbidden value"})
+    assert ran["called"] is False, "handler must not run when a block rule fires"
+
+
+async def test_dispatch_runs_post_tool_hook_after_success():
+    """A post-tool hook must fire after a successful dispatch."""
+    from armature.hooks.lifecycle import HookRegistry, HookPhase, HookDecision
+
+    hooks = HookRegistry()
+    seen = {"tool": None, "result": None}
+    async def post_hook(phase, tool_name, result, ctx):
+        seen["tool"] = tool_name
+        seen["result"] = result
+    hooks.register(HookPhase.POST_TOOL, post_hook)
+
+    registry = ToolRegistry(hooks=hooks)
+    async def echo(args):
+        return {"echo": args.get("msg")}
+    registry.register(ToolDescriptor(
+        name="echo", description="Echoes input",
+        permission=PermissionLevel.READ_ONLY, handler=echo,
+    ))
+
+    result = await registry.dispatch("echo", {"msg": "hi"})
+    assert result["echo"] == "hi"
+    assert seen["tool"] == "echo"
+    assert seen["result"] == {"echo": "hi"}
+
+
+async def test_dispatch_without_hooks_behaves_as_before():
+    """A registry with no hooks attached must dispatch exactly as before."""
+    registry = ToolRegistry()
+    async def echo(args):
+        return {"echo": args.get("msg")}
+    registry.register(ToolDescriptor(
+        name="echo", description="Echoes input",
+        permission=PermissionLevel.READ_ONLY, handler=echo,
+    ))
+    result = await registry.dispatch("echo", {"msg": "ok"})
+    assert result["echo"] == "ok"
+
+
+async def test_dispatch_attach_hooks_after_construction():
+    """attach_hooks() wires enforcement into an already-constructed registry."""
+    from armature.hooks.lifecycle import HookRegistry, SafetyHookBuilder, ToolBlocked
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+
+    registry = ToolRegistry()
+    async def echo(args):
+        return {"echo": args.get("msg")}
+    registry.register(ToolDescriptor(
+        name="echo", description="Echoes input",
+        permission=PermissionLevel.READ_ONLY, handler=echo,
+    ))
+
+    # No hooks yet -> allowed.
+    assert (await registry.dispatch("echo", {"msg": "ok"}))["echo"] == "ok"
+
+    hooks = HookRegistry()
+    SafetyHookBuilder.register(hooks, [ToolSafetyRule(
+        tool="echo", action="block",
+        condition=SafetyCondition(field="msg", op="contains", value="bad"),
+        message="blocked",
+    )])
+    registry.attach_hooks(hooks)
+
+    with pytest.raises(ToolBlocked):
+        await registry.dispatch("echo", {"msg": "bad"})

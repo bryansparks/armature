@@ -271,6 +271,60 @@ async def test_tool_dispatch_error_feeds_error_back():
     assert "error" in captured_tool_msg
 
 
+async def test_safety_rule_blocks_react_tool_call():
+    """A block rule must fire on the LLM ReAct dispatch path (Claim 1).
+
+    The ReAct loop catches the ToolBlocked raised by dispatch and feeds it back
+    as a tool error result; the handler must never run.
+    """
+    from armature.hooks.lifecycle import HookRegistry, SafetyHookBuilder
+    from armature.spec.models import SafetyCondition, ToolSafetyRule
+
+    hooks = HookRegistry()
+    SafetyHookBuilder.register(hooks, [ToolSafetyRule(
+        tool="search", action="block",
+        condition=SafetyCondition(field="query", op="contains", value="SENSITIVE"),
+        message="sensitive query not permitted",
+    )])
+
+    reg = ToolRegistry(hooks=hooks)
+    handler_called = {"n": 0}
+
+    async def search_handler(args):
+        handler_called["n"] += 1
+        return {"result": "should not reach here"}
+
+    reg.register(ToolDescriptor(
+        name="search", description="search",
+        permission=PermissionLevel.READ_ONLY, handler=search_handler,
+        parameters={"query": {"type": "string"}},
+    ))
+
+    stage, tiers = make_tool_stage(tool_names=["search"])
+    node = LLMNode(stage=stage, tiers=tiers, registry=reg)
+
+    call_num = 0
+    captured_tool_msg: dict = {}
+
+    async def mock_completion(**kwargs):
+        nonlocal call_num
+        call_num += 1
+        if call_num == 1:
+            return make_tool_call_response("search", {"query": "SENSITIVE"}, "tc_1")
+        for m in kwargs["messages"]:
+            if m["role"] == "tool":
+                captured_tool_msg.update(json.loads(m["content"]))
+        return make_plain_response("recovered after block")
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        result = await node.execute({})
+
+    assert result["content"] == "recovered after block"
+    assert handler_called["n"] == 0, "blocked tool handler must not run"
+    assert "error" in captured_tool_msg
+    assert "sensitive query not permitted" in captured_tool_msg["error"]
+
+
 # ── Ollama / _NO_STRUCTURED_OUTPUT provider ──────────────────────────────────
 
 async def test_ollama_skips_native_tool_kwargs():
