@@ -287,6 +287,47 @@ async def test_shell_handler_invokes_docker_run(tmp_path):
     assert "echo hello" in cmd_str
 
 
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /tmp/old",
+    "sudo apt install curl",
+    'sh -c "rm -rf /tmp/old"',
+    "echo hi; rm -rf /tmp/old",
+    "/bin/rm -rf /tmp/old",
+])
+async def test_shell_handler_refuses_destructive_command(tmp_path, cmd):
+    """The docker shell handler must refuse destructive commands without launching docker."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock()
+    with patch("subprocess.run", mock_run):
+        result = await registry.get("shell").handler({"cmd": cmd})
+
+    assert not mock_run.called, "docker must not be launched for a destructive command"
+    assert result["exit_code"] == 126
+    assert "DESTRUCTIVE" in result["stderr"]
+
+
+async def test_shell_handler_allows_non_destructive_in_docker(tmp_path):
+    """A non-destructive command still launches the container normally."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    mock_run = MagicMock(return_value=MagicMock(stdout="ok\n", stderr="", returncode=0))
+    with patch("subprocess.run", mock_run):
+        result = await registry.get("shell").handler({"cmd": "ls -la /workspace"})
+    assert mock_run.called
+    assert result["exit_code"] == 0
+
+
 async def test_shell_handler_mounts_host_workspace(tmp_path):
     """The docker command must bind-mount host_workspace to the container workspace."""
     from armature.sandbox.docker import DockerSandboxProvider
@@ -491,6 +532,92 @@ async def test_file_read_missing_file_returns_error(tmp_path):
     result = await registry.get("file_read").handler({"path": "nonexistent.txt"})
 
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# 12b. file_write/file_read path-traversal containment (Claim 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("rel_path", [
+    "/etc/passwd",                       # absolute path discards the workspace
+    "../../etc/passwd",                  # relative traversal out of workspace
+    "subdir/../../etc/passwd",           # traversal after a legit prefix
+    "/etc/hosts",
+])
+async def test_file_write_rejects_path_escape(tmp_path, rel_path):
+    """file_write must refuse paths that resolve outside host_workspace."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    result = await registry.get("file_write").handler(
+        {"path": rel_path, "content": "pwned"}
+    )
+
+    assert "error" in result, f"file_write should refuse escape path {rel_path!r}"
+    msg = result["error"].lower()
+    assert "escape" in msg or "absolute" in msg or "outside" in msg
+
+
+async def test_file_write_escape_does_not_create_host_file(tmp_path):
+    """A traversal attempt must not create any file outside host_workspace."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    sentinel = tmp_path.parent / "escaped.txt"
+    if sentinel.exists():
+        sentinel.unlink()
+    # Construct a traversal that would land exactly on `sentinel`.
+    rel = None
+    # Use a relative traversal: <workspace>/../../<parent>/escaped.txt
+    rel = f"../{sentinel.name}"
+    result = await registry.get("file_write").handler(
+        {"path": rel, "content": "pwned"}
+    )
+    assert "error" in result
+    assert not sentinel.exists(), "file must not be created outside the workspace"
+
+
+@pytest.mark.parametrize("rel_path", [
+    "/etc/passwd",
+    "../../etc/passwd",
+    "subdir/../../../etc/passwd",
+])
+async def test_file_read_rejects_path_escape(tmp_path, rel_path):
+    """file_read must refuse paths that resolve outside host_workspace."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    result = await registry.get("file_read").handler({"path": rel_path})
+
+    assert "error" in result, f"file_read should refuse escape path {rel_path!r}"
+
+
+async def test_file_write_allows_nested_path_inside_workspace(tmp_path):
+    """Legitimate nested paths inside the workspace must still work."""
+    from armature.sandbox.docker import DockerSandboxProvider
+    from armature.spec.models import SandboxConfig, SandboxMode
+
+    registry = _make_registry_with_builtins()
+    sandbox = SandboxConfig(mode=SandboxMode.DOCKER, image="python:3.11-slim")
+    DockerSandboxProvider().wrap_registry(registry, sandbox, tmp_path)
+
+    result = await registry.get("file_write").handler(
+        {"path": "a/b/c/file.txt", "content": "ok"}
+    )
+    assert "written" in result
+    assert (tmp_path / "a" / "b" / "c" / "file.txt").read_text() == "ok"
 
 
 # ---------------------------------------------------------------------------
