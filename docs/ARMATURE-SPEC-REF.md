@@ -417,6 +417,8 @@ Default: `[descriptions, retry_counts, timeouts]`. `schemas` and `model_tiers` r
 
 Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfImproveRunner` to generate multiple candidates and pick the best coverage match.
 
+**Latency-aware selection (#6).** When `n_proposals > 1`, selection is latency-aware: coverage is primary, but among candidates within 1 predicted-fix of the top coverage (an ε-band fuzzy tiebreak), the one with the lowest structural `latency_risk` wins (coverage is the final tiebreak). `latency_risk` is a proxy computed from the spec diff — +1.0 per stage added, −1.0 per stage removed, ±1.0 per tier escalation/demotion, +0.5 per retry-count increase, +0.25 per timeout increase, +0.5 for a `model_tiers` block redefinition; lower is safer for latency. This directly addresses the HQS latency-cancel tradeoff (the max-coverage candidate tends to add the most fix-power and raise latency, netting ~0 HQS). `latency_risk` is logged on each cycle and shown as the `Lat` column on the `armature dashboard` improvement-cycles table (red when > 1.0); on the single-proposal path it is surfaced as an informational flag.
+
 ---
 
 ## Validation Error Codes

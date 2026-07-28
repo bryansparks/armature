@@ -317,12 +317,33 @@ class SpecRefiner:
 def _pick_best_proposal(
     candidates: list[RefinerResult],
     diagnostics: list[DiagnosticResult],
+    old_spec: "HarnessSpec",
+    *,
+    latency_tolerance: int = 1,
 ) -> "RefinerResult | None":
-    """Select the candidate with the most predicted_fixes covering current diagnostics."""
+    """Select the best candidate using an ε-band fuzzy tiebreak.
+
+    Coverage is primary: a candidate ≥2 predicted fixes behind the top can never
+    win. Among candidates within ``latency_tolerance`` (ε) of the top coverage,
+    the one with the lowest structural ``latency_risk`` wins — coverage is the
+    final tiebreak. This directly addresses the H4-v2 latency-cancel mechanism:
+    the max-coverage candidate tends to add the most fix-power (stages, tier
+    escalations, retries), which raises latency and nets ~0 HQS, so within the
+    fuzzy band the lower-latency candidate is the better HQS bet.
+    """
     if not candidates:
         return None
     diag_keys = {f"{d.code.value}:{d.stage_id}" for d in diagnostics}
-    return max(candidates, key=lambda r: len(set(r.predicted_fixes) & diag_keys))
+
+    def coverage(r: RefinerResult) -> int:
+        return len(set(r.predicted_fixes) & diag_keys)
+
+    def risk(r: RefinerResult) -> float:
+        return _latency_risk(old_spec, r.spec)
+
+    best_cov = max(coverage(c) for c in candidates)
+    tied = [c for c in candidates if best_cov - coverage(c) <= latency_tolerance]
+    return min(tied, key=lambda r: (risk(r), -coverage(r)))
 
 
 def _healthy_stage_ids(
@@ -391,6 +412,9 @@ class ImprovementReport:
     # review (auto-apply suppressed) to avoid worsening the oscillation.
     triggered_by_drift: bool = False
     escalated_oscillation: bool = False
+    # #6 latency-aware selection — structural latency-risk of the selected proposal
+    # (proxy for the HQS latency-cancel tradeoff). 0.0 when no proposal was produced.
+    latency_risk: float = 0.0
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -488,6 +512,63 @@ def _touched_surfaces(old_spec: "HarnessSpec", new_spec: "HarnessSpec") -> set[s
         touched.add(EditableSurface.MODEL_TIERS.value)
 
     return touched
+
+
+# Tier rank for latency-risk escalation/demotion. Custom/unknown tier names
+# (anything not in the canonical tiny..frontier ladder) map to None and contribute
+# nothing — their latency direction is uncertain in v1.
+_TIER_RANK = {"tiny": 0, "small": 1, "medium": 2, "large": 3, "frontier": 4}
+
+
+def _latency_risk(old_spec: "HarnessSpec", new_spec: "HarnessSpec") -> float:
+    """Predict relative latency impact of old_spec → new_spec from the structural diff.
+
+    A proxy heuristic (no post-apply measurement): lower = safer for latency.
+    Unchanged spec → 0.0. Used by ``_pick_best_proposal`` as the ε-band tiebreak
+    so the coverage-winning candidate isn't systematically the highest-latency one
+    (the H4-v2 latency-cancel mechanism).
+
+    Contributions:
+      +1.0 / stage added,  −1.0 / stage removed
+      +1.0 / tier escalation, −1.0 / demotion (only when both ranks are known)
+      +0.5 / on_fail.loop.max increase
+      +0.25 / timeout_s increase
+      +0.5 for a model_tiers block redefinition (flat; direction uncertain in v1)
+    """
+    risk = 0.0
+
+    old_ids = {s.id for s in old_spec.stages}
+    new_ids = {s.id for s in new_spec.stages}
+    risk += 1.0 * len(new_ids - old_ids)      # stages added
+    risk -= 1.0 * len(old_ids - new_ids)      # stages removed
+
+    old_stages = {s.id: s for s in old_spec.stages}
+    new_stages = {s.id: s for s in new_spec.stages}
+    for sid in old_ids & new_ids:
+        old_s = old_stages[sid]
+        new_s = new_stages[sid]
+        if old_s.role and new_s.role:
+            old_rank = _TIER_RANK.get(old_s.role.model_tier) if old_s.role.model_tier else None
+            new_rank = _TIER_RANK.get(new_s.role.model_tier) if new_s.role.model_tier else None
+            if old_rank is not None and new_rank is not None:
+                if new_rank > old_rank:
+                    risk += 1.0
+                elif new_rank < old_rank:
+                    risk -= 1.0
+        # on_fail.loop.max increase
+        old_loop = old_s.on_fail.loop if old_s.on_fail else None
+        new_loop = new_s.on_fail.loop if new_s.on_fail else None
+        if old_loop and new_loop and new_loop.max > old_loop.max:
+            risk += 0.5
+        # timeout_s increase
+        if old_s.timeout_s and new_s.timeout_s and new_s.timeout_s > old_s.timeout_s:
+            risk += 0.25
+
+    # Global model_tiers block redefinition — flat, uncertain direction in v1.
+    if old_spec.model_tiers.model_dump() != new_spec.model_tiers.model_dump():
+        risk += 0.5
+
+    return risk
 
 
 def _build_refiner_suggestions(
@@ -638,6 +719,7 @@ class SelfImproveRunner:
         triggered_by_drift = False
         escalated_oscillation = False
         drift_score = 0.0
+        latency_risk = 0.0
 
         # Drift score: fraction of current failures that were previously "fixed".
         # Computed against the union of all prior cycles' verified_fixes so it
@@ -714,7 +796,7 @@ class SelfImproveRunner:
                     if not _proposal_regression_risk(c, spec, healthy)
                 ]
                 regression_risk_count = len(allowed_candidates) - len(safe_candidates)
-                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics)
+                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics, spec)
             else:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
@@ -737,6 +819,8 @@ class SelfImproveRunner:
                 proposed_yaml = result.yaml_text
                 predicted_fixes = result.predicted_fixes
                 predicted_regressions = result.predicted_regressions
+                # #6: structural latency-risk of the selected proposal (both paths).
+                latency_risk = _latency_risk(spec, result.spec)
                 # Hard gate (single proposal): reject if it touches a locked surface.
                 violations = _touched_surfaces(spec, result.spec) - set(editable_surfaces)
                 if violations:
@@ -792,6 +876,7 @@ class SelfImproveRunner:
             triggered_by_drift=triggered_by_drift,
             drift_threshold=self._drift_threshold,
             escalated_oscillation=escalated_oscillation,
+            latency_risk=latency_risk,
         )
 
         return ImprovementReport(
@@ -819,6 +904,7 @@ class SelfImproveRunner:
             rejected_proposals=rejected_proposals,
             triggered_by_drift=triggered_by_drift,
             escalated_oscillation=escalated_oscillation,
+            latency_risk=latency_risk,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -921,6 +1007,7 @@ class SelfImproveRunner:
         triggered_by_drift: bool = False,
         drift_threshold: float = 0.5,
         escalated_oscillation: bool = False,
+        latency_risk: float = 0.0,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -952,6 +1039,8 @@ class SelfImproveRunner:
             "triggered_by_drift": triggered_by_drift,
             "drift_threshold": drift_threshold,
             "escalated_oscillation": escalated_oscillation,
+            # #6 latency-aware selection — structural latency-risk of the selected proposal
+            "latency_risk": latency_risk,
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")

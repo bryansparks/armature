@@ -636,6 +636,10 @@ def run(
         else:
             typer.echo("Auto-improve: refiner could not produce a valid revision.")
 
+        # #6: informational — structural latency-risk of the selected proposal.
+        if report.proposed_spec is not None and not report.rejected_locked_surfaces:
+            typer.echo(f"Auto-improve: latency_risk={report.latency_risk:.1f} (lower is safer for HQS).")
+
 
 @app.command()
 def serve(
@@ -969,7 +973,7 @@ def improve(
             raise typer.Exit(1)
         raise
 
-    typer.echo(f"  traces: {report.n_traces}  HQS: {f'{report.hqs_before:.3f}' if report.hqs_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}")
+    typer.echo(f"  traces: {report.n_traces}  HQS: {f'{report.hqs_before:.3f}' if report.hqs_before is not None else 'n/a'}  needs_improvement: {report.needs_improvement}  latency_risk: {report.latency_risk:.1f}")
 
     if report.n_traces == 0:
         typer.echo("No traces found — run the workflow first.")

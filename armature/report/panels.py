@@ -147,6 +147,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
     t.add_column("✓Fix", justify="right", width=4)
     t.add_column("✗Miss", justify="right", width=5)
     t.add_column("↯Reg", justify="right", width=4)
+    t.add_column("Lat", justify="right", width=5)
 
     run_subtitle = f"{data.total_runs} run{'s' if data.total_runs != 1 else ''}"
     if data.last_run_at:
@@ -157,7 +158,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
             run_subtitle += f"  ·  {data.last_run_at[:10]}"
 
     if not data.improvement_cycles:
-        t.add_row("—", "—", "—", "—", "no cycles", "—", "—", "—")
+        t.add_row("—", "—", "—", "—", "no cycles", "—", "—", "—", "—")
     else:
         for c in data.improvement_cycles:
             date = c.timestamp[:10] if c.timestamp else "—"
@@ -176,6 +177,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
             if c.escalated_oscillation:
                 drift_text = Text(f"{c.drift_score:.2f} ⚠osc", style="red1 bold")
             reg_text = Text(str(c.unexpected_regressions), style="red1 bold" if c.unexpected_regressions > 0 else "")
+            lat_text = Text(f"{c.latency_risk:.1f}", style="red1 bold" if c.latency_risk > 1.0 else "")
 
             t.add_row(
                 str(c.cycle_number),
@@ -186,6 +188,7 @@ def improvement_timeline(data: DashboardData) -> Panel:
                 str(c.verified_fixes),
                 str(c.missed_predictions),
                 reg_text,
+                lat_text,
                 style=row_style,
             )
 

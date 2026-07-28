@@ -1487,34 +1487,283 @@ async def test_refine_many_uses_diversity_hints():
 
 # ── _pick_best_proposal ───────────────────────────────────────────────────────
 
-def test_pick_best_proposal_selects_highest_coverage():
+def _load(tmp_path, yaml_text):
+    from armature.spec.loader import load_spec
+    f = tmp_path / "s.yaml"
+    f.write_text(yaml_text)
+    return load_spec(f)
+
+
+def test_pick_best_proposal_selects_highest_coverage(tmp_path):
     from armature.synthesis.improve import _pick_best_proposal
     from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
-    from unittest.mock import MagicMock
 
     diags = [
         DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst"),
         DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="writer"),
     ]
+    # Same spec for both → equal latency_risk (0) → coverage decides (regression guard).
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    r_low = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    r_high = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["stage_failed:analyst", "output_invalid:writer"])
 
-    r_low = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=["stage_failed:analyst"])
-    r_high = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=["stage_failed:analyst", "output_invalid:writer"])
-
-    best = _pick_best_proposal([r_low, r_high], diags)
+    best = _pick_best_proposal([r_low, r_high], diags, spec)
     assert best is r_high
 
 
-def test_pick_best_proposal_returns_none_for_empty_list():
+def test_pick_best_proposal_returns_none_for_empty_list(tmp_path):
     from armature.synthesis.improve import _pick_best_proposal
-    assert _pick_best_proposal([], []) is None
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    assert _pick_best_proposal([], [], spec) is None
 
 
-def test_pick_best_proposal_returns_single_when_one_candidate():
+def test_pick_best_proposal_returns_single_when_one_candidate(tmp_path):
     from armature.synthesis.improve import _pick_best_proposal
-    from unittest.mock import MagicMock
-    r = RefinerResult(spec=MagicMock(), yaml_text="", predicted_fixes=[])
-    result = _pick_best_proposal([r], [])
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    r = RefinerResult(spec=spec, yaml_text="", predicted_fixes=[])
+    result = _pick_best_proposal([r], [], spec)
     assert result is r
+
+
+# ── #6: latency-aware selection (RED) ─────────────────────────────────────────
+
+
+def test_latency_risk_zero_when_unchanged(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    assert _latency_risk(spec, spec) == 0.0
+
+
+def test_latency_risk_stage_added(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    old = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    new_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+  - id: writer
+    role: {name: Writer, type: worker, description: Write.}
+"""
+    new = _load(tmp_path, new_yaml)
+    assert _latency_risk(old, new) == 1.0
+
+
+def test_latency_risk_stage_removed(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    two = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+  - id: writer
+    role: {name: Writer, type: worker, description: Write.}
+"""
+    old = _load(tmp_path, two)
+    new = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    assert _latency_risk(old, new) == -1.0
+
+
+def test_latency_risk_tier_escalation(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  small: {provider: openrouter, model: qwen/qwen3.6-27b}
+  large: {provider: openrouter, model: moonshotai/kimi-k2.6}
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, model_tier: small, description: Analyze.}
+"""
+    escalated = base.replace("model_tier: small", "model_tier: large")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, escalated)
+    assert _latency_risk(old, new) == 1.0
+
+
+def test_latency_risk_tier_demotion(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  small: {provider: openrouter, model: qwen/qwen3.6-27b}
+  large: {provider: openrouter, model: moonshotai/kimi-k2.6}
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, model_tier: large, description: Analyze.}
+"""
+    demoted = base.replace("model_tier: large", "model_tier: small")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, demoted)
+    assert _latency_risk(old, new) == -1.0
+
+
+def test_latency_risk_custom_tier_no_contribution(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  bespoke: {provider: openrouter, model: some/model}
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, model_tier: bespoke, description: Analyze.}
+"""
+    other = base.replace("model_tier: bespoke", "model_tier: other_custom")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, other)
+    # Both tiers are custom/unknown rank → no escalation contribution.
+    assert _latency_risk(old, new) == 0.0
+
+
+def test_latency_risk_retry_increase(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+    on_fail: {loop: {stage: analyst, max: 3}}
+"""
+    more = base.replace("max: 3", "max: 5")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, more)
+    assert _latency_risk(old, new) == 0.5
+
+
+def test_latency_risk_timeout_increase(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+    timeout_s: 30
+"""
+    more = base.replace("timeout_s: 30", "timeout_s: 60")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, more)
+    assert _latency_risk(old, new) == 0.25
+
+
+def test_latency_risk_model_tiers_block_redefinition(tmp_path):
+    from armature.synthesis.improve import _latency_risk
+    base = """\
+name: test-wf
+version: "1.0"
+model_tiers:
+  small: {provider: openrouter, model: qwen/qwen3.6-27b, max_tokens: 2048}
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, model_tier: small, description: Analyze.}
+"""
+    redef = base.replace("max_tokens: 2048", "max_tokens: 8192")
+    old = _load(tmp_path, base)
+    new = _load(tmp_path, redef)
+    assert _latency_risk(old, new) == 0.5
+
+
+def test_pick_best_prefers_lower_latency_risk_on_coverage_tie(tmp_path):
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst")]
+    # Equal coverage (both predict the one failing fix); one adds a stage (risk 1.0),
+    # one is description-only (risk 0.0). The low-risk one must win.
+    low_risk_spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    high_risk_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+  - id: writer
+    role: {name: Writer, type: worker, description: Write.}
+"""
+    high_risk_spec = _load(tmp_path, high_risk_yaml)
+    r_low = RefinerResult(spec=low_risk_spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    r_high = RefinerResult(spec=high_risk_spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    best = _pick_best_proposal([r_low, r_high], diags, low_risk_spec)
+    assert best is r_low
+
+
+def test_pick_best_low_risk_wins_within_epsilon(tmp_path):
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="writer"),
+    ]
+    low_risk_spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    high_risk_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+  - id: writer
+    role: {name: Writer, type: worker, description: Write.}
+"""
+    high_risk_spec = _load(tmp_path, high_risk_yaml)
+    # High-coverage candidate predicts 2 fixes but adds a stage (risk 1.0).
+    # Low-coverage candidate predicts 1 fix, risk 0.0. With ε=1, the 1-fix
+    # deficit is within tolerance → low-risk wins (H4-v2 thesis).
+    r_high_cov_high_risk = RefinerResult(
+        spec=high_risk_spec, yaml_text="",
+        predicted_fixes=["stage_failed:analyst", "output_invalid:writer"])
+    r_low_cov_low_risk = RefinerResult(
+        spec=low_risk_spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    best = _pick_best_proposal([r_high_cov_high_risk, r_low_cov_low_risk], diags, low_risk_spec)
+    assert best is r_low_cov_low_risk
+
+
+def test_pick_best_high_coverage_wins_beyond_epsilon(tmp_path):
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="writer"),
+        DiagnosticResult(code=DiagnosticCode.LOW_CONFIDENCE, stage_id="judge"),
+    ]
+    low_risk_spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    high_risk_yaml = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role: {name: Analyst, type: researcher, description: Analyze.}
+  - id: writer
+    role: {name: Writer, type: worker, description: Write.}
+"""
+    high_risk_spec = _load(tmp_path, high_risk_yaml)
+    # High-coverage predicts all 3 fixes (risk 1.0); low-coverage predicts 1 (risk 0.0).
+    # 3 vs 1 → deficit 2 > ε=1 → high-coverage wins despite latency risk.
+    r_high = RefinerResult(
+        spec=high_risk_spec, yaml_text="",
+        predicted_fixes=["stage_failed:analyst", "output_invalid:writer", "low_confidence:judge"])
+    r_low = RefinerResult(spec=low_risk_spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    best = _pick_best_proposal([r_high, r_low], diags, low_risk_spec)
+    assert best is r_high
+
+
+def test_pick_best_coverage_tiebreak_when_risks_equal(tmp_path):
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.STAGE_FAILED, stage_id="analyst"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="writer"),
+    ]
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    # Both same spec → equal risk 0 → higher coverage wins (regression guard).
+    r_low = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["stage_failed:analyst"])
+    r_high = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["stage_failed:analyst", "output_invalid:writer"])
+    best = _pick_best_proposal([r_low, r_high], diags, spec)
+    assert best is r_high
 
 
 # ── SelfImproveRunner with n_proposals ───────────────────────────────────────
@@ -2091,3 +2340,116 @@ async def test_analyze_feeds_missed_predictions_back_to_refiner(tmp_path):
     assert user_msgs, "expected at least one user message captured"
     assert "output_invalid:analyst" in user_msgs[0]
     assert "missed" in user_msgs[0].lower() or "still failing" in user_msgs[0].lower()
+
+
+# ── #6: latency-aware selection — integration (RED) ───────────────────────────
+
+_REVISED_DESC_ONLY_WITH_PRED = (
+    _REVISED_SPEC_YAML
+    + '\n---PREDICTIONS---\n{"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}'
+)
+
+_REVISED_NEW_STAGE_WITH_PRED = """\
+name: test-wf
+version: "1.0"
+stages:
+  - id: analyst
+    role:
+      name: Analyst
+      type: researcher
+      description: Analyze the topic.
+  - id: writer
+    role:
+      name: Writer
+      type: worker
+      description: Write the findings.
+""" + '\n---PREDICTIONS---\n{"predicted_fixes": ["output_invalid:analyst"], "predicted_regressions": []}'
+
+
+async def test_multi_proposal_selects_low_latency_candidate(tmp_path):
+    """Among equal-coverage candidates, the low-latency-risk one is applied."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=True, n_proposals=2,
+    )
+    responses = [_REVISED_NEW_STAGE_WITH_PRED, _REVISED_DESC_ONLY_WITH_PRED]
+
+    async def mock_llm(**kwargs):
+        return _make_llm_response(responses.pop(0) if responses else _REVISED_DESC_ONLY_WITH_PRED)
+
+    with patch("armature.synthesis.improve.llm_completion", side_effect=mock_llm):
+        report = await runner.analyze()
+
+    # Both candidates predict the same single fix (equal coverage). The
+    # description-only candidate has latency_risk 0; the stage-adding one has
+    # risk 1.0. ε=1 → low-risk wins → it is auto-applied (description-only changes
+    # need no review). The new-stage candidate must NOT be the one applied.
+    assert report.applied is True
+    assert spec_file.read_text().strip() == _REVISED_SPEC_YAML.strip()
+    assert not (tmp_path / "wf.pending.yaml").exists()
+    # The selected candidate's latency_risk surfaces on the report.
+    assert report.latency_risk == 0.0
+
+
+async def test_single_proposal_report_carries_latency_risk(tmp_path):
+    """Single-proposal path surfaces the proposal's latency_risk on the report."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False,
+    )
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_NEW_STAGE_WITH_PRED)
+        report = await runner.analyze()
+
+    # The proposal adds a stage → latency_risk 1.0.
+    assert report.latency_risk == 1.0
+
+
+async def test_log_entry_records_latency_risk(tmp_path):
+    """_write_log records latency_risk on the cycle entry."""
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    log_file = tmp_path / "improve.log.jsonl"
+    store = TraceStore(db)
+    await seed_store(store, [
+        make_trace(run_id="r1", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r2", quorum_score=0.20, output_valid=False),
+        make_trace(run_id="r3", quorum_score=0.20, output_valid=False),
+    ])
+    runner = SelfImproveRunner(
+        spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False, log_path=log_file,
+    )
+    with patch("armature.synthesis.improve.llm_completion", new_callable=AsyncMock) as mock_llm:
+        mock_llm.return_value = _make_llm_response(_REVISED_NEW_STAGE_WITH_PRED)
+        await runner.analyze()
+
+    lines = [l for l in log_file.read_text().splitlines() if l.strip()]
+    entry = json.loads(lines[-1])
+    assert entry["latency_risk"] == 1.0
+
+
+async def test_improvement_report_latency_risk_default():
+    """ImprovementReport.latency_risk defaults to 0.0."""
+    report = ImprovementReport(
+        workflow_name="wf", spec_path=Path("/tmp/wf.yaml"),
+        n_traces=1, hqs_before=0.8, needs_improvement=False,
+        applied=False, diagnostics=[],
+    )
+    assert report.latency_risk == 0.0
