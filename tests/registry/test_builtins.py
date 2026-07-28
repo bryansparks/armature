@@ -99,6 +99,29 @@ async def test_shell_run_returns_all_keys():
     assert "exit_code" in result
 
 
+# ── shell_run destructive-command guard (Claim 3) ──────────────────────────────
+
+@pytest.mark.parametrize("cmd", [
+    "rm -rf /tmp/old",
+    "sudo apt install curl",
+    'sh -c "rm -rf /tmp/old"',
+    "echo hi; rm -rf /tmp/old",
+    "true && rm -rf /tmp/old",
+    "FOO=bar rm -rf /tmp/old",
+    "/bin/rm -rf /tmp/old",
+])
+async def test_shell_run_rejects_destructive_commands(cmd):
+    from armature.registry.builtins import _shell_run
+    with pytest.raises(PermissionError):
+        await _shell_run({"cmd": cmd})
+
+
+async def test_shell_run_allows_readonly_command():
+    from armature.registry.builtins import _shell_run
+    result = await _shell_run({"cmd": "ls -la /tmp"})
+    assert result["exit_code"] == 0
+
+
 # ── http_get ───────────────────────────────────────────────────────────────────
 
 async def test_http_get_returns_status_and_body():
