@@ -180,6 +180,11 @@ class Harness:
             strict_mode=(self._spec.safety_mode == "strict"),
             counter=self._rogue_counter,
         )
+        # Route every tool dispatch through the safety hooks. This is the
+        # chokepoint that makes safety_rules/strict_mode fire on the
+        # tool_call: and LLM ReAct paths (which call registry.dispatch
+        # directly), not just the adapter path.
+        self._registry.attach_hooks(self._hooks)
         self._attach_observability_adapters()
         self._context = ContextManager()
         self._assembler = PromptAssembler()

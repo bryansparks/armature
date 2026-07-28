@@ -195,6 +195,57 @@ async def test_safety_rules_allow_safe_adapter(tmp_path):
     assert result["s1"]["exit_code"] == 0
 
 
+async def test_safety_rules_block_tool_call_stage(tmp_path):
+    """A block rule must fire on the tool_call: dispatch path, not just adapters.
+
+    Uses ``echo SENSITIVE`` so the destructive classifier (Claim 3) does NOT flag
+    it — the only thing stopping the call is the safety rule, which proves the
+    rule is enforced on the tool_call path (Claim 1).
+    """
+    from armature.spec.models import ToolCallConfig
+    spec = HarnessSpec(
+        name="guarded-tool-call",
+        stages=[Stage(id="s1", tool_call=ToolCallConfig(
+            name="shell", args={"cmd": "echo SENSITIVE"},
+        ))],
+        safety_rules=[
+            ToolSafetyRule(
+                tool="shell",
+                condition=SafetyCondition(field="cmd", op="contains", value="SENSITIVE"),
+                action="block",
+                message="sensitive data not permitted",
+            )
+        ],
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path)
+    with pytest.raises(ToolBlocked) as exc_info:
+        await harness.run({})
+    assert "sensitive data not permitted" in str(exc_info.value)
+
+
+async def test_safety_rules_allow_safe_tool_call_stage(tmp_path):
+    """A tool_call: that does not match the block rule runs normally."""
+    from armature.spec.models import ToolCallConfig
+    spec = HarnessSpec(
+        name="guarded-tool-call-allow",
+        stages=[Stage(id="s1", tool_call=ToolCallConfig(
+            name="shell", args={"cmd": "echo hello"},
+        ))],
+        safety_rules=[
+            ToolSafetyRule(
+                tool="shell",
+                condition=SafetyCondition(field="cmd", op="contains", value="SENSITIVE"),
+                action="block",
+                message="sensitive data not permitted",
+            )
+        ],
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path)
+    result = await harness.run({})
+    assert result["s1"]["exit_code"] == 0
+    assert "hello" in result["s1"]["stdout"]
+
+
 # ---------------------------------------------------------------------------
 # _extract_quorum_score unit tests
 # ---------------------------------------------------------------------------

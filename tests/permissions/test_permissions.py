@@ -106,3 +106,76 @@ def test_classify_strips_leading_whitespace():
 
 def test_classify_find_as_readonly():
     assert classify_shell_command("find . -name '*.py'") == PermissionLevel.READ_ONLY
+
+
+# ── Indirection / chaining bypasses (Claim 3) ──────────────────────────────────
+# A denylist that only inspects the leading token is bypassable. The classifier
+# must tokenize the command, inspect every subcommand in a chain, strip leading
+# env assignments, normalize absolute paths to their basename, and recurse one
+# level into `sh -c`/`bash -c` indirection.
+
+def test_classify_sh_c_indirection_is_destructive():
+    assert classify_shell_command('sh -c "rm -rf /tmp/old"') == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_bash_c_indirection_is_destructive():
+    assert classify_shell_command('bash -c "rm -rf /tmp/old"') == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_chained_echo_then_rm_is_destructive():
+    assert classify_shell_command("echo hi; rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_and_chain_with_rm_is_destructive():
+    assert classify_shell_command("true && rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_or_chain_with_rm_is_destructive():
+    assert classify_shell_command("false || rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_pipe_chain_with_rm_is_destructive():
+    assert classify_shell_command("echo hi | rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_env_prefix_rm_is_destructive():
+    assert classify_shell_command("FOO=bar rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_absolute_path_rm_is_destructive():
+    assert classify_shell_command("/bin/rm -rf /tmp/old") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_absolute_path_sudo_is_destructive():
+    assert classify_shell_command("/usr/bin/sudo apt install curl") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_sh_c_nested_chain_is_destructive():
+    assert classify_shell_command('sh -c "echo hi; rm -rf /tmp/old"') == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_chained_readonly_then_workspace_is_workspace():
+    # most-dangerous-wins: a workspace command in the chain upgrades the result
+    assert classify_shell_command("echo hi; python script.py") == PermissionLevel.WORKSPACE
+
+
+def test_classify_chained_all_readonly_is_readonly():
+    assert classify_shell_command("echo hi; ls -la /tmp") == PermissionLevel.READ_ONLY
+
+
+def test_classify_chained_destructive_short_circuits():
+    # destructive anywhere in the chain -> destructive
+    assert classify_shell_command("ls -la /tmp; rm -rf /tmp/old; echo done") == PermissionLevel.DESTRUCTIVE
+
+
+def test_classify_env_prefix_does_not_swallow_readonly():
+    assert classify_shell_command("FOO=bar ls -la /tmp") == PermissionLevel.READ_ONLY
+
+
+def test_classify_empty_command_is_workspace():
+    assert classify_shell_command("") == PermissionLevel.WORKSPACE
+    assert classify_shell_command("   ") == PermissionLevel.WORKSPACE
+
+
+def test_classify_trailing_separator_is_destructive():
+    assert classify_shell_command("rm -rf /tmp/old;") == PermissionLevel.DESTRUCTIVE

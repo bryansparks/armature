@@ -2,7 +2,7 @@ import subprocess
 import httpx
 from pathlib import Path
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
-from armature.permissions.permissions import Reversibility
+from armature.permissions.permissions import Reversibility, classify_shell_command, requires_approval
 
 
 async def _file_read(args: dict) -> dict:
@@ -20,8 +20,15 @@ async def _file_write(args: dict) -> dict:
 
 
 async def _shell_run(args: dict) -> dict:
+    cmd = args["cmd"]
+    permission = classify_shell_command(cmd)
+    if requires_approval(permission):
+        raise PermissionError(
+            f"shell tool command classified as DESTRUCTIVE and requires approval: {cmd[:60]!r}. "
+            "Use a HumanGateNode before this stage, or block/allow it explicitly via safety_rules."
+        )
     result = subprocess.run(
-        args["cmd"], shell=True, capture_output=True, text=True, timeout=30
+        cmd, shell=True, capture_output=True, text=True, timeout=30
     )
     return {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}
 
