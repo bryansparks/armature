@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -637,31 +638,33 @@ def _build_refiner_suggestions(
     return "\n".join(lines) if lines else None
 
 
-async def _load_optimizer_proposals(
-    proposal_db_path: Path | str | None, workflow_stem: str, limit: int = 10
+async def _load_cross_engine_history(
+    improvement_db_path: Path | str | None, workflow_stem: str, limit: int = 10
 ) -> list:
-    """Read ``armature optimize``'s A/B proposal history for a workflow stem.
+    """Read ``armature optimize``'s A/B-tested records for a workflow stem from the
+    unified ``ImprovementStore``.
 
     Reverse direction of #7: lets ``improve``'s refiner see the diffs the
     meta-workflow already A/B-tested (accepted/rejected, score, rationale) so it
-    doesn't re-propose rejected diffs and can build on accepted ones. Keyed by the
-    spec file stem — the same key ``OptimizerRunner`` uses (``target_spec_path.stem``).
+    doesn't re-propose rejected diffs and can build on accepted ones. Filters to
+    ``source="optimize"`` records, keyed by the spec file stem (the same key both
+    engines use).
 
     Advisory: a missing DB or any read error returns an empty list — never blocks
     improvement. The DB is **only** read here, never created — the file-existence
-    guard means ``improve`` never materializes ``~/.armature/proposals.db``; only
+    guard means ``improve`` never materializes ``~/.armature/improvements.db``; only
     ``optimize`` (which must write) does.
     """
-    if not proposal_db_path:
+    if not improvement_db_path:
         return []
-    path = Path(proposal_db_path)
+    path = Path(improvement_db_path)
     if not path.exists():
         return []
     try:
-        from armature.optimizer.history import ProposalStore
-        store = ProposalStore(path)
+        from armature.state.improvement_store import ImprovementStore
+        store = ImprovementStore(path)
         await store.init()  # idempotent — table already exists when optimize ran
-        return await store.load_history(workflow_stem, limit=limit)
+        return await store.load_history(workflow_stem, source="optimize", limit=limit)
     except Exception:
         return []
 
@@ -716,7 +719,7 @@ class SelfImproveRunner:
         log_path: Path | str | None = None,
         n_proposals: int = 1,
         drift_threshold: float = 0.5,
-        proposal_db_path: Path | str | None = None,
+        improvement_db_path: Path | str | None = None,
     ) -> None:
         self._spec_path = Path(spec_path)
         if trace_db:
@@ -734,11 +737,14 @@ class SelfImproveRunner:
             stem = self._spec_path.stem
             self._log_path = self._spec_path.parent / f"{stem}.improve_log.jsonl"
         self._n_proposals = n_proposals
-        # Reverse direction of #7: read optimize's A/B-tested proposals so the
-        # refiner doesn't re-propose scored diffs. CLI supplies the default
-        # (~/.armature/proposals.db); None → no read (keeps programmatic/test use
-        # free of the ProposalStore).
-        self._proposal_db_path = Path(proposal_db_path) if proposal_db_path else None
+        # #7 (Option 4): read optimize's A/B-tested records from the unified
+        # ImprovementStore so the refiner doesn't re-propose scored diffs, and write
+        # this cycle's record back so optimize can see it. CLI supplies the default
+        # (~/.armature/improvements.db); None → no read/write (keeps
+        # programmatic/test use free of the store).
+        self._improvement_db_path = (
+            Path(improvement_db_path) if improvement_db_path else None
+        )
 
     async def analyze(self) -> ImprovementReport:
         # Load previous cycle's predictions for verification
@@ -814,9 +820,10 @@ class SelfImproveRunner:
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
             # Close the loop: feed prior-cycle verification feedback and any post-run
             # analyst suggestions into the refiner so it can correct missed predictions.
-            # Reverse direction of #7: also surface optimize's A/B-tested proposals.
-            optimizer_proposals = await _load_optimizer_proposals(
-                self._proposal_db_path, self._spec_path.stem
+            # #7 (Option 4): also surface optimize's A/B-tested records from the
+            # unified ImprovementStore.
+            optimizer_proposals = await _load_cross_engine_history(
+                self._improvement_db_path, self._spec_path.stem
             )
             refiner_suggestions = _build_refiner_suggestions(
                 prev_entry, traces, optimizer_proposals
@@ -934,6 +941,29 @@ class SelfImproveRunner:
             escalated_oscillation=escalated_oscillation,
             latency_risk=latency_risk,
         )
+        # #7 (Option 4): also record this cycle to the unified ImprovementStore so
+        # `armature optimize` can see improve's verified/missed/regressed work. The
+        # JSONL log above stays the local audit + dashboard source; this record is
+        # the cross-engine substrate. Advisory — never block improvement on a DB
+        # write failure.
+        if self._improvement_db_path is not None:
+            try:
+                await self._write_improvement_record(
+                    workflow_stem=self._spec_path.stem,
+                    predicted_fixes=predicted_fixes,
+                    predicted_regressions=predicted_regressions,
+                    verified_fixes=verified_fixes,
+                    missed_predictions=missed_predictions,
+                    unexpected_regressions=unexpected_regressions,
+                    applied=applied,
+                    hqs_before=hqs_before,
+                    drift_score=drift_score,
+                    triggered_by_drift=triggered_by_drift,
+                    escalated_oscillation=escalated_oscillation,
+                    latency_risk=latency_risk,
+                )
+            except Exception:
+                pass
 
         return ImprovementReport(
             workflow_name=spec.name,
@@ -1100,3 +1130,51 @@ class SelfImproveRunner:
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
+    async def _write_improvement_record(
+        self,
+        *,
+        workflow_stem: str,
+        predicted_fixes: list[str],
+        predicted_regressions: list[str],
+        verified_fixes: list[str],
+        missed_predictions: list[str],
+        unexpected_regressions: list[str],
+        applied: bool,
+        hqs_before: float | None,
+        drift_score: float,
+        triggered_by_drift: bool,
+        escalated_oscillation: bool,
+        latency_risk: float,
+    ) -> None:
+        """Record this improve cycle to the unified ``ImprovementStore``.
+
+        The cross-engine substrate (Option 4): optimize reads these
+        ``source="improve"`` records to avoid re-proposing verified fixes and to
+        target missed predictions. improve doesn't produce a diff/rationale/score,
+        so the optimize-side fields stay at defaults; ``accepted`` mirrors
+        ``applied`` and ``score`` carries ``hqs_before`` as the cycle's HQS context.
+        """
+        from armature.state.improvement_store import (
+            ImprovementRecord, ImprovementStore,
+        )
+        store = ImprovementStore(self._improvement_db_path)
+        await store.init()
+        await store.record(ImprovementRecord(
+            record_id=str(uuid.uuid4()),
+            workflow_stem=workflow_stem,
+            source="improve",
+            accepted=applied,
+            score=hqs_before if hqs_before is not None else 0.0,
+            applied=applied,
+            hqs_before=hqs_before,
+            predicted_fixes=predicted_fixes,
+            predicted_regressions=predicted_regressions,
+            verified_fixes=verified_fixes,
+            missed_predictions=missed_predictions,
+            unexpected_regressions=unexpected_regressions,
+            drift_score=drift_score,
+            triggered_by_drift=triggered_by_drift,
+            escalated_oscillation=escalated_oscillation,
+            latency_risk=latency_risk,
+        ))
