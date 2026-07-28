@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 from pydantic import BaseModel
 from armature.state.diagnostics import DiagnosticAnalyzer
+from armature.state.improvement_store import ImprovementRecord, ImprovementStore
 from armature.state.traces import TraceStore
 
 if TYPE_CHECKING:
@@ -47,7 +48,7 @@ class OptimizerRunner:
         trace_db_path: Path | str,
         optimizer_spec_path: Path | str | None = None,
         metric_fn: Callable[[dict[str, Any]], float] | None = None,
-        proposal_db_path: Path | str | None = None,
+        improvement_db_path: Path | str | None = None,
         model_override: str | None = None,
     ):
         self._target_spec_path = Path(target_spec_path)
@@ -56,7 +57,9 @@ class OptimizerRunner:
             Path(__file__).parent / "workflow.yaml"
         )
         self._metric_fn = metric_fn
-        self._proposal_db_path = Path(proposal_db_path) if proposal_db_path else None
+        self._improvement_db_path = (
+            Path(improvement_db_path) if improvement_db_path else None
+        )
         self._model_override = model_override
 
     async def optimize(self) -> OptimizationResult | None:
@@ -79,7 +82,7 @@ class OptimizerRunner:
         # analyze_traces reasons over the same codes improve uses (stage_failed,
         # output_invalid, low_confidence, high_escalation, ...) instead of
         # re-deriving failure patterns from raw traces. Advisory — never block
-        # optimization on a diagnostic failure (mirrors proposal_history_json).
+        # optimization on a diagnostic failure.
         try:
             diagnostics = DiagnosticAnalyzer(traces).analyze()
             workflow_inputs["diagnostics_json"] = json.dumps(
@@ -87,6 +90,23 @@ class OptimizerRunner:
             )
         except Exception:
             pass
+
+        # #7 (Option 4): feed the unified improvement history (both engines) so the
+        # meta-workflow doesn't re-propose verified fixes / rejected A/B diffs and
+        # can target improve's missed predictions. One store, one record type, keyed
+        # by the spec stem. Advisory — never block optimization on a DB error.
+        improvement_store = None
+        if self._improvement_db_path is not None:
+            improvement_store = ImprovementStore(self._improvement_db_path)
+            await improvement_store.init()
+            try:
+                history = await improvement_store.load_history(self._target_spec_path.stem)
+                if history:
+                    workflow_inputs["improvement_history_json"] = json.dumps(
+                        [r.model_dump() for r in history], default=str
+                    )
+            except Exception:
+                pass  # history is advisory — never block optimization on DB errors
 
         if self._metric_fn is not None:
             scores: list[float] = []
@@ -98,20 +118,6 @@ class OptimizerRunner:
             if scores:
                 workflow_inputs["metric_mean"] = sum(scores) / len(scores)
                 workflow_inputs["metric_scores_json"] = json.dumps(scores)
-
-        proposal_store = None
-        if self._proposal_db_path is not None:
-            from armature.optimizer.history import ProposalStore
-            proposal_store = ProposalStore(self._proposal_db_path)
-            await proposal_store.init()
-            try:
-                history = await proposal_store.load_history(self._target_spec_path.stem)
-                if history:
-                    workflow_inputs["proposal_history_json"] = json.dumps(
-                        [p.model_dump() for p in history], default=str
-                    )
-            except Exception:
-                pass  # history is advisory — never block optimization on DB errors
 
         workflow_result = await self._run_optimizer_workflow(workflow_inputs)
 
@@ -130,11 +136,11 @@ class OptimizerRunner:
             feedback=evaluate.get("feedback", ""),
         )
 
-        if proposal_store is not None:
-            from armature.optimizer.history import ProposalRecord
-            await proposal_store.record(ProposalRecord(
-                proposal_id=str(uuid.uuid4()),
-                workflow_name=self._target_spec_path.stem,
+        if improvement_store is not None:
+            await improvement_store.record(ImprovementRecord(
+                record_id=str(uuid.uuid4()),
+                workflow_stem=self._target_spec_path.stem,
+                source="optimize",
                 proposed_diff=result.proposed_diff,
                 rationale=result.rationale,
                 confidence=result.confidence,
