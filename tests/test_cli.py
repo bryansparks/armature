@@ -708,3 +708,76 @@ def test_improve_command_summary_includes_latency_risk(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "latency_risk: 1.5" in result.output
+
+
+# ── --improvements wiring (Option 4: unified store) ──────────────────────────
+
+def test_improve_command_passes_improvements_path(tmp_path):
+    """`armature improve --improvements` flows improvement_db_path into the runner."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-prop.yaml"
+    _write_spec_with_self_improvement(spec_path)
+    improvements_db = tmp_path / "improvements.db"
+
+    report = _make_improve_report(applied=False, needs_improvement=False)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(
+            app, ["improve", str(spec_path), "--no-apply", "--improvements", str(improvements_db)]
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_cls.call_args
+    assert kwargs["improvement_db_path"] == improvements_db
+
+
+def test_optimize_command_passes_improvements_path(tmp_path):
+    """`armature optimize --improvements` flows improvement_db_path into the runner."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from armature.optimizer.runner import OptimizationResult
+
+    spec_path = tmp_path / "echo-opt.yaml"
+    _write_spec_with_self_improvement(spec_path)
+    improvements_db = tmp_path / "improvements.db"
+
+    mock_instance = MagicMock()
+    mock_instance.optimize = AsyncMock(return_value=OptimizationResult(
+        accepted=False, proposed_diff="d", rationale="r",
+        confidence=0.5, score=0.5, feedback="f",
+    ))
+
+    with patch("armature.optimizer.runner.OptimizerRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(
+            app, ["optimize", str(spec_path), "--improvements", str(improvements_db)]
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_cls.call_args
+    assert kwargs["improvement_db_path"] == improvements_db
+
+
+def test_run_auto_improve_passes_improvements_path(tmp_path):
+    """`armature run --auto-improve --improvements` flows improvement_db_path into the runner."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    spec_path = tmp_path / "echo-runprop.yaml"
+    _write_spec_with_self_improvement(spec_path)
+    improvements_db = tmp_path / "improvements.db"
+
+    report = _make_improve_report(applied=True, needs_improvement=False)
+    mock_instance = MagicMock()
+    mock_instance.analyze = AsyncMock(return_value=report)
+
+    with patch("armature.synthesis.improve.SelfImproveRunner", return_value=mock_instance) as mock_cls:
+        result = runner.invoke(
+            app,
+            ["run", str(spec_path), "--input", "message=hi", "--auto-improve",
+             "--improvements", str(improvements_db)],
+        )
+
+    assert result.exit_code == 0, result.output
+    _, kwargs = mock_cls.call_args
+    assert kwargs["improvement_db_path"] == improvements_db

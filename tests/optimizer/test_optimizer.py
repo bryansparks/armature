@@ -3,9 +3,21 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from armature.optimizer.runner import OptimizerRunner, OptimizationResult, ABTestResult
-from armature.state.traces import HqsResult
+from armature.state.traces import HqsResult, TraceRecord
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _trace(*, run_id, stage_id="worker1", role_type="worker", success=True,
+           output_valid=True, quorum_score=None, escalation_count=0,
+           error_type=None):
+    return TraceRecord(
+        run_id=run_id, workflow_name="echo-workflow", stage_id=stage_id,
+        role_type=role_type, model="claude-sonnet", success=success,
+        output_valid=output_valid, quorum_score=quorum_score,
+        escalation_count=escalation_count, error_type=error_type,
+        inputs={}, outputs={"brief": "x"},
+    )
 
 
 def make_mock_harness_result(accept: bool = True):
@@ -271,31 +283,33 @@ async def test_metric_fn_exception_does_not_crash(tmp_path):
 
 
 import json as _json
-from armature.optimizer.history import ProposalRecord, ProposalStore
+from armature.state.improvement_store import ImprovementRecord, ImprovementStore
 
 
-async def test_optimize_injects_proposal_history(tmp_path):
+async def test_optimize_injects_unified_improvement_history(tmp_path):
+    """optimize() feeds both engines' records as one improvement_history_json."""
     fixtures = Path(__file__).parent.parent / "fixtures"
-    proposal_db = tmp_path / "proposals.db"
+    # echo-workflow.yaml fixture's stem is "echo-workflow"
+    improvement_db = tmp_path / "improvements.db"
 
-    # Pre-populate history with two prior proposals
-    store = ProposalStore(proposal_db)
+    store = ImprovementStore(improvement_db)
     await store.init()
-    await store.record(ProposalRecord(
-        proposal_id="old1", workflow_name="echo-workflow",
-        proposed_diff="- text\n+ guided_json", rationale="Fix parse errors",
-        confidence=0.9, accepted=True, score=0.88, feedback="Improved output validity",
-    ))
-    await store.record(ProposalRecord(
-        proposal_id="old2", workflow_name="echo-workflow",
+    # A prior optimize record (A/B-rejected) + a prior improve record (verified fix).
+    await store.record(ImprovementRecord(
+        record_id="opt1", workflow_stem="echo-workflow", source="optimize",
         proposed_diff="- model: small\n+ model: medium", rationale="Improve quality",
         confidence=0.6, accepted=False, score=0.3, feedback="Introduced regression",
+    ))
+    await store.record(ImprovementRecord(
+        record_id="imp1", workflow_stem="echo-workflow", source="improve",
+        verified_fixes=["output_invalid:analyst"], missed_predictions=["stage_failed:writer"],
+        applied=True, hqs_before=0.6, drift_score=0.0,
     ))
 
     runner = OptimizerRunner(
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
-        proposal_db_path=proposal_db,
+        improvement_db_path=improvement_db,
     )
     mock_traces = [object()] * 5
     captured_inputs: list[dict] = []
@@ -310,22 +324,31 @@ async def test_optimize_injects_proposal_history(tmp_path):
             await runner.optimize()
 
     ctx = captured_inputs[0]
-    assert "proposal_history_json" in ctx
-    history = _json.loads(ctx["proposal_history_json"])
+    assert "improvement_history_json" in ctx
+    history = _json.loads(ctx["improvement_history_json"])
     assert len(history) == 2
-    # Most recent first — old2 was recorded after old1
-    assert history[0]["proposal_id"] == "old2"
-    assert history[1]["proposal_id"] == "old1"
+    sources = {h["source"] for h in history}
+    assert sources == {"optimize", "improve"}
+    # Most recent first — imp1 recorded after opt1
+    assert history[0]["record_id"] == "imp1"
+    assert history[1]["record_id"] == "opt1"
+    # Both engines' field sets are present
+    assert history[0]["verified_fixes"] == ["output_invalid:analyst"]
+    assert history[1]["accepted"] is False
+    assert history[1]["proposed_diff"] == "- model: small\n+ model: medium"
+    # The two legacy injection keys are gone — one unified key only.
+    assert "proposal_history_json" not in ctx
+    assert "improve_history_json" not in ctx
 
 
-async def test_optimize_records_result_to_proposal_store(tmp_path):
+async def test_optimize_records_result_to_improvement_store(tmp_path):
     fixtures = Path(__file__).parent.parent / "fixtures"
-    proposal_db = tmp_path / "proposals.db"
+    improvement_db = tmp_path / "improvements.db"
 
     runner = OptimizerRunner(
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
-        proposal_db_path=proposal_db,
+        improvement_db_path=improvement_db,
     )
     mock_traces = [object()] * 5
 
@@ -335,20 +358,21 @@ async def test_optimize_records_result_to_proposal_store(tmp_path):
             result = await runner.optimize()
 
     assert result is not None
-    store = ProposalStore(proposal_db)
+    store = ImprovementStore(improvement_db)
     history = await store.load_history("echo-workflow")
     assert len(history) == 1
+    assert history[0].source == "optimize"
     assert history[0].accepted is True
     assert history[0].proposed_diff == result.proposed_diff
 
 
-async def test_optimize_no_proposal_db_still_works(tmp_path):
-    """proposal_db_path is optional — existing behavior unchanged."""
+async def test_optimize_no_improvement_db_still_works(tmp_path):
+    """improvement_db_path is optional — existing behavior unchanged."""
     fixtures = Path(__file__).parent.parent / "fixtures"
     runner = OptimizerRunner(
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
-        # no proposal_db_path
+        # no improvement_db_path
     )
     mock_traces = [object()] * 5
     captured_inputs: list[dict] = []
@@ -363,7 +387,7 @@ async def test_optimize_no_proposal_db_still_works(tmp_path):
             result = await runner.optimize()
 
     assert result is not None
-    assert "proposal_history_json" not in captured_inputs[0]
+    assert "improvement_history_json" not in captured_inputs[0]
 
 
 from armature.optimizer.runner import LoopResult
@@ -374,7 +398,7 @@ async def test_run_loop_runs_n_iterations(tmp_path):
     runner = OptimizerRunner(
         target_spec_path=fixtures / "echo-workflow.yaml",
         trace_db_path=tmp_path / "traces.db",
-        proposal_db_path=tmp_path / "proposals.db",
+        improvement_db_path=tmp_path / "improvements.db",
     )
     call_count = 0
 
@@ -512,3 +536,82 @@ async def test_run_loop_no_auto_apply_skips_apply_diff(tmp_path):
             await runner.run_loop(n_iterations=1, auto_apply=False)
 
     mock_apply.assert_not_called()
+
+
+# ── #7-A: shared diagnosis (RED) ──────────────────────────────────────────────
+
+
+async def test_optimizer_injects_diagnostics_json(tmp_path):
+    """optimize() feeds DiagnosticAnalyzer codes into the meta-workflow as diagnostics_json."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    # 5 traces, some failing → stage_failed + output_invalid diagnostics.
+    mock_traces = [
+        _trace(run_id="r1", success=False, error_type="RuntimeError", output_valid=False),
+        _trace(run_id="r2", success=False, error_type="RuntimeError", output_valid=False),
+        _trace(run_id="r3", success=True, output_valid=True, quorum_score=0.95),
+        _trace(run_id="r4", success=True, output_valid=True, quorum_score=0.95),
+        _trace(run_id="r5", success=True, output_valid=True, quorum_score=0.95),
+    ]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            mock_run.return_value = make_mock_harness_result(accept=True)
+
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    inputs = captured["inputs"]
+    assert "diagnostics_json" in inputs
+    diags = json.loads(inputs["diagnostics_json"])
+    assert isinstance(diags, list)
+    codes = {d["code"] for d in diags}
+    assert "stage_failed" in codes
+    assert "output_invalid" in codes
+    # Each entry carries the structured fields improve uses.
+    assert all("stage_id" in d and "details" in d for d in diags)
+
+
+async def test_optimizer_diagnostics_json_empty_when_clean_traces(tmp_path):
+    """All-clean traces → diagnostics_json is an empty list (still injected)."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    captured: dict = {}
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+            async def capture(inputs):
+                captured["inputs"] = inputs
+                return make_mock_harness_result(accept=True)
+            mock_run.side_effect = capture
+            await runner.optimize()
+
+    assert json.loads(captured["inputs"]["diagnostics_json"]) == []
+
+
+async def test_optimizer_diagnostics_failure_does_not_block(tmp_path):
+    """If DiagnosticAnalyzer raises, optimize() still returns a result (advisory)."""
+    runner = OptimizerRunner(
+        target_spec_path=FIXTURES / "echo-workflow.yaml",
+        trace_db_path=tmp_path / "traces.db",
+    )
+    mock_traces = [_trace(run_id=f"r{i}", quorum_score=0.95) for i in range(5)]
+    with patch.object(runner, "_load_traces", new_callable=AsyncMock, return_value=mock_traces):
+        with patch("armature.optimizer.runner.DiagnosticAnalyzer") as mock_diag_cls:
+            mock_diag_cls.return_value.analyze.side_effect = RuntimeError("boom")
+            with patch.object(runner, "_run_optimizer_workflow", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = make_mock_harness_result(accept=True)
+                result = await runner.optimize()
+
+    assert isinstance(result, OptimizationResult)
+    assert result.accepted is True
+    # diagnostics_json is simply absent — optimization is not blocked.
+    inputs = mock_run.call_args.args[0] if mock_run.call_args.args else mock_run.call_args[0][0]
+    assert "diagnostics_json" not in inputs
