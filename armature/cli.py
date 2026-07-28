@@ -1034,6 +1034,113 @@ def improve(
 
 
 @app.command()
+def tune(
+    spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    inputs: list[str] = typer.Option([], "--input", "-i", help="Input values as key=value"),
+    trace_db: Path = typer.Option(
+        Path("~/.armature/traces.db").expanduser(), "--traces",
+        help="Path to traces database (default: ~/.armature/traces.db)",
+    ),
+    improvements: Path = typer.Option(
+        Path("~/.armature/improvements.db").expanduser(), "--improvements",
+        help="Path to unified improvement-history DB (default: ~/.armature/improvements.db)",
+    ),
+    target_hqs: float = typer.Option(None, "--target-hqs", help="HQS target for convergence (default: 0.90, or the spec's self_improvement.target_hqs)"),
+    min_traces: int = typer.Option(None, "--min-traces", help="Minimum traces before analysis (default: 3, or the spec's self_improvement.min_traces)"),
+    drift_threshold: float = typer.Option(None, "--drift-threshold", help="Drift score that fires improvement regardless of HQS (default: 0.5, or the spec's self_improvement.drift_threshold)"),
+    stall_window: int = typer.Option(3, "--stall-window", help="Recent improve cycles to inspect for a stall"),
+    max_escalations: int = typer.Option(2, "--max-escalations", help="Cap on optimize escalations per tune session"),
+    apply: bool = typer.Option(True, "--apply/--no-apply", help="Auto-apply improve and accepted optimize diffs (default: apply)"),
+    max_iterations: int = typer.Option(10, "--max-iterations", help="Maximum tune iterations"),
+    max_llm_calls: int | None = typer.Option(None, "--max-llm-calls", help="Cap total workflow LLM calls across iterations"),
+    max_wallclock: float | None = typer.Option(None, "--max-wallclock", help="Cap total wall-clock seconds"),
+    max_tokens: int | None = typer.Option(None, "--max-tokens", help="Cap total tokens across iterations"),
+    model: str = typer.Option(None, "--model", help="LLM for improve/optimize (default: auto; override with ARMATURE_REFINER_MODEL)"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress per-iteration output"),
+    output: Path = typer.Option(None, "--output", "-o", help="Write the full TuneResult as JSON to PATH"),
+):
+    """Run a budgeted improve→optimize closed loop with auto-escalation.
+
+    Each iteration runs the workflow, runs the cheap ``improve`` engine, and
+    escalates to the expensive ``optimize`` engine only when improve stalls
+    (oscillation, repeated missed predictions, flat HQS, latency-cancel, or
+    recurring regressions). Stops on HQS≥target, budget exhaustion, max
+    iterations, or the escalation cap.
+    """
+    if not spec.exists():
+        typer.echo(f"Spec file not found: {spec}", err=True)
+        raise typer.Exit(1)
+
+    parsed_inputs = parse_inputs(inputs)
+
+    from armature.synthesis.improve import resolve_trigger_overrides
+    from armature.spec.loader import load_spec
+    from armature.tune.runner import TuneRunner
+
+    resolved_spec = load_spec(spec)
+    eff_target_hqs, eff_min_traces, eff_drift_threshold = resolve_trigger_overrides(
+        target_hqs, min_traces, drift_threshold, resolved_spec,
+        default_target_hqs=0.90, default_min_traces=3,
+    )
+
+    async def _run():
+        runner = TuneRunner(
+            spec,
+            inputs=parsed_inputs,
+            trace_db=trace_db,
+            improvement_db=improvements,
+            target_hqs=eff_target_hqs,
+            min_traces=eff_min_traces,
+            drift_threshold=eff_drift_threshold,
+            stall_window=stall_window,
+            max_escalations=max_escalations,
+            auto_apply=apply,
+            max_iterations=max_iterations,
+            max_llm_calls=max_llm_calls,
+            max_wallclock=max_wallclock,
+            max_tokens=max_tokens,
+            model=model,
+        )
+        return await runner.run()
+
+    try:
+        result = asyncio.run(_run())
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if _print_provider_error(exc):
+            raise typer.Exit(1)
+        raise
+
+    if not quiet:
+        for it in result.iterations:
+            hqs = f"{it.run_hqs:.3f}" if it.run_hqs is not None else "n/a"
+            imp = "osc" if it.improve_escalated_oscillation else ("applied" if it.improve_applied else "idle")
+            stall = it.stall.reason if (it.stall and it.stall.stalled) else "-"
+            opt = f"ran:{'Y' if it.optimize_accepted else 'N'}" if it.optimize_ran else "-"
+            typer.echo(
+                f"  [{it.iteration}] hqs={hqs} improve={imp} stall={stall} "
+                f"opt={opt} llm_calls={it.llm_calls} wall={it.wall_s:.1f}s"
+            )
+        typer.echo(
+            f"tune stop={result.stop_reason} iterations={len(result.iterations)} "
+            f"escalations={result.escalations} final_hqs="
+            f"{f'{result.final_hqs:.3f}' if result.final_hqs is not None else 'n/a'} "
+            f"llm_calls={result.llm_calls} tokens={result.tokens} wall={result.wall_s:.1f}s"
+        )
+
+    if output:
+        import json
+        from dataclasses import asdict
+        output.write_text(json.dumps(asdict(result), indent=2, default=str))
+
+    if result.stop_reason == "error":
+        if result.error:
+            typer.echo(f"Tune error: {result.error}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
 def export(
     spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
     target: str = typer.Option("hermes", "--target", "-t", help="Export target platform (hermes)"),
