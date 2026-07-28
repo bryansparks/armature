@@ -26,17 +26,17 @@ stages:
           and non-empty, prefer it as the primary signal — do not re-derive failure
           patterns from raw traces_json except for latency (latency_ms > 2000), which
           the codes do not cover.
-        - proposal_history_json (if present): Prior optimization proposals, whether each
-          was accepted, and its quality score. Use this to avoid re-proposing changes that
-          were already tried and rejected, and to build on changes that worked.
-        - improve_history_json (if present): Prior cycles from `armature improve`.
-          Each entry has `verified_fixes` (fixes that worked — do NOT re-propose these),
-          `missed_predictions` (fixes predicted but still failing — prioritize these as
-          confirmed-still-broken targets), `unexpected_regressions` (stages that
-          regressed after a change — avoid touching them), `applied`, `hqs_before`,
-          `drift_score`, `triggered_by_drift`, `escalated_oscillation`, `latency_risk`.
-          Use this to avoid redoing improve's verified work and to target its
-          unresolved failures.
+        - improvement_history_json (if present): Unified prior history from BOTH
+          `armature improve` and `armature optimize`, each entry tagged with `source`.
+          `source: improve` records carry `verified_fixes` (fixes that worked — do NOT
+          re-propose these), `missed_predictions` (fixes predicted but still failing —
+          prioritize these as confirmed-still-broken targets), `unexpected_regressions`
+          (stages that regressed after a change — avoid touching them), plus `applied`,
+          `hqs_before`, `drift_score`, `triggered_by_drift`, `escalated_oscillation`,
+          `latency_risk`. `source: optimize` records carry `accepted`, `score`,
+          `proposed_diff`, `rationale` (A/B-tested diffs — do NOT re-propose rejected
+          ones, build on accepted ones). Use this to avoid redoing either engine's
+          verified/rejected work and to target unresolved failures.
 
         Identify the single most impactful failure pattern NOT already addressed by a
         prior accepted proposal. Focus on: JSON parse errors (_parse_error in outputs),
@@ -74,9 +74,11 @@ stages:
         Output as a unified diff (--- original\n+++ proposed). Be conservative — change one
         thing at a time. If the failure is JSON parse errors, suggest adding output_mode: guided_json
         and an appropriate output_schema to the affected stage.
-        If improve_history_json is present, do NOT re-propose a change whose target
-        appears in any cycle's verified_fixes — it already worked. Prefer targets in
-        missed_predictions (confirmed still broken).
+        If improvement_history_json is present, do NOT re-propose a change whose target
+        appears in any `source: improve` record's `verified_fixes` or any `source:
+        optimize` record that was rejected — those already worked or already failed.
+        Prefer targets in `source: improve` records' `missed_predictions` (confirmed
+        still broken).
     output_mode: guided_json
     output_schema:
       type: object
