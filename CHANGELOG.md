@@ -12,6 +12,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.5.1] - 2026-07-28
+
+### Security
+
+- **`safety_rules` / `strict_mode` are now enforced on every tool dispatch path** (Claim 1). Previously the `tool_call:` stage path and the LLM ReAct tool-call path called `registry.dispatch` directly, bypassing the PRE_TOOL safety hook — so a spec author's `block` rule was silently ignored on the two most common tool-execution paths (only the `adapter:`/script path honored it). `ToolRegistry` now holds an optional `HookRegistry` (set via constructor or `attach_hooks`) and `dispatch` calls `run_pre_tool` before the handler (letting `ToolBlocked` propagate) and `run_post_tool` after. The engine attaches its hook registry to the tool registry right after `SafetyHookBuilder.register`, closing both gaps with one chokepoint. The adapter path is unchanged (no double-fire).
+- **Docker sandbox `file_write` / `file_read` handlers now contain paths to the host workspace** (Claim 2). They previously did `host_workspace / rel_path` with no containment check, so an absolute `path` (e.g. `/etc/passwd`) or a `..` traversal escaped the workspace and read/wrote host files. Added `_resolve_within` (reject absolute paths, resolve, verify `is_relative_to`). The docker `shell` handler now also refuses destructive commands (returns `exit_code 126`) instead of launching the container, and `wrap_registry` preserves `reversibility`/`postcondition` via `model_copy`.
+- **`classify_shell_command` now tokenizes the command so indirection/chaining can't bypass it** (Claim 3). The prefix match (`startswith`) was bypassable via `sh -c "rm -rf …"`, `echo hi; rm …`, `true && rm …`, `FOO=bar rm …`, and `/bin/rm …`. Replaced with shell tokenization: split on `;`/`&&`/`||`/`|`, `shlex`+strip env assignments, `basename`-normalize the command token, and recurse one level into `sh -c`/`bash -c` with a fail-safe depth cap. The `shell` builtin handler (`_shell_run`) now applies the classifier too — it previously ran `subprocess.run(cmd, shell=True)` with no classification, so `tool_call:`/ReAct `shell` with `rm -rf /` executed with zero checks. This is a heuristic denylist backstop, not a complete shell parser.
+
+### Changed
+
+- Bumped version to 0.5.1 (security patch over 0.5.0).
+
+---
+
 ## [0.5.0] - 2026-06-29
 
 ### Added
