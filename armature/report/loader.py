@@ -17,7 +17,7 @@ async def load_dashboard_data(
     last_n: int = 200,
 ) -> DashboardData:
     """Query the last *last_n* traces for *workflow_name* and aggregate into DashboardData."""
-    from armature.state.traces import TraceStore
+    from armature.state.traces import TraceStore, compute_hqs_from_traces
 
     db = traces_db or Path("~/.armature/traces.db").expanduser()
     store = TraceStore(db)
@@ -34,23 +34,14 @@ async def load_dashboard_data(
     for t in traces:
         if t.run_id not in run_ids_seen:
             run_ids_seen.append(t.run_id)
+    # store.query returns traces newest-first (timestamp DESC); reverse so the
+    # trend and last_run_id follow the documented oldest → newest contract.
+    run_ids_seen.reverse()
 
     for run_id in run_ids_seen:
         run_traces = [t for t in traces if t.run_id == run_id]
         if run_traces:
-            success_rate = sum(1 for t in run_traces if t.success) / len(run_traces)
-            valid_rate = sum(1 for t in run_traces if t.output_valid) / len(run_traces)
-            quorum_vals = [t.quorum_score for t in run_traces if t.quorum_score is not None]
-            avg_quorum = sum(quorum_vals) / len(quorum_vals) if quorum_vals else 0.5
-            latencies = [t.latency_ms for t in run_traces]
-            max_lat = max(latencies) if latencies else 1.0
-            latency_score = max(0.0, 1.0 - max_lat / 60_000)
-            hqs = (
-                0.40 * valid_rate
-                + 0.30 * success_rate
-                + 0.20 * avg_quorum
-                + 0.10 * latency_score
-            )
+            hqs = compute_hqs_from_traces(run_traces).hqs
             hqs_trend.append(round(hqs, 4))
 
     last_run_id = run_ids_seen[-1] if run_ids_seen else None
