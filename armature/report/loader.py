@@ -18,6 +18,7 @@ async def load_dashboard_data(
 ) -> DashboardData:
     """Query the last *last_n* traces for *workflow_name* and aggregate into DashboardData."""
     from armature.state.traces import TraceStore, compute_hqs_from_traces
+    from armature.state.leverage import compute_leverage
 
     db = traces_db or Path("~/.armature/traces.db").expanduser()
     store = TraceStore(db)
@@ -61,6 +62,7 @@ async def load_dashboard_data(
     cycles = load_improvement_cycles(log_path)
     stage_stats = build_stage_stats(traces)
     safety_stats = load_safety_stats(traces)
+    leverage = compute_leverage(traces)
 
     return DashboardData(
         workflow_name=workflow_name,
@@ -72,4 +74,5 @@ async def load_dashboard_data(
         hqs_trend=hqs_trend,
         last_run_id=last_run_id,
         last_run_at=last_run_at,
+        leverage=leverage,
     )

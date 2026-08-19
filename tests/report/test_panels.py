@@ -421,3 +421,56 @@ class TestImprovementTimelineAllCyclesVisible:
         out = render(improvement_timeline(data))
         shown = sum(1 for i in range(15) if f"2026-05-{i + 1:02d}" in out)
         assert shown == 15
+
+
+# ── leverage_heatmap ──────────────────────────────────────────────────────────
+
+from armature.report.aggregator import DashboardData, SafetyStats
+from armature.report.panels import leverage_heatmap
+from armature.state.leverage import compute_leverage
+from armature.state.traces import TraceRecord
+
+
+def _trace(run_id, stage_id, *, quorum=0.5, role="judge"):
+    return TraceRecord(run_id=run_id, workflow_name="wf", stage_id=stage_id, role_type=role,
+                       model="m", quorum_score=quorum, success=True, output_valid=True,
+                       latency_ms=100.0, escalation_count=0)
+
+
+def _minimal_data(leverage=None):
+    return DashboardData(workflow_name="wf", total_runs=0, traces=[], stage_stats={},
+                          improvement_cycles=[], safety_stats=SafetyStats(0, 0, 0, 0, None, 0),
+                          hqs_trend=[], last_run_id=None, leverage=leverage)
+
+
+def test_leverage_heatmap_renders_when_sufficient():
+    traces = []
+    for i, q in enumerate([0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.45]):
+        traces += [_trace(f"r{i}", "judge_a", quorum=q), _trace(f"r{i}", "worker", role="worker")]
+    lev = compute_leverage(traces)
+    assert lev.sufficient
+    panel = leverage_heatmap(_minimal_data(leverage=lev))
+    from rich.console import Console
+    c = Console(record=True, width=80)
+    c.print(panel)
+    out = c.export_text()
+    assert "judge_a" in out
+    assert "Leverage" in out
+
+
+def test_leverage_heatmap_insufficient_notice():
+    lev = compute_leverage([])  # insufficient
+    panel = leverage_heatmap(_minimal_data(leverage=lev))
+    from rich.console import Console
+    c = Console(record=True, width=80)
+    c.print(panel)
+    out = c.export_text()
+    assert "insufficient" in out.lower()
+
+
+def test_leverage_heatmap_none_is_safe():
+    panel = leverage_heatmap(_minimal_data(leverage=None))
+    from rich.console import Console
+    c = Console(record=True, width=80)
+    c.print(panel)
+    assert "insufficient" in c.export_text().lower() or "no data" in c.export_text().lower()

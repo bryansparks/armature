@@ -16,6 +16,7 @@ from armature.report.panels import (
     stage_breakdown,
     improvement_timeline,
     safety_governance,
+    leverage_heatmap,
 )
 
 
@@ -33,6 +34,7 @@ def _build_layout(data: DashboardData) -> Layout:
     root["middle"]["right"].split_column(
         Layout(improvement_timeline(data), name="timeline", ratio=1),
         Layout(safety_governance(data), name="safety", size=8),
+        Layout(leverage_heatmap(data), name="leverage", size=10),
     )
     return root
 
@@ -44,7 +46,7 @@ def render_terminal(data: DashboardData, console: Console | None = None) -> None
     grid = Table.grid(expand=True)
     grid.add_column(ratio=1)
     grid.add_column(ratio=1)
-    right = Group(improvement_timeline(data), safety_governance(data))
+    right = Group(improvement_timeline(data), safety_governance(data), leverage_heatmap(data))
     grid.add_row(stage_breakdown(data), right)
     c.print(grid)
 
@@ -110,4 +112,16 @@ def render_json(data: DashboardData) -> dict[str, Any]:
             "stale_memory_count": data.safety_stats.stale_memory_count,
             "current_policy_version": data.safety_stats.current_policy_version,
         },
+        "leverage": (
+            None if data.leverage is None
+            else {
+                "n_runs": data.leverage.n_runs,
+                "sufficient": data.leverage.sufficient,
+                "reason": data.leverage.reason,
+                "stages": {
+                    sid: {"signal": s.signal_name, "r": s.r, "n_runs": s.n_runs, "sufficient": s.sufficient}
+                    for sid, s in data.leverage.stages.items()
+                },
+            }
+        ),
     }

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from armature.state.leverage import LeverageReport
 from armature.state.traces import TraceRecord
 
 
@@ -61,6 +62,7 @@ class DashboardData:
     hqs_trend: list[float]  # ordered oldest → newest
     last_run_id: str | None
     last_run_at: str | None = None
+    leverage: LeverageReport | None = None
 
     @property
     def current_hqs(self) -> float | None:
