@@ -321,23 +321,26 @@ def _pick_best_proposal(
     old_spec: "HarnessSpec",
     *,
     latency_tolerance: int = 1,
+    leverage: dict[str, float] | None = None,
 ) -> "RefinerResult | None":
     """Select the best candidate using an ε-band fuzzy tiebreak.
 
     Coverage is primary: a candidate ≥2 predicted fixes behind the top can never
-    win. Among candidates within ``latency_tolerance`` (ε) of the top coverage,
-    the one with the lowest structural ``latency_risk`` wins — coverage is the
-    final tiebreak. This directly addresses the H4-v2 latency-cancel mechanism:
-    the max-coverage candidate tends to add the most fix-power (stages, tier
-    escalations, retries), which raises latency and nets ~0 HQS, so within the
-    fuzzy band the lower-latency candidate is the better HQS bet.
+    win. When ``leverage`` is a stage->weight map, coverage is leverage-weighted
+    (a fix on a high-leverage stage scores higher); when ``leverage is None``,
+    coverage is the plain count — identical to the prior behavior. Among
+    candidates within ``latency_tolerance`` (ε) of the top weighted coverage,
+    the lowest structural ``latency_risk`` wins — coverage is the final tiebreak.
     """
     if not candidates:
         return None
     diag_keys = {f"{d.code.value}:{d.stage_id}" for d in diagnostics}
 
-    def coverage(r: RefinerResult) -> int:
-        return len(set(r.predicted_fixes) & diag_keys)
+    def coverage(r: RefinerResult) -> float:
+        fixes = set(r.predicted_fixes) & diag_keys
+        if leverage is None:
+            return float(len(fixes))
+        return sum(leverage.get(fix.split(":")[1], 1.0) for fix in fixes)
 
     def risk(r: RefinerResult) -> float:
         return _latency_risk(old_spec, r.spec)

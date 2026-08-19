@@ -1766,6 +1766,39 @@ def test_pick_best_coverage_tiebreak_when_risks_equal(tmp_path):
     assert best is r_high
 
 
+def test_pick_best_proposal_leverage_weights_high_leverage_stage(tmp_path):
+    # Two candidates with equal UNWEIGHTED coverage (1 fix each), equal latency risk
+    # (same spec). Stage "hi" is high-leverage (weight 1.8); "lo" is baseline (1.0).
+    # The hi-fixing candidate must win under weighted coverage.
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="hi"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="lo"),
+    ]
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)  # same spec for both -> equal latency risk (0)
+    r_hi = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:hi"])
+    r_lo = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:lo"])
+    best = _pick_best_proposal([r_lo, r_hi], diags, spec, leverage={"hi": 1.8, "lo": 1.0})
+    assert best is r_hi
+
+
+def test_pick_best_proposal_no_leverage_keeps_highest_coverage(tmp_path):
+    # leverage=None must be byte-for-byte today: 2 fixes beats 1 fix regardless of stage.
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="hi"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="lo"),
+    ]
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    r_one = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:hi"])
+    r_two = RefinerResult(spec=spec, yaml_text="",
+                          predicted_fixes=["output_invalid:hi", "output_invalid:lo"])
+    best = _pick_best_proposal([r_one, r_two], diags, spec)  # no leverage kwarg
+    assert best is r_two
+
+
 # ── SelfImproveRunner with n_proposals ───────────────────────────────────────
 
 async def test_runner_generates_k_proposals_when_configured(tmp_path):
