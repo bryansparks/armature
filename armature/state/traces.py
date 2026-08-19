@@ -74,6 +74,40 @@ _CREATE_SQL = """
 """
 
 
+def compute_hqs_from_traces(traces: list["TraceRecord"]) -> "HqsResult":
+    """Compute HQS from an in-memory list of traces (formula A — the single source).
+
+    Assumes ``traces`` is non-empty; callers must guard the empty case.
+    """
+    n = len(traces)
+    output_valid_rate = sum(1 for t in traces if t.output_valid) / n
+    success_rate = sum(1 for t in traces if t.success) / n
+    quorum_scores = [t.quorum_score for t in traces if t.quorum_score is not None]
+    avg_quorum_score = sum(quorum_scores) / len(quorum_scores) if quorum_scores else 0.5
+    avg_latency_ms = sum(t.latency_ms for t in traces) / n
+    latency_score = max(0.0, 1.0 - avg_latency_ms / 5000.0)
+    avg_escalation_count = sum(t.escalation_count for t in traces) / n
+    hfr = sum(1 for t in traces if t.escalation_count == 0) / n
+    hqs = (
+        0.35 * output_valid_rate
+        + 0.25 * success_rate
+        + 0.20 * avg_quorum_score
+        + 0.10 * latency_score
+        + 0.10 * hfr
+    )
+    return HqsResult(
+        run_id="",
+        hqs=hqs,
+        output_valid_rate=output_valid_rate,
+        success_rate=success_rate,
+        avg_quorum_score=avg_quorum_score,
+        latency_score=latency_score,
+        n_traces=n,
+        avg_escalation_count=avg_escalation_count,
+        hfr=hfr,
+    )
+
+
 class TraceStore:
     def __init__(self, db_path: Path | str):
         self._path = Path(db_path)
@@ -235,32 +269,5 @@ class TraceStore:
         traces = await self.query_by_run(run_id)
         if not traces:
             return None
-
-        n = len(traces)
-        output_valid_rate = sum(1 for t in traces if t.output_valid) / n
-        success_rate = sum(1 for t in traces if t.success) / n
-        quorum_scores = [t.quorum_score for t in traces if t.quorum_score is not None]
-        avg_quorum_score = sum(quorum_scores) / len(quorum_scores) if quorum_scores else 0.5
-        avg_latency_ms = sum(t.latency_ms for t in traces) / n
-        latency_score = max(0.0, 1.0 - avg_latency_ms / 5000.0)
-        avg_escalation_count = sum(t.escalation_count for t in traces) / n
-        hfr = sum(1 for t in traces if t.escalation_count == 0) / n
-
-        hqs = (
-            0.35 * output_valid_rate
-            + 0.25 * success_rate
-            + 0.20 * avg_quorum_score
-            + 0.10 * latency_score
-            + 0.10 * hfr
-        )
-        return HqsResult(
-            run_id=run_id,
-            hqs=hqs,
-            output_valid_rate=output_valid_rate,
-            success_rate=success_rate,
-            avg_quorum_score=avg_quorum_score,
-            latency_score=latency_score,
-            n_traces=n,
-            avg_escalation_count=avg_escalation_count,
-            hfr=hfr,
-        )
+        result = compute_hqs_from_traces(traces)
+        return result.model_copy(update={"run_id": run_id})
