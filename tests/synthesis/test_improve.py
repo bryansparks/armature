@@ -2646,3 +2646,43 @@ async def test_improvement_report_latency_risk_default():
         applied=False, diagnostics=[],
     )
     assert report.latency_risk == 0.0
+
+
+# ── Stage credit attribution: leverage wiring into analyze() ─────────────────
+
+async def test_analyze_leverage_sufficient_when_strong_stage(tmp_path):
+    # 8 runs where judge_a quorum varies and drives per-run HQS (strong r).
+    # worker is constant (zero variance) -> r=None, not sufficient.
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    traces = []
+    for i, q in enumerate([0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55]):
+        traces += [make_trace(run_id=f"r{i}", stage_id="judge_a", role_type="judge", quorum_score=q),
+                   make_trace(run_id=f"r{i}", stage_id="worker", role_type="worker", quorum_score=0.5)]
+    await seed_store(store, traces)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report = await runner.analyze()
+    assert report.leverage is not None
+    assert report.leverage.sufficient is True
+    assert report.leverage.stages["judge_a"].r is not None
+    assert report.leverage.stages["judge_a"].r > 0.9
+
+
+async def test_analyze_leverage_insufficient_when_few_runs(tmp_path):
+    # 2 runs: passes the min_traces=1 gate (reaches the main ImprovementReport
+    # return at line 968) but leverage needs >= min_runs (8) -> insufficient.
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    traces = [make_trace(run_id="r0", stage_id="judge_a", quorum_score=0.9),
+              make_trace(run_id="r1", stage_id="judge_a", quorum_score=0.5)]
+    await seed_store(store, traces)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report = await runner.analyze()
+    assert report.leverage is not None
+    assert report.leverage.sufficient is False

@@ -37,6 +37,7 @@ from armature.spec.loader import load_spec
 from armature.spec.validator import validate_spec, SpecValidationError
 from armature.state.diagnostics import DiagnosticAnalyzer, DiagnosticResult
 from armature.state.traces import TraceStore, HqsResult, TraceRecord, compute_hqs_from_traces
+from armature.state.leverage import compute_leverage, LeverageReport
 
 
 async def llm_completion(**kwargs) -> Any:
@@ -419,6 +420,9 @@ class ImprovementReport:
     # #6 latency-aware selection — structural latency-risk of the selected proposal
     # (proxy for the HQS latency-cancel tradeoff). 0.0 when no proposal was produced.
     latency_risk: float = 0.0
+    # Stage credit attribution — the LeverageReport carried for visibility/logging.
+    # None when no traces; a LeverageReport (possibly insufficient) otherwise.
+    leverage: LeverageReport | None = None
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -780,6 +784,19 @@ class SelfImproveRunner:
         drift_score = 0.0
         latency_risk = 0.0
 
+        # Stage credit attribution — computed once over all loaded traces.
+        # compute_leverage([]) returns a valid insufficient LeverageReport, so the
+        # n=0 path is safe. `leverage_weights` (the dict) feeds _pick_best_proposal;
+        # `leverage_report` (the report) feeds _write_log + ImprovementReport.
+        leverage_report = compute_leverage(traces)
+        if leverage_report.sufficient:
+            leverage_weights = {
+                sid: (1.0 + abs(s.r)) if s.sufficient else 1.0
+                for sid, s in leverage_report.stages.items()
+            }
+        else:
+            leverage_weights = None
+
         # Drift score: fraction of current failures that were previously "fixed".
         # Computed against the union of all prior cycles' verified_fixes so it
         # detects oscillation (a fixed issue reappearing) across the whole log.
@@ -862,7 +879,7 @@ class SelfImproveRunner:
                     if not _proposal_regression_risk(c, spec, healthy)
                 ]
                 regression_risk_count = len(allowed_candidates) - len(safe_candidates)
-                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics, spec)
+                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics, spec, leverage=leverage_weights)
             else:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
@@ -943,6 +960,7 @@ class SelfImproveRunner:
             drift_threshold=self._drift_threshold,
             escalated_oscillation=escalated_oscillation,
             latency_risk=latency_risk,
+            leverage=leverage_report,
         )
         # #7 (Option 4): also record this cycle to the unified ImprovementStore so
         # `armature optimize` can see improve's verified/missed/regressed work. The
@@ -994,6 +1012,7 @@ class SelfImproveRunner:
             triggered_by_drift=triggered_by_drift,
             escalated_oscillation=escalated_oscillation,
             latency_risk=latency_risk,
+            leverage=leverage_report,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -1068,6 +1087,7 @@ class SelfImproveRunner:
         drift_threshold: float = 0.5,
         escalated_oscillation: bool = False,
         latency_risk: float = 0.0,
+        leverage: LeverageReport | None = None,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -1101,6 +1121,13 @@ class SelfImproveRunner:
             "escalated_oscillation": escalated_oscillation,
             # #6 latency-aware selection — structural latency-risk of the selected proposal
             "latency_risk": latency_risk,
+            # Stage credit attribution — leverage report (sufficient flag + per-stage r).
+            "leverage_sufficient": (leverage.sufficient if leverage is not None else False),
+            "leverage_stages": (
+                {sid: {"r": s.r, "n_runs": s.n_runs, "sufficient": s.sufficient}
+                 for sid, s in leverage.stages.items()}
+                if leverage is not None else {}
+            ),
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
