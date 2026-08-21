@@ -1,4 +1,5 @@
-# tests/packaging/test_manifest.py
+# tests/packaging/test_pkg_manifest.py — renamed to avoid a basename collision
+# with tests/adapters/test_manifest.py under pytest's default import mode.
 from armature.packaging.manifest import (
     PackageManifest, SecretsFile, SecretRequirement, Destinations, ArtifactSpec,
     ResultsManifest, TraceRef, PACKAGE_API_VERSION,
