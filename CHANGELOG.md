@@ -10,7 +10,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+---
+
+## [0.6.0] - 2026-08-21
+
+### Added
+
 - **Stage credit attribution** — per-stage leverage analysis identifies which stages are most predictive of final HQS. For each stage, `compute_leverage(traces)` computes the Pearson correlation `r` between the stage's per-run signal (quorum score for judge stages, `success × valid` otherwise) and the run's final HQS; stages with high `|r|` are *leverage stages*. Surfaced as a new **leverage heatmap** panel on `armature dashboard` (one row per stage ranked by `|r|`, with signal type, run count, and a `leverage` / `flat` / `noise` verdict). When sufficient data exists (`min_runs` ≥ 8 and a stage reaches `|r| ≥ 0.4`), `armature improve` weights proposal coverage by stage leverage so fixes targeting high-leverage stages are prioritized; below that guard the optimizer is unchanged. Also canonicalizes the HQS trend to formula A (HFR + `avg_latency/5000`) so the dashboard trend and the leverage analysis share one HQS definition.
+
+### Security
+
+- Includes all security fixes from [0.5.1], which was bumped on `main` but not separately published to PyPI: enforcement of `safety_rules` / `strict_mode` on every tool dispatch path (the `tool_call:` stage path and the LLM ReAct path), Docker sandbox `file_write` / `file_read` path-traversal containment, and tokenized `classify_shell_command` so indirection/chaining can't bypass the classifier. See the [0.5.1] entry below for full detail.
+
+### Changed
+
+- Bumped version to 0.6.0 (minor bump over 0.5.0; bundles the unreleased 0.5.1 security patch with the stage-credit-attribution feature).
 
 ---
 
