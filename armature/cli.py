@@ -9,6 +9,9 @@ app = typer.Typer(name="armature", help="ELF ecosystem agent harness runner", no
 channels_app = typer.Typer(name="channels", help="Manage messaging channel connectors")
 app.add_typer(channels_app, name="channels")
 
+from armature.packaging.cli import package_app  # noqa: E402
+app.add_typer(package_app, name="package")
+
 
 @app.command()
 def new(
