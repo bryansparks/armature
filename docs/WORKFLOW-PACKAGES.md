@@ -107,7 +107,7 @@ The builder validates the spec, vendors tools, auto-generates `secrets.yaml` fro
 | **V7 DEPS_RESOLVE** | `requirements.txt` is parseable |
 | **V8 INTEGRITY** | `manifest.sha256` is written for every file |
 
-`armature package verify <pkg>` re-runs V1–V7 without rebuilding. `armature package inspect <pkg>` prints the manifest read-only.
+`armature package verify <pkg>` re-runs all eight checks (V1–V8) without rebuilding — V8 recomputes and rewrites `manifest.sha256`. `armature package inspect <pkg>` prints the manifest read-only.
 
 ---
 
@@ -134,8 +134,11 @@ results/<run_id>/
   artifacts/         # one file per destinations.artifacts[] entry (md/json/txt)
   trace.jsonl        # if --include-trace: full trace (dialogs); written even if 0 records
   logs/
-  session/
 ```
+
+The engine's live session directory (TraceStore DB etc.) is written to
+`results/_pending/session/` during execution and is not relocated into the
+per-run output dir. `trace.jsonl` is delivered into `<run_id>/` regardless.
 
 ### `receipt.json` — the run receipt
 
