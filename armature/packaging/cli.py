@@ -82,8 +82,11 @@ def run(
         except PackageError as exc:
             typer.echo(f"Run failed: {exc}", err=True)
             raise typer.Exit(1)
-        typer.echo(f"Run {receipt.run_id}: {receipt.status} → {results / receipt.run_id}")
-        return
+        if receipt.status == "complete":
+            typer.echo(f"Run {receipt.run_id}: {receipt.status} → {results / receipt.run_id}")
+            return
+        typer.echo(f"Run failed: {receipt.error or receipt.status}", err=True)
+        raise typer.Exit(1)
     # container mode
     from armature.packaging.docker_runner import DockerRunnerLauncher
     overrides = _write_overrides(pkg_dir.parent, _parse_inputs(input_kv)) if input_kv else None

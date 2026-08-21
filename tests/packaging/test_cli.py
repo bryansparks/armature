@@ -34,3 +34,20 @@ def test_package_verify_via_cli(tmp_path: Path, tiny_spec):
                         "--input", "topic=hello"])
     res = runner.invoke(app, ["package", "verify", str(out)])
     assert res.exit_code == 0
+
+
+def test_package_run_direct_exits_nonzero_on_failure(tmp_path: Path, tiny_spec):
+    """A failed --direct run must exit non-zero (R8 contract). Tamper the package
+    so R1 integrity fails → status='failed' receipt → CLI exits 1, not 0."""
+    out = tmp_path / "echo.pkg"
+    build_res = runner.invoke(app, ["package", "build", "--spec", str(tiny_spec),
+                                    "--out", str(out), "--input", "topic=hello"])
+    assert build_res.exit_code == 0, build_res.stdout
+
+    # Tamper: append a byte to workflow.yaml so manifest.sha256 no longer matches → R1 fails.
+    wf = out / "workflow.yaml"
+    wf.write_text(wf.read_text() + "\n# tampered\n")
+
+    res = runner.invoke(app, ["package", "run", "--direct", str(out),
+                              "--results", str(tmp_path / "results")])
+    assert res.exit_code != 0, f"expected non-zero exit on failed run, got {res.exit_code}"
