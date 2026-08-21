@@ -1,0 +1,23 @@
+# Dockerfile.runner — generic workflow-package executor (data-in, results-out)
+# syntax=docker/dockerfile:1
+FROM python:3.11-slim AS base
+
+RUN pip install --no-cache-dir uv==0.4.*
+
+WORKDIR /app
+
+COPY pyproject.toml .
+COPY armature/__init__.py armature/__init__.py
+RUN uv pip install --system ".[service]"
+
+COPY armature/ armature/
+
+# Docker CLI so DockerSandboxProvider can spawn sibling containers via the
+# mounted socket (DooD). The host mounts /var/run/docker.sock at run time.
+RUN apt-get update && apt-get install -y --no-install-recommends docker-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 armature && chown -R armature:armature /app
+USER armature
+
+ENTRYPOINT ["armature", "package", "run", "--direct"]
