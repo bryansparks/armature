@@ -27,7 +27,7 @@ def test_build_default_destinations_infers_leaves(tmp_path, tiny_spec):
 
 def test_build_aborts_on_invalid_spec(tmp_path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text("name: bad\nversion: \"1.0\"\nstages: []\n")
+    bad.write_text('name: bad\nversion: "1.0"\n')
     try:
         PackageBuilder().build(spec=bad, out=tmp_path / "bad.pkg", inputs={})
     except Exception:

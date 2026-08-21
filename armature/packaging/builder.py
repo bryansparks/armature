@@ -29,8 +29,6 @@ class PackageBuilder:
             loaded = load_spec(spec)
         except Exception as exc:
             raise PackageBuildError(f"spec invalid: {exc}") from exc
-        if not loaded.stages:
-            raise PackageBuildError("spec invalid: no stages defined")
 
         # 2. create dir + copy spec
         out.mkdir(parents=True, exist_ok=True)
