@@ -127,3 +127,14 @@ class TestRenderTerminalLayout:
         render_terminal(data, console=c)
         out = sio.getvalue()
         assert "h…" not in out  # "healthy" wrapping artifact
+
+
+def test_render_json_includes_leverage():
+    from armature.report.aggregator import DashboardData, SafetyStats
+    from armature.report.layout import render_json
+    data = DashboardData(workflow_name="wf", total_runs=0, traces=[], stage_stats={},
+                          improvement_cycles=[], safety_stats=SafetyStats(0, 0, 0, 0, None, 0),
+                          hqs_trend=[], last_run_id=None, leverage=None)
+    out = render_json(data)
+    assert "leverage" in out
+    assert out["leverage"] is None or "stages" in out["leverage"]

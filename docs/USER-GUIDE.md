@@ -3003,6 +3003,14 @@ The dashboard renders four panels:
 
 **Safety & governance** (right bottom) — Policy version stability, rule hit counts by action type, post-condition failure count, and stale memory key count.
 
+### Stage leverage
+
+The HQS trend in the health strip now uses the canonical HQS formula (including the HFR term and `avg-latency/5000`), so it matches the HQS that `armature improve` computes. Earlier releases used a slightly different trend formula; observed trend values may shift slightly as a result.
+
+A **Leverage** panel supplements the stage breakdown: for each stage it shows the Pearson correlation `r` between that stage's per-run signal (quorum score for judge stages, `success × valid` otherwise) and the run's final HQS. Stages with high `|r|` are *leverage stages* — improvements there move overall HQS the most. The panel reports "insufficient data" until at least `min_runs` (default 8) runs exist and one stage reaches `|r| ≥ 0.4`.
+
+When sufficient leverage data exists, `armature improve` (§20) weights proposal coverage by stage leverage, so fixes targeting high-leverage stages are prioritized. When data is insufficient, `armature improve` behaves exactly as before.
+
 ### Options
 
 | Flag | Default | Description |

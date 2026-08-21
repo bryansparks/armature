@@ -1766,6 +1766,39 @@ def test_pick_best_coverage_tiebreak_when_risks_equal(tmp_path):
     assert best is r_high
 
 
+def test_pick_best_proposal_leverage_weights_high_leverage_stage(tmp_path):
+    # Two candidates with equal UNWEIGHTED coverage (1 fix each), equal latency risk
+    # (same spec). Stage "hi" is high-leverage (weight 1.8); "lo" is baseline (1.0).
+    # The hi-fixing candidate must win under weighted coverage.
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="hi"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="lo"),
+    ]
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)  # same spec for both -> equal latency risk (0)
+    r_hi = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:hi"])
+    r_lo = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:lo"])
+    best = _pick_best_proposal([r_lo, r_hi], diags, spec, leverage={"hi": 1.8, "lo": 1.0})
+    assert best is r_hi
+
+
+def test_pick_best_proposal_no_leverage_keeps_highest_coverage(tmp_path):
+    # leverage=None must be byte-for-byte today: 2 fixes beats 1 fix regardless of stage.
+    from armature.synthesis.improve import _pick_best_proposal
+    from armature.state.diagnostics import DiagnosticResult, DiagnosticCode
+    diags = [
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="hi"),
+        DiagnosticResult(code=DiagnosticCode.OUTPUT_INVALID, stage_id="lo"),
+    ]
+    spec = _load(tmp_path, _MINIMAL_SPEC_YAML)
+    r_one = RefinerResult(spec=spec, yaml_text="", predicted_fixes=["output_invalid:hi"])
+    r_two = RefinerResult(spec=spec, yaml_text="",
+                          predicted_fixes=["output_invalid:hi", "output_invalid:lo"])
+    best = _pick_best_proposal([r_one, r_two], diags, spec)  # no leverage kwarg
+    assert best is r_two
+
+
 # ── SelfImproveRunner with n_proposals ───────────────────────────────────────
 
 async def test_runner_generates_k_proposals_when_configured(tmp_path):
@@ -2613,3 +2646,43 @@ async def test_improvement_report_latency_risk_default():
         applied=False, diagnostics=[],
     )
     assert report.latency_risk == 0.0
+
+
+# ── Stage credit attribution: leverage wiring into analyze() ─────────────────
+
+async def test_analyze_leverage_sufficient_when_strong_stage(tmp_path):
+    # 8 runs where judge_a quorum varies and drives per-run HQS (strong r).
+    # worker is constant (zero variance) -> r=None, not sufficient.
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    traces = []
+    for i, q in enumerate([0.9, 0.85, 0.8, 0.75, 0.7, 0.65, 0.6, 0.55]):
+        traces += [make_trace(run_id=f"r{i}", stage_id="judge_a", role_type="judge", quorum_score=q),
+                   make_trace(run_id=f"r{i}", stage_id="worker", role_type="worker", quorum_score=0.5)]
+    await seed_store(store, traces)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report = await runner.analyze()
+    assert report.leverage is not None
+    assert report.leverage.sufficient is True
+    assert report.leverage.stages["judge_a"].r is not None
+    assert report.leverage.stages["judge_a"].r > 0.9
+
+
+async def test_analyze_leverage_insufficient_when_few_runs(tmp_path):
+    # 2 runs: passes the min_traces=1 gate (reaches the main ImprovementReport
+    # return at line 968) but leverage needs >= min_runs (8) -> insufficient.
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(_MINIMAL_SPEC_YAML)
+    db = tmp_path / "traces.db"
+    store = TraceStore(db)
+    traces = [make_trace(run_id="r0", stage_id="judge_a", quorum_score=0.9),
+              make_trace(run_id="r1", stage_id="judge_a", quorum_score=0.5)]
+    await seed_store(store, traces)
+    runner = SelfImproveRunner(spec_file, db, target_hqs=0.90, min_traces=1, auto_apply=False)
+    with patch.object(SpecRefiner, "refine", new_callable=AsyncMock, return_value=None):
+        report = await runner.analyze()
+    assert report.leverage is not None
+    assert report.leverage.sufficient is False

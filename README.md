@@ -171,7 +171,7 @@ armature improve <spec>                       # analyze traces, propose + auto-a
 armature improve <spec> --no-apply            # propose only; review the diff before applying
 armature report --run-id <id>                 # per-run text report with failure signatures
 armature replay <run_id>                      # display a recorded run stage-by-stage
-armature dashboard <spec>                     # Rich 4-panel aggregate health dashboard
+armature dashboard <spec>                     # Rich 5-panel aggregate health dashboard (incl. stage leverage heatmap)
 armature dashboard <spec> --watch             # auto-refresh every 5 seconds
 armature dashboard <spec> --format json       # machine-readable JSON output
 armature export-traces                        # export traces as SFT/DPO training data
@@ -452,6 +452,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
 | **HQS** | Harness Quality Score — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
+| **Leverage stage** | A stage whose per-run signal (quorum score for judge stages, `success × valid` otherwise) is highly correlated (Pearson `r`) with the run's final HQS — improving it moves overall HQS the most. `armature dashboard` shows a per-stage leverage heatmap; `armature improve` weights proposal coverage by leverage once enough runs exist (`min_runs` ≥ 8 and a stage reaches `|r| ≥ 0.4`). Dormant below that guard, so the optimizer is unchanged until traces support the claim. |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
 | **LoRA adapter skills** | `skill_library` entries can reference a registered LoRA adapter via `skill.adapter`. On tiers with `adapter_support: dynamic`, the adapter replaces the skill text at runtime; on `none` tiers the skill text is used or the configured `fallback` policy is applied. Developed from the Skill-to-LoRA paper ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)); continual updates follow C-LoRA ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)) |
 | **Templates** | Pre-built spec files for common patterns (Six Thinking Hats deliberation, etc.) |

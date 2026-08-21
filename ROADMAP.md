@@ -143,9 +143,11 @@ This is the classic sparse terminal reward problem in reinforcement learning. Th
 
 ---
 
-**Stage credit attribution (near-term)**
+**Stage credit attribution ✅ (implemented — leverage identification)**
 
 Analyze accumulated traces to identify which stages are most predictive of final HQS — the "leverage stages" that, when they go well, pull the whole run up with them. Not all stages are equally important to final quality; in most workflows there are 1–2 stages whose quorum score has high correlation with HQS and several that are relatively independent noise.
+
+> **Status (implemented):** per-stage leverage (Pearson `r` between each stage's per-run signal and final HQS) ships as a `compute_leverage(traces)` analysis, a leverage heatmap panel on `armature dashboard`, and leverage-weighted proposal coverage in `armature improve` — gated by a data-sufficiency guard (`min_runs` ≥ 8 and a stage reaching `|r| ≥ 0.4`) so the optimizer is unchanged until traces support the claim. The deeper pattern analyses below (retry quality, cascade correlation, context utilization, escalation ROI) remain future work; the process reward model in the next section is the longer-term generalization.
 
 Beyond leverage identification, trace analysis surfaces several distinct pattern types:
 
@@ -157,9 +159,9 @@ Beyond leverage identification, trace analysis surfaces several distinct pattern
 
 - **Escalation ROI** — when `on_fail.loop` escalates to a higher model tier, does the upgraded model succeed? Or does it also fail? Escalation that reliably succeeds signals a model capability boundary (right fix: upgrade the base tier). Escalation that also fails signals a spec problem (right fix: rewrite the prompt, not raise retry limits).
 
-What this enables: `SelfImproveRunner` currently proposes changes without knowing which stages are highest-leverage. With credit attribution, the optimizer targets the stages that will produce the largest HQS improvement first — instead of treating a low-impact stage the same as a high-impact one.
+What this enables: `SelfImproveRunner` previously proposed changes without knowing which stages are highest-leverage. With credit attribution, the optimizer targets the stages that will produce the largest HQS improvement first — instead of treating a low-impact stage the same as a high-impact one. ✅ Shipped: leverage weights now flow into `_pick_best_proposal` coverage scoring (dormant below the sufficiency guard).
 
-Surface this in `armature dashboard` as a per-stage leverage heatmap, and incorporate leverage weights into the `DiagnosticAnalyzer` prioritization.
+Surfaced in `armature dashboard` as a per-stage leverage heatmap, with leverage weights incorporated into proposal selection. ✅ The pattern analyses above (retry quality, cascade correlation, context utilization, escalation ROI) are the natural next layers on the same trace data — not yet wired into the optimizer.
 
 ---
 

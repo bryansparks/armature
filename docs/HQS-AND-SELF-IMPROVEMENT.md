@@ -176,6 +176,19 @@ Inspired by Self-Harness ([arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1
 
 A `stage_failed` with `mechanism=timeout` → add `timeout_s`. The same code with `mechanism=runtime_error, causal_status=model_problem` → upgrade the model tier. The surface diagnostic code is identical; the right fix is different.
 
+### Stage leverage
+
+Not all stages matter equally to final HQS. **Stage leverage** measures how predictive each stage is of the run's outcome: for every stage, Armature computes the Pearson correlation `r` between that stage's per-run signal and the run's final HQS.
+
+The per-run stage signal is `mean(quorum_score)` when the stage emits quorum scores (judge / consensus stages), otherwise `mean(success × output_valid)` — a 0/1 proxy for non-judge stages. A stage with high `|r|` is a **leverage stage**: when it goes well, the whole run tends to go well, so improvements there move HQS the most. Stages with near-zero `|r|` are relatively independent noise.
+
+The analysis is gated by a **data-sufficiency guard** so it never over-reads a handful of runs: leverage is reported only once at least `min_runs` (default 8) runs exist *and* at least one stage reaches `|r| ≥ 0.4`. Below that, `armature dashboard` shows "insufficient data" and `armature improve` behaves exactly as before — the feature is dormant until the traces can actually support the claim.
+
+When sufficient, two things change:
+
+- `armature dashboard` renders a **leverage heatmap** panel — one row per stage ranked by `|r|`, with the signal type, the correlation, the run count, and a verdict (`leverage` / `flat` / `noise`).
+- `armature improve` **weights proposal coverage by leverage**: a candidate that fixes a high-leverage stage scores higher than one fixing a low-leverage stage, so the optimizer targets the stages that will produce the largest HQS improvement first. (Selection remains latency-aware within the ε-band — leverage reweights coverage, it does not replace the latency tiebreak.)
+
 ---
 
 ## What SpecRefiner does with the diagnosis

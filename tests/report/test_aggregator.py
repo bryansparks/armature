@@ -374,3 +374,39 @@ class TestDashboardData:
             last_run_id="r1",
         )
         assert data.hqs_delta == pytest.approx(0.05, abs=0.001)
+
+
+# ── HQS trend uses canonical formula (Task 3) ──────────────────────────────────
+
+from armature.state.traces import TraceRecord, compute_hqs_from_traces
+from armature.report.loader import load_dashboard_data
+
+
+def _t(run_id, quorum=0.9, latency=100.0, esc=0):
+    return TraceRecord(
+        run_id=run_id, workflow_name="wf", stage_id="s", role_type="judge",
+        model="m", quorum_score=quorum, success=True, output_valid=True,
+        latency_ms=latency, escalation_count=esc,
+    )
+
+
+async def _seed(store, traces):
+    for t in traces:
+        await store.record(t)
+
+
+async def test_dashboard_hqs_trend_uses_canonical_formula(tmp_path):
+    db = tmp_path / "traces.db"
+    # Two runs with different quorum so HQS differs
+    traces = [_t("r1", quorum=0.9, latency=100.0), _t("r1", quorum=0.9, latency=100.0, esc=1),
+              _t("r2", quorum=0.5, latency=4000.0), _t("r2", quorum=0.5, latency=4000.0)]
+    from armature.state.traces import TraceStore
+    store = TraceStore(db)
+    await store.init()
+    await _seed(store, traces)
+
+    data = await load_dashboard_data("wf", traces_db=db)
+    # The trend must equal compute_hqs_from_traces per run (canonical A, with HFR + avg latency)
+    run1 = compute_hqs_from_traces([_t("r1", quorum=0.9, latency=100.0), _t("r1", quorum=0.9, latency=100.0, esc=1)])
+    run2 = compute_hqs_from_traces([_t("r2", quorum=0.5, latency=4000.0), _t("r2", quorum=0.5, latency=4000.0)])
+    assert data.hqs_trend == [round(run1.hqs, 4), round(run2.hqs, 4)]

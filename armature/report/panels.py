@@ -134,6 +134,41 @@ def stage_breakdown(data: DashboardData) -> Panel:
     return Panel(t, title="[bold]Stage Breakdown[/bold]", border_style="dim", padding=(0, 0))
 
 
+# ── leverage_heatmap ──────────────────────────────────────────────────────────
+
+def leverage_heatmap(data: DashboardData) -> Panel:
+    """Per-stage leverage heatmap (correlation with final HQS)."""
+    t = Table(box=box.SIMPLE_HEAD, show_header=True, header_style="bold dim")
+    t.add_column("Stage", style="bold", no_wrap=True, max_width=16)
+    t.add_column("Signal", no_wrap=True, max_width=10)
+    t.add_column("r", justify="right", width=6)
+    t.add_column("Runs", justify="right", width=5)
+    t.add_column("Verdict", max_width=12)
+
+    lev = data.leverage
+    if lev is None or not lev.sufficient:
+        note = "insufficient data" if lev is None else f"insufficient data — {lev.n_runs} runs (need >= {lev.min_runs_required})"
+        t.add_row("—", "—", "—", "—", note)
+        return Panel(t, title="[bold]Leverage[/bold]", border_style="dim", padding=(0, 0))
+
+    # Show stages sorted by |r| descending (highest leverage first).
+    ordered = sorted(lev.stages.values(), key=lambda s: abs(s.r) if s.r is not None else 0.0, reverse=True)
+    for s in ordered[:_MAX_STAGE_ROWS]:
+        r_str = f"{s.r:+.2f}" if s.r is not None else "—"
+        if s.sufficient:
+            verdict = Text("leverage", style="bright_green bold")
+            style = "bright_green"
+        elif s.r is None:
+            verdict = Text("flat", style="dim")
+            style = ""
+        else:
+            verdict = Text("noise", style="dim")
+            style = ""
+        t.add_row(s.stage_id, s.signal_name, r_str, str(s.n_runs), verdict, style=style)
+
+    return Panel(t, title="[bold]Leverage[/bold]", border_style="dim", padding=(0, 0))
+
+
 # ── improvement_timeline ──────────────────────────────────────────────────────
 
 def improvement_timeline(data: DashboardData) -> Panel:

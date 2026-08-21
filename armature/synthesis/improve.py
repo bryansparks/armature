@@ -36,7 +36,8 @@ from armature.spec.models import HarnessSpec, EditableSurface
 from armature.spec.loader import load_spec
 from armature.spec.validator import validate_spec, SpecValidationError
 from armature.state.diagnostics import DiagnosticAnalyzer, DiagnosticResult
-from armature.state.traces import TraceStore, HqsResult, TraceRecord
+from armature.state.traces import TraceStore, HqsResult, TraceRecord, compute_hqs_from_traces
+from armature.state.leverage import compute_leverage, LeverageReport
 
 
 async def llm_completion(**kwargs) -> Any:
@@ -321,23 +322,26 @@ def _pick_best_proposal(
     old_spec: "HarnessSpec",
     *,
     latency_tolerance: int = 1,
+    leverage: dict[str, float] | None = None,
 ) -> "RefinerResult | None":
     """Select the best candidate using an ε-band fuzzy tiebreak.
 
     Coverage is primary: a candidate ≥2 predicted fixes behind the top can never
-    win. Among candidates within ``latency_tolerance`` (ε) of the top coverage,
-    the one with the lowest structural ``latency_risk`` wins — coverage is the
-    final tiebreak. This directly addresses the H4-v2 latency-cancel mechanism:
-    the max-coverage candidate tends to add the most fix-power (stages, tier
-    escalations, retries), which raises latency and nets ~0 HQS, so within the
-    fuzzy band the lower-latency candidate is the better HQS bet.
+    win. When ``leverage`` is a stage->weight map, coverage is leverage-weighted
+    (a fix on a high-leverage stage scores higher); when ``leverage is None``,
+    coverage is the plain count — identical to the prior behavior. Among
+    candidates within ``latency_tolerance`` (ε) of the top weighted coverage,
+    the lowest structural ``latency_risk`` wins — coverage is the final tiebreak.
     """
     if not candidates:
         return None
     diag_keys = {f"{d.code.value}:{d.stage_id}" for d in diagnostics}
 
-    def coverage(r: RefinerResult) -> int:
-        return len(set(r.predicted_fixes) & diag_keys)
+    def coverage(r: RefinerResult) -> float:
+        fixes = set(r.predicted_fixes) & diag_keys
+        if leverage is None:
+            return float(len(fixes))
+        return sum(leverage.get(fix.split(":")[1], 1.0) for fix in fixes)
 
     def risk(r: RefinerResult) -> float:
         return _latency_risk(old_spec, r.spec)
@@ -416,6 +420,9 @@ class ImprovementReport:
     # #6 latency-aware selection — structural latency-risk of the selected proposal
     # (proxy for the HQS latency-cancel tradeoff). 0.0 when no proposal was produced.
     latency_risk: float = 0.0
+    # Stage credit attribution — the LeverageReport carried for visibility/logging.
+    # None when no traces; a LeverageReport (possibly insufficient) otherwise.
+    leverage: LeverageReport | None = None
 
 
 _AUTO_APPLY_FIELDS = {"description", "on_fail", "model_tier", "timeout_s", "loop"}
@@ -777,13 +784,26 @@ class SelfImproveRunner:
         drift_score = 0.0
         latency_risk = 0.0
 
+        # Stage credit attribution — computed once over all loaded traces.
+        # compute_leverage([]) returns a valid insufficient LeverageReport, so the
+        # n=0 path is safe. `leverage_weights` (the dict) feeds _pick_best_proposal;
+        # `leverage_report` (the report) feeds _write_log + ImprovementReport.
+        leverage_report = compute_leverage(traces)
+        if leverage_report.sufficient:
+            leverage_weights = {
+                sid: (1.0 + abs(s.r)) if s.sufficient else 1.0
+                for sid, s in leverage_report.stages.items()
+            }
+        else:
+            leverage_weights = None
+
         # Drift score: fraction of current failures that were previously "fixed".
         # Computed against the union of all prior cycles' verified_fixes so it
         # detects oscillation (a fixed issue reappearing) across the whole log.
         ever_verified = _load_all_verified_fixes(self._log_path)
 
         if n > 0:
-            hqs_result = self._compute_hqs(traces)
+            hqs_result = compute_hqs_from_traces(traces)
             hqs_before = hqs_result.hqs
             diagnostics = DiagnosticAnalyzer(traces).analyze()
             curr_diag_keys = self._diag_keys(diagnostics)
@@ -816,7 +836,7 @@ class SelfImproveRunner:
         if needs_improvement:
             refiner = SpecRefiner(_model)
             spec_yaml = self._spec_path.read_text(encoding="utf-8")
-            hqs_obj = self._compute_hqs(traces) if traces else None
+            hqs_obj = compute_hqs_from_traces(traces) if traces else None
             editable_surfaces = [s.value for s in spec.self_improvement.editable_surfaces]
             # Close the loop: feed prior-cycle verification feedback and any post-run
             # analyst suggestions into the refiner so it can correct missed predictions.
@@ -859,7 +879,7 @@ class SelfImproveRunner:
                     if not _proposal_regression_risk(c, spec, healthy)
                 ]
                 regression_risk_count = len(allowed_candidates) - len(safe_candidates)
-                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics, spec)
+                result = _pick_best_proposal(safe_candidates or allowed_candidates, diagnostics, spec, leverage=leverage_weights)
             else:
                 result = await refiner.refine(
                     spec_yaml=spec_yaml,
@@ -940,6 +960,7 @@ class SelfImproveRunner:
             drift_threshold=self._drift_threshold,
             escalated_oscillation=escalated_oscillation,
             latency_risk=latency_risk,
+            leverage=leverage_report,
         )
         # #7 (Option 4): also record this cycle to the unified ImprovementStore so
         # `armature optimize` can see improve's verified/missed/regressed work. The
@@ -991,6 +1012,7 @@ class SelfImproveRunner:
             triggered_by_drift=triggered_by_drift,
             escalated_oscillation=escalated_oscillation,
             latency_risk=latency_risk,
+            leverage=leverage_report,
         )
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -1032,35 +1054,6 @@ class SelfImproveRunner:
         except (json.JSONDecodeError, OSError):
             return None
 
-    @staticmethod
-    def _compute_hqs(traces: list) -> HqsResult:
-        from armature.state.traces import HqsResult
-        n = len(traces)
-        output_valid_rate = sum(1 for t in traces if t.output_valid) / n
-        success_rate = sum(1 for t in traces if t.success) / n
-        qs = [t.quorum_score for t in traces if t.quorum_score is not None]
-        avg_quorum = sum(qs) / len(qs) if qs else 0.5
-        avg_latency = sum(t.latency_ms for t in traces) / n
-        latency_score = max(0.0, 1.0 - avg_latency / 5000.0)
-        hfr = sum(1 for t in traces if t.escalation_count == 0) / n
-        hqs = (
-            0.35 * output_valid_rate
-            + 0.25 * success_rate
-            + 0.20 * avg_quorum
-            + 0.10 * latency_score
-            + 0.10 * hfr
-        )
-        return HqsResult(
-            run_id="rolling",
-            hqs=hqs,
-            output_valid_rate=output_valid_rate,
-            success_rate=success_rate,
-            avg_quorum_score=avg_quorum,
-            latency_score=latency_score,
-            hfr=hfr,
-            n_traces=n,
-        )
-
     def _write_spec_history(self, yaml_text: str) -> None:
         history_path = self._spec_path.parent / f"{self._spec_path.stem}.spec_history.jsonl"
         entry = json.dumps({
@@ -1094,6 +1087,7 @@ class SelfImproveRunner:
         drift_threshold: float = 0.5,
         escalated_oscillation: bool = False,
         latency_risk: float = 0.0,
+        leverage: LeverageReport | None = None,
     ) -> None:
         self._log_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -1127,6 +1121,13 @@ class SelfImproveRunner:
             "escalated_oscillation": escalated_oscillation,
             # #6 latency-aware selection — structural latency-risk of the selected proposal
             "latency_risk": latency_risk,
+            # Stage credit attribution — leverage report (sufficient flag + per-stage r).
+            "leverage_sufficient": (leverage.sufficient if leverage is not None else False),
+            "leverage_stages": (
+                {sid: {"r": s.r, "n_runs": s.n_runs, "sufficient": s.sufficient}
+                 for sid, s in leverage.stages.items()}
+                if leverage is not None else {}
+            ),
         }
         with self._log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
