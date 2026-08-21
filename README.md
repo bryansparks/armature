@@ -177,6 +177,10 @@ armature dashboard <spec> --format json       # machine-readable JSON output
 armature export-traces                        # export traces as SFT/DPO training data
 armature channels start                       # messaging channel connectors
 armature watch <spec>                         # listen for cron/webhook triggers and fire runs
+armature package build --spec <yaml> --out <pkg>  # build a self-contained, verified workflow package
+armature package run <pkg> [--profile <env>]      # run a package (default: in a container)
+armature package verify <pkg>                     # re-run completeness checks without executing
+armature package inspect <pkg>                    # print the package manifest (read-only)
 ```
 
 ---
@@ -433,6 +437,8 @@ Armature is the **execution layer** — the first component in a larger system d
 ---
 
 ## Key concepts
+
+**Workflow packages** bundle a spec + inputs + vendored tools + a deps manifest + secret *names* + output destinations into a self-contained, verified directory any container can run. `armature package build` verifies completeness; `armature package run` executes one package in a generic `armature-runner` container and delivers artifacts (+ optional trace) to a results dir. The package is data, not an image — a pool of identical runner containers can pull packages from a queue (SQS, later) with no changes to the package or runner. See `docs/WORKFLOW-PACKAGES.md`.
 
 | Concept | Description |
 |---|---|
