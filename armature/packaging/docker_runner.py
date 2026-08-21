@@ -31,14 +31,14 @@ class DockerRunnerLauncher:
                "-v", f"{results}:/results",
                "-v", "/var/run/docker.sock:/var/run/docker.sock"]
         if profile is not None:
-            cmd += ["-v", f"{profile}:{profile}:ro"]
+            cmd += ["-v", f"{profile}:/secrets.env:ro"]
         if inputs_override is not None:
-            cmd += ["-v", f"{inputs_override}:{inputs_override}:ro"]
+            cmd += ["-v", f"{inputs_override}:/inputs-override.yaml:ro"]
         cmd += [self._image, "package", "run", "--direct", "/package", "--results", "/results"]
         if profile is not None:
-            cmd += ["--secrets", str(profile)]
+            cmd += ["--secrets", "/secrets.env"]
         if inputs_override is not None:
-            cmd += ["--inputs-override", str(inputs_override)]
+            cmd += ["--inputs-override", "/inputs-override.yaml"]
         if include_trace:
             cmd += ["--include-trace"]
         return cmd

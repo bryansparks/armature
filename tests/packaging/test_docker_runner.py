@@ -14,8 +14,8 @@ def test_run_command_constructs_mounts(tmp_path: Path):
     assert "-v /var/run/docker.sock:/var/run/docker.sock" in joined
     assert "package run --direct /package --results /results" in joined
     assert "--include-trace" in joined
-    assert f"--secrets {tmp_path/'p.env'}" in joined
-    assert f"--inputs-override {tmp_path/'o.yaml'}" in joined
+    assert "--secrets /secrets.env" in joined
+    assert "--inputs-override /inputs-override.yaml" in joined
 
 def subprocess_runner():
     """Avoid shelling out in unit tests — capture, don't execute."""
