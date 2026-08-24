@@ -56,8 +56,9 @@ class PackageRunner:
             # R1 integrity
             if not verify_integrity(pkg_dir):
                 raise PackageError("integrity check failed — package corrupt or tampered")
-            # R2 re-verify
-            report = CompletenessVerifier().verify(pkg_dir, manifest)
+            # R2 re-verify (read-only integrity: the package mount may be :ro,
+            # and R1 already verified integrity above)
+            report = CompletenessVerifier().verify(pkg_dir, manifest, write_integrity=False)
             if not report.ok:
                 raise PackageError("re-verify failed: " +
                                    "; ".join(f"{c.check}: {c.detail}" for c in report.failures))

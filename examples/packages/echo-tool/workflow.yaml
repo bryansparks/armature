@@ -1,0 +1,21 @@
+name: echo-tool
+version: "1.0"
+description: >
+  A no-LLM tool_call package. Echoes a runtime-supplied message through a
+  vendored tool. Needs no API key and no network — the smallest end-to-end
+  container smoke for workflow packages.
+
+contracts:
+  inputs:
+    - name: msg
+
+tools:
+  - module: echo_tool
+
+stages:
+  - id: echo
+    tool_call:
+      name: echo
+      args:
+        msg: "{{ msg }}"
+    depends_on: []

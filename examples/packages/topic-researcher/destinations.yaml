@@ -1,0 +1,5 @@
+artifacts:
+  - stage_id: writer
+    name: briefing
+    format: markdown
+include_trace: true

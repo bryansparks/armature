@@ -1,0 +1,5 @@
+artifacts:
+  - stage_id: run
+    name: result
+    format: json       # the shell tool returns {stdout, stderr, exit_code}
+include_trace: true

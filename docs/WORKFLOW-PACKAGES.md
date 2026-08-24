@@ -52,7 +52,7 @@ changes to the package or the runner.
 | **Deterministic results dir** | `results/<run_id>/{receipt.json, result.json, artifacts/, trace.jsonl, logs/}` — the same layout every run, every host |
 | **Run receipt** | `receipt.json` is the ready-made payload for push sinks (webhook, S3, Slack) — downstream consumers never parse Armature internals |
 | **Optional trace** | `--include-trace` writes a full `trace.jsonl` (LLM dialogs) alongside artifacts for replay/debugging |
-| **Nested sandbox (DooD)** | When a packaged workflow declares `sandbox.mode: docker`, the runner mounts the host Docker socket and runs the workflow's shell/file stages as sibling containers — isolation identical to a non-packaged run |
+| **Nested sandbox (DooD)** | When a packaged workflow declares `sandbox.mode: docker`, the launcher mounts the host Docker socket and runs the runner as root so `DockerSandboxProvider` can spawn the workflow's shell/file stages as sibling containers — isolation identical to a non-packaged run. Non-sandbox packages get neither (least privilege) |
 | **Four CLI verbs** | `armature package build | run | verify | inspect` — one tool for the whole lifecycle |
 | **Pool-ready by construction** | No per-host config, no image per workflow, secret-free bundle, machine-readable receipt — the format was designed for queue + fleet execution, not just single runs |
 
@@ -212,6 +212,12 @@ runs the eight completeness checks below. If any check fails the build aborts.
 rebuilding — V8 recomputes and rewrites `manifest.sha256`.
 `armature package inspect <pkg>` prints the manifest read-only.
 
+> The verifier's `write_integrity` flag controls V8. The builder and
+> `armature package verify` use the default (`True`, write). The runner's R2
+> re-verify passes `write_integrity=False` so V8 **validates** the existing
+> manifest instead of rewriting it — the package mount is read-only in the
+> container.
+
 ---
 
 ## `armature package run`
@@ -238,7 +244,7 @@ The in-process core (`PackageRunner`) runs a fixed eight-step sequence; the
 container entrypoint calls the same core via `--direct`:
 
 1. **R1 integrity** — re-verify `manifest.sha256`; fail closed on tamper/missing/extra.
-2. **R2 re-verify** — re-run the completeness checks.
+2. **R2 re-verify** — re-run the completeness checks with read-only integrity (`write_integrity=False`); V8 validates the manifest rather than rewriting it, since the package is mounted `:ro`.
 3. **R3 secrets** — inject values from `--profile` into the environment; compute the missing set *before* injection; fail closed (`SecretMissingError`) if any declared name has no value.
 4. **R4 deps** — install `requirements.txt` and put the vendored `tools/` dir on `sys.path` (so tool modules import without being pip-installed).
 5. **R5 inputs** — load bundled `inputs.yaml`, apply `--input` overrides.
@@ -320,6 +326,14 @@ shell and file stages as **sibling containers** on the host daemon, not as
 nested children. This keeps sandbox isolation identical to a non-packaged run:
 resource limits, network isolation, and image-digest tracing all apply, and the
 sandbox containers are siblings of the runner, not descendants.
+
+The launcher only mounts the socket and runs the runner as root when the
+package's bundled spec declares `sandbox.mode: docker` (it peeks at the spec
+before launch). Every other package runs as the image's non-root `armature`
+user with no socket — least privilege. Root is required for socket access on
+Orbstack (which rejects `--group-add`); on Linux a `docker`-group member would
+also work, but root is the portable choice for a trusted runner that
+deliberately mounts the socket.
 
 ---
 
@@ -457,11 +471,14 @@ contract.
 
 ## Testing
 
-The packaging feature has **30 tests** in `tests/packaging/` (plus the shared
-`conftest.py` fixtures). They run as part of the full repo suite
-(`python -m pytest tests/`); the whole suite is green (1850 passed, 6 skipped
-at the time of writing). The tests are unit- and integration-level only —
-**no test exercises a real Docker container** (see [Gaps](#gaps--what-is-not-yet-tested)).
+The packaging feature has **34 tests** in `tests/packaging/` (plus the shared
+`conftest.py` fixtures) and **3 example packages** in `examples/packages/`.
+They run as part of the full repo suite (`python -m pytest tests/`); the whole
+suite is green (1869 passed at the time of writing). Three of the tests are
+**real-Docker integration tests** that build the `armature-runner` image and
+run the example packages in actual containers; they skip automatically when
+Docker is not available, so `pytest tests/` stays green on any machine without
+Docker. Run them explicitly with `pytest -m docker`.
 
 ### Shared fixtures (`conftest.py`)
 
@@ -525,11 +542,14 @@ Uses a `FakeHarness` (no real LLM) so the runner's R1–R8 glue is tested withou
 | `test_runner_secrets_fail_closed` | `OPENROUTER_API_KEY` unset → `SecretMissingError` raised (fail-closed) |
 | `test_runner_input_override` | `inputs_override={"topic":"override"}` reaches the stage output (the artifact contains `"override"`) |
 
-### Docker launcher — `test_docker_runner.py` (1)
+### Docker launcher — `test_docker_runner.py` (2)
+
+Command-construction only (stubs out the subprocess runner — does not shell out):
 
 | Test | Asserts |
 |---|---|
-| `test_run_command_constructs_mounts` | `build_command` emits the right `docker run --rm` invocation: package mounted `/package:ro`, results `/results`, Docker socket passthrough, `package run --direct /package --results /results`, `--include-trace`, `--secrets /secrets.env`, `--inputs-override /inputs-override.yaml`. (Stubs out the subprocess runner — does **not** shell out.) |
+| `test_sandbox_pkg_mounts_socket_and_runs_as_root` | A `sandbox.mode: docker` package: `build_command` mounts `/package:ro` + `/results` + the Docker socket, adds `--user 0:0`, and appends only `/package --results /results` + option flags (no doubled `package run --direct` — the image ENTRYPOINT supplies it) |
+| `test_non_sandbox_pkg_omits_socket_and_root` | A non-sandbox package: no socket, no `--user 0:0`, no secrets/override flags — least privilege |
 
 ### CLI — `test_cli.py` (5)
 
@@ -547,53 +567,60 @@ Uses a `FakeHarness` (no real LLM) so the runner's R1–R8 glue is tested withou
 |---|---|
 | `test_build_and_run_direct_no_llm` | Builds the `no_llm_pkg` via `PackageBuilder`, runs it via `PackageRunner(skip_deps_install=True).run_sync(...)` against the **real `Harness`** (not a fake), and asserts `status == "complete"`, `receipt.json` exists, `trace.jsonl` exists, and an artifact with `stage_id == "echo"` was produced. This is the one test that exercises the real engine tool_call path end-to-end — no LLM, no network, no Docker. |
 
+### Docker integration — `test_docker_integration.py` (3)
+
+Real-container tests (marked `docker`; skipped without a Docker daemon). A
+module fixture builds the `armature-runner` image from `Dockerfile.runner`
+once; each test builds an example package via the CLI and runs it with
+`armature package run <pkg>` (the real container path, not `--direct`):
+
+| Test | Asserts |
+|---|---|
+| `test_echo_tool_runs_in_container` | The `echo-tool` example builds + runs in a container; host `results/<run_id>/` has `receipt.json` (status `complete`), `trace.jsonl`, and `artifacts/echo.md` containing the `--input msg=…` override value. Closes the container round-trip, the container-mode CLI, and the host `--input`→container `--inputs-override` path. |
+| `test_tampered_package_exits_nonzero_in_container` | A tampered package (a byte appended to `workflow.yaml` → R1 integrity fails) run in a container exits **non-zero** (R8). Proves the failure path through the real container. |
+| `test_sandbox_shell_runs_in_sibling_container` | The `sandbox-shell` example (`sandbox.mode: docker`) runs in a container that mounts the Docker socket as root and spawns an `alpine:3.20` **sibling** container (DooD); the sibling's `echo` stdout is captured into `artifacts/result.json`. Closes the nested-sandbox path. |
+
+These tests surfaced (and fixed) three real bugs the unit suite missed: the
+`Dockerfile.runner` image failed to build (missing `README.md` at install time,
+and an incomplete wheel from a partial source copy), the launcher duplicated
+the image's `package run --direct` ENTRYPOINT, and R2's re-verify tried to
+rewrite `manifest.sha256` on the read-only package mount.
+
 ### Gaps — what is *not* yet tested
 
-These are the seams a real-world test expansion should close. They are
-deliberate scoping for the first slice, not oversights — each is a candidate
-for a new test:
+The first slice is now well covered, including the real-Docker round-trip.
+These seams remain — each is a candidate for a new test:
 
-1. **Real Docker round-trip (the big one).** No test builds the
-   `armature-runner` image from `Dockerfile.runner`, runs a package in the
-   container, and checks the host results dir. `docker_runner` is only tested
-   at command-construction level (`test_run_command_constructs_mounts`). A
-   smoke test: `docker build -f Dockerfile.runner -t armature-runner:latest .`
-   then `armature package run <pkg> --profile <env>` and assert
-   `results/<run_id>/receipt.json` exists on the host and a forced failure
-   exits non-zero. Requires Orbstack/Docker locally; gated as a manual step
-   in the first slice.
-2. **Container entrypoint flags.** `--secrets` and `--inputs-override` are
-   parsed (visible via `--help`) and emitted by `build_command`, but no test
-   drives `package run --direct --secrets /secrets.env --inputs-override
-   /inputs-override.yaml` end-to-end through the CLI parser + runner. A test
-   that writes a secrets .env and an inputs-override YAML, runs `--direct` with
-   them, and asserts the override value reaches the artifact would close this.
-3. **`verify` is non-read-only.** V8 rewrites `manifest.sha256` on every
-   `verify`/`run`. No test asserts (or guards) that mutation. A test that
-   snapshots `manifest.sha256` before/after `verify` would document the
-   behavior; a `write_integrity=False` option is a deferred follow-up.
-4. **V4 TOOLS_RESOLVABLE failure path.** No test asserts that a `tools:`
-   module neither vendored nor in `requirements.txt` makes V4 `fail`.
-5. **V5 SANDBOX_IMAGE / V7 DEPS_RESOLVE failure paths.** V7's content check is
+**Closed by the Docker integration tests:**
+- ✅ Real Docker round-trip (build image → run package in container → host results + receipt).
+- ✅ Container-mode CLI (`armature package run <pkg>`, not just `--direct`).
+- ✅ Host `--input` override reaching a stage inside the container (the `--inputs-override` container flag).
+- ✅ Nested sandbox (DooD) — a `sandbox.mode: docker` package spawning a sibling container.
+- ✅ Read-only integrity at run time (`write_integrity=False` on the `:ro` package mount).
+
+**Still open:**
+1. **`--secrets` container flag end-to-end.** The echo/sandbox examples have no
+   declared secrets, so the container `--secrets /secrets.env` mount is not
+   exercised in automation. Close it by running the `topic-researcher` example
+   (needs an `ANTHROPIC_API_KEY` profile) or a contrived no-LLM package that
+   declares a secret via `model_tiers[*].api_key_env`.
+2. **Real LLM run.** Every automated runner/CLI/e2e test uses `FakeHarness` or
+   a no-LLM `tool_call` spec. No test runs a packaged `role:` workflow against
+   a real provider (needs credits + network; the `topic-researcher` example is
+   the manual live smoke for this).
+3. **V4 TOOLS_RESOLVABLE failure path.** No test asserts that a `tools:` module
+   neither vendored nor in `requirements.txt` makes V4 `fail`.
+4. **V5 SANDBOX_IMAGE / V7 DEPS_RESOLVE failure paths.** V7's content check is
    effectively a no-op (parse-only); V5 is warn-only. No test exercises either
    as a failing/warning case.
-6. **Real LLM run.** Every runner/CLI/e2e test uses `FakeHarness` or a no-LLM
-   `tool_call` spec. No test runs a packaged `role:` workflow against a real
-   provider (would need credits + network; belongs in a live integration suite).
-7. **Nested sandbox (DooD).** No test runs a packaged workflow that declares
-   `sandbox.mode: docker` and confirms the workflow's shell/file stages run as
-   sibling containers on the host daemon.
-8. **Archive output.** `--archive tar|zip` is implemented but no test asserts
+5. **Archive output.** `--archive tar|zip` is implemented but no test asserts
    the archive is produced and is itself runnable.
-9. **Partial-dir cleanup on build abort.** When `build` fails a check, the
+6. **Partial-dir cleanup on build abort.** When `build` fails a check, the
    partial output dir's cleanup is not asserted.
-10. **Concurrent runs / clobber.** `_inputs-override.yaml` is written into
-    `pkg_dir.parent`; two concurrent runs of the same package could clobber it.
-    No concurrency test.
-11. **`run` (container mode, not `--direct`) from the CLI.** All CLI `run`
-    tests use `--direct`. The host-side path that shells out to `docker run`
-    is not exercised (it needs Docker; see gap 1).
+7. **Concurrent runs / clobber.** `_inputs-override.yaml` is written into
+   `pkg_dir.parent`; two concurrent runs of the same package could clobber it.
+   No concurrency test.
 
-A good expansion order: close gap 1 (real Docker smoke) first — it exercises
-gaps 2, 7, and 11 at once — then add the cheap unit tests for gaps 4, 5, 8, 9,
-which need no Docker.
+A good expansion order: add the cheap no-Docker unit tests for gaps 3, 4, 5, 6
+first; then a live-LLM integration suite for gaps 1 and 2 (gated on credits +
+network, like `topic-researcher`).

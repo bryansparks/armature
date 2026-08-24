@@ -54,7 +54,15 @@ def _has_execution_type(stage) -> bool:
 
 class CompletenessVerifier:
     def verify(self, pkg_dir: Path, manifest: PackageManifest,
-               profile_env: dict[str, str] | None = None) -> VerificationReport:
+               profile_env: dict[str, str] | None = None, *,
+               write_integrity: bool = True) -> VerificationReport:
+        """Run all eight completeness checks.
+
+        ``write_integrity`` controls V8: when True (default, used by the
+        builder and ``armature package verify``) V8 rewrites
+        ``manifest.sha256``; when False (used by the runner's R2 re-verify on a
+        read-only package mount) V8 validates the existing manifest instead.
+        """
         report = VerificationReport()
         report.checks.append(self._v1_spec(pkg_dir, manifest))
         report.checks.append(self._v2_inputs(pkg_dir, manifest))
@@ -63,7 +71,7 @@ class CompletenessVerifier:
         report.checks.append(self._v5_sandbox(pkg_dir, manifest))
         report.checks.append(self._v6_artifacts(pkg_dir, manifest))
         report.checks.append(self._v7_deps(pkg_dir, manifest))
-        report.checks.append(self._v8_integrity(pkg_dir))
+        report.checks.append(self._v8_integrity(pkg_dir, write=write_integrity))
         return report
 
     # -- individual checks ---------------------------------------------------
@@ -197,9 +205,17 @@ class CompletenessVerifier:
             return CheckResult(check="DEPS_RESOLVE", status="fail", detail=f"unparseable lines: {bad}")
         return CheckResult(check="DEPS_RESOLVE", status="pass", detail=f"{len(lines)} requirement(s)")
 
-    def _v8_integrity(self, pkg_dir) -> CheckResult:
-        write_manifest_sha256(pkg_dir)
-        return CheckResult(check="INTEGRITY", status="pass", detail="manifest.sha256 written")
+    def _v8_integrity(self, pkg_dir, *, write: bool = True) -> CheckResult:
+        if write:
+            write_manifest_sha256(pkg_dir)
+            return CheckResult(check="INTEGRITY", status="pass", detail="manifest.sha256 written")
+        # Read-only path (read-only package mount): validate the existing
+        # manifest against the files rather than rewriting it.
+        from armature.packaging.integrity import verify_integrity
+        if verify_integrity(pkg_dir):
+            return CheckResult(check="INTEGRITY", status="pass", detail="manifest.sha256 verified")
+        return CheckResult(check="INTEGRITY", status="fail",
+                           detail="manifest.sha256 missing or does not match files")
 
     # -- helpers -------------------------------------------------------------
     @staticmethod
