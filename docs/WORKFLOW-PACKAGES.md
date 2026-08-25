@@ -471,14 +471,24 @@ contract.
 
 ## Testing
 
-The packaging feature has **34 tests** in `tests/packaging/` (plus the shared
+The packaging feature has **35 tests** in `tests/packaging/` (plus the shared
 `conftest.py` fixtures) and **3 example packages** in `examples/packages/`.
 They run as part of the full repo suite (`python -m pytest tests/`); the whole
-suite is green (1869 passed at the time of writing). Three of the tests are
+suite is green (1870 passed at the time of writing). Three of the tests are
 **real-Docker integration tests** that build the `armature-runner` image and
 run the example packages in actual containers; they skip automatically when
 Docker is not available, so `pytest tests/` stays green on any machine without
 Docker. Run them explicitly with `pytest -m docker`.
+
+> **Live local run.** All three example packages were run end-to-end in real
+> Orbstack containers (`armature package run <pkg>`), which surfaced a
+> host-path bug the unit suite missed: the container-mode CLI passed
+> *relative* paths to `docker run -v`, and Docker silently treats a relative
+> path matching its volume-name charset as an empty named volume (rejecting
+> names that start with `_`, which is how `_inputs-override.yaml` surfaced it).
+> The fix absolutizes every host path that reaches a bind-mount and writes the
+> override to a unique temp file; a regression test
+> (`test_package_run_container_mode_absolutizes_paths`) locks it in.
 
 ### Shared fixtures (`conftest.py`)
 
@@ -591,19 +601,24 @@ rewrite `manifest.sha256` on the read-only package mount.
 The first slice is now well covered, including the real-Docker round-trip.
 These seams remain — each is a candidate for a new test:
 
-**Closed by the Docker integration tests:**
+**Closed by the Docker integration tests and the live local run:**
 - ✅ Real Docker round-trip (build image → run package in container → host results + receipt).
 - ✅ Container-mode CLI (`armature package run <pkg>`, not just `--direct`).
 - ✅ Host `--input` override reaching a stage inside the container (the `--inputs-override` container flag).
 - ✅ Nested sandbox (DooD) — a `sandbox.mode: docker` package spawning a sibling container.
 - ✅ Read-only integrity at run time (`write_integrity=False` on the `:ro` package mount).
+- ✅ Bind-mount path absolutization — the live run surfaced that relative host
+  paths were silently treated as empty named Docker volumes; the CLI now
+  absolutizes every host path, with a regression test.
+- ✅ Concurrent-run override clobber — overrides now go to a unique temp file
+  instead of a shared `_inputs-override.yaml` in the package's parent dir.
 
 **Still open:**
 1. **`--secrets` container flag end-to-end.** The echo/sandbox examples have no
    declared secrets, so the container `--secrets /secrets.env` mount is not
-   exercised in automation. Close it by running the `topic-researcher` example
-   (needs an `ANTHROPIC_API_KEY` profile) or a contrived no-LLM package that
-   declares a secret via `model_tiers[*].api_key_env`.
+   exercised in automation. The live `topic-researcher` run confirmed the
+   fail-closed path (missing `ANTHROPIC_API_KEY` → exit 2), but the happy path
+   (a profile injecting a real value that reaches the LLM call) needs credits.
 2. **Real LLM run.** Every automated runner/CLI/e2e test uses `FakeHarness` or
    a no-LLM `tool_call` spec. No test runs a packaged `role:` workflow against
    a real provider (needs credits + network; the `topic-researcher` example is
@@ -617,9 +632,6 @@ These seams remain — each is a candidate for a new test:
    the archive is produced and is itself runnable.
 6. **Partial-dir cleanup on build abort.** When `build` fails a check, the
    partial output dir's cleanup is not asserted.
-7. **Concurrent runs / clobber.** `_inputs-override.yaml` is written into
-   `pkg_dir.parent`; two concurrent runs of the same package could clobber it.
-   No concurrency test.
 
 A good expansion order: add the cheap no-Docker unit tests for gaps 3, 4, 5, 6
 first; then a live-LLM integration suite for gaps 1 and 2 (gated on credits +

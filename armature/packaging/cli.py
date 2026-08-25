@@ -66,6 +66,14 @@ def run(
 ):
     """Run a workflow package to completion (default: in a container)."""
     pkg_dir = _resolve_pkg(pkg)
+    # Docker bind-mounts require absolute host paths: a relative path that
+    # happens to match Docker's volume-name charset is silently treated as a
+    # named (empty) volume rather than a bind mount. Absolutize every host path
+    # that will reach `docker run -v` (and the in-process path too, harmlessly).
+    results = _abs(results)
+    profile = _abs(profile)
+    secrets = _abs(secrets)
+    inputs_override_file = _abs(inputs_override_file)
     if direct:
         from armature.packaging.runner import PackageRunner, PackageError, SecretMissingError
         runner = PackageRunner(skip_deps_install=False)
@@ -89,7 +97,7 @@ def run(
         raise typer.Exit(1)
     # container mode
     from armature.packaging.docker_runner import DockerRunnerLauncher
-    overrides = _write_overrides(pkg_dir.parent, _parse_inputs(input_kv)) if input_kv else None
+    overrides = _write_overrides(_parse_inputs(input_kv)) if input_kv else None
     dockerfile = Path(__file__).resolve().parents[2] / "Dockerfile.runner"
     launcher = DockerRunnerLauncher()
     try:
@@ -99,6 +107,11 @@ def run(
         raise typer.Exit(1)
     rc = launcher.run(pkg=pkg_dir, results=results, profile=profile,
                       inputs_override=overrides, include_trace=include_trace)
+    if overrides is not None:
+        try:
+            overrides.unlink()
+        except OSError:
+            pass
     raise typer.Exit(rc)
 
 
@@ -139,7 +152,7 @@ def inspect(
 # -- helpers ---------------------------------------------------------------
 def _resolve_pkg(pkg: Path) -> Path:
     if pkg.is_dir():
-        return pkg
+        return pkg.resolve()
     if pkg.exists() and pkg.suffix in (".tar", ".zip"):
         import tempfile, tarfile, zipfile
         target = Path(tempfile.mkdtemp(prefix="armature-pkg-")) / pkg.stem
@@ -153,8 +166,8 @@ def _resolve_pkg(pkg: Path) -> Path:
         # archive may wrap a top dir
         entries = list(target.iterdir())
         if len(entries) == 1 and entries[0].is_dir() and (entries[0] / "package.yaml").exists():
-            return entries[0]
-        return target
+            return entries[0].resolve()
+        return target.resolve()
     typer.echo(f"Package not found: {pkg}", err=True)
     raise typer.Exit(1)
 
@@ -164,8 +177,25 @@ def _load_profile_env(profile: Path) -> dict[str, str]:
     return PackageRunner._parse_env_file(profile)
 
 
-def _write_overrides(parent: Path, overrides: dict) -> Path:
+def _write_overrides(overrides: dict) -> Path:
+    """Write input overrides to a unique absolute temp YAML file.
+
+    A unique temp file (not ``<pkg_dir.parent>/_inputs-override.yaml``) avoids
+    two concurrent runs of the same package clobbering each other's overrides,
+    and guarantees an absolute path for the Docker bind-mount (Docker rejects
+    relative paths that don't match its volume-name charset, and silently
+    treats the rest as empty named volumes).
+    """
+    import tempfile
     from ruamel.yaml import YAML
-    p = parent / "_inputs-override.yaml"
+    fd, name = tempfile.mkstemp(prefix="armature-overrides-", suffix=".yaml")
+    p = Path(name)
     YAML().dump(overrides, p)
+    import os
+    os.close(fd)
     return p
+
+
+def _abs(p: Path | None) -> Path | None:
+    """Resolve to an absolute path, or None if already None."""
+    return p.resolve() if p is not None else None
