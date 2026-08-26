@@ -341,6 +341,10 @@ The harness resolves the path to absolute at init time and mounts it as `-v /abs
 
 `file_write` and `file_read` tool handlers write and read directly on the host filesystem (within `host_workspace`) rather than invoking Docker. This is intentional: it avoids spawning an extra container for simple I/O, which would add 100–300ms per file operation. The security boundary is the `host_workspace` directory — the handlers refuse paths that escape it.
 
+### Running sandboxed workflows as packages (DooD)
+
+When a workflow is shipped as a **workflow package** and run in the `armature-runner` container (`armature package run <pkg>`), a `sandbox.mode: docker` spec runs its shell/file stages as *sibling* containers on the **host** Docker daemon — Docker-outside-of-Docker. The runner container mounts the host Docker socket and runs as root *only* for packages that declare the docker sandbox (every other package runs without the socket and without root, least-privilege). The sandbox containers are siblings of the runner, not nested inside it, so the same image, network, and resource limits above apply on the host daemon. This is the deployment shape for a pool of worker containers. See `docs/WORKFLOW-PACKAGES.md`.
+
 ---
 
 ## What the sandbox does not cover

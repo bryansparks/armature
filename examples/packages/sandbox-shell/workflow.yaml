@@ -1,0 +1,24 @@
+name: sandbox-shell
+version: "1.0"
+description: >
+  A no-LLM package that runs a shell command inside a sibling Docker container
+  (DooD — Docker-outside-of-Docker). Proves the runner container can spawn
+  isolated sibling containers on the host daemon via the mounted socket, with
+  no network and a tiny sibling image. No API key, no LLM.
+
+sandbox:
+  mode: docker
+  image: alpine:3.20        # tiny sibling image; auto-pulled on first run
+  allow_network: false      # sibling runs with --network none
+  host_workspace: /tmp/armature-sandbox-demo
+
+contracts:
+  inputs: []
+
+stages:
+  - id: run
+    tool_call:
+      name: shell
+      args:
+        cmd: "echo hello-from-sandbox"
+    depends_on: []

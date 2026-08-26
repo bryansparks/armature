@@ -84,6 +84,9 @@ mcp = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "docker: marks tests that require a running Docker daemon (skipped without one)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["armature"]

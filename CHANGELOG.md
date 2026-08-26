@@ -17,6 +17,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - **Stage credit attribution** — per-stage leverage analysis identifies which stages are most predictive of final HQS. For each stage, `compute_leverage(traces)` computes the Pearson correlation `r` between the stage's per-run signal (quorum score for judge stages, `success × valid` otherwise) and the run's final HQS; stages with high `|r|` are *leverage stages*. Surfaced as a new **leverage heatmap** panel on `armature dashboard` (one row per stage ranked by `|r|`, with signal type, run count, and a `leverage` / `flat` / `noise` verdict). When sufficient data exists (`min_runs` ≥ 8 and a stage reaches `|r| ≥ 0.4`), `armature improve` weights proposal coverage by stage leverage so fixes targeting high-leverage stages are prioritized; below that guard the optimizer is unchanged. Also canonicalizes the HQS trend to formula A (HFR + `avg_latency/5000`) so the dashboard trend and the leverage analysis share one HQS definition.
+- Workflow packages: `armature package build|run|verify|inspect` — self-contained,
+  portable, verified workflow bundles executed by a generic `armature-runner`
+  container; results dir with `receipt.json` + artifacts + optional `trace.jsonl`.
+  Reference-only secrets (names in the bundle, values injected at run, fail-closed
+  if unresolvable). `manifest.sha256` integrity verified before every run. A package
+  with `sandbox.mode: docker` spawns its sandboxed stages as sibling containers on the
+  host Docker daemon (DooD) — the runner mounts the socket and runs as root only for
+  that case (least privilege otherwise). Three example packages in `examples/packages/`
+  (`echo-tool`, `topic-researcher`, `sandbox-shell`) double as the Docker integration
+  test corpus (`pytest -m docker`, auto-skipped without Docker). See
+  docs/WORKFLOW-PACKAGES.md.
 
 ### Security
 

@@ -75,6 +75,8 @@ This guide covers everything you need to build agentic workflows with Armature: 
 35. [Continuation — rolling memory across runs](#35-continuation--rolling-memory-across-runs)
 36. [Triggers — cron and webhook activation](#36-triggers--cron-and-webhook-activation)
 37. [Named workflow registry](#37-named-workflow-registry)
+38. [Docker sandbox isolation](#38-docker-sandbox-isolation)
+39. [Workflow packages](#39-workflow-packages)
 
 ---
 
@@ -4191,10 +4193,36 @@ The spec is the complete statement of what this agent can do and what its execut
 
 See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry usage, workspace configuration, and the enterprise security posture.
 
+## 39. Workflow packages
+
+**Problem.** A workflow spec is just a YAML file — it references tool modules by Python path, pulls secrets from the ambient environment, and assumes the host has the right Python and dependencies installed. Sharing a workflow across machines, teams, or a pool of worker containers means re-establishing all of that by hand each time.
+
+**Solution.** `armature package build` bundles a workflow spec into a self-contained, verified, portable directory: the spec, bundled inputs, vendored tools, `requirements.txt`, a reference-only secrets manifest, declared output destinations, and a `manifest.sha256` integrity digest. A generic `armature-runner` Docker image executes any package — the same image runs every workflow, no per-workflow container build. `armature package run <pkg>` runs a package in a container by default; `--direct` runs it in-process.
+
+```bash
+armature package build --spec my_workflow.yml --out my_pkg \
+  --tools ./tools --input topic="quantum error correction"
+armature package run my_pkg [--profile secrets.env]   # default: in a container
+armature package verify my_pkg                        # 8 completeness checks, no execution
+armature package inspect my_pkg                       # print the manifest (read-only)
+```
+
+**What the bundle carries — and what it doesn't.** The package stores secret *names* (`api_key_env` references) but never secret *values*. Values are injected at run time from an owner-supplied `--profile` `.env` file (gitignored), and the run fails closed if a declared secret is unresolvable. Inputs declared in `contracts.inputs` must be present — either bundled at build time or supplied at run time via `--input key=value` — or the build/verify fails. The eight completeness checks (spec validity, inputs, secrets, tools resolvable, sandbox image, artifacts, deps, integrity) run at build, again at run, and on demand via `verify`.
+
+**Integrity.** `manifest.sha256` hashes every file in the package. R1 verifies it before run; any tampering (a changed spec, a swapped tool) fails the run before the workflow executes. The build's V8 writes the manifest; the run's R2 re-verifies it read-only (the package mount is read-only in the container).
+
+**Nested sandbox (DooD).** A package that declares `sandbox.mode: docker` spawns its sandboxed shell/file stages as *sibling* containers on the host Docker daemon — the runner container mounts the host Docker socket and runs as root only for this case (least privilege for every other package). This is Docker-outside-of-Docker: the sandbox containers are siblings of the runner, not nested inside it.
+
+**Results.** Each run writes a `receipt.json` (status, run id, duration, exit code, armature version, artifact list), the declared artifacts, and an optional `trace.jsonl`. Results land in a host directory you choose with `--results`.
+
+**Examples** live in `examples/packages/`: `echo-tool` (no-LLM `tool_call` round-trip), `topic-researcher` (Anthropic LLM, demonstrates the secrets flow), and `sandbox-shell` (DooD — a shell command runs in a sibling alpine container). They double as the Docker integration test corpus (`pytest -m docker`).
+
+See **`docs/WORKFLOW-PACKAGES.md`** for the full feature set, the secrets model, the pool-of-worker-containers deployment path, and the catalog of tests.
+
 ---
 
 *Armature User Guide — built from nine academic papers, one industry governance framework, and one open-source agent architecture project. 1,388 tests. MIT license.*
 
 *Academic influences: [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 (HQS metric, Skill-Load Rate, spec refinement without frontier models); [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 (Self-Harness — causal failure attribution, declared editable surfaces, K-proposal diversity with best-coverage selection, held-out trace-split regression gating).*
 
-*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
+*For AI agents reading this document: every section above describes a composable capability. A full-featured agentic team uses: model tiers (§3) to route by cost/quality, role types (§5) to assign responsibilities, fan-out/fan-in (§13) for parallelism, safety rules (§11) with strict mode and only-tighten composition (§32), sandbox isolation (§38) for execution-layer security, workflow packages (§39) for portable, verified bundles that run in containers, cross-run memory (§8) for knowledge accumulation, self-improvement (§20, §29) for continuous quality, observability (§25, §27, §31) for production monitoring, mission context (§33) to maintain focus across long-horizon runs, response stage streaming (§34) for low-latency interactive workflows, continuation (§35) for rolling state across activations, and triggers (§36) for event-driven autonomous operation. Start with a single worker stage and the starter template; add governance and observability before deploying to production.*
