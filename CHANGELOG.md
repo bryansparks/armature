@@ -14,7 +14,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Workflow packages: `armature package build|run|verify|inspect` — self-contained,
   portable, verified workflow bundles executed by a generic `armature-runner`
   container; results dir with `receipt.json` + artifacts + optional `trace.jsonl`.
-  Reference-only secrets (names in the bundle, values injected at run). See
+  Reference-only secrets (names in the bundle, values injected at run, fail-closed
+  if unresolvable). `manifest.sha256` integrity verified before every run. A package
+  with `sandbox.mode: docker` spawns its sandboxed stages as sibling containers on the
+  host Docker daemon (DooD) — the runner mounts the socket and runs as root only for
+  that case (least privilege otherwise). Three example packages in `examples/packages/`
+  (`echo-tool`, `topic-researcher`, `sandbox-shell`) double as the Docker integration
+  test corpus (`pytest -m docker`, auto-skipped without Docker). See
   docs/WORKFLOW-PACKAGES.md.
 
 ---

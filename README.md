@@ -183,6 +183,24 @@ armature package verify <pkg>                     # re-run completeness checks w
 armature package inspect <pkg>                    # print the package manifest (read-only)
 ```
 
+## Workflow packages
+
+A **workflow package** is a self-contained, verified, portable bundle — the spec, vendored tools, bundled inputs, a `requirements.txt`, a reference-only secrets manifest, declared output destinations, and a `manifest.sha256` integrity digest — that a single generic `armature-runner` Docker image executes. The same image runs every workflow; there is no per-workflow container build. This is the deployment shape for a **pool of worker containers**: build once, run anywhere.
+
+```bash
+armature package build --spec my_workflow.yml --out my_pkg --tools ./tools
+armature package run my_pkg --profile secrets.env   # default: runs in a container
+armature package run my_pkg --direct               # in-process (no Docker)
+armature package verify my_pkg                     # 8 completeness checks, no execution
+```
+
+- **Reference-only secrets.** The bundle carries secret *names* (`api_key_env`), never values. Values are injected at run time from an owner-supplied `--profile` `.env` (gitignored); the run fails closed if a declared secret is unresolvable.
+- **Integrity.** `manifest.sha256` is verified before every run; any tampering (changed spec, swapped tool) fails before the workflow executes.
+- **Nested sandbox (DooD).** A package with `sandbox.mode: docker` spawns its sandboxed shell/file stages as *sibling* containers on the host Docker daemon — the runner mounts the host socket and runs as root only for this case (least privilege otherwise).
+- **Results.** Each run writes `receipt.json` + declared artifacts + optional `trace.jsonl` to a host `--results` dir.
+
+Three example packages live in `examples/packages/` (`echo-tool`, `topic-researcher`, `sandbox-shell`) and double as the Docker integration test corpus (`pytest -m docker`). Full feature set, the secrets model, the pool-of-worker-containers path, and the test catalog: **[`docs/WORKFLOW-PACKAGES.md`](docs/WORKFLOW-PACKAGES.md)**.
+
 ---
 
 ## Built-in tools

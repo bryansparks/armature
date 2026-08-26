@@ -394,6 +394,30 @@ The integration is not accidental. It is the consequence of building a harness r
 
 ---
 
+## Packaged execution and the pool of worker containers
+
+The three stacks above govern *what a workflow does*. **Workflow packages** govern *how a workflow is shipped and run* — turning a spec plus its tools, inputs, secrets, and destinations into a single portable, verified artifact that any worker can execute without re-establishing the environment by hand.
+
+`armature package build` produces a self-contained directory: the spec, vendored tools, `requirements.txt`, bundled inputs, a reference-only secrets manifest, declared output destinations, and a `manifest.sha256` integrity digest. A single generic `armature-runner` Docker image executes *any* package — the same image runs every workflow, with no per-workflow container build. This is the deployment shape for a **pool of worker containers**: build packages in CI, drop them on a queue, and any worker that pulls an image and mounts a package runs them identically.
+
+```bash
+armature package build --spec my_workflow.yml --out my_pkg --tools ./tools
+armature package run my_pkg --profile secrets.env          # default: in a container
+armature package verify my_pkg                             # 8 completeness checks, no execution
+```
+
+Three properties make packages safe to run unattended in a fleet:
+
+- **Reference-only secrets.** The bundle carries secret *names* only. Values are injected at run time from an owner's `--profile` `.env` (kept off the bundle, gitignored). The run fails *closed* if a declared secret is unresolvable — a package cannot run with a missing key, by construction.
+- **Integrity.** `manifest.sha256` is verified before every run. A package that has been tampered with in transit or at rest — a changed spec, a swapped tool module — fails before the workflow executes. The build writes the manifest; the run re-verifies it read-only against the read-only package mount.
+- **Least-privilege nesting.** A package declaring `sandbox.mode: docker` spawns its sandboxed shell/file stages as *sibling* containers on the host Docker daemon (Docker-outside-of-Docker): the runner mounts the host socket and runs as root *only* for that package. Every other package runs without the socket and without root. The governance stack's safety rules, strict mode, and the sandbox's resource and network limits all apply inside the package run exactly as they do in-process — packaging changes the execution *boundary*, not the policy.
+
+Results land in a host `--results` directory per run: a `receipt.json` (status, run id, duration, exit code, armature version, artifact list), the declared artifacts, and an optional `trace.jsonl` that feeds the quality and observability stacks above. A package run is a first-class run — it writes to the same trace store, so the dashboard, replay, and self-improvement loops see it.
+
+See `docs/WORKFLOW-PACKAGES.md` for the full feature set, the secrets model, the pool deployment path, and the test catalog.
+
+---
+
 ## The spec as the source of truth for production AI governance
 
 Every decision made in a production Armature deployment is expressed in YAML and checked into version control alongside the workflow.

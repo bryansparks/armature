@@ -295,7 +295,20 @@ armature loop my_workflow.yml              # run repeatedly under a central budg
 armature dashboard my_workflow.yml         # health metrics after multiple runs
 armature new my_workflow.yml               # terminal wizard (secondary path)
 armature optimize my_workflow.yml          # LLM-proposed spec improvements from traces
+armature package build --spec my_workflow.yml --out my_pkg   # bundle into a verified, portable package
+armature package run my_pkg [--profile secrets.env]          # run it (default: in a container)
+armature package verify my_pkg                               # 8 completeness checks, no execution
+armature package inspect my_pkg                              # print the package manifest
 ```
+
+**Workflow packages** (`armature package`) bundle a spec + vendored tools + inputs + a
+reference-only secrets manifest + `manifest.sha256` integrity digest into a portable
+directory that a generic `armature-runner` Docker image executes. Secret names travel in
+the bundle; values are injected at run time from an owner's `--profile` .env (gitignored)
+and the run fails closed if a declared secret is unresolvable. A package declaring
+`sandbox.mode: docker` spawns its sandboxed stages as sibling containers on the host
+Docker daemon (DooD). Full feature set, deployment to a pool of worker containers, and
+the test catalog: `docs/WORKFLOW-PACKAGES.md`. Example packages: `examples/packages/`.
 
 ---
 
