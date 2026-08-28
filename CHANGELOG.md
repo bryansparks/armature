@@ -9,6 +9,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Script adapters can emit structured output (`parse: json`).** An adapter
+  declared with `parse: json` has its stdout parsed as a JSON object, which
+  becomes the stage result directly — downstream stages can reference
+  `{{ stage.field }}` and fan-out stages can partition over script-produced
+  lists. A non-zero exit, invalid JSON, or a non-object top level raises
+  (subject to `on_fail` / `fail_as_value`), making deterministic script
+  stages first-class citizens alongside LLM stages.
+
+### Fixed
+- **Subagent fan-out no longer duplicates children per item.** A subagent stage
+  with both `partition_source` and `fan_out` used to run `fan_out` duplicate
+  child workflows *per item* (N items x fan_out=K spawned N×K children, each
+  item reviewed K times): the engine's fan-out path ran the stage once per
+  item, and then `SubagentNode.execute` fanned out again internally. When
+  `partition_source` is set, `SubagentNode` now runs exactly one child and
+  returns its result raw — the engine owns concurrency, per-item error
+  containment (`_fan_out_error`), and fan-in collection, matching the
+  behavior documented in `docs/SUBAGENT-COMPOSITION.md`. The internal
+  fan-out path (fan_out without partition_source, e.g. N redundant runs or
+  list-sharding via `partition_key`) is unchanged.
+- Subagent child session directories are now nested under
+  `stage_<stage_id>/child_<n>/` (previously flat `child_<n>/`), matching the
+  documented layout and preventing collisions between children of different
+  fan-out items or different subagent stages in the same parent.
 
 ---
 

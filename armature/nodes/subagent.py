@@ -91,7 +91,11 @@ class SubagentNode(BaseNode):
 
         child_dir: Path | None = None
         if self._session_dir is not None:
-            child_dir = self._session_dir / f"child_{child_index}"
+            # Nested under stage_<id>/ so children of different fan-out items
+            # (and of different subagent stages in the same parent) never
+            # share a session directory. Matches the layout documented in
+            # docs/SUBAGENT-COMPOSITION.md.
+            child_dir = self._session_dir / f"stage_{self._stage.id}" / f"child_{child_index}"
             child_dir.mkdir(parents=True, exist_ok=True)
 
         child_context = self._resolve_child_context(context)
@@ -109,6 +113,17 @@ class SubagentNode(BaseNode):
         return [dict(context) for _ in range(n)]
 
     async def execute(self, context: dict[str, Any]) -> Any:
+        if self._stage.partition_source is not None:
+            # The engine's fan-out path (_execute_fan_out_stage) has already
+            # partitioned the list and bound this item to partition_key in
+            # the context. Run exactly ONE child and return its result raw —
+            # the engine owns concurrency, per-item error containment, and
+            # fan-in collection. Spawning fan_out children here as well
+            # would duplicate every item fan_out times.
+            idx = context.get("_fan_out_item_index")
+            child_index = idx if isinstance(idx, int) and idx >= 0 else 0
+            return await self._run_child(context, child_index)
+
         n = self._stage.fan_out
         if n is None:
             return await self._run_child(context, 0)

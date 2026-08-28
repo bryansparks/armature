@@ -141,6 +141,66 @@ async def test_fan_out_one_wraps_in_fan_in(tmp_path):
     assert "respond" in result_single
 
 
+# ── partition_source: the engine owns fan-out ─────────────────────────────────
+
+async def test_partition_source_runs_single_child_regardless_of_fan_out(tmp_path):
+    """When partition_source is set, the engine's fan-out path invokes this
+    node once per item. execute() must run exactly ONE child and return its
+    result raw — applying fan_out/fan_in here would duplicate every item
+    fan_out times (regression: 3 items x fan_out=3 spawned 9 children).
+    """
+    stage = Stage(
+        id="fan_out",
+        subagent_spec=str(FIXTURES / "child-workflow.yaml"),
+        partition_source="{{ items }}",
+        partition_key="greeting",
+        fan_out=3,  # must be ignored: the engine owns concurrency
+        fan_in="list",
+    )
+    node = SubagentNode(stage=stage, session_dir=tmp_path)
+    result = await node.execute({"greeting": "solo", "_fan_out_item_index": 2})
+
+    # Raw child result — no fan_in wrapping, no duplicated children.
+    assert "results" not in result
+    assert "respond" in result
+    assert result["respond"]["stdout"].strip() == "child says: solo"
+    # Distinct session dir per engine-fanned item index.
+    assert (tmp_path / "stage_fan_out" / "child_2").is_dir()
+    assert not (tmp_path / "stage_fan_out" / "child_1").exists()
+
+
+async def test_engine_fans_out_one_subagent_child_per_item(tmp_path):
+    """End-to-end: partition_source + fan_out on a subagent stage runs exactly
+    one child workflow per item, each seeing exactly one item."""
+    from armature.spec.models import HarnessSpec, ModelTiers, ModelTierConfig
+    from armature.runtime.engine import Harness
+
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(
+            id="fan",
+            subagent_spec=str(FIXTURES / "child-workflow.yaml"),
+            partition_source="{{ items }}",
+            partition_key="greeting",
+            fan_out=3,
+            fan_in="list",
+            depends_on=[],
+        )],
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path)
+    result = await harness.run({"items": ["a", "b", "c"]})
+
+    results = result["fan"]
+    assert isinstance(results, list)
+    assert len(results) == 3  # exactly one child per item — not 3x3
+    outs = sorted(r["respond"]["stdout"].strip() for r in results)
+    assert outs == ["child says: a", "child says: b", "child says: c"]
+    # Documented session layout: stage_<id>/child_0..child_N-1.
+    child_dirs = sorted(p.name for p in (tmp_path / "stage_fan").iterdir())
+    assert child_dirs == ["child_0", "child_1", "child_2"]
+
+
 # ── Phase 1-f: Sub-agent context isolation ────────────────────────────────────
 
 def test_isolated_field_defaults_to_false():

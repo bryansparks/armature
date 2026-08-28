@@ -28,8 +28,37 @@ class ScriptNode(BaseNode):
 
         env = {**os.environ, "ARMATURE_CONTEXT": json.dumps(context, default=str)}
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=self._adapter.timeout, env=env)
-        return {
+        envelope = {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.returncode,
         }
+        if self._adapter.parse == "json":
+            return self._parse_json(envelope)
+        return envelope
+
+    def _parse_json(self, envelope: dict[str, Any]) -> Any:
+        """Turn a script's stdout into a structured stage result.
+
+        With parse: json the script is a function: exit 0 with a JSON object
+        on stdout. Anything else is a contract violation and raises, so the
+        stage's normal failure handling (on_fail, fail_as_value) applies.
+        Diagnostics belong on stderr.
+        """
+        if envelope["exit_code"] != 0:
+            raise RuntimeError(
+                f"Adapter '{self._adapter.name}' exited {envelope['exit_code']} "
+                f"(parse: json): {envelope['stderr'].strip()[:500]}"
+            )
+        try:
+            parsed = json.loads(envelope["stdout"])
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"Adapter '{self._adapter.name}' has parse: json but stdout is not valid JSON: {e}"
+            ) from e
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"Adapter '{self._adapter.name}' has parse: json and must print a "
+                f"top-level JSON object, got {type(parsed).__name__}"
+            )
+        return parsed

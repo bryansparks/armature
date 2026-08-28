@@ -88,7 +88,7 @@ The `fan_in` strategies from fan-out/fan-in apply here directly: `list`, `merge`
 
 ### How partitioning works
 
-`SubagentNode._build_contexts` takes the list resolved by `partition_source`, splits it into N chunks (one per `fan_out` slot), and assigns each chunk to a child context under `partition_key`. With `isolated: true` and `signature.input`, only the declared keys travel into each child. Children have no shared state and cannot interfere with each other.
+The engine resolves the `partition_source` expression, then runs **one child workflow per item** (concurrency bounded by `fan_out`). Each item is bound to `partition_key` in that child's context; with `isolated: true` and `signature.input`, only the declared keys travel into the child. Children have no shared state and cannot interfere with each other. A child that raises returns `{"_fan_out_error": ...}` instead of aborting the batch, and results are collected by the stage's `fan_in` strategy. Each child also gets its own session directory — `stage_<stage_id>/child_<n>/` — under the parent's session directory.
 
 ---
 
