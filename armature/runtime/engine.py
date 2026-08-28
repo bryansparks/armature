@@ -677,9 +677,14 @@ class Harness:
         semaphore = asyncio.Semaphore(max_concurrent)
         partition_key = stage.partition_key or "item"
 
-        async def _run_one(item: Any) -> Any:
+        async def _run_one(item_index: int, item: Any) -> Any:
             async with semaphore:
                 per_ctx = {**context, partition_key: item}
+                if stage.subagent_spec is not None:
+                    # Reserved context key (same convention as the loop
+                    # machinery's _iteration) letting SubagentNode give each
+                    # engine-fanned child a distinct session directory.
+                    per_ctx["_fan_out_item_index"] = item_index
                 if stage.inject_file_as is not None:
                     try:
                         per_ctx[stage.inject_file_as] = _Path(str(item)).read_text(errors="replace")
@@ -690,7 +695,7 @@ class Harness:
                 except Exception as exc:
                     return {"_fan_out_error": str(exc), "vulnerabilities": []}
 
-        raw = await asyncio.gather(*[_run_one(item) for item in items])
+        raw = await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(items)])
         results = list(raw)
 
         strategy = stage.fan_in
