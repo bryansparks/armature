@@ -731,8 +731,26 @@ stages:
 | `cmd` | string | Shell command to run |
 | `fn` | string | Python callable path (for `type: python`) |
 | `args` | object | Static arguments merged into context |
+| `parse` | `json`? | Parse stdout as a JSON object and use it as the stage result (see below) |
 
 Script stage output is passed downstream as a dict under the stage's id.
+
+**Structured output (`parse: json`).** By default a script stage's result is the envelope `{stdout, stderr, exit_code}` — stdout is a string, which downstream templates can't index into. When the script prints a JSON object on stdout, add `parse: json` and the parsed object becomes the stage result directly: downstream stages can reference `{{ fetch_data.selected }}`, and fan-out stages can partition over `{{ fetch_data.items }}`. Diagnostics go to stderr. A non-zero exit, invalid JSON, or a non-object top level raises, so `on_fail` / `fail_as_value` apply:
+
+```yaml
+adapters:
+  select_files:
+    name: select_files
+    type: script
+    cmd: "python scripts/select_files.py"
+    parse: json
+
+stages:
+  - id: triage
+    adapter: select_files
+    depends_on: [fetch]
+  # downstream: partition_source: "{{ triage.selected }}"
+```
 
 ---
 

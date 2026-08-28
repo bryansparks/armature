@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- **Script adapters can emit structured output (`parse: json`).** An adapter
+  declared with `parse: json` has its stdout parsed as a JSON object, which
+  becomes the stage result directly — downstream stages can reference
+  `{{ stage.field }}` and fan-out stages can partition over script-produced
+  lists. A non-zero exit, invalid JSON, or a non-object top level raises
+  (subject to `on_fail` / `fail_as_value`), making deterministic script
+  stages first-class citizens alongside LLM stages.
+
 ### Fixed
 - **Subagent fan-out no longer duplicates children per item.** A subagent stage
   with both `partition_source` and `fan_out` used to run `fan_out` duplicate

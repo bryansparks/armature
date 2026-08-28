@@ -123,6 +123,9 @@ class Adapter(BaseModel):
     cmd: str | None = None
     args: dict[str, Any] = Field(default_factory=dict)
     timeout: int = 60
+    # When set, stdout is parsed into the stage result instead of returning
+    # the {stdout, stderr, exit_code} envelope. Currently "json" only.
+    parse: Literal["json"] | None = None
 
 
 class Failure(BaseModel):
