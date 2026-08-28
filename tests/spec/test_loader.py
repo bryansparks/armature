@@ -165,3 +165,39 @@ def test_vars_substituted_in_spec_level_fields(tmp_path):
     )
     spec = load_spec(spec_file, vars={"env": "staging"})
     assert spec.name == "wf-staging"
+
+
+def test_load_spec_inlines_context_layer_src(tmp_path):
+    (tmp_path / "principles.md").write_text("Be terse. Cite sources.", encoding="utf-8")
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(
+        """
+name: wf
+stages:
+  - id: a
+context_layers:
+  - name: principles
+    src: principles.md
+""",
+        encoding="utf-8",
+    )
+    spec = load_spec(spec_file)
+    assert spec.context_layers[0].content == "Be terse. Cite sources."
+    assert spec.context_layers[0].src == "principles.md"  # kept for provenance
+
+
+def test_load_spec_missing_context_layer_src_fails_closed(tmp_path):
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(
+        """
+name: wf
+stages:
+  - id: a
+context_layers:
+  - name: principles
+    src: missing.md
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(FileNotFoundError, match="SRC_FILE_NOT_FOUND"):
+        load_spec(spec_file)
