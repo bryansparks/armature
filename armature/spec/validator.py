@@ -4,8 +4,14 @@ Call `validate_spec(spec)` and handle the returned list of `SpecError`.
 `strict=True` raises `SpecValidationError` on the first error found.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from armature.spec.models import HarnessSpec
+from armature.spec.context import (
+    MISSION_LAYER_NAME, floor_never, runtime_context_keys,
+)
+
+_PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 
 @dataclass
@@ -227,21 +233,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
     }
 
     # Keys the harness always injects into context at runtime — never flag these.
-    harness_injected_keys: set[str] = {
-        "run_id",           # set by Harness.run() before any stage executes
-        "_transcript",      # available in post_run stages
-        "_diagnostics",     # available in post_run stages
-        "_stale_memory_keys",  # injected when memory has stale entries
-        "_memory_index",       # injected when navigation_tools is True (Phase 2)
-    }
-    if spec.continuation:
-        harness_injected_keys.add(spec.continuation.inject_as)
-    if spec.memory:
-        harness_injected_keys.add(spec.memory.inject_as)
-        if spec.memory.inject_knowledge_as:
-            harness_injected_keys.add(spec.memory.inject_knowledge_as)
-        if spec.memory.navigation_tools:
-            harness_injected_keys.add("_memory_index")
+    harness_injected_keys: set[str] = set(runtime_context_keys(spec))
 
     # ── Memory pyramid: navigation requires memory.enabled ──
     if spec.memory and not spec.memory.enabled and spec.memory.navigation_tools:
@@ -492,6 +484,119 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                         f"match any configured model tier model"
                     ),
                     stage_id=None,
+                ))
+
+    # ── Context governance ───────────────────────────────────────────────
+    layer_names = {l.name for l in spec.context_layers}
+    if MISSION_LAYER_NAME in layer_names:
+        errors.append(SpecError(
+            code="RESERVED_CONTEXT_LAYER_NAME",
+            message=(
+                "context_layers contains a layer named 'mission', which is "
+                "reserved for the auto layer synthesized from the top-level "
+                "'mission' field"
+            ),
+        ))
+    all_layer_names = layer_names | ({MISSION_LAYER_NAME} if spec.mission else set())
+    never_targets = (stage_ids | workflow_input_keys | all_layer_names
+                     | set(runtime_context_keys(spec)))
+
+    for layer in spec.context_layers:
+        for n in layer.never:
+            if n not in never_targets:
+                errors.append(SpecError(
+                    code="UNKNOWN_CONTEXT_SOURCE",
+                    message=(
+                        f"context_layers '{layer.name}' never references '{n}', "
+                        f"which is neither a stage id, runtime input, layer "
+                        f"name, nor harness-injected key"
+                    ),
+                ))
+
+    floor = floor_never(spec)
+
+    def _check_policy(policy, where: str, stage_id: str | None,
+                      applicable_never: set[str]) -> None:
+        for m in policy.must:
+            if m not in all_layer_names:
+                errors.append(SpecError(
+                    code="UNKNOWN_CONTEXT_LAYER",
+                    message=f"{where}: must references unknown layer '{m}'",
+                    stage_id=stage_id,
+                ))
+            if m in applicable_never:
+                errors.append(SpecError(
+                    code="CONTEXT_POLICY_CONTRADICTS_FLOOR",
+                    message=(
+                        f"{where}: must forces '{m}' but a never closes it — "
+                        f"a closure always wins over a force"
+                    ),
+                    stage_id=stage_id,
+                ))
+        for n in policy.never:
+            if n not in never_targets:
+                errors.append(SpecError(
+                    code="UNKNOWN_CONTEXT_SOURCE",
+                    message=(
+                        f"{where}: never references '{n}', which is neither a "
+                        f"stage id, runtime input, layer name, nor "
+                        f"harness-injected key"
+                    ),
+                    stage_id=stage_id,
+                ))
+        for m in sorted(set(policy.must) & set(policy.never)):
+            errors.append(SpecError(
+                code="CONTEXT_POLICY_CONTRADICTS_FLOOR",
+                message=f"{where}: '{m}' is both must'd and never'd",
+                stage_id=stage_id,
+            ))
+
+    if spec.context_policy is not None:
+        _check_policy(spec.context_policy, "workflow context_policy", None,
+                      floor | set(spec.context_policy.never))
+    for stage in spec.stages:
+        if stage.context_policy is None:
+            continue
+        applicable = set(floor)
+        if spec.context_policy is not None:
+            applicable.update(spec.context_policy.never)
+        applicable.update(stage.context_policy.never)
+        _check_policy(stage.context_policy, f"stage '{stage.id}'", stage.id, applicable)
+
+        # partition_source resolves from the unfiltered context (rendered
+        # pre-filter in the engine), so closing it is ineffective for the items.
+        if stage.fan_out and stage.partition_source:
+            m = _PARTITION_VAR_RE.match(stage.partition_source)
+            if m and m.group(1) in stage.context_policy.never:
+                errors.append(SpecError(
+                    code="NEVER_BLOCKS_PARTITION_SOURCE",
+                    message=(
+                        f"stage '{stage.id}' never's '{m.group(1)}', which its "
+                        f"partition_source reads — partition_source resolves "
+                        f"from the unfiltered context, so the closure is "
+                        f"ineffective for the partitioned items"
+                    ),
+                    stage_id=stage.id,
+                    severity="warning",
+                ))
+
+        # A closed stage's content can still flow transitively through a
+        # visible intermediate that read it — warn, cannot prevent.
+        closed_stages = set(stage.context_policy.never) & stage_ids
+        if closed_stages:
+            readers = {s.id for s in spec.stages
+                       if any(d in closed_stages for d in s.depends_on)}
+            for y in sorted(set(stage.depends_on) & readers):
+                errors.append(SpecError(
+                    code="CONTEXT_TRANSIT_LEAK_RISK",
+                    message=(
+                        f"stage '{stage.id}' closes "
+                        f"'{', '.join(sorted(closed_stages))}', but depends on "
+                        f"'{y}' which reads that stage — the closed content "
+                        f"may flow transitively through '{y}'s output"
+                    ),
+                    stage_id=stage.id,
+                    severity="warning",
                 ))
 
     if strict:
