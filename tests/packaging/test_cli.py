@@ -95,3 +95,48 @@ def test_package_run_container_mode_absolutizes_paths(tmp_path: Path, no_llm_pkg
     assert captured["inputs_override"] is not None
     assert captured["inputs_override"].is_absolute(), (
         f"inputs-override path not absolute: {captured['inputs_override']}")
+
+
+def test_package_run_container_mode_writes_world_readable_overrides(
+        tmp_path: Path, no_llm_pkg, monkeypatch):
+    """Regression: the container-mode ``--input`` overrides file must be
+    readable by the container user (uid 1000) even when the host runner has a
+    different uid (GitHub Actions runs as uid 1001).
+
+    ``tempfile.mkstemp`` creates 0600 files. That file is bind-mounted
+    read-only into the runner container, whose fixed uid 1000 cannot read a
+    0600 file owned by host uid 1001 on plain-Linux dockerd — the in-container
+    CLI then dies with "Invalid value for '--inputs-override': Path
+    '/inputs-override.yaml' is not readable" (rc=2). Mac Docker Desktop/
+    OrbStack remap bind-mount ownership, which masked this locally.
+
+    Assert from inside the stub launcher because the real CLI unlinks the
+    temp file as soon as the container exits.
+    """
+    spec_path, tools_dir = no_llm_pkg
+    pkg = tmp_path / "echo.pkg"
+    build_res = runner.invoke(app, ["package", "build", "--spec", str(spec_path),
+                                    "--tools", str(tools_dir), "--out", str(pkg)])
+    assert build_res.exit_code == 0, build_res.stdout
+
+    import armature.packaging.docker_runner as dr_mod
+    captured: dict = {}
+
+    class _StubLauncher:
+        def ensure_image(self, dockerfile):
+            return
+
+        def run(self, *, pkg, results, profile, inputs_override, include_trace):
+            captured["mode"] = inputs_override.stat().st_mode & 0o777
+            return 0
+
+    monkeypatch.setattr(dr_mod, "DockerRunnerLauncher", _StubLauncher)
+
+    res = runner.invoke(app, ["package", "run", str(pkg),
+                              "--results", str(tmp_path / "results"),
+                              "--input", "msg=hi"])
+    assert res.exit_code == 0, res.stdout
+    assert captured["mode"] & 0o004, (
+        f"inputs-override file mode {oct(captured['mode'])} is not world-readable; "
+        "the runner container's uid 1000 could not read it on hosts "
+        "whose uid differs (e.g. GitHub Actions uid 1001)")

@@ -186,13 +186,20 @@ def _write_overrides(overrides: dict) -> Path:
     relative paths that don't match its volume-name charset, and silently
     treats the rest as empty named volumes).
     """
+    import os
     import tempfile
     from ruamel.yaml import YAML
     fd, name = tempfile.mkstemp(prefix="armature-overrides-", suffix=".yaml")
     p = Path(name)
     YAML().dump(overrides, p)
-    import os
     os.close(fd)
+    # mkstemp creates 0600 (owner-only). The file is bind-mounted read-only
+    # into the runner container, which runs as a fixed uid 1000 — on hosts
+    # whose uid differs (GitHub Actions runs as 1001) a 0600 file is
+    # unreadable there and the in-container CLI rejects --inputs-override.
+    # The overrides carry no secrets (those travel via the secrets profile),
+    # so world-readable is safe and portable.
+    os.chmod(p, 0o644)
     return p
 
 
