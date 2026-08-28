@@ -81,6 +81,35 @@ class Signature(BaseModel):
     output: dict[str, str] = Field(default_factory=dict)
 
 
+class ContextLayer(BaseModel):
+    """A named block of context that context_policy can force into stage prompts.
+
+    Exactly one of `content` (inline text) or `src` (file path, resolved
+    relative to the spec at load time) must be set — the SkillDef precedent.
+    """
+    name: str
+    precedence: int = 0                # higher = rendered first among must'd layers
+    content: str | None = None
+    src: str | None = None
+    never: list[str] = Field(default_factory=list)  # sources no stage may see (floor)
+
+    def model_post_init(self, __context: Any) -> None:
+        if (self.content is None) == (self.src is None):
+            raise ValueError(
+                f"ContextLayer '{self.name}' must have exactly one of 'content' or 'src'"
+            )
+
+
+class ContextPolicy(BaseModel):
+    """MUST/NEVER governance — workflow default and/or per stage.
+
+    must: layer names forced into the prompt. never: context keys closed
+    (stage ids, runtime inputs, layer names, harness-injected keys).
+    """
+    must: list[str] = Field(default_factory=list)
+    never: list[str] = Field(default_factory=list)
+
+
 class Role(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -181,6 +210,7 @@ class Stage(BaseModel):
     sandbox_image: str | None = None   # per-stage Docker image override; falls back to sandbox.image
     loop: IterationConfig | None = None  # deliberate iteration (not retry)
     agent: str | None = None            # agent_library key; resolved to role at load time, then cleared
+    context_policy: ContextPolicy | None = None  # per-stage MUST/NEVER (adds to workflow default)
 
 
 class TraceConfig(BaseModel):
@@ -422,6 +452,8 @@ class HarnessSpec(BaseModel):
     version: str = "1.0"
     description: str = ""
     mission: str = ""
+    context_layers: list[ContextLayer] = Field(default_factory=list)
+    context_policy: ContextPolicy | None = None
     checkpoint: bool = False             # persist completed stage results for resume across runs
     contracts: Contract = Field(default_factory=Contract)
     roles: dict[str, Role] = Field(default_factory=dict)
