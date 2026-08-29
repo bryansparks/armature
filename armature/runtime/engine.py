@@ -488,8 +488,8 @@ class Harness:
                             spec_version=self._spec_version,
                             policy_version=self._policy_version,
                             context_policy=(
-                                self._context_policies[stage.id].as_dict()
-                                if self._record_context_policy else None
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
                             ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in (result.items() if isinstance(result, dict) else {})},
@@ -538,8 +538,8 @@ class Harness:
                             ).hexdigest()[:32],
                             policy_version=self._policy_version,
                             context_policy=(
-                                self._context_policies[stage.id].as_dict()
-                                if self._record_context_policy else None
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
                             ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
@@ -557,7 +557,10 @@ class Harness:
                         self._llm_call_count += 1
                         await self._ensure_cache()
                         mission_ctx = _build_context_block(
-                            self._must_layer_pairs(self._context_policies[stage.id]),
+                            self._must_layer_pairs(
+                                gov if gov is not None
+                                else EffectiveContextPolicy(must=(), never=frozenset())
+                            ),
                             context,
                             {s.id for s in self._spec.stages},
                         )
@@ -612,8 +615,8 @@ class Harness:
                             ).hexdigest()[:32],
                             policy_version=self._policy_version,
                             context_policy=(
-                                self._context_policies[stage.id].as_dict()
-                                if self._record_context_policy else None
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
                             ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
@@ -665,8 +668,8 @@ class Harness:
                                 ).hexdigest()[:32],
                                 policy_version=self._policy_version,
                                 context_policy=(
-                                    self._context_policies[stage.id].as_dict()
-                                    if self._record_context_policy else None
+                                    gov.as_dict()
+                                    if gov is not None and self._record_context_policy else None
                                 ),
                                 inputs={k: str(v)[:200] for k, v in context.items()},
                                 inputs_provenance=dict(self._get_provenance()),

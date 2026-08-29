@@ -110,6 +110,11 @@ def _resolve_context_layers(spec: HarnessSpec, base_dir: Path) -> None:
         if layer.content is not None or layer.src is None:
             continue
         src_path = (base_dir / layer.src).resolve()
+        if not src_path.is_relative_to(base_dir.resolve()):
+            raise ValueError(
+                f"ContextLayer '{layer.name}' src '{layer.src}' resolves outside the spec "
+                f"directory {base_dir.resolve()} (SRC_PATH_ESCAPE) — refusing to read"
+            )
         if not src_path.is_file():
             raise FileNotFoundError(
                 f"SRC_FILE_NOT_FOUND: context layer '{layer.name}' src "

@@ -77,6 +77,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
 37. [Named workflow registry](#37-named-workflow-registry)
 38. [Docker sandbox isolation](#38-docker-sandbox-isolation)
 39. [Workflow packages](#39-workflow-packages)
+40. [Context governance](#40-context-governance)
 
 ---
 
@@ -1338,19 +1339,6 @@ An `allow` match returns immediately without inspecting later rules.
 > **Attribution:** The `require_approval` action, `safety_mode: strict`, tool reversibility
 > classification, and trace argument hashing are concepts borrowed from Microsoft's
 > [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit).
-
----
-
-## Context governance
-
-By default every stage sees all upstream outputs plus the `mission:` block.
-`context_layers:` declares named context blocks (generalizing `mission:`),
-and `context_policy:` — workflow-wide and/or per stage — forces layers into
-prompts (`must:`) and closes sources (`never:`: stage ids, runtime inputs,
-layer names, injected keys). Closures always win over forces, layer-level
-`never:` is a non-relaxable floor, and the effective policy is recorded on
-every trace row. Full grammar and validation codes:
-`docs/ARMATURE-SPEC-REF.md`.
 
 ---
 
@@ -4231,6 +4219,19 @@ armature package inspect my_pkg                       # print the manifest (read
 **Examples** live in `examples/packages/`: `echo-tool` (no-LLM `tool_call` round-trip), `topic-researcher` (Anthropic LLM, demonstrates the secrets flow), and `sandbox-shell` (DooD — a shell command runs in a sibling alpine container). They double as the Docker integration test corpus (`pytest -m docker`).
 
 See **`docs/WORKFLOW-PACKAGES.md`** for the full feature set, the secrets model, the pool-of-worker-containers deployment path, and the catalog of tests.
+
+---
+
+## 40. Context governance
+
+By default every stage sees all upstream outputs plus the `mission:` block.
+`context_layers:` declares named context blocks (generalizing `mission:`),
+and `context_policy:` — workflow-wide and/or per stage — forces layers into
+prompts (`must:`) and closes sources (`never:`: stage ids, runtime inputs,
+layer names, injected keys). Closures always win over forces, layer-level
+`never:` is a non-relaxable floor, and the effective policy is recorded on
+every trace row. Full grammar and validation codes:
+`docs/ARMATURE-SPEC-REF.md`.
 
 ---
 

@@ -438,12 +438,16 @@ default and which `never: [mission]` closes). `never` targets:
 | stage id | that stage's output key | `stages` |
 | runtime input | that input | `contracts.inputs` |
 | layer name | that layer's content | `context_layers` |
-| injected key | `_memory`, `_knowledge`, `_transcript`, `prior_run`, `run_id`, … | the harness-injected key set |
+| injected key | always present: `run_id`, `_transcript`, `_diagnostics`, `_stale_memory_keys`, `_memory_index`; conditional (when configured): `_memory`, `_knowledge`, `prior_run` | the harness-injected key set |
 
 The effective policy is recorded on every trace row (`context_policy`).
 Known limits: closed content can still flow transitively through intermediate
-stage outputs, and tool-mediated reads (memory navigation tools) are governed
-by `safety_rules`, not `never:`.
+stage outputs (the `CONTEXT_TRANSIT_LEAK_RISK` warning only checks declared
+`depends_on`, not transitive ancestors); tool-mediated reads (memory
+navigation tools) are governed by `safety_rules`, not `never:`; and
+`skip_if`/`condition`/`until` expressions evaluate against the pre-filter
+context (truthiness only — no closed content reaches prompts or trace
+previews, but a closed key can still steer control flow).
 
 ---
 

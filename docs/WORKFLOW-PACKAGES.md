@@ -195,6 +195,13 @@ from the spec's `api_key_env` references, infers a default `destinations.yaml`
 from the spec's leaf stages when none is given, writes the manifest, and then
 runs the eight completeness checks below. If any check fails the build aborts.
 
+Any `context_layers:` entry with a `src:` file is bundled too, copied into the
+package at the same path relative to the spec that the source spec used —
+same posture as vendored tools. A `src:` that would escape the package
+directory (`../` traversal, an absolute path) fails the build closed
+(`SRC_PATH_ESCAPE`) rather than bundling it. Bundled layer files are covered
+by `manifest.sha256` like every other file in the package.
+
 ### The eight completeness checks
 
 | Check | What it verifies |

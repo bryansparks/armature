@@ -108,6 +108,25 @@ def test_never_blocks_partition_source_warns():
          "tool_call": {"name": "x", "args": {}},
          "context_policy": {"never": ["researcher"]}},
     ])
+    errors = validate_spec(spec, strict=False)
+    assert "NEVER_BLOCKS_PARTITION_SOURCE" in {e.code for e in errors}
+    for e in errors:
+        if e.code == "NEVER_BLOCKS_PARTITION_SOURCE":
+            assert e.severity == "warning"
+
+
+def test_workflow_default_never_triggers_partition_source_warning():
+    # Blind spot fix: a stage governed only by the workflow-level never (no
+    # stage.context_policy of its own) must still be analyzed for warnings.
+    spec = _spec(
+        context_policy={"never": ["researcher"]},
+        stages=[
+            {"id": "researcher", "role": _WORKER},
+            {"id": "fan", "depends_on": ["researcher"], "fan_out": 3, "fan_in": "list",
+             "partition_key": "item", "partition_source": "{{ researcher.queries }}",
+             "tool_call": {"name": "x", "args": {}}},
+        ],
+    )
     assert "NEVER_BLOCKS_PARTITION_SOURCE" in _codes(spec)
 
 
@@ -129,4 +148,22 @@ def test_context_transit_leak_risk_warns():
         {"id": "analyst", "role": _WORKER, "depends_on": ["middle"],
          "context_policy": {"never": ["researcher"]}},
     ])
-    assert "CONTEXT_TRANSIT_LEAK_RISK" in _codes(spec)
+    errors = validate_spec(spec, strict=False)
+    assert "CONTEXT_TRANSIT_LEAK_RISK" in {e.code for e in errors}
+    for e in errors:
+        if e.code == "CONTEXT_TRANSIT_LEAK_RISK":
+            assert e.severity == "warning"
+
+
+def test_context_transit_leak_risk_not_triggered_when_intermediate_also_closes_source():
+    # False positive fix: if the intermediate (middle) also closes the same
+    # source (researcher) in its own never, no leak reaches analyst through
+    # it — the user already closed the leak.
+    spec = _spec(stages=[
+        {"id": "researcher", "role": _WORKER},
+        {"id": "middle", "role": _WORKER, "depends_on": ["researcher"],
+         "context_policy": {"never": ["researcher"]}},
+        {"id": "analyst", "role": _WORKER, "depends_on": ["middle"],
+         "context_policy": {"never": ["researcher"]}},
+    ])
+    assert "CONTEXT_TRANSIT_LEAK_RISK" not in _codes(spec)

@@ -201,3 +201,46 @@ context_layers:
     )
     with pytest.raises(FileNotFoundError, match="SRC_FILE_NOT_FOUND"):
         load_spec(spec_file)
+
+
+def test_load_spec_context_layer_src_traversal_escape_fails_closed(tmp_path):
+    spec_dir = tmp_path / "spec_dir"
+    spec_dir.mkdir()
+    (tmp_path / "secret.md").write_text("do not read me", encoding="utf-8")
+    spec_file = spec_dir / "wf.yaml"
+    spec_file.write_text(
+        """
+name: wf
+stages:
+  - id: a
+context_layers:
+  - name: principles
+    src: ../secret.md
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="SRC_PATH_ESCAPE"):
+        load_spec(spec_file)
+
+
+def test_load_spec_context_layer_src_absolute_escape_fails_closed(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.md"
+    secret.write_text("do not read me", encoding="utf-8")
+    spec_dir = tmp_path / "spec_dir"
+    spec_dir.mkdir()
+    spec_file = spec_dir / "wf.yaml"
+    spec_file.write_text(
+        f"""
+name: wf
+stages:
+  - id: a
+context_layers:
+  - name: principles
+    src: {secret}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="SRC_PATH_ESCAPE"):
+        load_spec(spec_file)

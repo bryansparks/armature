@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from armature.spec.models import HarnessSpec
 from armature.spec.context import (
-    MISSION_LAYER_NAME, floor_never, runtime_context_keys,
+    MISSION_LAYER_NAME, floor_never, resolve_effective_policy, runtime_context_keys,
 )
 
 _PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
@@ -517,6 +517,11 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
 
     def _check_policy(policy, where: str, stage_id: str | None,
                       applicable_never: set[str]) -> None:
+        # Same offending name can trip both the must-vs-applicable-never check
+        # below and the must-vs-own-never check at the end (identical root
+        # cause when the closure comes from the policy's own never) — track
+        # what the first branch already reported so the second doesn't repeat it.
+        reported_contradictions: set[str] = set()
         for m in policy.must:
             if m not in all_layer_names:
                 errors.append(SpecError(
@@ -533,6 +538,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     ),
                     stage_id=stage_id,
                 ))
+                reported_contradictions.add(m)
         for n in policy.never:
             if n not in never_targets:
                 errors.append(SpecError(
@@ -544,7 +550,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                     ),
                     stage_id=stage_id,
                 ))
-        for m in sorted(set(policy.must) & set(policy.never)):
+        for m in sorted(set(policy.must) & set(policy.never) - reported_contradictions):
             errors.append(SpecError(
                 code="CONTEXT_POLICY_CONTRADICTS_FLOOR",
                 message=f"{where}: '{m}' is both must'd and never'd",
@@ -563,11 +569,23 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
         applicable.update(stage.context_policy.never)
         _check_policy(stage.context_policy, f"stage '{stage.id}'", stage.id, applicable)
 
+    # ── Warning coverage: derive each stage's closed set from its EFFECTIVE
+    # policy (resolve_effective_policy — workflow default ∪ layer floor ∪
+    # stage override), not stage.context_policy alone. A stage governed only
+    # by the workflow default or a layer floor previously got zero warnings
+    # here (back-compat is preserved: an ungoverned spec resolves an empty
+    # effective never for every stage, so these loops no-op).
+    effective_never = {s.id: resolve_effective_policy(spec, s).never for s in spec.stages}
+    for stage in spec.stages:
+        eff_never = effective_never[stage.id]
+        if not eff_never:
+            continue
+
         # partition_source resolves from the unfiltered context (rendered
         # pre-filter in the engine), so closing it is ineffective for the items.
         if stage.fan_out and stage.partition_source:
             m = _PARTITION_VAR_RE.match(stage.partition_source)
-            if m and m.group(1) in stage.context_policy.never:
+            if m and m.group(1) in eff_never:
                 errors.append(SpecError(
                     code="NEVER_BLOCKS_PARTITION_SOURCE",
                     message=(
@@ -581,17 +599,20 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 ))
 
         # A closed stage's content can still flow transitively through a
-        # visible intermediate that read it — warn, cannot prevent.
-        closed_stages = set(stage.context_policy.never) & stage_ids
-        if closed_stages:
-            readers = {s.id for s in spec.stages
-                       if any(d in closed_stages for d in s.depends_on)}
-            for y in sorted(set(stage.depends_on) & readers):
+        # visible intermediate that read it — warn, cannot prevent. Only
+        # declared depends_on is checked (not transitive ancestors), and a
+        # reader that itself closes the same source is not a leak path.
+        closed_stages = eff_never & stage_ids
+        for s in sorted(closed_stages):
+            readers_of_s = {
+                r.id for r in spec.stages
+                if s in r.depends_on and s not in effective_never[r.id]
+            }
+            for y in sorted(set(stage.depends_on) & readers_of_s):
                 errors.append(SpecError(
                     code="CONTEXT_TRANSIT_LEAK_RISK",
                     message=(
-                        f"stage '{stage.id}' closes "
-                        f"'{', '.join(sorted(closed_stages))}', but depends on "
+                        f"stage '{stage.id}' closes '{s}', but depends on "
                         f"'{y}' which reads that stage — the closed content "
                         f"may flow transitively through '{y}'s output"
                     ),

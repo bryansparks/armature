@@ -76,6 +76,23 @@ async def test_default_must_injects_layers_into_prompt(tmp_path):
     assert "[Context Layer: principles]" in analyst.kwargs["mission_context"]
 
 
+async def test_mission_only_context_block_is_byte_identical(tmp_path):
+    """End-to-end pin (through the engine, not just the _build_context_block
+    unit): a mission-only, ungoverned single-stage spec produces EXACTLY the
+    old mission-block string — the branch's load-bearing back-compat claim."""
+    spec = HarnessSpec.model_validate({
+        "name": "solo-mission",
+        "mission": "Be careful.",
+        "model_tiers": {"small": {"provider": "mock", "model": "m"}},
+        "role_type_defaults": {"worker": "small"},
+        "stages": [{"id": "solo",
+                    "role": {"name": "S", "type": "worker", "description": "d"}}],
+    })
+    await _run(spec, tmp_path)
+    solo = _node("solo")
+    assert solo.kwargs["mission_context"] == "[Workflow Mission]\nBe careful."
+
+
 async def test_effective_policy_recorded_on_traces(tmp_path):
     harness, _ = await _run(_governed_spec(), tmp_path, {"raw_pii": "x"})
     traces = await harness._traces.query_by_run(harness._run_id)
@@ -125,6 +142,30 @@ async def test_never_applies_to_tool_call_stages(tmp_path, monkeypatch):
     })
     await _run(spec, tmp_path)
     assert "leak" not in captured
+
+
+async def test_sibling_wave_filtering_does_not_mutate_shared_context(tmp_path):
+    """b1 and b2 run in the same wave off shared cumulative context; b1's
+    `never` must not leak into — or shrink — the context b2 sees."""
+    spec = HarnessSpec.model_validate({
+        "name": "siblings",
+        "model_tiers": {"small": {"provider": "mock", "model": "m"}},
+        "role_type_defaults": {"worker": "small"},
+        "stages": [
+            {"id": "a",
+             "role": {"name": "A", "type": "worker", "description": "produce"}},
+            {"id": "b1", "depends_on": ["a"],
+             "role": {"name": "B1", "type": "worker", "description": "d"},
+             "context_policy": {"never": ["a"]}},
+            {"id": "b2", "depends_on": ["a"],
+             "role": {"name": "B2", "type": "worker", "description": "d"}},
+        ],
+    })
+    await _run(spec, tmp_path)
+    b1 = _node("b1")
+    b2 = _node("b2")
+    assert "a" not in b1.context
+    assert "a" in b2.context
 
 
 def test_apply_context_never_drops_keys():
