@@ -1341,6 +1341,19 @@ An `allow` match returns immediately without inspecting later rules.
 
 ---
 
+## Context governance
+
+By default every stage sees all upstream outputs plus the `mission:` block.
+`context_layers:` declares named context blocks (generalizing `mission:`),
+and `context_policy:` — workflow-wide and/or per stage — forces layers into
+prompts (`must:`) and closes sources (`never:`: stage ids, runtime inputs,
+layer names, injected keys). Closures always win over forces, layer-level
+`never:` is a non-relaxable floor, and the effective policy is recorded on
+every trace row. Full grammar and validation codes:
+`docs/ARMATURE-SPEC-REF.md`.
+
+---
+
 ## 12. Lifecycle hooks
 
 Lifecycle hooks let you attach custom logic at four points in the execution pipeline. They are Armature's extensible guardrail layer — safety rules (§11) handle the declarative case; hooks handle everything that requires custom code.

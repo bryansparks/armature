@@ -49,6 +49,29 @@ not model names directly. Swap all models globally by editing the `model_tiers` 
 - `output_mode: guided_json` + `output_schema:` → strongly typed dict; auto-escalates to next
   tier on parse failure — use whenever downstream stages depend on specific fields
 
+### Context governance
+For sensitive or noisy context, declare named layers and a MUST/NEVER policy:
+
+```yaml
+context_layers:
+  - name: principles
+    precedence: 10
+    content: |
+      Never invent numbers. Cite the source stage for every claim.
+context_policy:                 # workflow default
+  must: [principles]            # force into every stage's prompt
+  never: []                     # close for every stage
+
+stages:
+  - id: analyst
+    context_policy:
+      never: [researcher, raw_pii]   # close stage outputs / inputs / layers / injected keys
+```
+
+A closure at any level always wins over a force; `never` targets stage ids,
+runtime inputs, layer names, and harness-injected keys. Full grammar:
+`docs/ARMATURE-SPEC-REF.md` → `context_layers:` / `context_policy:`.
+
 ---
 
 ## Generating a Spec — Checklist
@@ -239,6 +262,7 @@ stages:
 | Undefined stage in `depends_on` | Validator error: `UNDEFINED_DEPENDENCY` | Check all stage IDs |
 | Undeclared inputs in `contracts.inputs` | Validator warning for `signature.input` keys | Declare every runtime input |
 | No `fail_as_value: true` on optional stages | One failure aborts the entire run | Add it to non-critical stages |
+| `never` on a fan-out stage's own `partition_source` | `partition_source` resolves pre-filter — closure ineffective | Don't close the partition source |
 
 ---
 

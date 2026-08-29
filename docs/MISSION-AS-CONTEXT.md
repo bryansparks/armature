@@ -41,10 +41,10 @@ stages:
 
 ## The mechanism
 
-Before every LLM stage call, the engine runs `_build_mission_block()`:
+Before every LLM stage call, the engine runs `_build_context_block()`:
 
 ```python
-def _build_mission_block(
+def _build_context_block(
     mission: str,
     context: dict,
     spec_stage_ids: set[str],
