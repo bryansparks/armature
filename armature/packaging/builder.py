@@ -34,6 +34,9 @@ class PackageBuilder:
         out.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(spec, out / "workflow.yaml")
 
+        # 2.5 bundle context-layer src: files (covered by manifest.sha256)
+        self._bundle_context_layer_srcs(loaded, spec, out)
+
         # 3. inputs
         _Y.dump(inputs or {}, out / "inputs.yaml")
 
@@ -96,6 +99,31 @@ class PackageBuilder:
         if archive:
             self._archive(out, archive)
         return out
+
+    @staticmethod
+    def _bundle_context_layer_srcs(spec, spec_path: Path, out: Path) -> None:
+        """Copy each layer's src: file into the package, preserving its
+        spec-relative path so the packaged workflow.yaml resolves it.
+
+        Containment guard: a src that escapes the package dir (``../``)
+        aborts the build — same posture as the Docker file handlers.
+        """
+        for layer in getattr(spec, "context_layers", None) or []:
+            if layer.src is None:
+                continue
+            src_file = (spec_path.parent / layer.src).resolve()
+            if not src_file.is_file():
+                raise PackageBuildError(
+                    f"context layer '{layer.name}' src not found: {layer.src}"
+                )
+            dest = (out / layer.src).resolve()
+            if not dest.is_relative_to(out.resolve()):
+                raise PackageBuildError(
+                    f"context layer '{layer.name}' src escapes the package "
+                    f"dir: {layer.src}"
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src_file, dest)
 
     @staticmethod
     def _infer_destinations(spec) -> Destinations:

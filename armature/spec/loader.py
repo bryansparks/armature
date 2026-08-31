@@ -62,6 +62,7 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     data = yaml.load(raw)
 
     spec = HarnessSpec.model_validate(data)
+    _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
     return spec
 
@@ -97,6 +98,29 @@ def _merge_agent_safety(spec: HarnessSpec, bundle: CompiledAgent) -> None:
     existing = {_cond_key(r) for r in kept if r.action == "block"}
     new = [r for r in agent_blocks if _cond_key(r) not in existing]
     spec.safety_rules = new + kept
+
+
+def _resolve_context_layers(spec: HarnessSpec, base_dir: Path) -> None:
+    """Inline each layer's src: file into content (src kept for provenance).
+
+    Fail closed at load time — a missing file is an authoring error,
+    not a runtime surprise.
+    """
+    for layer in spec.context_layers:
+        if layer.content is not None or layer.src is None:
+            continue
+        src_path = (base_dir / layer.src).resolve()
+        if not src_path.is_relative_to(base_dir.resolve()):
+            raise ValueError(
+                f"ContextLayer '{layer.name}' src '{layer.src}' resolves outside the spec "
+                f"directory {base_dir.resolve()} (SRC_PATH_ESCAPE) — refusing to read"
+            )
+        if not src_path.is_file():
+            raise FileNotFoundError(
+                f"SRC_FILE_NOT_FOUND: context layer '{layer.name}' src "
+                f"'{layer.src}' not found (looked in {base_dir})"
+            )
+        layer.content = src_path.read_text(encoding="utf-8")
 
 
 def _resolve_agent_references(spec: HarnessSpec, base_dir: Path) -> None:

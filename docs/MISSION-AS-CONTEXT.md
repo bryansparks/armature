@@ -41,18 +41,22 @@ stages:
 
 ## The mechanism
 
-Before every LLM stage call, the engine runs `_build_mission_block()`:
+Before every LLM stage call, the engine runs `_build_context_block()`. The mission is just one
+of the layers it renders — governed the same way as any other context layer (see
+[Context Governance](USER-GUIDE.md#40-context-governance) for the `must`/`never` mechanics):
 
 ```python
-def _build_mission_block(
-    mission: str,
+def _build_context_block(
+    layers: list[tuple[str, str]],
     context: dict,
     spec_stage_ids: set[str],
     max_preview_chars: int = 200,
 ) -> str:
     parts = []
-    if mission:
-        parts.append(f"[Workflow Mission]\n{mission.strip()}")
+    for header, content in layers:
+        text = content.strip()
+        if text:
+            parts.append(f"{header}\n{text}")
     prior = []
     for sid in spec_stage_ids:
         if sid in context:
@@ -62,6 +66,10 @@ def _build_mission_block(
         parts.append("[Prior stages]\n" + "\n".join(prior))
     return "\n\n".join(parts)
 ```
+
+`layers` is a list of `(header, content)` pairs — one per context layer whose effective policy
+`must`'s it, in render order. The mission field is synthesized into a pseudo-layer with header
+`[Workflow Mission]`; user-declared `context_layers:` render as `[Context Layer: {name}]`.
 
 The result becomes the first thing in the system prompt — ahead of the role preamble, ahead of the stage description. Every LLM call in the workflow sees it.
 

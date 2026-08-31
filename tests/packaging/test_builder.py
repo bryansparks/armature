@@ -1,7 +1,7 @@
 # tests/packaging/test_builder.py
 from pathlib import Path
 from ruamel.yaml import YAML
-from armature.packaging.builder import PackageBuilder
+from armature.packaging.builder import PackageBuilder, PackageBuildError
 
 _Y = YAML()
 
@@ -33,3 +33,48 @@ def test_build_aborts_on_invalid_spec(tmp_path):
     except Exception:
         return
     raise AssertionError("expected build to abort on invalid spec")
+
+
+LAYERED_SPEC = """\
+name: layered
+version: "1.0"
+description: Layer-bundling spec for package tests.
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+contracts:
+  inputs:
+    - name: topic
+context_layers:
+  - name: principles
+    src: principles.md
+stages:
+  - id: writer
+    role: {name: Writer, type: worker, description: "Echo {{ topic }}"}
+    output_mode: text
+    depends_on: []
+"""
+
+
+def test_build_bundles_context_layer_src_files(tmp_path):
+    (tmp_path / "principles.md").write_text("Be terse.", encoding="utf-8")
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(LAYERED_SPEC)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg",
+                                 inputs={"topic": "x"})
+    assert (pkg / "principles.md").read_text(encoding="utf-8") == "Be terse."
+    assert "principles.md" in (pkg / "manifest.sha256").read_text(encoding="utf-8")
+
+
+def test_build_rejects_layer_src_escaping_package_dir(tmp_path):
+    (tmp_path / "secret.md").write_text("outside", encoding="utf-8")
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(LAYERED_SPEC.replace("src: principles.md", "src: ../secret.md"))
+    try:
+        PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg",
+                               inputs={"topic": "x"})
+    except PackageBuildError:
+        return
+    raise AssertionError("expected build to abort on escaping layer src")

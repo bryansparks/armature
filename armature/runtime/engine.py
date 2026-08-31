@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any, Callable
 from armature.spec.models import HarnessSpec, Stage
 from armature.spec.loader import load_spec
+from armature.spec.context import (
+    MISSION_LAYER_NAME, EffectiveContextPolicy, ordered_layers, resolve_effective_policy,
+)
 from armature.runtime.dag import DAGExecutor
 from armature.runtime.context import ContextManager
 from armature.runtime.prompt import PromptAssembler
@@ -100,16 +103,24 @@ def _carry_output_cap(stage_id: str, spec: "HarnessSpec") -> int:
     return 200
 
 
-def _build_mission_block(
-    mission: str,
+def _build_context_block(
+    layers: list[tuple[str, str]],
     context: dict,
     spec_stage_ids: set[str],
     max_preview_chars: int = 200,
 ) -> str:
-    """Build the mission + prior-stage breadcrumb block for LLM system prompts."""
+    """Build the must'd-layers + prior-stage breadcrumb block for LLM system prompts.
+
+    `layers` is one (header, content) pair per must'd context layer, in render
+    order. The mission pseudo-layer renders as `[Workflow Mission]` — exact
+    back-compat with the old mission block; user layers as
+    `[Context Layer: {name}]`.
+    """
     parts = []
-    if mission:
-        parts.append(f"[Workflow Mission]\n{mission.strip()}")
+    for header, content in layers:
+        text = content.strip()
+        if text:
+            parts.append(f"{header}\n{text}")
     prior = []
     for sid in spec_stage_ids:
         if sid in context:
@@ -118,6 +129,27 @@ def _build_mission_block(
     if prior:
         parts.append("[Prior stages]\n" + "\n".join(prior))
     return "\n\n".join(parts)
+
+
+def _apply_context_never(never: frozenset[str], context: dict[str, Any]) -> dict[str, Any]:
+    """Copy `context` minus every key a NEVER closes.
+
+    `_transcript` (post_run context) is special-cased: entries whose stage_id
+    is never'd are dropped individually, so a post_run analyst still sees
+    the rest of the transcript — unless `_transcript` itself is closed.
+    """
+    if not never:
+        return context
+    filtered = {k: v for k, v in context.items() if k not in never}
+    if "_transcript" in never:
+        return filtered
+    transcript = context.get("_transcript")
+    if isinstance(transcript, list):
+        filtered["_transcript"] = [
+            e for e in transcript
+            if not (isinstance(e, dict) and e.get("stage_id") in never)
+        ]
+    return filtered
 
 
 class Harness:
@@ -170,6 +202,13 @@ class Harness:
         self._policy_version = hashlib.sha256(
             str([r.model_dump() for r in self._spec.safety_rules]).encode()
         ).hexdigest()[:12]
+        self._context_policies: dict[str, EffectiveContextPolicy] = {
+            s.id: resolve_effective_policy(spec, s) for s in spec.stages
+        }
+        self._record_context_policy = bool(
+            spec.context_layers or spec.context_policy
+            or any(s.context_policy for s in spec.stages)
+        )
         self._hooks = HookRegistry()
         self._rogue_counter = RogueSignalCounter()
         from armature.hooks.lifecycle import SafetyHookBuilder
@@ -370,6 +409,25 @@ class Harness:
     def _get_provenance(self) -> dict[str, str]:
         return getattr(self, "_provenance", {})
 
+    def _must_layer_pairs(self, gov: EffectiveContextPolicy) -> list[tuple[str, str]]:
+        """(header, content) per must'd layer, in precedence render order.
+
+        The mission pseudo-layer renders as `[Workflow Mission]` — exact
+        back-compat with the old mission block; user layers as
+        `[Context Layer: {name}]`.
+        """
+        pairs: list[tuple[str, str]] = []
+        for layer in ordered_layers(self._spec):
+            if layer.name not in gov.must or layer.content is None:
+                continue
+            header = (
+                "[Workflow Mission]"
+                if layer.name == MISSION_LAYER_NAME
+                else f"[Context Layer: {layer.name}]"
+            )
+            pairs.append((header, layer.content))
+        return pairs
+
     async def _execute_stage(self, stage: Stage, context: dict[str, Any]) -> Any:
         await self._session.append(SessionEvent(type="stage_start", data={"stage": stage.id}))
 
@@ -390,6 +448,13 @@ class Harness:
         decision = await self._hooks.run_pre_stage(stage.id, context)
         if decision == HookDecision.BLOCK:
             raise PermissionError(f"Stage '{stage.id}' blocked by lifecycle hook")
+
+        # Context governance: a NEVER at any level closes context keys for
+        # every downstream dispatch (LLM, gate, tool_call, adapter, subagent)
+        # and for the breadcrumb block — closed content cannot leak via previews.
+        gov = self._context_policies.get(stage.id)
+        if gov is not None and gov.never:
+            context = _apply_context_never(gov.never, context)
 
         t0 = time.monotonic()
         tracer = get_tracer()
@@ -422,6 +487,10 @@ class Harness:
                             output_valid=True,
                             spec_version=self._spec_version,
                             policy_version=self._policy_version,
+                            context_policy=(
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
+                            ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in (result.items() if isinstance(result, dict) else {})},
                             inputs_provenance=dict(self._get_provenance()),
@@ -468,6 +537,10 @@ class Harness:
                                 json.dumps(context, sort_keys=True, default=str).encode()
                             ).hexdigest()[:32],
                             policy_version=self._policy_version,
+                            context_policy=(
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
+                            ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:200] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
@@ -483,8 +556,11 @@ class Harness:
                             )
                         self._llm_call_count += 1
                         await self._ensure_cache()
-                        mission_ctx = _build_mission_block(
-                            self._spec.mission,
+                        mission_ctx = _build_context_block(
+                            self._must_layer_pairs(
+                                gov if gov is not None
+                                else EffectiveContextPolicy(must=(), never=frozenset())
+                            ),
                             context,
                             {s.id for s in self._spec.stages},
                         )
@@ -538,6 +614,10 @@ class Harness:
                                 json.dumps(context, sort_keys=True, default=str).encode()
                             ).hexdigest()[:32],
                             policy_version=self._policy_version,
+                            context_policy=(
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
+                            ),
                             inputs={k: str(v)[:200] for k, v in context.items()},
                             outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
                             inputs_provenance=dict(self._get_provenance()),
@@ -587,6 +667,10 @@ class Harness:
                                     json.dumps(context, sort_keys=True, default=str).encode()
                                 ).hexdigest()[:32],
                                 policy_version=self._policy_version,
+                                context_policy=(
+                                    gov.as_dict()
+                                    if gov is not None and self._record_context_policy else None
+                                ),
                                 inputs={k: str(v)[:200] for k, v in context.items()},
                                 inputs_provenance=dict(self._get_provenance()),
                                 sandbox_image_digest=self._sandbox_image_digest,

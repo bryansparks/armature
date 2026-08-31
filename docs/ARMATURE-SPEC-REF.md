@@ -378,6 +378,79 @@ continuation:
 
 ---
 
+## context_layers:
+
+A named stack of context blocks that `context_policy` can force into stage
+prompts. Generalizes the single `mission:` string, which remains and behaves
+exactly as before.
+
+```yaml
+context_layers:
+  - name: principles        # unique; 'mission' is reserved
+    precedence: 10          # higher = rendered first among must'd layers
+    content: |             # inline text ...
+      Never invent numbers.
+    never:                  # floor closures — no stage may see these sources
+      - raw_pii
+  - name: domain
+    src: domain.md          # ... or a file path, resolved at load
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `name` | str | required | unique; `mission` is reserved (error) |
+| `precedence` | int | `0` | render order among must'd layers (highest first) |
+| `content` | str | — | inline layer text — exactly one of `content`/`src` |
+| `src` | str | — | path relative to the spec; inlined at load; bundled into packages |
+| `never` | list[str] | `[]` | sources closed for ALL stages — non-relaxable floor |
+
+## context_policy:
+
+Workflow-level default and per-stage MUST/NEVER governance over what context
+each stage sees. A stage's policy adds to the workflow default; nothing can
+relax a closure.
+
+```yaml
+context_policy:               # workflow default
+  must: [principles]          # layer names forced into every stage's prompt
+  never: []                   # sources closed for every stage
+
+stages:
+  - id: analyst
+    context_policy:
+      must: [domain]                # additional forced layers (additive)
+      never: [researcher, raw_pii]  # closed stage outputs / inputs / layers / injected keys
+```
+
+**Resolution (per stage):**
+
+```
+effective_never = ∪ layer.never  ∪ workflow_default.never  ∪ stage.never
+effective_must  = (workflow_default.must ∪ stage.must ∪ {mission}) − effective_never
+```
+
+A closure at any level always wins over a force. `must` targets layer names
+only (plus the reserved auto layer `mission`, which every stage receives by
+default and which `never: [mission]` closes). `never` targets:
+
+| target | closes | validated against |
+|---|---|---|
+| stage id | that stage's output key | `stages` |
+| runtime input | that input | `contracts.inputs` |
+| layer name | that layer's content | `context_layers` |
+| injected key | always present: `run_id`, `_transcript`, `_diagnostics`, `_stale_memory_keys`, `_memory_index`; conditional (when configured): `_memory`, `_knowledge`, `prior_run` | the harness-injected key set |
+
+The effective policy is recorded on every trace row (`context_policy`).
+Known limits: closed content can still flow transitively through intermediate
+stage outputs (the `CONTEXT_TRANSIT_LEAK_RISK` warning only checks declared
+`depends_on`, not transitive ancestors); tool-mediated reads (memory
+navigation tools) are governed by `safety_rules`, not `never:`; and
+`skip_if`/`condition`/`until` expressions evaluate against the pre-filter
+context (truthiness only — no closed content reaches prompts or trace
+previews, but a closed key can still steer control flow).
+
+---
+
 ## safety_rules:
 
 ```yaml
@@ -441,6 +514,12 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `ADAPTER_FACTORY_NO_BASE_MODEL` | Set `adapter_factory.base_model` or ensure it matches a tier |
 | `ADAPTER_NO_FALLBACK` | Add `content`/`path` to the skill or change `fallback` to `none`/`fail` |
 | `ADAPTER_BASE_MODEL_MISMATCH` | Align `adapter_factory.base_model` with a configured tier model |
+| `RESERVED_CONTEXT_LAYER_NAME` | A user layer is named `mission` (reserved for the auto layer from `mission:`) |
+| `UNKNOWN_CONTEXT_LAYER` | `context_policy.must` names a layer that doesn't exist |
+| `UNKNOWN_CONTEXT_SOURCE` | a `never` names neither a stage id, runtime input, layer name, nor injected key |
+| `CONTEXT_POLICY_CONTRADICTS_FLOOR` | a `must` overlaps an applicable `never` (floor, workflow default, or its own) |
+| `NEVER_BLOCKS_PARTITION_SOURCE` *(warning)* | a fan-out stage closes its own `partition_source` — it resolves pre-filter |
+| `CONTEXT_TRANSIT_LEAK_RISK` *(warning)* | a closed stage's content may flow transitively through a visible stage's output |
 
 ---
 
