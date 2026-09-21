@@ -401,6 +401,20 @@ class Harness:
             await self._traces.init()
             self._traces_initialized = True
 
+    async def _record_trace(self, trace: TraceRecord) -> None:
+        """Record a trace for a stage that succeeded, without being able to fail it.
+
+        The success-path write sits inside the stage's try, so an exception here
+        is indistinguishable from the stage itself failing: the work is thrown
+        away and a fan-out branch silently returns _fan_out_error instead. A
+        dropped row costs a dashboard entry; a raised one costs the whole stage.
+        """
+        try:
+            await self._ensure_traces()
+            await self._traces.record(trace)
+        except Exception:
+            pass
+
     async def _ensure_cache(self) -> None:
         if self._llm_cache is not None and not hasattr(self, "_cache_initialized"):
             await self._llm_cache.init()
@@ -473,10 +487,9 @@ class Harness:
                         _stage_type = "gate"
                         node = HumanGateNode(stage=stage)
                         result = await node.execute(context)
-                        await self._ensure_traces()
                         gate_latency = (time.monotonic() - t0) * 1000
                         approved = result.get("approved", True) if isinstance(result, dict) else True
-                        await self._traces.record(TraceRecord(
+                        await self._record_trace(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
@@ -520,10 +533,9 @@ class Harness:
                             raise ToolBlocked(stage.adapter, adapter.cmd or "", "blocked by safety rule")
                         result = await node.execute(context)
                         await self._hooks.run_post_tool(stage.adapter, result, context)
-                        await self._ensure_traces()
                         script_latency = (time.monotonic() - t0) * 1000
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
-                        await self._traces.record(TraceRecord(
+                        await self._record_trace(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
@@ -587,14 +599,13 @@ class Harness:
                             ),
                         )
                         result = await _llm_node.execute(context)
-                        await self._ensure_traces()
                         latency = (time.monotonic() - t0) * 1000
                         span.set_attribute("latency_ms", latency)
                         output_valid = "_parse_error" not in result
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result
                                                       if not k.startswith("_")})
                         _escalation_count = result.pop("_escalation_count", 0)
-                        await self._traces.record(TraceRecord(
+                        await self._record_trace(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
