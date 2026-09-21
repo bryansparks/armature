@@ -9,6 +9,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **TypeSafe decision adapter spike (Layer 1).** New example
+  `examples/decision-typesafe/` — an A/B benchmark pitting a non-LLM
+  decision API (TypeSafe/Jev) against an LLM judge on 20 hand-labeled
+  finding statements. Ships `parse: json` script adapters, a fan-out A/B
+  spec (`ab-demo.yml`), a labeled benchmark + questions battery, and a
+  comparison harness with per-state miss detail. Measured on the live
+  API: decision 0.87 vs judge 0.98 dimension accuracy, ~260 ms vs
+  ~20.6 s mean latency, $0.0005 for all 20 decision calls. Misses cluster
+  at probability boundaries (calibrated uncertainty, not confusion) —
+  see the example README for the hybrid-escalation read.
 - **Script adapters can emit structured output (`parse: json`).** An adapter
   declared with `parse: json` has its stdout parsed as a JSON object, which
   becomes the stage result directly — downstream stages can reference

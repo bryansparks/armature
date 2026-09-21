@@ -753,6 +753,17 @@ stages:
   # downstream: partition_source: "{{ triage.selected }}"
 ```
 
+**Non-LLM decision services.** `parse: json` makes any structured-output API a
+first-class stage — including non-LLM ones. `examples/decision-typesafe/` wraps
+the TypeSafe decision API (Jev) in a script adapter that asks typed questions
+(boolean, multiple choice, numeric score) about each item and prints
+`{model, answers, usage, latency_ms}` on stdout, so downstream stages template
+off the answers and a fan-out stage can score a whole list in parallel. Measured
+on a 20-item labeled benchmark: ~260 ms and ~$0.00003 per call (vs ~20.6 s for
+an LLM judge), at 0.87 vs 0.98 dimension accuracy — a cheap pre-filter or
+escalation trigger for LLM judgment rather than a replacement for it. The
+example's README has the full worked pattern and results.
+
 ---
 
 ### 4.3 Human gate

@@ -84,7 +84,14 @@ adapters:
     type: script              # script | python
     cmd: "echo {{ arg }}"     # Jinja2 allowed
     timeout: 60
+    parse: json               # optional — stdout parsed as a JSON object becomes the stage result
 ```
+
+Fields: `name`, `type` (`script` | `python`), `cmd` (script) or `fn` (python),
+`args` (static dict merged into context), `timeout`, `parse` (`json` — the
+printed JSON object becomes the stage result; non-object top level or non-zero
+exit raises, subject to `on_fail` / `fail_as_value`). See
+`docs/USER-GUIDE.md` §4.3 for details and a worked example.
 
 ---
 
