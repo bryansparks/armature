@@ -1,5 +1,8 @@
 from __future__ import annotations
+import asyncio
 import json
+import sqlite3
+import time
 import aiosqlite
 from pathlib import Path
 from datetime import datetime, timezone
@@ -109,13 +112,48 @@ def compute_hqs_from_traces(traces: list["TraceRecord"]) -> "HqsResult":
     )
 
 
+_BUSY_TIMEOUT_SECONDS = 30.0
+_BUSY_RETRIES = 4
+
+_INSERT_SQL = """INSERT INTO traces
+       (run_id, workflow_name, stage_id, role_type, model,
+        input_tokens, output_tokens, latency_ms, success, output_valid,
+        quorum_score, timestamp, inputs_json, outputs_json,
+        error_type, error_kind, escalation_count, spec_version,
+        inputs_hash, policy_version, inputs_provenance_json,
+        tools_declared_json, tools_called_json,
+        sandbox_image_digest, loop_iteration,
+        agent_id, agent_version, active_skill_ids_json, context_policy_json)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+
+
+def _insert_trace(path: Path, params: tuple[Any, ...]) -> None:
+    # IMMEDIATE takes the write lock up front. A deferred transaction upgrades
+    # to it from a read snapshot, and SQLite refuses that upgrade instantly
+    # with SQLITE_BUSY rather than waiting out the busy timeout.
+    for attempt in range(_BUSY_RETRIES):
+        conn = sqlite3.connect(
+            path, timeout=_BUSY_TIMEOUT_SECONDS, isolation_level="IMMEDIATE"
+        )
+        try:
+            conn.execute(_INSERT_SQL, params)
+            conn.commit()
+            return
+        except sqlite3.OperationalError:
+            if attempt == _BUSY_RETRIES - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+        finally:
+            conn.close()
+
+
 class TraceStore:
     def __init__(self, db_path: Path | str):
         self._path = Path(db_path)
 
     async def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self._path) as db:
+        async with aiosqlite.connect(self._path, timeout=_BUSY_TIMEOUT_SECONDS) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute(_CREATE_SQL)
             for col_def in [
@@ -143,39 +181,29 @@ class TraceStore:
             await db.commit()
 
     async def record(self, trace: TraceRecord) -> None:
-        async with aiosqlite.connect(self._path) as db:
-            await db.execute(
-                """INSERT INTO traces
-                   (run_id, workflow_name, stage_id, role_type, model,
-                    input_tokens, output_tokens, latency_ms, success, output_valid,
-                    quorum_score, timestamp, inputs_json, outputs_json,
-                    error_type, error_kind, escalation_count, spec_version,
-                    inputs_hash, policy_version, inputs_provenance_json,
-                    tools_declared_json, tools_called_json,
-                    sandbox_image_digest, loop_iteration,
-                    agent_id, agent_version, active_skill_ids_json, context_policy_json)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    trace.run_id, trace.workflow_name, trace.stage_id,
-                    trace.role_type, trace.model,
-                    trace.input_tokens, trace.output_tokens, trace.latency_ms,
-                    int(trace.success), int(trace.output_valid),
-                    trace.quorum_score, trace.timestamp,
-                    json.dumps(trace.inputs), json.dumps(trace.outputs),
-                    trace.error_type, trace.error_kind, trace.escalation_count, trace.spec_version,
-                    trace.inputs_hash, trace.policy_version,
-                    json.dumps(trace.inputs_provenance),
-                    json.dumps(trace.tools_declared),
-                    json.dumps(trace.tools_called),
-                    trace.sandbox_image_digest,
-                    trace.loop_iteration,
-                    trace.agent_id,
-                    trace.agent_version,
-                    json.dumps(trace.active_skill_ids),
-                    json.dumps(trace.context_policy) if trace.context_policy else None,
-                ),
-            )
-            await db.commit()
+        params = (
+            trace.run_id, trace.workflow_name, trace.stage_id,
+            trace.role_type, trace.model,
+            trace.input_tokens, trace.output_tokens, trace.latency_ms,
+            int(trace.success), int(trace.output_valid),
+            trace.quorum_score, trace.timestamp,
+            json.dumps(trace.inputs), json.dumps(trace.outputs),
+            trace.error_type, trace.error_kind, trace.escalation_count, trace.spec_version,
+            trace.inputs_hash, trace.policy_version,
+            json.dumps(trace.inputs_provenance),
+            json.dumps(trace.tools_declared),
+            json.dumps(trace.tools_called),
+            trace.sandbox_image_digest,
+            trace.loop_iteration,
+            trace.agent_id,
+            trace.agent_version,
+            json.dumps(trace.active_skill_ids),
+            json.dumps(trace.context_policy) if trace.context_policy else None,
+        )
+        # One thread hop for the whole transaction. Awaiting between the INSERT
+        # and the COMMIT would hold the write lock for as long as the event loop
+        # is blocked, and a script adapter blocks it for the length of the script.
+        await asyncio.to_thread(_insert_trace, self._path, params)
 
     async def query(
         self,
@@ -197,7 +225,7 @@ class TraceStore:
             params.append(min_quorum_score)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
-        async with aiosqlite.connect(self._path) as db:
+        async with aiosqlite.connect(self._path, timeout=_BUSY_TIMEOUT_SECONDS) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 f"SELECT * FROM traces {where} ORDER BY timestamp DESC LIMIT ?", params
@@ -247,7 +275,7 @@ class TraceStore:
 
     async def latest_run_id(self, workflow_name: str) -> str | None:
         """Return the run_id of the most recent run for the given workflow."""
-        async with aiosqlite.connect(self._path) as db:
+        async with aiosqlite.connect(self._path, timeout=_BUSY_TIMEOUT_SECONDS) as db:
             cursor = await db.execute(
                 "SELECT run_id FROM traces WHERE workflow_name = ? ORDER BY timestamp DESC LIMIT 1",
                 (workflow_name,),
@@ -261,7 +289,7 @@ class TraceStore:
         return {t.stage_id: t.outputs for t in traces}
 
     async def query_by_run(self, run_id: str) -> list[TraceRecord]:
-        async with aiosqlite.connect(self._path) as db:
+        async with aiosqlite.connect(self._path, timeout=_BUSY_TIMEOUT_SECONDS) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT * FROM traces WHERE run_id = ? ORDER BY timestamp ASC", (run_id,)

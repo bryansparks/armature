@@ -18,6 +18,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   stages first-class citizens alongside LLM stages.
 
 ### Fixed
+- **A fan-out branch no longer loses its result when the trace write fails.**
+  The success-path trace write ran inside the stage's `try`, so a transient
+  `sqlite3.OperationalError` ("database is locked") was indistinguishable from
+  the stage itself failing: the branch's finished work was discarded and
+  replaced with `_fan_out_error`, and the fan-in list silently came back one
+  item short. Trace writes now go through `Harness._record_trace`, which
+  swallows telemetry errors the way the failure path and memory capture
+  already did. `TraceStore.record` also writes in a single thread hop using
+  `BEGIN IMMEDIATE`: a deferred transaction upgrades to the write lock from a
+  read snapshot, which SQLite refuses instantly with `SQLITE_BUSY` without
+  consulting the busy timeout, and an `await` between the INSERT and the
+  COMMIT held that lock for as long as a blocking script adapter stalled the
+  event loop.
 - **Subagent fan-out no longer duplicates children per item.** A subagent stage
   with both `partition_source` and `fan_out` used to run `fan_out` duplicate
   child workflows *per item* (N items x fan_out=K spawned N×K children, each
