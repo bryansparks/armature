@@ -1,0 +1,104 @@
+{
+  "states": [
+    {
+      "id": "s01",
+      "text": "engine.py:44 drops the Authorization header when following a redirect, leaking credentials to third-party hosts.",
+      "labels": {"is_concrete": true, "severity": "high", "actionability": 2}
+    },
+    {
+      "id": "s02",
+      "text": "The code quality could be better in several places.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s03",
+      "text": "nodes/script.py crashes with KeyError 'stdout' when the adapter subprocess is killed by a signal before producing output.",
+      "labels": {"is_concrete": true, "severity": "medium", "actionability": 2}
+    },
+    {
+      "id": "s04",
+      "text": "Error handling is inconsistent across the codebase.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s05",
+      "text": "storage/db.py:112 builds the SQL query with string formatting, so a user-supplied folder name can inject arbitrary SQL.",
+      "labels": {"is_concrete": true, "severity": "high", "actionability": 2}
+    },
+    {
+      "id": "s06",
+      "text": "Some functions are too long and should probably be refactored.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s07",
+      "text": "The README install instructions reference requirements.txt, but the project moved to pyproject.toml, so a fresh contributor following them fails.",
+      "labels": {"is_concrete": true, "severity": "low", "actionability": 2}
+    },
+    {
+      "id": "s08",
+      "text": "Pricing calculation sometimes returns the wrong total for edge cases.",
+      "labels": {"is_concrete": false, "severity": "medium", "actionability": 1}
+    },
+    {
+      "id": "s09",
+      "text": "worker.py:88 calls asyncio.create_task without keeping a reference, so fire-and-forget tasks can be garbage-collected mid-flight and silently disappear.",
+      "labels": {"is_concrete": true, "severity": "medium", "actionability": 2}
+    },
+    {
+      "id": "s10",
+      "text": "auth/session.py:201 writes the session token to a world-readable file, so any local user on the box can steal active sessions.",
+      "labels": {"is_concrete": true, "severity": "high", "actionability": 2}
+    },
+    {
+      "id": "s11",
+      "text": "Naming is confusing in a few of the newer modules.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s12",
+      "text": "The API feels slow under heavy load.",
+      "labels": {"is_concrete": false, "severity": "medium", "actionability": 0}
+    },
+    {
+      "id": "s13",
+      "text": "parsers/csv.py raises csv.Error('field larger than field limit') on any row over 131072 characters; the limit is neither raised nor configurable.",
+      "labels": {"is_concrete": true, "severity": "medium", "actionability": 2}
+    },
+    {
+      "id": "s14",
+      "text": "It would be nice to add more tests.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s15",
+      "text": "api/handlers.py:77 reads the full request body into memory without checking content_length first, so one 10GB upload OOMs the pod.",
+      "labels": {"is_concrete": true, "severity": "high", "actionability": 2}
+    },
+    {
+      "id": "s16",
+      "text": "The design feels over-engineered in places.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 0}
+    },
+    {
+      "id": "s17",
+      "text": "The config loader silently falls back to defaults when the YAML file is malformed, instead of failing loudly.",
+      "labels": {"is_concrete": true, "severity": "medium", "actionability": 1}
+    },
+    {
+      "id": "s18",
+      "text": "Users report occasional crashes in production.",
+      "labels": {"is_concrete": false, "severity": "medium", "actionability": 0}
+    },
+    {
+      "id": "s19",
+      "text": "utils.py:5 defines two functions named _normalize; the later definition shadows the first, so callers of the first get the wrong implementation.",
+      "labels": {"is_concrete": true, "severity": "high", "actionability": 2}
+    },
+    {
+      "id": "s20",
+      "text": "Docstrings are missing throughout the newer modules.",
+      "labels": {"is_concrete": false, "severity": "low", "actionability": 1}
+    }
+  ]
+}

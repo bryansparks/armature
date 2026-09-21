@@ -1,0 +1,28 @@
+{
+  "is_concrete": {
+    "type": "noul",
+    "instructions": "Does the statement identify a specific artifact (file, function, endpoint, config key) or an observable, reproducible behavior? Opinions, general quality complaints, and reports that name nothing identifiable are not concrete.",
+    "criteria": {
+      "true": "A specific file/function/artifact is named, or the behavior described is concretely observable and reproducible",
+      "false": "An opinion or unspecific complaint with no identifiable artifact or observable behavior"
+    }
+  },
+  "severity": {
+    "type": "choice",
+    "instructions": "If this statement describes a real defect, how severe would its impact be? Judge only the statement's own claim, not whether it is true.",
+    "criteria": {
+      "low": "Cosmetic, stylistic, documentation, or developer-experience issue with no runtime impact",
+      "medium": "Correctness or reliability risk in a narrow case: degraded behavior, edge-case wrong results, silent fallbacks",
+      "high": "Security exposure, data loss, crash or OOM, or breakage affecting many users"
+    }
+  },
+  "actionability": {
+    "type": "score",
+    "instructions": "How directly can an engineer act on this statement without further investigation?",
+    "criteria": [
+      "vague: no clear next action, you would have to ask what or where",
+      "partially actionable: the direction is clear but the location is not",
+      "immediately actionable: you know exactly what to change and where"
+    ]
+  }
+}

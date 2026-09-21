@@ -1,0 +1,151 @@
+# Layer 1 spike: A/B benchmark — TypeSafe decision API vs LLM judge.
+#
+# 20 hand-labeled finding-style statements. The decide stage calls the
+# TypeSafe decision API through the decide.py script adapter (parse: json);
+# the llm_judge stage answers the same three questions with a small-tier
+# LLM (guided_json). The compare stage produces accuracy, agreement,
+# latency, and cost numbers. Run from the repo root:
+#
+#   PATH="$PWD/.venv/bin:$PATH" .venv/bin/armature run examples/decision-typesafe/ab-demo.yml
+#
+# (PATH prefix so adapter `python3` resolves to the venv python with httpx.)
+name: typesafe-decision-ab
+version: "1.0"
+description: >
+  A/B benchmark of the TypeSafe decision API (decide.py script adapter)
+  against an LLM judge stage over 20 hand-labeled code-review findings.
+  Outputs accuracy vs labels, decision-vs-judge agreement, decision
+  latency, and decision cost.
+
+model_tiers:
+  small:
+    provider: openrouter
+    model: qwen/qwen3.6-27b
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 1024
+  # Escalation backstop for guided_json parse failures (rarely used).
+  medium:
+    provider: openrouter
+    model: moonshotai/kimi-k2.6
+    api_key_env: OPENROUTER_API_KEY
+    temperature: 0.2
+    max_tokens: 2048
+
+role_type_defaults:
+  judge: small
+
+contracts:
+  max_iterations: 40
+  max_llm_calls: 60
+  timeout_hours: 0.5
+
+adapters:
+  load_benchmark:
+    name: load_benchmark
+    type: script
+    cmd: "python3 examples/decision-typesafe/load_benchmark.py"
+    timeout: 30
+    parse: json
+
+  decide:
+    name: decide
+    type: script
+    cmd: "python3 examples/decision-typesafe/decide.py --questions-file examples/decision-typesafe/questions.json"
+    timeout: 60
+    parse: json
+
+  compare:
+    name: compare
+    type: script
+    cmd: "python3 examples/decision-typesafe/compare.py"
+    timeout: 60
+    parse: json
+
+stages:
+  # -----------------------------------------------------------------
+  # Stage 1: load the labeled benchmark states
+  # -----------------------------------------------------------------
+  - id: load_benchmark
+    adapter: load_benchmark
+    depends_on: []
+
+  # -----------------------------------------------------------------
+  # Stage 2: TypeSafe decision API, one call per state
+  # (state arrives via ARMATURE_CONTEXT's state_item partition key)
+  # -----------------------------------------------------------------
+  - id: decide
+    fan_out: 5
+    fan_in: list
+    partition_source: "{{ load_benchmark.states }}"
+    partition_key: state_item
+    adapter: decide
+    depends_on: [load_benchmark]
+
+  # -----------------------------------------------------------------
+  # Stage 3: LLM judge, one call per state, same questions.
+  # Wording mirrors questions.json so both sides judge identically.
+  # -----------------------------------------------------------------
+  - id: llm_judge
+    fan_out: 5
+    fan_in: list
+    partition_source: "{{ load_benchmark.states }}"
+    partition_key: state_item
+    role:
+      name: FindingAssessor
+      type: judge
+      description: |
+        You are assessing a single statement from a code-review report.
+        Judge only the statement's own claim, not whether it is true.
+
+        STATEMENT:
+        {{ state_item.text }}
+
+        Answer three questions about the statement:
+
+        1. CONCRETE: Does the statement identify a specific artifact
+           (file, function, endpoint, config key) or an observable,
+           reproducible behavior? Opinions, general quality complaints,
+           and reports that name nothing identifiable are not concrete.
+
+        2. SEVERITY: If this describes a real defect, how severe would its
+           impact be?
+           - low: cosmetic, stylistic, documentation, or developer-experience
+             issue with no runtime impact
+           - medium: correctness or reliability risk in a narrow case —
+             degraded behavior, edge-case wrong results, silent fallbacks
+           - high: security exposure, data loss, crash or OOM, or breakage
+             affecting many users
+
+        3. ACTIONABILITY: How directly can an engineer act on this without
+           further investigation?
+           - 0: vague — no clear next action, you would have to ask what or where
+           - 1: partially actionable — the direction is clear but the location is not
+           - 2: immediately actionable — you know exactly what to change and where
+
+        Return JSON with exactly these fields: concrete (boolean),
+        severity (one of "low", "medium", "high"), actionability
+        (integer 0-2).
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [concrete, severity, actionability]
+      properties:
+        concrete:
+          type: boolean
+        severity:
+          type: string
+          enum: [low, medium, high]
+        actionability:
+          type: integer
+          minimum: 0
+          maximum: 2
+    depends_on: [load_benchmark]
+
+  # -----------------------------------------------------------------
+  # Stage 4: compare — accuracy, agreement, latency, cost
+  # (fan-out preserves item order, so results are index-aligned)
+  # -----------------------------------------------------------------
+  - id: compare
+    adapter: compare
+    depends_on: [decide, llm_judge]
