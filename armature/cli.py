@@ -564,10 +564,15 @@ def run(
         harness._on_event = _make_on_event(quiet, fan_out_ids=fan_out_ids)
         return await harness.run(parsed_inputs, force=force)
 
+    from armature.runtime.checkpoint import SessionDirInUse
+
     try:
         result = asyncio.run(_run())
     except typer.Exit:
         raise
+    except SessionDirInUse as exc:
+        typer.echo(f"✗ {exc}", err=True)
+        raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001
         if _print_provider_error(exc):
             raise typer.Exit(1)

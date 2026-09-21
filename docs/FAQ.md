@@ -929,14 +929,18 @@ checkpoint: true
 stages:
   - id: fetch_documents     # if this completes, it won't re-run on resume
     ...
-  - id: review_each         # fan-out: 100 documents — partial completion is preserved
-    fan_out: 100
-    ...
+  - id: review_each         # fan-out — but note: the fan-out is checkpointed
+    fan_out: 100            # as a UNIT; if interrupted mid-batch it re-runs
+    ...                     # all items (no per-item checkpointing)
 ```
 
 **Does checkpoint mode affect normal (non-interrupted) runs?**
 
-No. On a clean run, stages complete and write their checkpoints, but the next `armature run` starts fresh unless you pass `--resume`. Checkpoint files are stored in `.armature/checkpoints/{run_id}/`. See `CHECKPOINT-AND-RESUME.md`.
+No. On a clean run, stages complete and write their checkpoints. Every `armature run` generates a fresh run id and starts clean — resume happens when you run again against a **stable session directory** (pass `session_dir` via the Python API or the service API; see `CHECKPOINT-AND-RESUME.md` → Session directory). `armature run --force` ignores the checkpoint and re-runs everything. Checkpoint files are stored at `<session_dir>/checkpoint.json` (default: `~/.armature/runs/{run_id}/checkpoint.json`).
+
+**If a stage crashed halfway, what happens to its side effects on resume?**
+
+Completed stages are exactly-once — never re-executed. A stage that was interrupted mid-execution is *not* in the checkpoint, so it re-runs and its external effects (written files, API calls) may be applied a second time — at-least-once. Design `tool_call`/adapter tools idempotently, and note that two concurrent runs against the same session directory are rejected outright (`SessionDirInUse`) rather than silently duplicating effects. Full per-stage-type table: `CHECKPOINT-AND-RESUME.md` → Effect-delivery contract.
 
 ---
 

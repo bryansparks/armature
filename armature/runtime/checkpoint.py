@@ -16,6 +16,60 @@ from pathlib import Path
 from typing import Any
 
 
+class SessionDirInUse(RuntimeError):
+    """The session directory is locked by an active run."""
+
+
+class SessionLock:
+    """Fail-closed advisory lock guarding a session directory.
+
+    Two concurrent runs against one session directory would both execute
+    un-checkpointed stages and clobber each other's checkpoint writes
+    (last rename wins) — silently duplicating external effects. Instead,
+    the second run fails loudly with `SessionDirInUse`.
+
+    Uses `fcntl.flock` so the OS releases the lock if the process dies:
+    there are no stale-lock files to clean up. Because flock is scoped to
+    the open file description (not the process), two Harness instances in
+    the same process are also correctly rejected.
+    """
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._fh = None
+
+    def acquire(self) -> None:
+        import fcntl
+
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+")
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._fh.close()
+            self._fh = None
+            raise SessionDirInUse(
+                f"Session directory is in use by an active run: {self._path.parent}. "
+                f"Concurrent resumes would duplicate un-checkpointed stage effects — "
+                f"wait for the active run to finish or use a different session_dir."
+            ) from None
+
+    def release(self) -> None:
+        if self._fh is not None:
+            import fcntl
+
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+
+    def __enter__(self) -> "SessionLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
 class CheckpointStore:
     def __init__(self, path: Path):
         self._path = path

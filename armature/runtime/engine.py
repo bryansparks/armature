@@ -316,12 +316,16 @@ class Harness:
             )
 
         if self._spec.checkpoint:
-            from armature.runtime.checkpoint import CheckpointStore
+            from armature.runtime.checkpoint import CheckpointStore, SessionLock
             self._checkpoint: "CheckpointStore | None" = CheckpointStore(
                 base_dir / "checkpoint.json"
             )
+            self._session_lock: "SessionLock | None" = SessionLock(
+                base_dir / "session.lock"
+            )
         else:
             self._checkpoint = None
+            self._session_lock = None
         self._checkpoint_prior: dict[str, Any] = {}
         self._checkpoint_loop_iters: dict[str, Any] = {}
         self._llm_call_count: int = 0
@@ -1095,6 +1099,25 @@ class Harness:
                 )
 
     async def run(
+        self,
+        inputs: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Execute the workflow.
+
+        With checkpoint mode on, the session lock is held for the duration
+        of the run so a concurrent run against the same session directory
+        fails loudly (SessionDirInUse) instead of silently duplicating
+        un-checkpointed stage effects. See docs/CHECKPOINT-AND-RESUME.md
+        → Effect-delivery contract.
+        """
+        if self._session_lock is not None:
+            with self._session_lock:
+                return await self._run_locked(inputs, force=force)
+        return await self._run_locked(inputs, force=force)
+
+    async def _run_locked(
         self,
         inputs: dict[str, Any] | None = None,
         *,
