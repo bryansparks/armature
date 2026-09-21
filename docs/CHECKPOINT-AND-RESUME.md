@@ -103,6 +103,38 @@ A crash mid-write leaves the `.tmp` file behind and the previous `checkpoint.jso
 
 ---
 
+## Effect-delivery contract
+
+Resume guarantees are defined per stage state at the interruption point:
+
+| Stage state at crash | On resume | Effect delivery |
+|---|---|---|
+| Completed and checkpointed | Not re-executed — result injected from checkpoint | **Exactly-once** |
+| In-flight (crashed mid-execution) | Re-executed from scratch | **At-least-once** — external effects may be applied again |
+| Not yet started | Executed normally | **Exactly-once** |
+| Failed with `fail_as_value: true` | Result (the failure value) comes from checkpoint | **Exactly-once** |
+| Failed without `fail_as_value` | Run aborted; re-runs on resume | **At-least-once** |
+| Fan-out interrupted mid-batch | **Entire fan-out re-runs — all items**, even ones that finished | **At-least-once** per item |
+
+This is prefix continuation: the completed prefix of the DAG is exactly-once, everything past the interruption point is at-least-once.
+
+What that means for your stage types:
+
+- **`role` (LLM) stages** produce text — re-running costs tokens but applies no external effect. Repeat-safe by construction.
+- **`tool_call` and `adapter` stages** can have real external effects (files written, API calls made, messages sent). A stage that applied its effect and *then* crashed is not in the checkpoint, so resume applies the effect again. Design effectful tools idempotently, or isolate each effectful call in a small stage so a re-run's blast radius is one operation.
+- **`gate: human` stages** checkpoint the approver's response — an approval is never re-requested on resume.
+
+### Concurrent runs are rejected
+
+Two concurrent runs against one session directory would each execute the un-checkpointed stages and clobber each other's checkpoint writes (last rename wins), silently duplicating external effects. Instead, the second run fails loudly.
+
+- A checkpointed run holds an OS-level lock (`session.lock`, via `flock`) on the session directory for the duration of the run.
+- A second concurrent run raises `SessionDirInUse` immediately — it never starts executing stages.
+- The lock is released by the OS if the process dies, so there are no stale-lock files to clean up.
+- Runs with `checkpoint: false` take no lock — concurrent runs against one directory are allowed (nothing to protect).
+
+---
+
 ## Session directory
 
 The checkpoint file lives at `checkpoint.json` inside the session directory. The session directory is fixed at run start:
