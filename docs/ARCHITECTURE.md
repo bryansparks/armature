@@ -36,10 +36,10 @@ Armature synthesizes eleven academic papers published between February 2025 and 
 | **Skill-to-LoRA** — CUHK, [arXiv:2606.16769](https://arxiv.org/abs/2606.16769) | Distill textual skills into plug-and-play LoRA adapters loaded at runtime; cuts skill prefill tokens while preserving behavior |
 | **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
-| **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
-| **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 
 The benchmarked insight from NLAH: when workflows are defined in readable, editable natural language rather than code, both humans and optimizers can reason about them causally. A YAML diff is meaningful; a Python AST diff is opaque.
+
+For the July–September 2026 currency check on this foundation — what the later literature confirmed, what it added, and the register of tracked, deliberately-not-adopted items — see [RESEARCH-CURRENCY-CHECK.md](RESEARCH-CURRENCY-CHECK.md).
 
 ---
 

@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Research currency check.** New `docs/RESEARCH-CURRENCY-CHECK.md` records the
+  September 2026 analysis of harness research since July 2026: the verdict (the
+  field converged on what Armature already is), the one adopted item (the resume
+  contract), and a register of tracked, deliberately-not-adopted items each with
+  its reason and reopening trigger.
 - **TypeSafe decision adapter spike (Layer 1).** New example
   `examples/decision-typesafe/` — an A/B benchmark pitting a non-LLM
   decision API (TypeSafe/Jev) against an LLM judge on 20 hand-labeled
@@ -28,6 +33,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   stages first-class citizens alongside LLM stages.
 
 ### Fixed
+- **Concurrent runs on a checkpointed session directory now fail loudly.** A
+  second run against a session directory whose run is still active raises
+  `SessionDirInUse` instead of silently duplicating un-checkpointed stage
+  effects (last checkpoint-rename wins, both runs execute the un-checkpointed
+  stages). The lock is an `flock` on `session.lock`, held for the run's
+  duration and released by the OS on process death — no stale-lock files.
+  Runs with `checkpoint: false` take no lock. Alongside the lock, six
+  conformance tests (`tests/runtime/test_resume_contract.py`) now pin the
+  resume contract in CI — completed stages exactly-once, in-flight stages
+  at-least-once, fan-out checkpointed as a unit, concurrent runs rejected —
+  and the docs were truth-passed: the FAQ's nonexistent `--resume` flag and
+  wrong checkpoint path corrected, and `docs/CHECKPOINT-AND-RESUME.md` gained
+  an Effect-delivery contract section.
 - **A fan-out branch no longer loses its result when the trace write fails.**
   The success-path trace write ran inside the stage's `try`, so a transient
   `sqlite3.OperationalError` ("database is locked") was indistinguishable from
