@@ -501,6 +501,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | `07_lora_adapter.yml` | **LoRA adapter skills** — replace skill text with a fine-tuned adapter at runtime |
 | `11_iterative_refinement.yml` | Deliberate iteration with `loop:` and an `until:` stop condition |
 | `starter_template.yml` | **Full-featured reference** — every section documented inline, showing model tiers, context filtering, cross-run memory, safety rules, guided JSON, and a human gate |
+| `decision-typesafe/` | **A/B benchmark: non-LLM decision API vs LLM judge** — script adapters with `parse: json`, fan-out over a 20-item labeled benchmark, measured accuracy/latency/cost in the example README (needs `TYPESAFE_API_KEY` + `OPENROUTER_API_KEY`) |
 
 ## Templates
 

@@ -1,9 +1,9 @@
 # Example workflow packages
 
-Each subdirectory is the **source** for a workflow package — a spec, optionally
-vendored tools, a destinations contract, and a README. Build one with
-`armature package build`, then run it with `armature package run`. See
-`docs/WORKFLOW-PACKAGES.md` for the full feature reference.
+The `packages/` subdirectories are the **source** for workflow packages — a
+spec, optionally vendored tools, a destinations contract, and a README. Build
+one with `armature package build`, then run it with `armature package run`.
+See `docs/WORKFLOW-PACKAGES.md` for the full feature reference.
 
 | Package | LLM? | Secrets? | Sandbox? | What it demonstrates |
 |---|---|---|---|---|
@@ -40,3 +40,13 @@ pytest -m docker
 
 `topic-researcher` needs an API key and is not in the automated suite — run it
 manually as a live LLM smoke.
+
+## Other examples (not packages)
+
+These run directly with `armature run` — no packaging step:
+
+| Example | What it demonstrates |
+|---|---|
+| [`decision-typesafe/`](decision-typesafe) | A/B benchmark: TypeSafe decision API (Jev) vs LLM judge on a labeled benchmark — `parse: json` script adapters + fan-out; measured results in its README |
+| [`dangerous-pretzel/`](dangerous-pretzel) | Multi-workflow campaign chain (intake → concept-gen → production) with shared scripts |
+| [`agents/`](agents) | Minimal `agent.yaml` — single role with a `skill_library` entry |

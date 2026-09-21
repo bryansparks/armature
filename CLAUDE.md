@@ -187,6 +187,27 @@ stages:
     depends_on: [executor]
 ```
 
+### Structured decision gate (non-LLM)
+```yaml
+adapters:
+  decide: {name: decide, type: script, cmd: "python decide.py", parse: json}
+
+stages:
+  - id: triage
+    adapter: decide              # typed answers (noul/choice/score), no LLM
+    fan_out: 10
+    fan_in: list
+    partition_source: "{{ load_findings.findings }}"
+    partition_key: finding
+    depends_on: [load_findings]
+```
+
+When the judgment is structured (classify / choose / score), a script adapter
+wrapping a decision API is ~80× faster and effectively free vs an LLM judge
+(measured: 260 ms and ~$0.00003 per call). Use it as a pre-filter or escalation
+trigger — graded misses concentrate at probability boundaries. Worked example
+with measured results: `examples/decision-typesafe/`.
+
 ### Fan-out research pipeline (parallel search + synthesis)
 ```yaml
   - id: plan_searches
