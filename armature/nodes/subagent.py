@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 from armature.nodes.base import BaseNode
 from armature.spec.models import Stage
-from armature.spec.loader import load_spec
+from armature.spec.loader import load_child_spec
 
 
 async def litellm_completion(**kwargs) -> Any:
@@ -102,7 +102,9 @@ class SubagentNode(BaseNode):
 
         child_context = self._resolve_child_context(context)
         child = Harness(
-            spec=load_spec(spec_path, vars=child_context),
+            # Parse-first load: carried context renders into string scalars
+            # only, so multiline stage outputs can't break the child's YAML.
+            spec=load_child_spec(spec_path, vars=child_context),
             session_dir=child_dir,
         )
         return await child.run(child_context)

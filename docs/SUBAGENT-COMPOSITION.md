@@ -330,6 +330,18 @@ role:
 
 This pattern gives the child full awareness of prior work without duplicating effort. The child does not need to know it is being looped — it reads `_iteration` and behaves accordingly. The loop semantics live entirely in the parent stage.
 
+### Child spec template semantics
+
+Carried context is runtime data — stage outputs that are frequently multiline. The engine loads child specs with a **parse-first** strategy: the YAML is parsed with templates inert, then carried values render into **string fields only** (`mission`, role `description`, tool args, …). What this means for authors:
+
+- **Multiline carried values are safe.** A three-paragraph report renders into `description: 'Report so far: {{ _iteration.carry_forward... }}'` without breaking anything — the value lands inside the field, never in the YAML structure.
+- **Comments are immune.** A `{{ }}` template in a YAML comment is discarded at parse time, exactly as a literal comment is. (Before 0.6.1, the spec text was rendered *before* parsing; a live template in a comment spliced multiline content past the `#` and corrupted the file — the loop broke on iteration 2.)
+- **Structural templating is unsupported.** A template may not stand in for YAML structure — `stages: '{{ built_stages }}'` fails loudly at child load with a `templates inert` error. Render values *inside* string fields; keep the structure literal. If you need per-iteration structure, branch with `{% if %}` inside a description block scalar instead.
+- **Runtime placeholders survive.** `{{ planner.steps }}` (an upstream output the engine renders per-stage) stays literal through the child load, same as in a top-level spec.
+- The `| tojson` workaround — piping carried values through JSON encoding so multiline text couldn't break the YAML — is no longer necessary in child specs. Existing specs using it keep working; it is simply inert.
+
+These semantics apply to every child load, looped or not. Top-level specs (`armature run parent.yml`) keep the pre-parse render: their `vars` are author-time inputs (`--input key=value`), not stage outputs, so the historical behavior is fine there.
+
 ### Stopping the loop
 
 The `until` expression is evaluated after each iteration completes, against the merged context (parent context plus the child's result dict). A stage inside the child that sets `continue_research: false` in its output will cause `{{ continue_research == false }}` to evaluate truthy, stopping the loop before the next iteration begins. This lets the child decide whether more iterations are warranted — the judge or decision stage inside the child returns a flag, and the parent loop respects it.

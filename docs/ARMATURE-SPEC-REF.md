@@ -279,12 +279,17 @@ Always pair with `output_schema`. Use `medium` or `large` tier (not `small`).
 
 ```yaml
 - id: child_run
-  subagent_spec: workflows/child.yml
+  subagent_spec: workflows/child.yml   # resolved spec-dir first, cwd fallback
   fan_out: 3
   fan_in: list
   partition_key: child_input
   depends_on: []
 ```
+
+Carried context renders into the child spec's **string fields only** (the child
+is parsed with templates inert first) — multiline upstream values are safe, and
+a template may not stand in for YAML structure. Details:
+`docs/SUBAGENT-COMPOSITION.md` → *Child spec template semantics*.
 
 ### Post-run stage (post_run: true)
 

@@ -350,3 +350,106 @@ def test_load_spec_stamps_rendered_subagent_ref(tmp_path):
     spec = load_spec(spec_file, vars={"child_ref": "children/child.yaml"})
     assert spec.stages[0].subagent_spec == "children/child.yaml"
     assert spec.stages[0].subagent_spec_path == str((tmp_path / "children" / "child.yaml").resolve())
+
+
+# ── load_child_spec: parse with templates inert, render string scalars only ────
+#
+# The dispatch smoke (2026-09-21) broke a looped subagent run on iteration 2:
+# carried context rendered into raw YAML text before parsing, and a live
+# {{ }} template in a COMMENT spliced multiline content past the '#'.
+
+_CHILD_TEMPLATE_SPEC = """\
+name: child
+version: "1.0"
+# Live template in a comment: {{ prior }}
+mission: 'Prior output: {{ prior }}'
+contracts:
+  inputs: []
+stages:
+  - id: respond
+    role: {name: Worker, type: worker, description: "Steps: {{ planner.steps }}"}
+"""
+
+
+def _write_child_template(dir_: Path) -> Path:
+    p = dir_ / "child-tpl.yaml"
+    p.write_text(_CHILD_TEMPLATE_SPEC, encoding="utf-8")
+    return p
+
+
+def test_child_spec_multiline_value_renders_without_breaking_parse(tmp_path):
+    """The dispatch repro: a template in a comment plus a multiline carried
+    value must parse and render — under load_spec this raises YAMLError."""
+    from armature.spec.loader import load_child_spec
+
+    p = _write_child_template(tmp_path)
+    prior = "line one\nline two\nline three"
+    spec = load_child_spec(p, vars={"prior": prior})
+    assert spec.mission == f"Prior output: {prior}"
+
+
+def test_child_spec_preserves_runtime_placeholders(tmp_path):
+    """Expressions the engine renders at run time (upstream stage outputs)
+    must survive the child load verbatim."""
+    from armature.spec.loader import load_child_spec
+
+    p = _write_child_template(tmp_path)
+    spec = load_child_spec(p, vars={"prior": "short"})
+    assert spec.stages[0].role.description == "Steps: {{ planner.steps }}"
+
+
+def test_child_spec_no_vars_same_as_plain_load(tmp_path):
+    from armature.spec.loader import load_child_spec
+
+    p = _write_child_template(tmp_path)
+    assert load_child_spec(p).model_dump() == load_spec(p).model_dump()
+
+
+def test_child_spec_structural_template_fails_loudly(tmp_path):
+    """A template standing in for YAML structure parses to a string with
+    templates inert — child specs must be inert-valid, so this is a loud
+    error, never a silently-mangled structure."""
+    from armature.spec.loader import load_child_spec
+
+    p = tmp_path / "child.yaml"
+    p.write_text(
+        "name: child\n"
+        "version: \"1.0\"\n"
+        "stages: '{{ stages_var }}'\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="templates inert"):
+        load_child_spec(p, vars={"stages_var": [{"id": "a"}]})
+
+
+def test_child_spec_inert_unparseable_fails_loudly(tmp_path):
+    from armature.spec.loader import load_child_spec
+
+    p = tmp_path / "child.yaml"
+    p.write_text(
+        "name: child\n"
+        "version: \"1.0\"\n"
+        "contracts: [{{ x }}\n",  # unbalanced flow syntax: invalid inert
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="templates inert"):
+        load_child_spec(p, vars={"x": "a, b"})
+
+
+def test_child_spec_rendered_subagent_ref_stamps_path(tmp_path):
+    """Scalar rendering composes with load-time resolution: a templated
+    subagent_spec whose var is carried in the context resolves and stamps."""
+    from armature.spec.loader import load_child_spec
+
+    grandchild = _write_child(tmp_path / "children")  # from the stamping tests above
+    p = tmp_path / "child.yaml"
+    p.write_text(
+        "name: child\n"
+        "stages:\n"
+        "  - id: spawn_inner\n"
+        "    subagent_spec: '{{ child_ref }}'\n",
+        encoding="utf-8",
+    )
+    spec = load_child_spec(p, vars={"child_ref": "children/child.yaml"})
+    assert spec.stages[0].subagent_spec == "children/child.yaml"
+    assert spec.stages[0].subagent_spec_path == str(grandchild.resolve())

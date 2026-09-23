@@ -1,8 +1,10 @@
 import logging
 from pathlib import Path
+from typing import Any
 import jinja2
 from jinja2 import Environment, BaseLoader
-from ruamel.yaml import YAML
+from pydantic import ValidationError
+from ruamel.yaml import YAML, YAMLError
 from armature.spec.models import CompiledAgent, HarnessSpec, SkillDef, ToolSafetyRule
 
 _log = logging.getLogger(__name__)
@@ -40,6 +42,17 @@ class _KeepUndefined(jinja2.Undefined):
         return 0
 
 
+def _template_env() -> Environment:
+    """The shared load-time Jinja2 environment: preserves {{ expr }} for any
+    variable not in vars (_KeepUndefined) so runtime placeholders survive."""
+    return Environment(
+        loader=BaseLoader(),
+        variable_start_string="{{",
+        variable_end_string="}}",
+        undefined=_KeepUndefined,
+    )
+
+
 def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     path = Path(path)
     if not path.exists():
@@ -48,13 +61,7 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     raw = path.read_text(encoding="utf-8")
 
     if vars:
-        env = Environment(
-            loader=BaseLoader(),
-            variable_start_string="{{",
-            variable_end_string="}}",
-            undefined=_KeepUndefined,
-        )
-        template = env.from_string(raw)
+        template = _template_env().from_string(raw)
         raw = template.render(**(vars or {}))
 
     yaml = YAML()
@@ -62,6 +69,80 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     data = yaml.load(raw)
 
     spec = HarnessSpec.model_validate(data)
+    _resolve_context_layers(spec, path.parent)
+    _resolve_agent_references(spec, path.parent)
+    _resolve_subagent_specs(spec, path.parent)
+    return spec
+
+
+def _render_string_scalars(data: Any, env: Environment, vars: dict) -> None:
+    """Render carried context into string scalars of an already-parsed spec tree.
+
+    Values only — dict keys and YAML structure are untouched, so a multiline or
+    otherwise hostile carried value can never alter the spec's shape. Scalars
+    without template markers skip rendering entirely (fast path, and keeps
+    plain strings byte-identical).
+    """
+    if isinstance(data, dict):
+        for key, val in data.items():
+            if isinstance(val, str):
+                if "{{" in val or "{%" in val:
+                    data[key] = env.from_string(val).render(**vars)
+            else:
+                _render_string_scalars(val, env, vars)
+    elif isinstance(data, list):
+        for i, val in enumerate(data):
+            if isinstance(val, str):
+                if "{{" in val or "{%" in val:
+                    data[i] = env.from_string(val).render(**vars)
+            else:
+                _render_string_scalars(val, env, vars)
+
+
+def load_child_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
+    """Load a subagent child spec: parse with templates inert, then render
+    carried context into string scalars only.
+
+    load_spec renders the whole YAML text before parsing — fine for author-time
+    inputs. A child spec's vars are the parent's RUNTIME context: rich, often
+    multiline stage outputs. Rendering those into raw YAML text before parsing
+    lets a value alter the YAML structure — observed live on 2026-09-21: a
+    {{ }} template in a COMMENT spliced multiline carried content past the '#'
+    and broke the parse on loop iteration 2 (research-round.yaml line 372).
+
+    Child specs must therefore parse with templates inert. Structural
+    templating from carried context (a template emitting YAML structure) is
+    unsupported and fails loudly here rather than mangling silently. Runtime
+    placeholders ({{ upstream.key }} the engine renders per-stage) survive via
+    _KeepUndefined, same as load_spec.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Spec not found: {path}")
+
+    raw = path.read_text(encoding="utf-8")
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    try:
+        data = yaml.load(raw)
+    except YAMLError as exc:
+        raise ValueError(
+            f"child spec '{path.name}' does not parse with templates inert — "
+            f"carried context must not be able to alter YAML structure; "
+            f"rewrite the spec so it is valid YAML before rendering: {exc}"
+        ) from exc
+
+    if vars:
+        _render_string_scalars(data, _template_env(), vars)
+
+    try:
+        spec = HarnessSpec.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(
+            f"child spec '{path.name}' is invalid with templates inert — "
+            f"structural templating from carried context is not supported for "
+            f"child specs (render values inside string fields instead): {exc}"
+        ) from exc
     _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
     _resolve_subagent_specs(spec, path.parent)
