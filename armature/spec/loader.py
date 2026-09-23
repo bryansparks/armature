@@ -64,7 +64,47 @@ def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     spec = HarnessSpec.model_validate(data)
     _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
+    _resolve_subagent_specs(spec, path.parent)
     return spec
+
+
+def resolve_spec_ref(ref: str, base_dir: Path) -> Path | None:
+    """Resolve a spec file reference: absolute as-is; otherwise spec-dir
+    first, process cwd as fallback.
+
+    Returns the first existing candidate, or None when no candidate exists —
+    callers decide whether that's fatal (the loader leaves the ref unstamped
+    so runtime surfaces its usual error; the package builder fails the build).
+    """
+    p = Path(ref)
+    if p.is_absolute():
+        return p if p.exists() else None
+    for cand in (base_dir / ref, Path.cwd() / ref):
+        if cand.exists():
+            return cand
+    return None
+
+
+def _resolve_subagent_specs(spec: HarnessSpec, base_dir: Path) -> None:
+    """Stamp each subagent stage with the resolved child-spec path.
+
+    Unlike context-layer src: and agent_library paths (spec-dir only), a
+    subagent_spec historically resolved against process cwd at run time, so
+    resolution keeps cwd as a fallback for back-compat. Stamping at load time
+    — when the spec's own directory is known — makes child workflows findable
+    regardless of cwd (packaged runs, `armature run` from another directory).
+    The ref itself is preserved as written; unresolvable or still-templated
+    refs are left unstamped and fail at run time as before.
+    """
+    for stage in spec.stages:
+        ref = stage.subagent_spec
+        if ref is None or stage.subagent_spec_path is not None:
+            continue
+        if "{{" in ref:
+            continue
+        resolved = resolve_spec_ref(ref, base_dir)
+        if resolved is not None:
+            stage.subagent_spec_path = str(resolved.resolve())
 
 
 def _cond_key(rule: ToolSafetyRule) -> tuple:

@@ -342,7 +342,7 @@ armature new my_workflow.yml               # terminal wizard (secondary path)
 armature optimize my_workflow.yml          # LLM-proposed spec improvements from traces
 armature package build --spec my_workflow.yml --out my_pkg   # bundle into a verified, portable package
 armature package run my_pkg [--profile secrets.env]          # run it (default: in a container)
-armature package verify my_pkg                               # 8 completeness checks, no execution
+armature package verify my_pkg                               # 9 completeness checks, no execution
 armature package inspect my_pkg                              # print the package manifest
 ```
 

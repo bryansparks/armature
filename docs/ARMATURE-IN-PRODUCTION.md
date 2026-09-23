@@ -403,7 +403,7 @@ The three stacks above govern *what a workflow does*. **Workflow packages** gove
 ```bash
 armature package build --spec my_workflow.yml --out my_pkg --tools ./tools
 armature package run my_pkg --profile secrets.env          # default: in a container
-armature package verify my_pkg                             # 8 completeness checks, no execution
+armature package verify my_pkg                             # 9 completeness checks, no execution
 ```
 
 Three properties make packages safe to run unattended in a fleet:

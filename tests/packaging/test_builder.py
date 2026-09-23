@@ -78,3 +78,147 @@ def test_build_rejects_layer_src_escaping_package_dir(tmp_path):
     except PackageBuildError:
         return
     raise AssertionError("expected build to abort on escaping layer src")
+
+# ── subagent_spec bundling (Fargate blocker: children must ship in the pkg) ──
+
+import logging as _logging
+
+from armature.packaging.integrity import verify_integrity
+
+SUBAGENT_PARENT = """\
+name: subagent-demo
+version: "1.0"
+description: Parent workflow with a subagent stage.
+contracts:
+  inputs: []
+stages:
+  - id: spawn
+    subagent_spec: workflows/child.yaml
+    depends_on: []
+"""
+
+CHILD_NO_LLM = """\
+name: child
+version: "1.0"
+description: No-LLM child (script adapter) for packaging tests.
+adapters:
+  greet:
+    name: greet
+    type: script
+    cmd: "echo 'child says: {{greeting}}'"
+stages:
+  - id: respond
+    adapter: greet
+"""
+
+
+def _write_child(dir_: Path, text: str = CHILD_NO_LLM, name: str = "child.yaml") -> Path:
+    dir_.mkdir(parents=True, exist_ok=True)
+    p = dir_ / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_build_bundles_subagent_spec_files(tmp_path):
+    _write_child(tmp_path / "workflows")
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    assert (pkg / "workflows" / "child.yaml").read_text(encoding="utf-8") == CHILD_NO_LLM
+    assert "workflows/child.yaml" in (pkg / "manifest.sha256").read_text(encoding="utf-8")
+    assert verify_integrity(pkg)
+
+
+def test_build_bundles_nested_subagent_specs(tmp_path):
+    grandchild = _write_child(tmp_path / "workflows" / "inner", name="grand.yaml")
+    child = CHILD_NO_LLM.replace(
+        "stages:\n  - id: respond\n    adapter: greet\n",
+        "stages:\n  - id: respond\n    adapter: greet\n  - id: spawn_inner\n"
+        "    subagent_spec: inner/grand.yaml\n",
+    )
+    _write_child(tmp_path / "workflows", text=child)
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    assert (pkg / "workflows" / "child.yaml").exists()
+    assert (pkg / "workflows" / "inner" / "grand.yaml").exists()
+    assert verify_integrity(pkg)
+
+
+def test_build_bundles_child_context_layer_srcs(tmp_path):
+    child = CHILD_NO_LLM.replace(
+        "stages:\n",
+        "context_layers:\n  - name: notes\n    src: notes.md\nstages:\n",
+    )
+    _write_child(tmp_path / "workflows", text=child)
+    (tmp_path / "workflows" / "notes.md").write_text("child-level layer", encoding="utf-8")
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    # Vendored next to the bundled child, where the child's own load resolves it.
+    assert (pkg / "workflows" / "notes.md").read_text(encoding="utf-8") == "child-level layer"
+    assert verify_integrity(pkg)
+
+
+def test_build_rejects_missing_subagent_spec(tmp_path):
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT)  # workflows/child.yaml never created
+    try:
+        PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    except PackageBuildError as exc:
+        assert "workflows/child.yaml" in str(exc)
+        return
+    raise AssertionError("expected build to abort on missing subagent spec")
+
+
+def test_build_rejects_absolute_subagent_spec_ref(tmp_path):
+    child = _write_child(tmp_path / "elsewhere", name="child.yaml")
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT.replace(
+        "subagent_spec: workflows/child.yaml", f"subagent_spec: {child}"))
+    try:
+        PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    except PackageBuildError as exc:
+        assert "absolute" in str(exc)
+        return
+    raise AssertionError("expected build to abort on absolute subagent_spec")
+
+
+def test_build_rejects_subagent_ref_escaping_package_dir(tmp_path):
+    _write_child(tmp_path)  # at repo root, one level above the spec's dir
+    spec_dir = tmp_path / "specs"
+    spec_dir.mkdir()
+    spec_path = spec_dir / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT.replace(
+        "subagent_spec: workflows/child.yaml", "subagent_spec: ../child.yaml"))
+    try:
+        PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    except PackageBuildError as exc:
+        assert "escapes" in str(exc)
+        return
+    raise AssertionError("expected build to abort on escaping subagent ref")
+
+
+def test_build_handles_subagent_reference_cycles(tmp_path):
+    # Child references its own parent: the walk must terminate and the
+    # package must still be complete.
+    child = CHILD_NO_LLM.replace(
+        "stages:\n",
+        "stages:\n  - id: respawn\n    subagent_spec: ../workflow.yaml\n",
+    )
+    _write_child(tmp_path / "workflows", text=child)
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    assert (pkg / "workflows" / "child.yaml").exists()
+    assert verify_integrity(pkg)
+
+
+def test_build_warns_and_skips_templated_subagent_ref(tmp_path, caplog):
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(SUBAGENT_PARENT.replace(
+        "subagent_spec: workflows/child.yaml", "subagent_spec: '{{ child_ref }}'"))
+    with caplog.at_level(_logging.WARNING, logger="armature.packaging.builder"):
+        pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
+    assert any("templated" in r.message for r in caplog.records)
+    assert pkg.exists()

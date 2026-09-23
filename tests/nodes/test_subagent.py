@@ -260,3 +260,47 @@ async def test_isolated_subagent_with_no_signature_passes_empty_context(tmp_path
     output = result["reveal"]["stdout"]
     assert "hello" not in output
     assert "s3cret" not in output
+
+
+# ── subagent_spec resolution: spec-dir relative, cwd fallback ──────────────────
+
+async def test_subagent_runs_child_resolved_from_spec_dir_not_cwd(tmp_path, monkeypatch):
+    """Regression (Fargate blocker): a relative subagent_spec must resolve
+    against the parent spec's directory, not process cwd — otherwise packaged
+    runs and runs from any other cwd fail with FileNotFoundError."""
+    from armature.spec.loader import load_spec
+
+    child_dir = tmp_path / "workflows"
+    child_dir.mkdir()
+    child = child_dir / "child.yaml"
+    child.write_text(
+        "name: child\n"
+        "version: \"1.0\"\n"
+        "adapters:\n"
+        "  greet:\n"
+        "    name: greet\n"
+        "    type: script\n"
+        "    cmd: \"echo 'child says: {{greeting}}'\"\n"
+        "stages:\n"
+        "  - id: respond\n"
+        "    adapter: greet\n",
+        encoding="utf-8",
+    )
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: workflows/child.yaml\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "unrelated"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    spec = load_spec(spec_file)
+    stage = next(s for s in spec.stages if s.subagent_spec)
+    node = SubagentNode(stage=stage, session_dir=tmp_path / "session")
+    result = await node.execute({"greeting": "resolved"})
+
+    assert result["respond"]["stdout"].strip() == "child says: resolved"

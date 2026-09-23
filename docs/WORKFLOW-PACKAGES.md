@@ -45,7 +45,7 @@ changes to the package or the runner.
 | Feature | What it gives you |
 |---|---|
 | **One-directory bundle** | spec + inputs + vendored tools + deps manifest + secret names + destinations + integrity checksums — everything to run, nothing else to fetch |
-| **Build-time verification** | Eight completeness checks (V1–V8) abort a bad build before it ships |
+| **Build-time verification** | Nine completeness checks (V1–V9) abort a bad build before it ships |
 | **Integrity guarantee** | `manifest.sha256` (standard `sha256sum` format) over every file; the runner re-verifies on every run and fails closed on tamper, missing, or extra files |
 | **Reference-only secrets** | The bundle carries *names* only; values injected at run from the owner's `--profile .env`; fail-closed if any are missing; values never written to package, results, or logs |
 | **Generic executor image** | One `armature-runner` image runs every package — the package is data, not an image |
@@ -86,10 +86,10 @@ leaking credentials. The executor injects values from its own `--profile` at
 run; if it lacks a declared secret, the run fails closed.
 
 ### 5. CI gate on workflow quality
-`armature package build` runs the eight completeness checks and aborts on any
+`armature package build` runs the nine completeness checks and aborts on any
 failure. Wire `build` + `verify` into CI to block merges that produce a
 non-runnable package (undeclared inputs, dangling artifact refs, missing tool
-modules).
+modules, unbundled subagent specs).
 
 ### 6. Replay and debug a run
 Run with `--include-trace`. `results/<run_id>/trace.jsonl` captures the full
@@ -193,7 +193,7 @@ armature package build \
 The builder validates the spec, vendors tools, auto-generates `secrets.yaml`
 from the spec's `api_key_env` references, infers a default `destinations.yaml`
 from the spec's leaf stages when none is given, writes the manifest, and then
-runs the eight completeness checks below. If any check fails the build aborts.
+runs the nine completeness checks below. If any check fails the build aborts.
 
 Any `context_layers:` entry with a `src:` file is bundled too, copied into the
 package at the same path relative to the spec that the source spec used —
@@ -202,7 +202,21 @@ directory (`../` traversal, an absolute path) fails the build closed
 (`SRC_PATH_ESCAPE`) rather than bundling it. Bundled layer files are covered
 by `manifest.sha256` like every other file in the package.
 
-### The eight completeness checks
+`subagent_spec` child workflows are bundled the same way, recursively: every
+child spec referenced by the workflow ships inside the package at its
+as-written path, and each bundled child's own `subagent_spec` references and
+context-layer `src:` files ship too (a child may reference grandchildren,
+its own layer files, and so on). Children may reference back up the tree —
+cycles are fine. Absolute `subagent_spec` refs fail the build (they can't be
+vendored portably); refs that escape the package dir fail the build; a
+still-templated ref (`{{ ... }}` the load render didn't substitute) is
+skipped with a warning — the run must provide that file. At run time the
+loader resolves `subagent_spec` spec-dir first (for a package, the entry spec
+sits at the package root, so spec-dir *is* package root) with process cwd as
+fallback, so bundled children are found no matter where the package runs —
+including a Fargate container whose cwd is unrelated to the repo.
+
+### The nine completeness checks
 
 | Check | What it verifies |
 |---|---|
@@ -214,8 +228,9 @@ by `manifest.sha256` like every other file in the package.
 | **V6 ARTIFACTS_VALID** | Every `destinations.artifacts[].stage_id` exists in the spec and produces output |
 | **V7 DEPS_RESOLVE** | `requirements.txt` is parseable |
 | **V8 INTEGRITY** | `manifest.sha256` is written for every file |
+| **V9 SUBAGENTS_BUNDLED** | Every `subagent_spec` in the spec tree (recursively) exists inside the package; absolute refs fail, templated refs warn |
 
-`armature package verify <pkg>` re-runs all eight checks (V1–V8) without
+`armature package verify <pkg>` re-runs all nine checks (V1–V9) without
 rebuilding — V8 recomputes and rewrites `manifest.sha256`.
 `armature package inspect <pkg>` prints the manifest read-only.
 
