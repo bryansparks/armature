@@ -304,3 +304,51 @@ async def test_subagent_runs_child_resolved_from_spec_dir_not_cwd(tmp_path, monk
     result = await node.execute({"greeting": "resolved"})
 
     assert result["respond"]["stdout"].strip() == "child says: resolved"
+
+
+async def test_subagent_child_survives_multiline_context_on_iteration_two(tmp_path):
+    """Regression (dispatch smoke 2026-09-21): iteration 2 re-loads the child
+    spec with carried context; a multiline upstream value rendered into the
+    YAML text broke the parse. The child must parse and run every iteration."""
+    from armature.spec.loader import load_spec
+
+    child_dir = tmp_path / "children"
+    child_dir.mkdir()
+    child = child_dir / "child.yaml"
+    child.write_text(
+        "name: child\n"
+        "version: \"1.0\"\n"
+        "# Live template in a comment: {{ prior }}\n"
+        "mission: 'Prior output: {{ prior }}'\n"
+        "adapters:\n"
+        "  greet:\n"
+        "    name: greet\n"
+        "    type: script\n"
+        "    cmd: \"echo 'round: {{greeting}}'\"\n"
+        "stages:\n"
+        "  - id: respond\n"
+        "    adapter: greet\n",
+        encoding="utf-8",
+    )
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: children/child.yaml\n",
+        encoding="utf-8",
+    )
+    spec = load_spec(spec_file)
+    stage = next(s for s in spec.stages if s.subagent_spec)
+    node = SubagentNode(stage=stage, session_dir=tmp_path / "session")
+
+    # Iteration 1: no carried prior output.
+    r1 = await node.execute({"greeting": "iter1"})
+    assert r1["respond"]["stdout"].strip() == "round: iter1"
+
+    # Iteration 2: carries iteration 1's multiline output — under the old
+    # text-render-before-parse this raised a YAML parse error.
+    prior = "line one\nline two\nline three\n"
+    r2 = await node.execute({"greeting": "iter2", "prior": prior,
+                             "respond": {"stdout": prior}})
+    assert r2["respond"]["stdout"].strip() == "round: iter2"
