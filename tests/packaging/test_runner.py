@@ -50,3 +50,56 @@ def test_runner_input_override(tmp_path, tiny_spec, monkeypatch):
     receipt = runner.run_sync(pkg, tmp_path / "results", inputs_override={"topic": "override"})
     art = (tmp_path / "results" / "testrun0001" / "artifacts" / "writer.md").read_text()
     assert "override" in art
+
+# ── subagent packages run from an unrelated cwd (Fargate acceptance) ───────────
+
+_SUBAGENT_PARENT = """\
+name: subagent-demo
+version: "1.0"
+description: Parent workflow with a subagent stage.
+contracts:
+  inputs: []
+stages:
+  - id: spawn
+    subagent_spec: workflows/child.yaml
+"""
+
+_ECHO_CHILD = """\
+name: child
+version: "1.0"
+description: No-LLM child (script adapter) for package e2e.
+adapters:
+  greet:
+    name: greet
+    type: script
+    cmd: "echo 'child says: {{greeting}}'"
+stages:
+  - id: respond
+    adapter: greet
+"""
+
+
+def test_package_run_with_subagent_from_unrelated_cwd(tmp_path, monkeypatch):
+    """Acceptance (armature-dispatch/Fargate): build a package whose workflow
+    spawns a subagent, then run it with the process cwd outside both the
+    package and the repo — the bundled child spec is what must execute."""
+    repo = tmp_path / "repo"
+    (repo / "workflows").mkdir(parents=True)
+    (repo / "workflows" / "child.yaml").write_text(_ECHO_CHILD, encoding="utf-8")
+    spec_path = repo / "workflow.yaml"
+    spec_path.write_text(_SUBAGENT_PARENT, encoding="utf-8")
+
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "pkg", inputs={})
+
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)  # not the repo, not the package
+
+    runner = PackageRunner(skip_deps_install=True)
+    receipt = runner.run_sync(pkg, tmp_path / "results")
+
+    assert receipt.status == "complete", receipt.error
+    spawn_artifacts = list((tmp_path / "results").glob("*/artifacts/spawn.md"))
+    assert spawn_artifacts, "expected the subagent stage artifact"
+    art = spawn_artifacts[0].read_text(encoding="utf-8")
+    assert "child says" in art  # the bundled child actually ran

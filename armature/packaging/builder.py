@@ -1,5 +1,6 @@
 # armature/packaging/builder.py
 from __future__ import annotations
+import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from armature.packaging.verifier import CompletenessVerifier, collect_api_key_en
 from armature.packaging.integrity import write_manifest_sha256
 
 _Y = YAML()
+
+_log = logging.getLogger(__name__)
 
 
 class PackageBuildError(Exception):
@@ -34,8 +37,9 @@ class PackageBuilder:
         out.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(spec, out / "workflow.yaml")
 
-        # 2.5 bundle context-layer src: files (covered by manifest.sha256)
-        self._bundle_context_layer_srcs(loaded, spec, out)
+        # 2.5 bundle file references (covered by manifest.sha256): context-layer
+        # src: files and subagent_spec child workflows, recursively.
+        self._bundle_spec_file_refs(loaded, spec, out)
 
         # 3. inputs
         _Y.dump(inputs or {}, out / "inputs.yaml")
@@ -101,29 +105,85 @@ class PackageBuilder:
         return out
 
     @staticmethod
-    def _bundle_context_layer_srcs(spec, spec_path: Path, out: Path) -> None:
-        """Copy each layer's src: file into the package, preserving its
-        spec-relative path so the packaged workflow.yaml resolves it.
+    def _bundle_spec_file_refs(spec, spec_path: Path, out: Path) -> None:
+        """Vendor every file the spec tree references: context-layer src:
+        files and subagent_spec child workflows, recursively — children may
+        reference grandchildren and their own layer files.
 
-        Containment guard: a src that escapes the package dir (``../``)
-        aborts the build — same posture as the Docker file handlers.
+        Each ref is preserved at its as-written package-relative path, so the
+        run-time loader (which resolves refs spec-dir first) finds the bundled
+        copies: the packaged entry spec sits at the package root, and each
+        bundled child sits at the ref its parent used.
+
+        Containment: a ref that escapes the package dir (``../``) aborts the
+        build — same posture as the Docker file handlers. Reference cycles
+        (a child pointing back at an ancestor) are fine: the visited set stops
+        the walk, and every file still ships exactly where resolution expects.
+
+        Absolute subagent_spec refs are rejected: they can't be vendored
+        portably. Still-templated refs (``{{ ... }}`` the load render didn't
+        substitute) are skipped with a warning — the package must provide the
+        file at run time.
         """
-        for layer in getattr(spec, "context_layers", None) or []:
-            if layer.src is None:
-                continue
-            src_file = (spec_path.parent / layer.src).resolve()
-            if not src_file.is_file():
-                raise PackageBuildError(
-                    f"context layer '{layer.name}' src not found: {layer.src}"
-                )
-            dest = (out / layer.src).resolve()
-            if not dest.is_relative_to(out.resolve()):
-                raise PackageBuildError(
-                    f"context layer '{layer.name}' src escapes the package "
-                    f"dir: {layer.src}"
-                )
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src_file, dest)
+        from armature.packaging.refs import walk_spec_file_refs
+        from armature.spec.loader import resolve_spec_ref
+
+        out_resolved = out.resolve()
+        walked: set[Path] = set()
+
+        def vendor_level(subagent_refs: list[str], layer_srcs: list[str],
+                         level_dir: Path, pkg_dir: Path, label: str) -> None:
+            for src in layer_srcs:
+                src_file = (level_dir / src).resolve()
+                if not src_file.is_file():
+                    raise PackageBuildError(
+                        f"{label} context layer src not found: {src}"
+                    )
+                dest = (pkg_dir / src).resolve()
+                if not dest.is_relative_to(out_resolved):
+                    raise PackageBuildError(
+                        f"{label} context layer src escapes the package dir: {src}"
+                    )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src_file, dest)
+            for ref in subagent_refs:
+                if "{{" in ref:
+                    _log.warning(
+                        "subagent_spec '%s' (%s) is templated — not vendored; "
+                        "the package must provide it at run time", ref, label,
+                    )
+                    continue
+                if Path(ref).is_absolute():
+                    raise PackageBuildError(
+                        f"absolute subagent_spec '{ref}' is not portable — "
+                        f"rewrite it as a path relative to the spec"
+                    )
+                src_file = resolve_spec_ref(ref, level_dir)
+                if src_file is None:
+                    raise PackageBuildError(
+                        f"subagent_spec not found (looked in {level_dir} and "
+                        f"cwd): {ref}"
+                    )
+                dest = (pkg_dir / ref).resolve()
+                if not dest.is_relative_to(out_resolved):
+                    raise PackageBuildError(
+                        f"subagent_spec escapes the package dir: {ref}"
+                    )
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(src_file, dest)
+                src_file = src_file.resolve()
+                if src_file in walked:
+                    continue
+                walked.add(src_file)
+                child_refs, child_srcs = walk_spec_file_refs(src_file)
+                vendor_level(child_refs, child_srcs, src_file.parent,
+                             dest.parent, f"child spec {ref}")
+
+        vendor_level(
+            [s.subagent_spec for s in spec.stages if s.subagent_spec],
+            [l.src for l in spec.context_layers if l.src],
+            spec_path.parent, out, "spec",
+        )
 
     @staticmethod
     def _infer_destinations(spec) -> Destinations:

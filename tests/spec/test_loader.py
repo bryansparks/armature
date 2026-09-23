@@ -244,3 +244,109 @@ context_layers:
     )
     with pytest.raises(ValueError, match="SRC_PATH_ESCAPE"):
         load_spec(spec_file)
+
+
+# ── subagent_spec path resolution (spec-dir first, cwd fallback) ────────────────
+
+def _write_child(dir_: Path, name: str = "child.yaml") -> Path:
+    dir_.mkdir(parents=True, exist_ok=True)
+    p = dir_ / name
+    p.write_text(
+        "name: child\n"
+        "version: \"1.0\"\n"
+        "stages:\n"
+        "  - id: respond\n"
+        "    role: {name: Worker, type: worker, description: hi}\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def test_load_spec_stamps_subagent_spec_path_spec_dir_relative(tmp_path, monkeypatch):
+    """A relative subagent_spec resolves against the spec's own directory,
+    independent of process cwd — packaged runs rely on this (the bundled
+    entry spec sits at the package root, so spec-dir == package root)."""
+    _write_child(tmp_path / "children")
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: children/child.yaml\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    spec = load_spec(spec_file)
+    assert spec.stages[0].subagent_spec_path == str((tmp_path / "children" / "child.yaml").resolve())
+    assert spec.stages[0].subagent_spec == "children/child.yaml"  # ref preserved as written
+
+
+def test_load_spec_stamps_subagent_spec_path_cwd_fallback(tmp_path, monkeypatch):
+    """Refs that don't exist next to the spec but do exist relative to cwd keep
+    working (back-compat for specs authored cwd-relative from a repo root)."""
+    _write_child(tmp_path / "sub")
+    spec_dir = tmp_path / "nested"
+    spec_dir.mkdir()
+    spec_file = spec_dir / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: sub/child.yaml\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)  # file exists at ./sub/child.yaml, NOT at ./nested/sub/child.yaml
+    spec = load_spec(spec_file)
+    assert spec.stages[0].subagent_spec_path == str((tmp_path / "sub" / "child.yaml").resolve())
+
+
+def test_load_spec_leaves_subagent_spec_path_unset_when_unresolvable(tmp_path, monkeypatch):
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: missing/child.yaml\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    spec = load_spec(spec_file)
+    assert spec.stages[0].subagent_spec_path is None
+    assert spec.stages[0].subagent_spec == "missing/child.yaml"
+
+
+def test_load_spec_skips_stamping_unrendered_templated_subagent_ref(tmp_path):
+    """A templated subagent_spec with the var absent can't be resolved
+    statically; the loader leaves it alone (runtime substitutes later)."""
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: '{{ child_ref }}'\n",
+        encoding="utf-8",
+    )
+    spec = load_spec(spec_file)
+    assert spec.stages[0].subagent_spec == "{{ child_ref }}"
+    assert spec.stages[0].subagent_spec_path is None
+
+
+def test_load_spec_stamps_rendered_subagent_ref(tmp_path):
+    """With the var provided, the load render substitutes the template into a
+    concrete ref — which then resolves like any other relative ref."""
+    _write_child(tmp_path / "children")
+    spec_file = tmp_path / "parent.yaml"
+    spec_file.write_text(
+        "name: parent\n"
+        "stages:\n"
+        "  - id: spawn\n"
+        "    subagent_spec: '{{ child_ref }}'\n",
+        encoding="utf-8",
+    )
+    spec = load_spec(spec_file, vars={"child_ref": "children/child.yaml"})
+    assert spec.stages[0].subagent_spec == "children/child.yaml"
+    assert spec.stages[0].subagent_spec_path == str((tmp_path / "children" / "child.yaml").resolve())

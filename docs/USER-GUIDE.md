@@ -4233,7 +4233,7 @@ See `SANDBOX-AND-ISOLATION.md` for the full reference including private registry
 armature package build --spec my_workflow.yml --out my_pkg \
   --tools ./tools --input topic="quantum error correction"
 armature package run my_pkg [--profile secrets.env]   # default: in a container
-armature package verify my_pkg                        # 8 completeness checks, no execution
+armature package verify my_pkg                        # 9 completeness checks, no execution
 armature package inspect my_pkg                       # print the manifest (read-only)
 ```
 

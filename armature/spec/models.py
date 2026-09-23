@@ -199,7 +199,8 @@ class Stage(BaseModel):
     timeout_s: float | None = None                # wall-clock limit for the whole stage (incl. retries)
     fail_as_value: bool = False                   # on failure, return {"_failed": True, ...} instead of raising
     output_schema: dict[str, Any] | None = None   # JSON Schema for GUIDED_JSON output
-    subagent_spec: str | None = None              # Path to child workflow spec file
+    subagent_spec: str | None = None              # Path to child workflow spec file, as authored
+    subagent_spec_path: str | None = None         # Loader-stamped resolved path: spec-dir first, cwd fallback
     isolated: bool = False             # when True, strips parent context to signature.input keys only
     fan_out: int | None = None          # max parallelism; if set, stage fans out over partition_source
     fan_in: Literal["list", "merge", "first", "consensus"] = "list"

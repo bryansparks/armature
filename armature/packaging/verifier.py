@@ -56,7 +56,7 @@ class CompletenessVerifier:
     def verify(self, pkg_dir: Path, manifest: PackageManifest,
                profile_env: dict[str, str] | None = None, *,
                write_integrity: bool = True) -> VerificationReport:
-        """Run all eight completeness checks.
+        """Run all nine completeness checks.
 
         ``write_integrity`` controls V8: when True (default, used by the
         builder and ``armature package verify``) V8 rewrites
@@ -72,6 +72,7 @@ class CompletenessVerifier:
         report.checks.append(self._v6_artifacts(pkg_dir, manifest))
         report.checks.append(self._v7_deps(pkg_dir, manifest))
         report.checks.append(self._v8_integrity(pkg_dir, write=write_integrity))
+        report.checks.append(self._v9_subagents(pkg_dir, manifest))
         return report
 
     # -- individual checks ---------------------------------------------------
@@ -216,6 +217,62 @@ class CompletenessVerifier:
             return CheckResult(check="INTEGRITY", status="pass", detail="manifest.sha256 verified")
         return CheckResult(check="INTEGRITY", status="fail",
                            detail="manifest.sha256 missing or does not match files")
+
+    def _v9_subagents(self, pkg_dir, manifest) -> CheckResult:
+        """Every subagent_spec referenced by the bundled spec tree (children
+        reference children, recursively) must exist inside the package, at the
+        ref's as-written path — the run-time loader resolves spec-dir first,
+        and the packaged entry spec sits at the package root.
+        """
+        try:
+            spec = self._spec(pkg_dir, manifest)
+        except Exception:
+            return CheckResult(check="SUBAGENTS_BUNDLED", status="fail", detail="spec did not load")
+
+        from armature.packaging.refs import walk_spec_file_refs
+        problems: list[str] = []
+        warnings: list[str] = []
+        visited: set[Path] = set()
+        n_refs = 0
+
+        def check_level(subagent_refs, layer_srcs, level_dir: Path, label: str):
+            nonlocal n_refs
+            for src in layer_srcs:
+                if not (level_dir / src).is_file():
+                    problems.append(f"{label}: layer src '{src}' not bundled")
+            for ref in subagent_refs:
+                if "{{" in ref:
+                    warnings.append(
+                        f"{label}: templated subagent_spec '{ref}' cannot be statically checked")
+                    continue
+                if Path(ref).is_absolute():
+                    problems.append(
+                        f"{label}: absolute subagent_spec '{ref}' is not portable")
+                    continue
+                n_refs += 1
+                child = (level_dir / ref).resolve()
+                if not child.is_file():
+                    problems.append(f"{label}: subagent_spec '{ref}' not bundled")
+                    continue
+                if child in visited:  # shared children / reference cycles
+                    continue
+                visited.add(child)
+                child_refs, child_srcs = walk_spec_file_refs(child)
+                check_level(child_refs, child_srcs, child.parent, f"child {ref}")
+
+        check_level([s.subagent_spec for s in spec.stages if s.subagent_spec],
+                    [], pkg_dir, "spec")
+        if problems:
+            return CheckResult(check="SUBAGENTS_BUNDLED", status="fail",
+                              detail="; ".join(problems))
+        if warnings:
+            return CheckResult(check="SUBAGENTS_BUNDLED", status="warn",
+                              detail="; ".join(warnings))
+        if n_refs == 0:
+            return CheckResult(check="SUBAGENTS_BUNDLED", status="pass",
+                               detail="no subagent stages")
+        return CheckResult(check="SUBAGENTS_BUNDLED", status="pass",
+                           detail=f"{n_refs} subagent spec(s) bundled")
 
     # -- helpers -------------------------------------------------------------
     @staticmethod

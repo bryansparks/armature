@@ -85,7 +85,9 @@ class SubagentNode(BaseNode):
     async def _run_child(self, context: dict[str, Any], child_index: int) -> dict[str, Any]:
         from armature.runtime.engine import Harness
 
-        spec_path = Path(self._stage.subagent_spec)
+        # Loader-stamped path (spec-dir first, cwd fallback) when available;
+        # the raw ref otherwise, for stages constructed programmatically.
+        spec_path = Path(self._stage.subagent_spec_path or self._stage.subagent_spec)
         if not spec_path.exists():
             raise FileNotFoundError(f"Subagent spec not found: {spec_path}")
 

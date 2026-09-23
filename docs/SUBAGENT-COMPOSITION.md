@@ -433,7 +433,7 @@ stages:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `subagent_spec` | `str` | Path to the child workflow YAML spec |
+| `subagent_spec` | `str` | Path to the child workflow YAML spec. Resolved at load time against the parent spec's own directory first, then process cwd (so runs work from any cwd, and packaged runs find bundled children). `armature package build` vendors referenced child specs recursively — see `docs/WORKFLOW-PACKAGES.md`. |
 | `isolated` | `bool` | If true, only `signature.input` keys pass to the child (default: false) |
 | `signature.input` | `dict` | Declared input keys when `isolated: true` |
 | `fan_out` | `int` | Number of concurrent child workflow runs (omit for single child) |
