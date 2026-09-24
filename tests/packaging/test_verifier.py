@@ -186,3 +186,31 @@ def test_v9_warns_on_templated_subagent_ref(tmp_path):
     v9 = _v9(report)
     assert v9.status == "warn"
     assert report.ok  # warn is not fail
+
+
+def test_collect_api_key_envs_sweeps_tool_modules(tmp_path):
+    """A secret consumed by a TOOL module (e.g. research.tools.web's
+    TAVILY_API_KEY) must be collectable — otherwise the package can never
+    declare it and fail-closed runners won't inject it."""
+    from armature.spec.loader import load_spec
+    from armature.packaging.verifier import collect_api_key_envs
+
+    spec_file = tmp_path / "wf.yaml"
+    spec_file.write_text(
+        "name: wf\n"
+        "model_tiers:\n"
+        "  small:\n"
+        "    provider: openrouter\n"
+        "    model: m\n"
+        "    api_key_env: OPENROUTER_API_KEY\n"
+        "tools:\n"
+        "  - module: research.tools.web\n"
+        "    api_key_env: [TAVILY_API_KEY]\n"
+        "stages:\n"
+        "  - id: s1\n"
+        "    role: {name: W, type: worker, description: hi}\n",
+        encoding="utf-8",
+    )
+    spec = load_spec(spec_file)
+    envs = collect_api_key_envs(spec)
+    assert envs == {"OPENROUTER_API_KEY", "TAVILY_API_KEY"}

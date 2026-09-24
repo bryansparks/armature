@@ -103,3 +103,43 @@ def test_package_run_with_subagent_from_unrelated_cwd(tmp_path, monkeypatch):
     assert spawn_artifacts, "expected the subagent stage artifact"
     art = spawn_artifacts[0].read_text(encoding="utf-8")
     assert "child says" in art  # the bundled child actually ran
+
+
+def test_package_run_captures_artifact_files_from_workdir(tmp_path, monkeypatch):
+    """End-to-end (dispatch): a packaged workflow whose tool writes a real
+    file (research-output/report.html) declares it as a file-capture
+    destination; the run delivers the actual file inside results/ and the
+    receipt digests it — not a 105-byte pointer."""
+    spec_file = tmp_path / "workflow.yaml"
+    spec_file.write_text(
+        "name: filecap\n"
+        "destinations:\n"
+        "  artifacts:\n"
+        "    - stage_id: writer\n"
+        "      name: report\n"
+        "      format: text\n"
+        "      source: research-output/report.html\n"
+        "adapters:\n"
+        "  wt:\n"
+        "    name: wt\n"
+        "    type: script\n"
+        "    cmd: \"mkdir -p research-output && echo 'real report body' > research-output/report.html\"\n"
+        "stages:\n"
+        "  - id: writer\n"
+        "    adapter: wt\n",
+        encoding="utf-8",
+    )
+    pkg = PackageBuilder().build(spec=spec_file, out=tmp_path / "pkg", inputs={})
+
+    job_dir = tmp_path / "job"  # the run's working directory (Fargate: /job)
+    job_dir.mkdir()
+    monkeypatch.chdir(job_dir)
+
+    receipt = PackageRunner(skip_deps_install=True).run_sync(pkg, tmp_path / "results")
+
+    assert receipt.status == "complete", receipt.error
+    captured = list((tmp_path / "results").glob("*/artifacts/report.html"))
+    assert captured, "expected the captured file inside results/"
+    assert "real report body" in captured[0].read_text(encoding="utf-8")
+    entry = next(a for a in receipt.artifacts if a.path == "artifacts/report.html")
+    assert entry.sha256  # receipt digests the delivered bytes

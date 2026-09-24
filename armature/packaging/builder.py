@@ -12,7 +12,14 @@ from armature.packaging.manifest import (
 from armature.packaging.verifier import CompletenessVerifier, collect_api_key_envs
 from armature.packaging.integrity import write_manifest_sha256
 
-_Y = YAML()
+
+def _dump_yaml(data, path) -> None:
+    """Fresh ruamel instance per dump: an exception mid-dump (e.g. a
+    non-representable object) can corrupt a shared YAML() instance's
+    representer state, silently mangling every later dump in the process —
+    observed as cross-test poisoning when a build aborts mid-destinations.
+    """
+    YAML().dump(data, path)
 
 _log = logging.getLogger(__name__)
 
@@ -42,7 +49,7 @@ class PackageBuilder:
         self._bundle_spec_file_refs(loaded, spec, out)
 
         # 3. inputs
-        _Y.dump(inputs or {}, out / "inputs.yaml")
+        _dump_yaml(inputs or {}, out / "inputs.yaml")
 
         # 4. vendor tools
         tools_dir_rel = None
@@ -66,14 +73,18 @@ class PackageBuilder:
         # 6. secrets.yaml (auto-generated from api_key_env scan)
         envs = collect_api_key_envs(loaded)
         sf = SecretsFile(required=[SecretRequirement(name=e) for e in sorted(envs)])
-        _Y.dump(sf.model_dump(), out / "secrets.yaml")
+        _dump_yaml(sf.model_dump(), out / "secrets.yaml")
 
-        # 7. destinations.yaml
+        # 7. destinations.yaml — precedence: explicit --destinations file >
+        # spec destinations section > inferred from leaf stages.
         if destinations is not None:
             shutil.copyfile(destinations, out / "destinations.yaml")
+        elif loaded.destinations is not None:
+            _dump_yaml(self._destinations_from_spec(loaded.destinations).model_dump(),
+                    out / "destinations.yaml")
         else:
             dest = self._infer_destinations(loaded)
-            _Y.dump(dest.model_dump(), out / "destinations.yaml")
+            _dump_yaml(dest.model_dump(), out / "destinations.yaml")
 
         # manifest (written before verify so the verifier can read runtime_inputs)
         manifest = PackageManifest(
@@ -83,7 +94,7 @@ class PackageBuilder:
             runtime_inputs=runtime_inputs or [], armature_version=">=0.6.0",
             created_at=datetime.now(timezone.utc).isoformat(),
         )
-        _Y.dump(manifest.model_dump(), out / "package.yaml")
+        _dump_yaml(manifest.model_dump(), out / "package.yaml")
 
         # 8. verify (aborts on fail)
         report = CompletenessVerifier().verify(out, manifest, profile_env=profile_env)
@@ -183,6 +194,16 @@ class PackageBuilder:
             [s.subagent_spec for s in spec.stages if s.subagent_spec],
             [l.src for l in spec.context_layers if l.src],
             spec_path.parent, out, "spec",
+        )
+
+    @staticmethod
+    def _destinations_from_spec(spec_dest) -> Destinations:
+        """Convert the spec's destinations section into the packaging model.
+        ArtifactSpec validates formats (and rejects unknown artifact fields)
+        here, at build time rather than at run time."""
+        return Destinations(
+            artifacts=[ArtifactSpec(**a.model_dump()) for a in spec_dest.artifacts],
+            include_trace=spec_dest.include_trace,
         )
 
     @staticmethod

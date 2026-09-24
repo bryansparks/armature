@@ -102,12 +102,15 @@ class PackageRunner:
             finished = datetime.now(timezone.utc)
             writer = ResultsWriter(results_dir)
             run_id = "failed"
+            # capture=False: a failed run has no deliverables to collect, and
+            # re-firing capture here could raise past the failed receipt
+            # (e.g. when the failure itself was a missing captured file).
             run_dir = writer.write(
                 run_id=run_id, package_name=manifest.name, package_version=manifest.version,
                 destinations=destinations, result={}, trace_records=[],
                 status="failed", started_at=started.isoformat(), finished_at=finished.isoformat(),
                 duration_s=(finished - started).total_seconds(), exit_code=1,
-                armature_version=armature_version, error=str(exc),
+                armature_version=armature_version, error=str(exc), capture=False,
             )
             receipt = json.loads((run_dir / "receipt.json").read_text())
             r = ResultsManifest.model_validate(receipt)

@@ -251,6 +251,10 @@ class MemoryConfig(BaseModel):
 
 class ToolModule(BaseModel):
     module: str  # dotted Python import path; must expose register(registry) -> None
+    # Env vars the tool module needs injected (e.g. TAVILY_API_KEY). The
+    # package builder sweeps these into secrets.yaml alongside model tiers'
+    # api_key_env, so fail-closed runners (dispatch) inject them.
+    api_key_env: list[str] = Field(default_factory=list)
 
 
 class ToolCallConfig(BaseModel):
@@ -451,6 +455,27 @@ TriggerConfig = Annotated[
 ]
 
 
+class SpecArtifact(BaseModel):
+    """Spec-side artifact declaration (spec `destinations:` section).
+
+    Mirrors packaging's ArtifactSpec — kept separate so spec models don't
+    import from the packaging layer. `source` opts into file capture: copy
+    matching files from the run working directory instead of extracting the
+    stage's output value.
+    """
+    stage_id: str
+    name: str
+    format: str = "text"
+    source: str | None = None
+
+
+class SpecDestinations(BaseModel):
+    """Run destinations declared in the spec; carried verbatim by the package
+    builder (explicit --destinations file still wins; otherwise inferred)."""
+    artifacts: list[SpecArtifact] = Field(default_factory=list)
+    include_trace: bool = False
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -480,3 +505,4 @@ class HarnessSpec(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)
+    destinations: SpecDestinations | None = None  # run destinations; None → package builder infers

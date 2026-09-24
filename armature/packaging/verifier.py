@@ -34,7 +34,8 @@ _TIER_NAMES = ("tiny", "small", "medium", "large", "frontier")
 
 
 def collect_api_key_envs(spec) -> set[str]:
-    """Every api_key_env referenced by any model tier (named or custom)."""
+    """Every api_key_env referenced by any model tier (named or custom) and
+    every tool module — both must be declarable in the package's secrets.yaml."""
     envs: set[str] = set()
     mt = spec.model_tiers
     for n in _TIER_NAMES:
@@ -45,6 +46,8 @@ def collect_api_key_envs(spec) -> set[str]:
     for cfg in extra.values():
         if getattr(cfg, "api_key_env", None):
             envs.add(cfg.api_key_env)
+    for tm in getattr(spec, "tools", None) or []:
+        envs.update(getattr(tm, "api_key_env", None) or [])
     return envs
 
 
