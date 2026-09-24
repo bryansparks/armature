@@ -71,6 +71,28 @@ Built-in fallbacks: `worker=small`, `judge=frontier`, `orchestrator=frontier`, `
 ```yaml
 tools:
   - module: my_pkg.tools.web  # must define register(registry: ToolRegistry) -> None
+    api_key_env: [TAVILY_API_KEY]  # env vars the module needs; package build
+                                   # sweeps these into secrets.yaml so
+                                   # fail-closed runners inject them
+```
+
+---
+
+## destinations:
+
+```yaml
+destinations:                     # run output contract; carried verbatim by
+  artifacts:                      # armature package build (an explicit
+    - stage_id: writer            # --destinations file still wins; inferred
+      name: briefing              # from leaf stages when absent)
+      format: markdown            # markdown | json | text
+    - stage_id: writer
+      name: report
+      format: text
+      source: research-output/report.html   # opt-in file capture: copy files
+                                             # matching this path-or-glob (run
+                                             # working dir) into artifacts/
+  include_trace: false
 ```
 
 ---

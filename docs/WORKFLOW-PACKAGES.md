@@ -147,10 +147,20 @@ input override varies per run.
 required:
   - name: ANTHROPIC_API_KEY
   - name: OPENROUTER_API_KEY
+  - name: TAVILY_API_KEY
 ```
 
-Auto-generated at build time from every `model_tiers[*].api_key_env` referenced
-in the spec. The bundle carries *names* only — values are injected at run from
+Auto-generated at build time from every `model_tiers[*].api_key_env` **and every
+`tools[*].api_key_env`** referenced in the spec. Tool modules declare their env
+needs right where they're registered:
+
+```yaml
+tools:
+  - module: research.tools.web
+    api_key_env: [TAVILY_API_KEY]
+```
+
+The bundle carries *names* only — values are injected at run from
 the owner's `--profile` `.env` file.
 
 ### `destinations.yaml` — the output contract
@@ -160,12 +170,32 @@ artifacts:
   - stage_id: writer
     name: briefing
     format: markdown      # markdown | json | text
+  - stage_id: writer      # file capture: copy real files the run wrote to disk
+    name: report
+    format: text
+    source: research-output/report.html
 include_trace: false      # set true to emit trace.jsonl
 results_layout: by_run_id
 ```
 
-The runner extracts each artifact's content from the matching stage's output and
-writes one file per entry to the results dir.
+Two artifact modes:
+
+- **Value extraction (default)** — the runner extracts the matching stage's
+  output and writes it as `artifacts/<name>.<ext>`.
+- **File capture (`source:`)** — for workflows whose tools write real files
+  (HTML reports, images, datasets) to the run's working directory. `source` is a
+  path-or-glob relative to the run working directory; every matching file is
+  copied into `results/<run_id>/artifacts/` with its basename preserved, inside
+  the results tree so downstream consumers (leak scans, integrity checks,
+  uploaders) see it. The receipt digests each captured file (`artifacts[].sha256`)
+  and lists one entry per file. A `source` that matches **no** file fails the
+  run — a declared deliverable that wasn't produced is a failure, not an empty
+  artifact.
+
+The spec can also declare this section directly (`destinations:` in the spec
+YAML) — the builder carries it verbatim. Precedence: an explicit
+`--destinations` file wins; then the spec's `destinations:` section; if neither
+is present the builder infers one artifact per leaf stage.
 
 ### `inputs.yaml` — bundled defaults
 
@@ -192,8 +222,11 @@ armature package build \
 
 The builder validates the spec, vendors tools, auto-generates `secrets.yaml`
 from the spec's `api_key_env` references, infers a default `destinations.yaml`
-from the spec's leaf stages when none is given, writes the manifest, and then
-runs the nine completeness checks below. If any check fails the build aborts.
+from the spec's `api_key_env` references (model tiers **and** tool modules),
+infers a default `destinations.yaml` from the spec's leaf stages when neither
+an explicit `--destinations` file nor a spec `destinations:` section is given,
+writes the manifest, and then runs the nine completeness checks below. If any
+check fails the build aborts.
 
 Any `context_layers:` entry with a `src:` file is bundled too, copied into the
 package at the same path relative to the spec that the source spec used —
@@ -303,7 +336,9 @@ per-run output dir. `trace.jsonl` is delivered into `<run_id>/` regardless.
   "exit_code": 0,
   "armature_version": ">=0.6.0",
   "artifacts": [{"name": "briefing", "stage_id": "writer", "format": "markdown",
-                 "path": "artifacts/briefing.md"}],
+                 "path": "artifacts/briefing.md", "sha256": null},
+                {"name": "report__report", "stage_id": "writer", "format": "text",
+                 "path": "artifacts/report.html", "sha256": "<digest of the captured bytes>"}],
   "trace": {"included": false, "path": null},
   "error": null
 }

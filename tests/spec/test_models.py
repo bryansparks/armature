@@ -466,3 +466,36 @@ def test_memory_config_navigation_round_trip():
     assert restored.navigation_tools is True
     assert restored.extract_knowledge is True
     assert restored.reconcile is False
+
+
+def test_spec_destinations_section_parses():
+    """Specs can declare run destinations (artifacts, trace) — the package
+    builder carries these instead of inferring; file-capture artifacts need
+    this to reach destinations.yaml."""
+    import yaml as _pyyaml  # noqa: F401  (not used; kept for symmetry with loader tests)
+    from armature.spec.models import HarnessSpec
+
+    spec = HarnessSpec.model_validate({
+        "name": "wf",
+        "destinations": {
+            "artifacts": [
+                {"stage_id": "writer", "name": "report", "format": "text",
+                 "source": "research-output/report.html"},
+                {"stage_id": "judge", "name": "verdict", "format": "json"},
+            ],
+            "include_trace": True,
+        },
+        "stages": [{"id": "writer",
+                    "role": {"name": "W", "type": "worker", "description": "hi"}}],
+    })
+    assert spec.destinations is not None
+    assert spec.destinations.include_trace is True
+    [capture, verdict] = spec.destinations.artifacts
+    assert capture.source == "research-output/report.html"
+    assert verdict.source is None
+
+
+def test_spec_destinations_defaults_to_none():
+    from armature.spec.models import HarnessSpec
+    spec = HarnessSpec.model_validate({"name": "wf", "stages": [{"id": "s"}]})
+    assert spec.destinations is None

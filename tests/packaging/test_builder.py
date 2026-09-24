@@ -222,3 +222,88 @@ def test_build_warns_and_skips_templated_subagent_ref(tmp_path, caplog):
         pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "echo.pkg", inputs={})
     assert any("templated" in r.message for r in caplog.records)
     assert pkg.exists()
+
+
+def test_build_carries_spec_destinations_over_inference(tmp_path):
+    """A spec's destinations section (artifacts with file-capture sources)
+    must reach destinations.yaml verbatim — inference would drop the
+    source field and the run would capture nothing."""
+    spec_file = tmp_path / "workflow.yaml"
+    spec_file.write_text(
+        "name: filecap\n"
+        "destinations:\n"
+        "  artifacts:\n"
+        "    - stage_id: writer\n"
+        "      name: report\n"
+        "      format: text\n"
+        "      source: research-output/report.html\n"
+        "  include_trace: true\n"
+        "adapters:\n"
+        "  wt: {name: wt, type: script, cmd: \"mkdir -p research-output && echo x > research-output/report.html\"}\n"
+        "stages:\n"
+        "  - id: writer\n"
+        "    adapter: wt\n",
+        encoding="utf-8",
+    )
+    out = PackageBuilder().build(spec=spec_file, out=tmp_path / "pkg", inputs={})
+    from ruamel.yaml import YAML
+    dest = YAML().load((out / "destinations.yaml").read_text())
+    assert dest["include_trace"] is True
+    assert len(dest["artifacts"]) == 1
+    a = dest["artifacts"][0]
+    assert a["source"] == "research-output/report.html"
+    assert a["stage_id"] == "writer"
+
+
+def test_build_explicit_destinations_file_beats_spec_section(tmp_path):
+    """Precedence: --destinations file > spec destinations > inferred. An
+    explicit operator-provided file is authoritative."""
+    spec_file = tmp_path / "workflow.yaml"
+    spec_file.write_text(
+        "name: filecap\n"
+        "destinations:\n"
+        "  artifacts:\n"
+        "    - {stage_id: writer, name: from_spec, format: text}\n"
+        "stages:\n"
+        "  - id: writer\n"
+        "    role: {name: W, type: worker, description: hi}\n",
+        encoding="utf-8",
+    )
+    explicit = tmp_path / "dest.yaml"
+    explicit.write_text(
+        "artifacts:\n"
+        "  - {stage_id: writer, name: from_file, format: markdown}\n"
+        "include_trace: false\n",
+        encoding="utf-8",
+    )
+    out = PackageBuilder().build(spec=spec_file, out=tmp_path / "pkg", inputs={},
+                                  destinations=explicit)
+    from ruamel.yaml import YAML
+    dest = YAML().load((out / "destinations.yaml").read_text())
+    assert [a["name"] for a in dest["artifacts"]] == ["from_file"]
+
+
+def test_build_secrets_yaml_includes_tool_envs(tmp_path):
+    """Tool-level api_key_env declarations flow into the generated
+    secrets.yaml so fail-closed runners inject them."""
+    tools_src = tmp_path / "tools_src"
+    (tools_src / "research" / "tools").mkdir(parents=True)
+    (tools_src / "research" / "tools" / "web.py").write_text(
+        "def register(registry):\n    pass\n", encoding="utf-8")
+    spec_file = tmp_path / "workflow.yaml"
+    spec_file.write_text(
+        "name: wf\n"
+        "tools:\n"
+        "  - module: research.tools.web\n"
+        "    api_key_env: [TAVILY_API_KEY, GITHUB_TOKEN]\n"
+        "stages:\n"
+        "  - id: s1\n"
+        "    role: {name: W, type: worker, description: hi}\n",
+        encoding="utf-8",
+    )
+    out = PackageBuilder().build(spec=spec_file, out=tmp_path / "pkg", inputs={},
+                                  tools=tools_src)
+    from ruamel.yaml import YAML
+    sf = YAML().load((out / "secrets.yaml").read_text())
+    names = {r["name"] for r in sf["required"]}
+    assert {"TAVILY_API_KEY", "GITHUB_TOKEN"} <= names

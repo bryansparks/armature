@@ -19,6 +19,11 @@ class ArtifactSpec(BaseModel):
     stage_id: str
     name: str
     format: Literal["markdown", "json", "text"] = "text"
+    # Opt-in file capture: path-or-glob relative to the run working directory.
+    # When set, matching files are copied into artifacts/ (basename preserved)
+    # instead of extracting the stage's output value — for workflows whose
+    # tools write real files (reports, images, datasets) to disk.
+    source: str | None = None
 
 
 class Destinations(BaseModel):
@@ -50,6 +55,10 @@ class ArtifactResult(BaseModel):
     stage_id: str
     format: str
     path: str
+    # sha256 of the artifact bytes — set for file captures, so downstream
+    # consumers (leak scans, integrity checks over the delivered results)
+    # can verify what was captured.
+    sha256: str | None = None
 
 
 class TraceRef(BaseModel):

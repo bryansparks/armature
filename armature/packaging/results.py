@@ -20,13 +20,19 @@ class ResultsWriter:
               destinations: Destinations, result: dict[str, Any],
               trace_records: list, status: str, started_at: str, finished_at: str,
               duration_s: float, exit_code: int, armature_version: str,
-              error: str | None = None) -> Path:
+              error: str | None = None, workdir: Path | None = None,
+              capture: bool = True) -> Path:
         run_dir = self._base / run_id
         (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
 
         artifact_results: list[ArtifactResult] = []
         for a in destinations.artifacts:
+            if a.source is not None:
+                if capture:
+                    artifact_results.extend(
+                        self._capture_files(a, run_dir, workdir or Path.cwd()))
+                continue
             stage_out = result.get(a.stage_id, {})
             content = self._extract(stage_out, a.format)
             ext = _EXT[a.format]
@@ -60,6 +66,45 @@ class ResultsWriter:
         )
         (run_dir / "receipt.json").write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
         return run_dir
+
+    @staticmethod
+    def _capture_files(a: "ArtifactSpec", run_dir: Path, workdir: Path) -> list[ArtifactResult]:
+        """Copy files matching a.source (path-or-glob, run-working-dir relative)
+        into artifacts/, basename preserved, one receipt entry per file with a
+        sha256 of the copied bytes.
+
+        Fail closed: a source that matches no file raises (the run fails — a
+        declared deliverable that wasn't produced is a failure, not an empty
+        artifact). Two matches sharing a basename would clobber each other in
+        artifacts/ — also refused.
+        """
+        import hashlib
+        import shutil as _shutil
+
+        matches = [p for p in sorted(workdir.glob(a.source)) if p.is_file()]
+        if not matches:
+            raise FileNotFoundError(
+                f"artifact '{a.name}' (stage {a.stage_id}) source "
+                f"'{a.source}' matched nothing in the run working directory"
+            )
+        out: list[ArtifactResult] = []
+        seen: dict[str, Path] = {}
+        for src in matches:
+            dest_rel = f"artifacts/{src.name}"
+            if dest_rel in seen:
+                raise ValueError(
+                    f"artifact capture collision: '{seen[dest_rel]}' and '{src}' "
+                    f"both map to {dest_rel} — tighten the glob or rename"
+                )
+            seen[dest_rel] = src
+            dest = run_dir / dest_rel
+            _shutil.copyfile(src, dest)
+            out.append(ArtifactResult(
+                name=f"{a.name}__{src.stem}", stage_id=a.stage_id,
+                format=a.format, path=dest_rel,
+                sha256=hashlib.sha256(dest.read_bytes()).hexdigest(),
+            ))
+        return out
 
     @staticmethod
     def _extract(stage_out: Any, fmt: str) -> Any:
