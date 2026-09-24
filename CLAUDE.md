@@ -126,6 +126,7 @@ contracts:
 ```yaml
 tools:
   - module: my_package.tools.web     # Python module path; must define register(registry)
+    api_key_env: [TAVILY_API_KEY]    # secrets the tool needs — swept into the package's secrets.yaml
 ```
 
 **5. Stages** — see patterns below
@@ -269,6 +270,26 @@ with measured results: `examples/decision-typesafe/`.
         confidence: {type: number, minimum: 0.0, maximum: 1.0}
     depends_on: [proponent, critic]
 ```
+
+### File-capture deliverables (destinations)
+When a workflow writes real files to disk (a report a tool built, a chart, a zip),
+declare them — otherwise only stage output **values** are captured and the files
+die with the container:
+
+```yaml
+destinations:
+  artifacts:
+    - stage_id: report_builder        # the stage that produces the files
+      name: report
+      format: html
+      source: research-output/*.html  # path-or-glob relative to the run working dir
+```
+
+Matches are copied into `results/<run>/artifacts/` (basename preserved) before
+any upload, and each receipt entry carries a `sha256`. A `source:` matching
+nothing fails the run — a missing deliverable can't pass silently. Without a
+`destinations:` section, artifacts are inferred from leaf-stage output values.
+Precedence: `--destinations` file > spec `destinations:` section > inferred.
 
 ---
 
