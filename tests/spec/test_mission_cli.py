@@ -463,3 +463,38 @@ def test_mission_run_meters_spent_usd_on_failure(tmp_path, monkeypatch):
     rec = LocalWorkStore(store_dir).load("m", "a")
     assert rec.state == WorkUnitState.RETRY_PENDING
     assert abs(rec.spent_usd - 0.01) < 1e-9
+
+
+# ── Slice 3: mission advance — pure readiness for executors ──────────────────
+
+ADVANCE_MISSION_TEXT = MISSION_TEXT.replace(
+    "objective: Ship it.", "objective: Ship it.\nposture: delegated")
+
+
+def test_mission_advance_renders_table(tmp_path):
+    p = _write_pair(tmp_path, ADVANCE_MISSION_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "advance", str(p), "--store", str(tmp_path / "store")])
+    out = plain(r.output)
+    assert r.exit_code == 0, out
+    assert "launchable" in out and "a" in out
+
+
+def test_mission_advance_json_is_machine_readable(tmp_path):
+    import json as _json
+    p = _write_pair(tmp_path, ADVANCE_MISSION_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "advance", str(p), "--store", str(tmp_path / "store"),
+                            "--json"])
+    payload = _json.loads(plain(r.output))
+    assert any(x["unit_id"] == "a" and x["launchable"] for x in payload)
+
+
+def test_mission_advance_never_executes(tmp_path):
+    """Design §5: advance returns decisions only — no attempt is consumed,
+    no state moves."""
+    p = _write_pair(tmp_path, ADVANCE_MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    r = runner.invoke(app, ["mission", "advance", str(p), "--store", str(store_dir)])
+    assert r.exit_code == 0, plain(r.output)
+    rec = LocalWorkStore(store_dir).load("m", "a")
+    assert rec.attempts == 0
+    assert rec.state == WorkUnitState.PENDING

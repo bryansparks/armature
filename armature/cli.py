@@ -711,6 +711,54 @@ def mission_status(
         typer.echo(f"  {t.seq:>3}  {frm} → {t.to_state.value:<13} {t.unit_id:<17} {t.reason}")
 
 
+@mission_app.command("advance")
+def mission_advance(
+    mission: Path = typer.Argument(..., help="Path to mission document YAML"),
+    store: Path | None = typer.Option(
+        None, "--store", help="Work store directory (default: ~/.armature/work)"),
+    as_json: bool = typer.Option(False, "--json", help="Emit decisions as JSON"),
+):
+    """Pure readiness: which work units may an executor start now.
+
+    Returns decisions; never executes (design §5). Delegated + ready =
+    launchable. human-led is notify-only. Slice 4's sweep submits what
+    this returns.
+    """
+    import json as _json
+    from armature.spec.mission import load_mission
+    from armature.state.work import compute_readiness
+
+    if not mission.exists():
+        typer.echo(f"Mission document not found: {mission}", err=True)
+        raise typer.Exit(1)
+    try:
+        loaded = load_mission(mission)
+    except Exception as exc:
+        typer.echo(f"Failed to load mission document: {exc}", err=True)
+        raise typer.Exit(1)
+    work = _work_store(store)
+    records = {u.id: work.ensure_unit(loaded, u) for u in loaded.work}
+    # dynamic (closure-seeded) records participate too
+    for rec in work.list_units(loaded.name):
+        records.setdefault(rec.unit_id, rec)
+    decisions = compute_readiness(loaded, list(records.values()))
+
+    if as_json:
+        typer.echo(_json.dumps([d.model_dump() for d in decisions], indent=2))
+        return
+    launchable = [d for d in decisions if d.launchable]
+    notify = [d for d in decisions if d.notify_only and not d.launchable]
+    held = [d for d in decisions if not d.launchable and not d.notify_only]
+    typer.echo(f"mission '{loaded.name}' — {len(launchable)} launchable, "
+               f"{len(notify)} notify-only, {len(held)} held")
+    for d in launchable:
+        typer.echo(f"  ▶ {d.unit_id}  launchable")
+    for d in notify:
+        typer.echo(f"  ● {d.unit_id}  notify-only  ({'; '.join(d.reasons)})")
+    for d in held:
+        typer.echo(f"  ■ {d.unit_id}  held  ({'; '.join(d.reasons)})")
+
+
 def _print_provider_error(exc: Exception) -> bool:
     """Translate common LLM-provider failures into a concise, actionable message.
 

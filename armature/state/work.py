@@ -341,3 +341,53 @@ class LocalWorkStore:
 
     def _next_seq(self, mission: str) -> int:
         return len(self.list_transitions(mission)) + 1
+
+
+class Readiness(BaseModel):
+    """One unit's launchability decision — pure computation (design §5).
+    advance returns decisions; executors act on them."""
+
+    unit_id: str
+    launchable: bool = False
+    notify_only: bool = False
+    reasons: list[str] = Field(default_factory=list)
+
+
+def compute_readiness(mission: MissionSpec,
+                      records: list[WorkUnitRecord]) -> list[Readiness]:
+    """Which units may a delegated executor start now (design §5)?
+
+    Launchable = state pending/retry_pending/blocked_on(requires done — the
+    same re-entry Task 5's run gate admits) AND requires all done AND attempts
+    remain AND budget remains (unit and mission). human-led units are never
+    launchable — notify only (design §2.3).
+    """
+    by_id = {r.unit_id: r for r in records}
+    mission_spent = sum(r.spent_usd for r in records)
+    out: list[Readiness] = []
+    for rec in records:
+        reasons: list[str] = []
+        notify = rec.posture == "human-led"
+        if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING,
+                             WorkUnitState.BLOCKED_ON):
+            reasons.append(f"state {rec.state.value}")
+        unmet = [dep for dep in rec.requires
+                 if (by_id.get(dep) is None
+                     or by_id[dep].state != WorkUnitState.DONE)]
+        if unmet:
+            reasons.append("waiting on " + ", ".join(unmet))
+        if rec.attempts >= rec.max_attempts:
+            reasons.append(f"no attempts left ({rec.attempts}/{rec.max_attempts})")
+        if rec.max_budget_usd is not None and rec.spent_usd >= rec.max_budget_usd:
+            reasons.append(f"unit budget spent (${rec.spent_usd:.2f})")
+        if (mission.budget_usd is not None
+                and mission_spent >= mission.budget_usd):
+            reasons.append(f"mission budget spent (${mission_spent:.2f})")
+        launchable = (not reasons and not notify
+                      and rec.state in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING,
+                                         WorkUnitState.BLOCKED_ON))
+        if notify and not reasons:
+            reasons.append("human-led: notify only, executor never acts")
+        out.append(Readiness(unit_id=rec.unit_id, launchable=launchable,
+                             notify_only=notify, reasons=reasons))
+    return out
