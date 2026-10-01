@@ -232,6 +232,51 @@ def test_shipped_example_status_renders(tmp_path):
     assert "0/2" in hero_row                     # attempts/max column
 
 
+STATUS_ALIGN_TEXT = """\
+name: m
+objective: Ship it.
+work:
+  - id: a
+    title: A
+    workflow: wf.yml
+  - id: a-much-longer-unit-identifier
+    title: B
+    workflow: wf.yml
+"""
+
+
+def test_mission_status_columns_align(tmp_path):
+    """M-4: column widths are computed from the rendered cells — rows stay
+    aligned across unit-id lengths."""
+    p = _write_pair(tmp_path, STATUS_ALIGN_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "status", str(p), "--store", str(tmp_path / "store")])
+    out = plain(r.output)
+    rows = [l for l in out.splitlines() if l.startswith("  a")]
+    assert len(rows) == 2
+    offsets = {l.index("pending") for l in rows}
+    assert len(offsets) == 1          # state column aligned despite id lengths
+
+
+def test_mission_status_lists_dynamic_follow_on_units(tmp_path):
+    """Closure-seeded units (absent from the doc) render in the table with a
+    seeded-by marker."""
+    from armature.spec.mission import load_mission
+    from armature.state.closure import FollowOnUnit
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    mission = load_mission(p)
+    store.ensure_unit(mission, mission.work[0])
+    store.seed_follow_on("m", FollowOnUnit(id="dyn", title="Dynamic", workflow="wf.yml"))
+    r = runner.invoke(app, ["mission", "status", str(p), "--store", str(store_dir)])
+    out = plain(r.output)
+    assert r.exit_code == 0, out
+    # pin the TABLE row, not the transitions footer (the seeding transition's
+    # reason text mentions closure regardless)
+    dyn_row = next(l for l in out.splitlines() if l.startswith("  dyn"))
+    assert "closure" in dyn_row          # seeded-by marker on the unit row
+
+
 # ── Slice 3: closure-driven terminal states, budget gates, metering ───────────
 
 CLOSURE_SPEC = """\

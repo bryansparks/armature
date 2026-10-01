@@ -694,15 +694,34 @@ def mission_status(
 
     work = _work_store(store)
     records = {u.id: work.ensure_unit(loaded, u) for u in loaded.work}
+    # dynamic (closure-seeded) units participate too, marked in the table
+    doc_ids = {u.id for u in loaded.work}
+    for rec in work.list_units(loaded.name):
+        records.setdefault(rec.unit_id, rec)
 
-    typer.echo(f"mission '{loaded.name}' — {len(loaded.work)} work unit(s)")
-    typer.echo("")
-    typer.echo("  unit              state           attempts  posture     requires")
+    rows = []
     for u in loaded.work:
-        rec = records[u.id]
-        reqs = ", ".join(u.requires) if u.requires else "-"
-        typer.echo(f"  {u.id:<17} {rec.state.value:<15} "
-                   f"{rec.attempts}/{rec.max_attempts:<7}  {rec.posture:<10} {reqs}")
+        rows.append((u.id, records[u.id], list(u.requires), False))
+    for uid, rec in records.items():
+        if uid not in doc_ids:
+            rows.append((uid, rec, list(rec.requires), True))
+
+    cells = []
+    for uid, rec, reqs, dynamic in rows:
+        req_text = ", ".join(reqs) if reqs else "-"
+        if dynamic:
+            req_text += " (closure-seeded)"
+        cells.append((uid, rec.state.value, f"{rec.attempts}/{rec.max_attempts}",
+                      rec.posture, req_text))
+
+    header = ("unit", "state", "attempts", "posture", "requires")
+    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
+              for i, h in enumerate(header)]
+    typer.echo(f"mission '{loaded.name}' — {len(cells)} work unit(s)")
+    typer.echo("")
+    typer.echo("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(header)).rstrip())
+    for c in cells:
+        typer.echo("  " + "  ".join(c[i].ljust(widths[i]) for i in range(len(header))).rstrip())
 
     transitions = work.list_transitions(loaded.name)
     typer.echo("\nrecent transitions:")
