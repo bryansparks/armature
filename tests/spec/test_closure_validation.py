@@ -27,7 +27,14 @@ def _closure_stage(sid="closer", schema=None) -> Stage:
                 "reason": {"type": "string", "enum": [
                     "done_no_follow_on", "handed_off", "blocked_on", "escalation"]},
                 "notes": {"type": "string"},
-                "follow_on": {"type": "array", "items": {"type": "object"}},
+                "follow_on": {"type": "array", "items": {
+                    "type": "object",
+                    "required": ["id", "title", "workflow"],
+                    "properties": {"id": {"type": "string"},
+                                   "title": {"type": "string"},
+                                   "workflow": {"type": "string"},
+                                   "objective": {"type": "string"},
+                                   "inputs": {"type": "object"}}}},
             },
         },
         depends_on=[],
@@ -119,3 +126,47 @@ def test_existing_specs_gain_no_new_errors():
     spec = _spec([_closure_stage()])
     errors = validate_spec(spec, strict=False)
     assert not any(c.startswith("CLOSURE_") for c in codes(errors))
+
+
+# ── Slice 3: follow_on items are addressable work units ──────────────────────
+
+
+def _follow_on_item_spec(follow_on_props: dict) -> HarnessSpec:
+    item = {"type": "object", "properties": follow_on_props,
+            "required": list(follow_on_props)}
+    return HarnessSpec.model_validate({
+        "name": "c",
+        "closure": {"stage": "final"},
+        "stages": [{
+            "id": "final", "depends_on": [],
+            "role": {"name": "W", "type": "worker", "description": "d"},
+            "output_mode": "guided_json",
+            "output_schema": {
+                "type": "object", "required": ["reason"],
+                "properties": {
+                    "reason": {"type": "string",
+                               "enum": ["done_no_follow_on", "handed_off", "blocked_on", "escalation"]},
+                    "follow_on": {"type": "array", "items": item},
+                }}}]})
+
+
+def test_closure_follow_on_items_require_id_title_workflow():
+    errors = validate_spec(
+        _follow_on_item_spec({"id": "a", "title": "T", "workflow": "w"}), strict=False)
+    assert "CLOSURE_SCHEMA_INVALID" not in codes(errors)
+
+
+@pytest.mark.parametrize("missing", ["id", "title", "workflow"])
+def test_closure_follow_on_missing_required_key_fails(missing):
+    props = {"id": "a", "title": "T", "workflow": "w"}
+    props.pop(missing)
+    errors = validate_spec(_follow_on_item_spec(props), strict=False)
+    assert "CLOSURE_SCHEMA_INVALID" in codes(errors)
+
+
+def test_closure_without_follow_on_unchanged():
+    spec = _follow_on_item_spec({"id": "a", "title": "T", "workflow": "w"})
+    # drop follow_on from the schema entirely — reason-only closure stays valid
+    spec.stages[0].output_schema["properties"].pop("follow_on")
+    errors = validate_spec(spec, strict=False)
+    assert "CLOSURE_SCHEMA_INVALID" not in codes(errors)
