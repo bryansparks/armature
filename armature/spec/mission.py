@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from ruamel.yaml import YAML, YAMLError
 
 from armature.runtime.dag import topological_order
+from armature.spec.loader import resolve_spec_ref
 from armature.spec.validator import SpecError, SpecValidationError
 
 
@@ -77,9 +78,13 @@ def load_mission(path: Path) -> MissionSpec:
     base = path.resolve().parent
     for unit in mission.work:
         if _is_path_like(unit.workflow):
-            # subagent_spec convention: document's own directory first, then cwd
-            candidate = (base / unit.workflow).resolve()
-            unit.workflow_path = str(candidate)
+            # subagent_spec convention via the shared helper: absolute as-is,
+            # else the document's own directory first, then process cwd.
+            # An unresolvable ref still gets the doc-dir candidate stamped so
+            # validation can report WORKFLOW_NOT_REGISTERED.
+            resolved = resolve_spec_ref(unit.workflow, base)
+            unit.workflow_path = str(resolved if resolved is not None
+                                     else (base / unit.workflow).resolve())
     return mission
 
 

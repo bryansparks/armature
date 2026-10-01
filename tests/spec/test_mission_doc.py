@@ -68,9 +68,37 @@ def test_posture_inherits_when_omitted(tmp_path):
     assert mission.work[1].posture is None   # None = inherit mission default (resolved in Task 2's helper)
 
 
-def test_workflow_path_stamped_for_path_like(tmp_path):
+def test_workflow_path_stamped_for_path_like(tmp_path, monkeypatch):
+    # pin cwd so the fallback candidate is deterministic under the
+    # doc-dir-first-then-cwd convention
+    monkeypatch.chdir(tmp_path)
     mission = load_mission(_write(tmp_path, VALID_MISSION))
     assert mission.work[0].workflow_path == str((tmp_path / "../06_human_in_the_loop.yml").resolve())
+
+
+def test_workflow_ref_falls_back_to_cwd(tmp_path, monkeypatch):
+    # subagent_spec convention: the document's own directory first, then cwd —
+    # a ref that exists only relative to cwd must still resolve
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    (cwd_dir / "worker.yml").write_text("name: worker\n")
+    monkeypatch.chdir(cwd_dir)
+    mission_dir = tmp_path / "missions"
+    mission_dir.mkdir()
+    text = VALID_MISSION.replace("workflow: ../06_human_in_the_loop.yml", "workflow: worker.yml")
+    mission = load_mission(_write(mission_dir, text))
+    assert mission.work[0].workflow_path == str((cwd_dir / "worker.yml").resolve())
+
+
+def test_unresolvable_ref_stamps_doc_dir_candidate(tmp_path, monkeypatch):
+    # nowhere to be found → still stamped (doc-dir candidate) so validation
+    # can report WORKFLOW_NOT_REGISTERED
+    monkeypatch.chdir(tmp_path)
+    mission_dir = tmp_path / "missions"
+    mission_dir.mkdir()
+    text = VALID_MISSION.replace("workflow: ../06_human_in_the_loop.yml", "workflow: gone.yml")
+    mission = load_mission(_write(mission_dir, text))
+    assert mission.work[0].workflow_path == str((mission_dir / "gone.yml").resolve())
 
 
 def test_workflow_path_none_for_bare_name(tmp_path):
