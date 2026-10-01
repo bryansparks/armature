@@ -19,6 +19,9 @@ from armature.spec.models import ContextLayer, HarnessSpec, Stage
 MISSION_LAYER_NAME = "mission"
 MISSION_LAYER_PRECEDENCE = -1000  # renders last = bottom of the context block
 
+WORK_UNIT_LAYER_NAME = "work_unit"               # synthesized from the injected record
+WORK_UNIT_LAYER_PRECEDENCE = MISSION_LAYER_PRECEDENCE - 1  # renders after the mission
+
 
 @dataclass(frozen=True)
 class EffectiveContextPolicy:
@@ -29,32 +32,78 @@ class EffectiveContextPolicy:
         return {"must": list(self.must), "never": sorted(self.never)}
 
 
-def mission_layer(spec: HarnessSpec) -> ContextLayer | None:
+def mission_layer(
+    spec: HarnessSpec,
+    work_record: dict | None = None,
+) -> ContextLayer | None:
     """The auto layer synthesized from spec.mission, or None if not applicable.
 
     Built on the fly — the loaded spec is never mutated, so spec_version
     stays a faithful hash of what the author wrote.
+
+    With a work record and `mission_source: work_unit` (design §4), the
+    record's mission_objective replaces spec.mission — the mission document,
+    not the spec, is the origin of the objective when driven by a work unit.
     """
-    if not spec.mission:
+    content = spec.mission
+    if work_record is not None and spec.mission_source == "work_unit":
+        content = (work_record.get("mission_objective") or "").strip() or spec.mission
+    if not content:
         return None
     if any(l.name == MISSION_LAYER_NAME for l in spec.context_layers):
         return None  # reserved name is a validation error; nothing to synthesize
     return ContextLayer(
         name=MISSION_LAYER_NAME,
         precedence=MISSION_LAYER_PRECEDENCE,
-        content=spec.mission,
+        content=content,
     )
 
 
-def ordered_layers(spec: HarnessSpec) -> list[ContextLayer]:
-    """All layers (mission pseudo-layer included), highest precedence first.
+def work_unit_layer(spec: HarnessSpec, work_record: dict | None) -> ContextLayer | None:
+    """The auto layer synthesized from the injected work record (design §4).
+
+    Only when the spec opts in via `mission_source: work_unit` AND the
+    executor injected a `work_unit` record — an ordinary `armature run` of an
+    opted-in spec (no record) falls back to static mission behavior.
+    Carries the unit's title + objective, plus requires awareness so the
+    agent can notice it is one slice of a larger mission.
+    """
+    if spec.mission_source != "work_unit" or not work_record:
+        return None
+    if any(l.name == WORK_UNIT_LAYER_NAME for l in spec.context_layers):
+        return None  # reserved name; nothing to synthesize
+    title = (work_record.get("title") or "").strip()
+    objective = (work_record.get("objective") or "").strip()
+    if not title and not objective:
+        return None
+    content = "\n".join(part for part in (title, objective) if part)
+    requires = work_record.get("requires") or []
+    if requires:
+        content += (f"\nThis unit is one slice of the mission; "
+                    f"it waited on: {', '.join(requires)}.")
+    return ContextLayer(
+        name=WORK_UNIT_LAYER_NAME,
+        precedence=WORK_UNIT_LAYER_PRECEDENCE,
+        content=content,
+    )
+
+
+def ordered_layers(
+    spec: HarnessSpec,
+    work_record: dict | None = None,
+) -> list[ContextLayer]:
+    """All layers (mission + work_unit pseudo-layers included), highest
+    precedence first.
 
     Python's sort is stable, so equal precedences keep declaration order.
     """
     layers = list(spec.context_layers)
-    m = mission_layer(spec)
+    m = mission_layer(spec, work_record)
     if m is not None:
         layers.append(m)
+    w = work_unit_layer(spec, work_record)
+    if w is not None:
+        layers.append(w)
     layers.sort(key=lambda l: -l.precedence)
     return layers
 
@@ -82,10 +131,16 @@ def runtime_context_keys(spec: HarnessSpec) -> frozenset[str]:
         keys.add(spec.memory.inject_as)
         if spec.memory.inject_knowledge_as:
             keys.add(spec.memory.inject_knowledge_as)
+    if spec.mission_source == "work_unit":
+        keys.add("work_unit")          # record dict injected by the executor
     return frozenset(keys)
 
 
-def resolve_effective_policy(spec: HarnessSpec, stage: Stage) -> EffectiveContextPolicy:
+def resolve_effective_policy(
+    spec: HarnessSpec,
+    stage: Stage,
+    work_record: dict | None = None,
+) -> EffectiveContextPolicy:
     """The §5.3 formula. must is subtracted by never — never re-added."""
     never: set[str] = set(floor_never(spec))
     must: set[str] = set()
@@ -95,7 +150,9 @@ def resolve_effective_policy(spec: HarnessSpec, stage: Stage) -> EffectiveContex
     if stage.context_policy is not None:
         never.update(stage.context_policy.never)
         must.update(stage.context_policy.must)
-    if mission_layer(spec) is not None:
+    if mission_layer(spec, work_record) is not None:
         must.add(MISSION_LAYER_NAME)
+    if work_unit_layer(spec, work_record) is not None:
+        must.add(WORK_UNIT_LAYER_NAME)
     must -= never
     return EffectiveContextPolicy(must=tuple(sorted(must)), never=frozenset(never))

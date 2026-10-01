@@ -195,3 +195,46 @@ def test_apply_context_never_closed_transcript_dropped_whole():
         {"_transcript": [{"stage_id": "a"}], "x": 1},
     )
     assert "_transcript" not in out
+
+
+# ── Slice 2: mission_source: work_unit — objective injection from the record ──
+
+async def test_work_unit_record_drives_mission_context(tmp_path):
+    spec = HarnessSpec.model_validate({
+        "name": "wu", "mission_source": "work_unit",
+        "stages": [{"id": "x", "role": {"name": "r", "type": "worker", "description": "d"}}],
+    })
+    rec = {"mission": "m", "mission_objective": "Ship it by Nov 15.",
+           "unit_id": "a", "title": "Unit A", "objective": "12 variants.",
+           "requires": [], "posture": "delegated", "state": "in_progress", "attempts": 1}
+    await _run(spec, tmp_path, inputs={"work_unit": rec})
+    mc = _node("x").kwargs["mission_context"]
+    assert "[Work Unit]" in mc
+    assert "Ship it by Nov 15." in mc          # mission objective, from the record
+    assert "12 variants." in mc
+    assert _node("x").context["work_unit"]["unit_id"] == "a"   # injectable as Jinja
+
+
+async def test_no_record_falls_back_to_static_mission(tmp_path):
+    spec = HarnessSpec.model_validate({
+        "name": "wu", "mission": "static mission", "mission_source": "work_unit",
+        "stages": [{"id": "x", "role": {"name": "r", "type": "worker", "description": "d"}}],
+    })
+    await _run(spec, tmp_path, inputs={})
+    mc = _node("x").kwargs["mission_context"]
+    assert "static mission" in mc
+    assert "[Work Unit]" not in mc
+
+
+async def test_never_closes_work_unit_key_and_layer(tmp_path):
+    spec = HarnessSpec.model_validate({
+        "name": "wu", "mission_source": "work_unit",
+        "context_policy": {"never": ["work_unit"]},
+        "stages": [{"id": "x", "role": {"name": "r", "type": "worker", "description": "d"}}],
+    })
+    rec = {"mission": "m", "mission_objective": "Ship.", "unit_id": "a",
+           "title": "Unit A", "objective": "", "requires": [],
+           "posture": "human-led", "state": "in_progress", "attempts": 1}
+    await _run(spec, tmp_path, inputs={"work_unit": rec})
+    assert "work_unit" not in _node("x").context
+    assert "[Work Unit]" not in _node("x").kwargs["mission_context"]
