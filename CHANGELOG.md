@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-01
+
 ### Added
 - **Mission lifecycle (slice 3: closure application, budget metering,
   `mission advance`).** A run's closure is now authoritative for the
