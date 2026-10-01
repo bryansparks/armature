@@ -119,7 +119,9 @@ The named stage must use `output_mode: guided_json` with an
 `reason` whose enum is non-empty and drawn from `CLOSURE_REASONS`
 (`done_no_follow_on` \| `handed_off` \| `blocked_on` \| `escalation`).
 Optional: `notes` (string) and `follow_on` (array of objects — mini
-work-unit specs the executor upserts into the mission).
+work-unit specs the executor upserts into the mission). `follow_on` items
+are work units and need a durable address (design §7): each requires
+`id`, `title`, and `workflow` (`objective` and `inputs` optional).
 
 ```yaml
 # inside the closure stage's output_schema
@@ -127,8 +129,30 @@ required: [reason]
 properties:
   reason: {type: string, enum: [done_no_follow_on, handed_off, blocked_on, escalation]}
   notes: {type: string}
-  follow_on: {type: array, items: {type: object}}
+  follow_on:
+    type: array
+    items:
+      type: object
+      required: [id, title, workflow]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        workflow: {type: string}
 ```
+
+When `mission run` executes a spec that declares a closure, the stage's
+output is extracted into a typed `ClosureRecord` and is **authoritative
+for the unit's resting state**:
+
+| `reason` | Resting state | Side effects |
+|---|---|---|
+| `done_no_follow_on` | `done` | — |
+| `handed_off` | `handed_off` | each `follow_on` seeded `pending` (idempotent upsert) |
+| `blocked_on` | `blocked_on` | blockers seeded `pending`; the unit's `requires` extended with their ids |
+| `escalation` | `escalation` | `notes` carried as the audit reason |
+
+A malformed closure output is loud: the unit lands `failed` (retry while
+attempts remain) with the violation named — never silently `done`.
 
 A run whose spec declares no closure yields `done_no_follow_on` — silence is
 an explicit default. Validation codes: `CLOSURE_STAGE_UNDEFINED`,
@@ -212,15 +236,30 @@ pending → in_progress → done
 ```bash
 armature mission status my_mission.mission.yml    # unit states + recent transitions
 armature mission run my_mission.mission.yml unit_a   # run one unit's workflow
+armature mission advance my_mission.mission.yml   # pure readiness: what may start now
 ```
 
 `mission run` refuses without consuming an attempt when the unit's
 `requires` are not all `done` or the unit is not in `pending` /
-`retry_pending`. Each run increments `attempts`; a failure lands `failed`,
+`retry_pending` (a `blocked_on` unit re-enters once its requires — spec ∪
+record — are done). Each run increments `attempts`; a failure lands `failed`,
 then `retry_pending` only while `attempts < max_attempts` — at the ceiling
 the unit stays `failed`. The run id is recorded as the unit's `last_job_id`.
-Budget metering (`spent_usd`), closure application, and `mission advance`
-are slice 3.
+
+**Budget gates**: `spent_usd` on each record accrues from the run's own
+observed LLM cost (the receipt's `cost_usd` field on `ResultsManifest` —
+provider-reported per response, `0.00` when the provider reports none,
+never a vendor balance check), on success *and* failure. `mission run`
+refuses before any attempt is consumed when the unit's `spent_usd` has
+reached `max_budget_usd` or the mission's records sum to `budget_usd`.
+
+**`mission advance`** is pure computation: it seeds missing records, reads
+the store, and returns a per-unit decision — `launchable` (delegated,
+requires done, attempts and budget remaining), `notify_only` (human-led
+posture), or `held` with reasons. It never executes anything; executors (slice 4's
+dispatch sweep) consume `--json`. When the spec declares a `closure:`, the
+run's closure record is authoritative for the unit's resting state (see
+[closure:](#closure) above).
 
 Worked example: `examples/missions/campaign-pretzel.mission.yml`. Full
 concept doc: `docs/MISSION-AS-WORKFLOW-DRIVER.md`.
@@ -704,6 +743,7 @@ armature validate spec.yml                         # always run before armature 
 armature mission validate my_mission.mission.yml   # validate a mission document
 armature mission status my_mission.mission.yml      # unit states + recent transitions
 armature mission run my_mission.mission.yml unit_a  # run one unit's workflow
+armature mission advance my_mission.mission.yml    # pure readiness --json for machines
 armature run spec.yml --input topic="..." --quiet
 armature run spec.yml --dry-run                    # validate only, no execution
 armature dashboard spec.yml                        # health metrics after runs

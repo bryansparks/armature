@@ -9,6 +9,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Mission lifecycle (slice 3: closure application, budget metering,
+  `mission advance`).** A run's closure is now authoritative for the
+  unit's resting state: `armature/state/closure.py` ships
+  `extract_closure` (the closure stage's guided_json output → typed
+  `ClosureRecord`), `apply_closure` (reason → resting state: `handed_off`
+  seeds `follow_on` units `pending` idempotently; `blocked_on` seeds the
+  blockers and extends the unit's `requires`; malformed closures fail the
+  unit loudly, never silently `done`), and follow-on units are addressable
+  work units (`id`/`title`/`workflow` required, validator-enforced).
+  Budgets are now metered, not declared: the engine sums the
+  provider-reported cost of every LLM response (`total_cost_usd`), the run
+  receipt carries it as `cost_usd` (`ResultsManifest`), and each record's
+  `spent_usd` accrues on success *and* failure — `mission run` refuses
+  before consuming an attempt when a unit hits `max_budget_usd` or the
+  mission's records sum to `budget_usd` (armature-side metering, never a
+  vendor balance check). New verb `armature mission advance` computes pure
+  readiness — `launchable` / `notify_only` / `held` with reasons, `--json`
+  for executors — and never executes anything; `mission run` additionally
+  re-admits a `blocked_on` unit once its requires (spec ∪ record) are
+  done, and `mission status` computes column widths and lists
+  closure-seeded units.
 - **Mission lifecycle (slice 2: LocalWorkStore + enforcement).** The
   work-unit state machine ships: nine states with a single legality table
   (`armature/state/work.py` — the one place transitions are checked),

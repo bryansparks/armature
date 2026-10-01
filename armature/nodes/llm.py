@@ -65,6 +65,19 @@ def _retryable_errors() -> tuple[type[Exception], ...]:
     return tuple(errors) if errors else (Exception,)
 
 
+def _response_cost(response: Any) -> float:
+    """litellm's per-response cost estimate, when it computed one.
+
+    litellm reports it under ``response._hidden_params["response_cost"]``
+    once the model's pricing is known. Providers without pricing (or
+    without the field) meter 0.0 — a run's cost is what its own responses
+    observed, never a provider balance check.
+    """
+    hidden = getattr(response, "_hidden_params", None) or {}
+    cost = hidden.get("response_cost")
+    return float(cost) if cost is not None else 0.0
+
+
 _RETRYABLE_ERRORS = _retryable_errors()
 
 
@@ -514,6 +527,9 @@ class LLMNode(BaseNode):
         content = ""
         tier_attempt = -1
         tools_called: list[str] = []
+        # Accumulates across ALL tier attempts — an escalation retry spent
+        # real money too, so exhaustion meters what was observed, not 0.0.
+        call_cost = 0.0
 
         for attempt_tier in [tier_name] + active_order:
             if attempt_tier in tried:
@@ -559,6 +575,7 @@ class LLMNode(BaseNode):
             response = await _call_with_retry(model=model, **kwargs)
             msg = response.choices[0].message
             content = msg.content or ""
+            call_cost += _response_cost(response)
 
             # ReAct tool-call loop — iterations reset per tier attempt.
             # messages is mutated in place; kwargs["messages"] is the same object.
@@ -592,6 +609,7 @@ class LLMNode(BaseNode):
                 response = await _call_with_retry(model=model, **kwargs)
                 msg = response.choices[0].message
                 content = msg.content or ""
+                call_cost += _response_cost(response)
 
             usage = getattr(response, "usage", None)
             input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -619,16 +637,17 @@ class LLMNode(BaseNode):
                     result["_output_tokens"] = output_tokens
                     result["_escalation_count"] = tier_attempt
                     result["_tools_called"] = tools_called
+                    result["_cost_usd"] = call_cost
                     return result
                 continue  # escalate to next tier
 
             if content:
                 self._append_transcript(messages, model, content)
-                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt, "_tools_called": tools_called}
+                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}
             continue  # empty text response — escalate to next tier
 
-        # All tiers exhausted
+        # All tiers exhausted — every failed attempt's spend still metered
         if not parse_as_json:
             # All tiers returned empty content — report as empty, not a parse error
-            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called}
-        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called}
+            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}
+        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}

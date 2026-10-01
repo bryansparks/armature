@@ -91,21 +91,33 @@ pending → in_progress → done
 
 Every transition produces an append-only transition record — an audit trail, not just a current-state pointer. **Enforcement is live**: the transition table above runs in exactly one place (`armature/state/work.py`), and every writer goes through it. Persistence lives behind the `WorkStore` protocol; the local implementation is `LocalWorkStore` (dir of JSON records plus a `transitions.jsonl` audit log, default base `~/.armature/work`, `--store` to override). A dispatch transport later implements the same protocol against S3.
 
-Two verbs drive a mission locally:
+Three verbs drive a mission locally:
 
 ```bash
-armature mission status my_mission.mission.yml            # unit states + recent transitions
-armature mission run    my_mission.mission.yml unit_a    # run one unit's workflow
+armature mission status  my_mission.mission.yml            # unit states + recent transitions
+armature mission run     my_mission.mission.yml unit_a    # run one unit's workflow
+armature mission advance my_mission.mission.yml           # pure readiness: what may start now
 ```
 
 `mission run` is the local executor, and its refusals are the point:
 
-- **Readiness**: a unit whose `requires` are not all `done` refuses, *without consuming an attempt* — the exact premature-run failure this grammar exists to prevent.
-- **State gate**: only `pending` and `retry_pending` units start; a `done` or `escalation` unit refuses with a per-state reason.
+- **Readiness**: a unit whose `requires` are not all `done` refuses, *without consuming an attempt* — the exact premature-run failure this grammar exists to prevent. A `blocked_on` closure may extend a unit's `requires` on the record; re-entry checks those too.
+- **State gate**: `pending` and `retry_pending` units start; a `blocked_on` unit may re-enter once its requires are done (the same blockers check decides). A `done` or `escalation` unit refuses with a per-state reason.
+- **Budget gates**: a unit at its `max_budget_usd`, or a mission at its `budget_usd`, refuses *before* an attempt is consumed — spend is metered, not guessed (below).
 - **Attempt ceiling**: each run increments `attempts`; a failure lands `failed`, then `retry_pending` only while `attempts < max_attempts`. At the ceiling the unit stays `failed` — no unbounded retry loop.
 - **Identity**: the run id becomes the record's `last_job_id`, so a unit's history is traceable run-by-run (design §7: the unit is the durable identity; runs are attempts).
 
-Budget metering (`spent_usd`), closure application (follow-on upserts from a run's closure stage), and `mission advance` arrive with slice 3.
+### Budget metering
+
+`spent_usd` on each record accrues from the run's *own observed LLM cost* — the engine sums what the provider reported per response (`total_cost_usd`), and the run receipt carries it as `cost_usd`. Metering is armature-side and provider-independent: a provider that doesn't report cost meters `0.00`, and no run ever consults a vendor balance. Both meter on success *and* failure — a failed attempt still spent money. `mission run` refuses to start a unit whose record shows `spent_usd ≥ max_budget_usd`, or when the mission's records sum to `≥ budget_usd`, before any attempt is consumed.
+
+`timeout_hours` is declared and carried on records but not yet enforced by the local executor — a run exceeding it still completes; enforcement arrives with the dispatch transport's watchdog.
+
+### Crash recovery
+
+If the process dies mid-run, the unit stays `in_progress` with its `last_job_id`; `mission advance` reports it as held, and an operator (or slice-4's sweep orphan rule) may transition it to `failed`/`retry_pending`.
+
+`mission advance` is pure computation (design §5): it seeds missing records, reads the store, and returns a decision per unit — `launchable` (delegated, requires done, attempts and budget remaining), `notify_only` (human-led posture — an executor may notify, never act), or `held` with reasons. It never executes anything; slice 4's dispatch sweep submits exactly what it returns (`--json` for the machine form).
 
 ---
 
@@ -122,6 +134,21 @@ closure:
 The named stage's `output_schema` must require a `reason` drawn from a fixed set — `done_no_follow_on`, `handed_off`, `blocked_on`, `escalation` — and may carry `notes` and a `follow_on` array of mini work-unit specs. One run's judgment becomes more work, as typed output, with the engine doing the bookkeeping: `handed_off` upserts the follow-on units into the mission as new `pending` work; `blocked_on` rewrites dependencies.
 
 A run whose spec declares no closure yields `done_no_follow_on`. Silence is an explicit default — and *declared* silence is the armature-native form of OpenRig's "you cannot silently finish a task."
+
+### Closure application
+
+When `mission run` executes a spec that declares a closure, the closure stage's output is extracted into a typed `ClosureRecord` and is **authoritative for the unit's resting state** — it lands the unit where the run says, not automatically `done`:
+
+| `reason` | Resting state | Side effects |
+|---|---|---|
+| `done_no_follow_on` | `done` | — |
+| `handed_off` | `handed_off` | each `follow_on` seeded `pending` (upsert: absent → seed; existing → untouched) |
+| `blocked_on` | `blocked_on` | blockers seeded `pending`; the unit's `requires` extended with their ids |
+| `escalation` | `escalation` | notes carried as the audit reason |
+
+`follow_on` items are work units and need a durable address (design §7): each requires `id`, `title`, and `workflow` (`objective` and `inputs` optional) — the validator enforces this on the closure schema. Seeding is idempotent: re-delivering the same run's closure never double-seeds or clobbers a live record, and any other closure against a terminal unit refuses through the legality table. A `blocked_on` unit re-enters through `mission run` once its blockers reach `done`.
+
+A malformed closure output is loud, never silently done: the unit lands `failed` (retry available while attempts remain) with the violation named.
 
 ---
 

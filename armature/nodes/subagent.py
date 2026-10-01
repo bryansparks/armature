@@ -73,6 +73,11 @@ class SubagentNode(BaseNode):
             raise ValueError(f"Stage '{stage.id}' has no subagent_spec")
         self._stage = stage
         self._session_dir = session_dir
+        # Child-run spend is observed spend of the parent run too (design
+        # §2.3): every child's metered cost accumulates here, and the engine
+        # adds it to the run's total after execution — the child's own
+        # harness total is otherwise read by no one.
+        self.total_cost_usd = 0.0
 
     def _resolve_child_context(self, context: dict[str, Any]) -> dict[str, Any]:
         if not self._stage.isolated:
@@ -107,7 +112,9 @@ class SubagentNode(BaseNode):
             spec=load_child_spec(spec_path, vars=child_context),
             session_dir=child_dir,
         )
-        return await child.run(child_context)
+        result = await child.run(child_context)
+        self.total_cost_usd += getattr(child, "total_cost_usd", 0.0)
+        return result
 
     def _build_contexts(self, context: dict[str, Any], n: int) -> list[dict[str, Any]]:
         key = self._stage.partition_key

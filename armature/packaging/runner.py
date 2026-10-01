@@ -94,7 +94,10 @@ class PackageRunner:
                 destinations=destinations, result=result, trace_records=trace_records,
                 status="complete", started_at=started.isoformat(), finished_at=finished.isoformat(),
                 duration_s=(finished - started).total_seconds(), exit_code=0,
+                # The harness_factory seam stays optional: a factory-provided
+                # harness without metering gets cost_usd=None on the receipt.
                 armature_version=armature_version,
+                cost_usd=getattr(harness, "total_cost_usd", None),
             )
             receipt = json.loads((run_dir / "receipt.json").read_text())
             return ResultsManifest.model_validate(receipt)

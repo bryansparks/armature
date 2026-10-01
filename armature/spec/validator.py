@@ -159,6 +159,20 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                              f"{list(CLOSURE_REASONS)}"),
                     stage_id=target.id,
                 ))
+            follow_on = props.get("follow_on") or {}
+            if follow_on.get("type") == "array":
+                item = follow_on.get("items") or {}
+                item_props = set((item.get("properties") or {}).keys())
+                item_required = set(item.get("required") or [])
+                missing = {"id", "title", "workflow"} - item_props
+                if missing or not {"id", "title", "workflow"} <= item_required:
+                    errors.append(SpecError(
+                        code="CLOSURE_SCHEMA_INVALID",
+                        message=(f"closure stage '{target.id}' follow_on items must "
+                                 "require 'id', 'title', and 'workflow' — a follow-on "
+                                 "is a work unit and needs a durable address"),
+                        stage_id=target.id,
+                    ))
 
     # ── on_fail.loop points to a valid stage ──────────────────────────────
     for stage in spec.stages:

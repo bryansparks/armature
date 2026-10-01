@@ -494,7 +494,10 @@ def mission_run(
     consuming an attempt. Outcomes: success → done; failure → failed, then
     retry_pending while attempts remain (attempt ceiling enforced here).
     """
-    from armature.spec.mission import load_mission, resolve_posture, validate_mission
+    from armature.spec.loader import resolve_spec_ref
+    from armature.spec.mission import (
+        WorkUnit, load_mission, resolve_posture, validate_mission,
+    )
     from armature.spec.validator import SpecValidationError
     from armature.state.work import WorkUnitState
 
@@ -509,10 +512,34 @@ def mission_run(
         typer.echo(f"Failed to load mission document: {exc}", err=True)
         raise typer.Exit(1)
 
+    work = _work_store(store)
     unit = next((u for u in loaded.work if u.id == unit_id), None)
     if unit is None:
-        typer.echo(f"unknown unit '{unit_id}' in mission '{loaded.name}'", err=True)
-        raise typer.Exit(1)
+        # Closure-seeded (dynamic) unit: the doc never knew it — the store
+        # record is its source of truth (design §3 follow-on upserts). Its
+        # workflow ref resolves doc-dir-first, the same convention the
+        # loader stamps for doc units, so the follow-on chain a handed_off
+        # closure started is actually runnable locally.
+        seeded = work.load(loaded.name, unit_id)
+        resolved = (resolve_spec_ref(seeded.workflow, mission.parent)
+                    if seeded is not None else None)
+        if seeded is None or resolved is None:
+            if seeded is None:
+                typer.echo(f"unknown unit '{unit_id}' in mission '{loaded.name}'",
+                           err=True)
+            else:
+                typer.echo(
+                    f"unit '{unit_id}' names workflow '{seeded.workflow}' — bare "
+                    "names are registered by executors; local runs require a path",
+                    err=True)
+            raise typer.Exit(1)
+        unit = WorkUnit(
+            id=seeded.unit_id, title=seeded.title, objective=seeded.objective,
+            workflow=seeded.workflow, workflow_path=str(resolved),
+            inputs=dict(seeded.inputs), requires=list(seeded.requires),
+            posture=(seeded.posture
+                     if seeded.posture in ("human-led", "delegated") else None),
+        )
 
     if unit.workflow_path is None:
         typer.echo(
@@ -523,12 +550,13 @@ def mission_run(
         typer.echo(f"unit '{unit_id}' workflow path does not exist: {unit.workflow_path}", err=True)
         raise typer.Exit(1)
 
-    work = _work_store(store)
     rec = work.ensure_unit(loaded, unit)
 
-    # State gate — only pending / retry_pending may start, and no attempt is
-    # consumed on any refusal below.
-    if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING):
+    # State gate — pending / retry_pending may start; blocked_on is admitted
+    # too (design §2.3): the blockers check below decides whether its requires
+    # are done. No attempt is consumed on any refusal below.
+    if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING,
+                         WorkUnitState.BLOCKED_ON):
         why = {
             WorkUnitState.IN_PROGRESS: "already in progress",
             WorkUnitState.DONE: "already done",
@@ -541,8 +569,10 @@ def mission_run(
         typer.echo(f"✗ Refusing to run unit '{unit_id}' ({why})", err=True)
         raise typer.Exit(1)
 
+    # Spec requires ∪ record requires — a blocked_on closure rewrites the
+    # record's requires (design §3), and re-entry must honor those too.
     blockers = [
-        dep for dep in unit.requires
+        dep for dep in dict.fromkeys([*unit.requires, *rec.requires])
         if (d := work.load(loaded.name, dep)) is None or d.state != WorkUnitState.DONE
     ]
     if blockers:
@@ -550,6 +580,21 @@ def mission_run(
             f"✗ Unit '{unit_id}' requires unit(s) that are not done: "
             f"{', '.join(blockers)}", err=True)
         raise typer.Exit(1)
+
+    # Budget gates (design §2.3) — metered from run-observed spend (spent_usd),
+    # provider-independent. Refusals consume no attempt.
+    if rec.max_budget_usd is not None and rec.spent_usd >= rec.max_budget_usd:
+        typer.echo(
+            f"✗ Unit '{unit_id}' budget exhausted: spent ${rec.spent_usd:.2f} "
+            f"of ${rec.max_budget_usd:.2f}", err=True)
+        raise typer.Exit(1)
+    if loaded.budget_usd is not None:
+        total_spent = sum(u.spent_usd for u in work.list_units(loaded.name))
+        if total_spent >= loaded.budget_usd:
+            typer.echo(
+                f"✗ Mission '{loaded.name}' budget exhausted: "
+                f"${total_spent:.2f} of ${loaded.budget_usd:.2f} spent", err=True)
+            raise typer.Exit(1)
 
     merged_inputs = dict(unit.inputs)
     try:
@@ -588,8 +633,20 @@ def mission_run(
                    f"(attempt {rec.attempts}/{rec.max_attempts}, job {run_id})")
 
     try:
-        asyncio.run(harness.run(merged_inputs))
+        result = asyncio.run(harness.run(merged_inputs))
+        # Meter run-observed spend (design §2.3). Refresh from the store first:
+        # the on-disk record moved to in_progress; our in-memory copy is stale.
+        rec = work.load(loaded.name, unit_id) or rec
+        rec.spent_usd += harness.total_cost_usd
+        work.save(rec)
     except Exception as exc:  # noqa: BLE001
+        try:    # a failed attempt still spent money — meter before the failure path
+            spent = work.load(loaded.name, unit_id)
+            if spent is not None:
+                spent.spent_usd += harness.total_cost_usd
+                work.save(spent)
+        except Exception:
+            pass
         work.apply(loaded.name, unit_id, WorkUnitState.FAILED,
                    reason=str(exc)[:200], job_id=run_id)
         if rec.attempts < rec.max_attempts:
@@ -601,6 +658,35 @@ def mission_run(
             f"{exc}", err=True)
         raise typer.Exit(1)
 
+    # Success: the closure, when the spec declares one, is authoritative for
+    # the unit's resting state (design §3). No closure → done, as before.
+    from armature.state.closure import ClosureError, apply_closure, extract_closure
+    try:
+        closure = extract_closure(harness._spec, result)
+    except ClosureError as exc:
+        # Malformed is loud, never silently done (design §3): the unit fails
+        # like any other run failure — retry available while attempts remain.
+        work.apply(loaded.name, unit_id, WorkUnitState.FAILED,
+                   reason=f"malformed closure: {exc}"[:200], job_id=run_id)
+        if rec.attempts < rec.max_attempts:
+            work.apply(loaded.name, unit_id, WorkUnitState.RETRY_PENDING,
+                       reason=(f"attempt {rec.attempts}/{rec.max_attempts} "
+                               "failed; retry available"))
+        typer.echo(f"✗ Unit '{unit_id}' produced a malformed closure: {exc}", err=True)
+        raise typer.Exit(1)
+    if closure is not None:
+        closure.unit_id = unit_id
+        closure.mission = loaded.name
+        closure.job_id = run_id
+        final_rec = apply_closure(work, loaded.name, unit_id, closure,
+                                  job_id=run_id,
+                                  posture=resolve_posture(loaded, unit))
+        if not quiet:
+            typer.echo(f"✓ unit '{unit_id}' → {final_rec.state.value} "
+                       f"(closure: {closure.reason})")
+        else:
+            typer.echo(final_rec.state.value)
+        return
     work.apply(loaded.name, unit_id, WorkUnitState.DONE,
                reason="run complete", job_id=run_id)
     if not quiet:
@@ -634,21 +720,88 @@ def mission_status(
 
     work = _work_store(store)
     records = {u.id: work.ensure_unit(loaded, u) for u in loaded.work}
+    # dynamic (closure-seeded) units participate too, marked in the table
+    doc_ids = {u.id for u in loaded.work}
+    for rec in work.list_units(loaded.name):
+        records.setdefault(rec.unit_id, rec)
 
-    typer.echo(f"mission '{loaded.name}' — {len(loaded.work)} work unit(s)")
-    typer.echo("")
-    typer.echo("  unit              state           attempts  posture     requires")
+    rows = []
     for u in loaded.work:
-        rec = records[u.id]
-        reqs = ", ".join(u.requires) if u.requires else "-"
-        typer.echo(f"  {u.id:<17} {rec.state.value:<15} "
-                   f"{rec.attempts}/{rec.max_attempts:<7}  {rec.posture:<10} {reqs}")
+        rows.append((u.id, records[u.id], list(u.requires), False))
+    for uid, rec in records.items():
+        if uid not in doc_ids:
+            rows.append((uid, rec, list(rec.requires), True))
+
+    cells = []
+    for uid, rec, reqs, dynamic in rows:
+        req_text = ", ".join(reqs) if reqs else "-"
+        if dynamic:
+            req_text += " (closure-seeded)"
+        cells.append((uid, rec.state.value, f"{rec.attempts}/{rec.max_attempts}",
+                      rec.posture, req_text))
+
+    header = ("unit", "state", "attempts", "posture", "requires")
+    widths = [max(len(h), *(len(c[i]) for c in cells)) if cells else len(h)
+              for i, h in enumerate(header)]
+    typer.echo(f"mission '{loaded.name}' — {len(cells)} work unit(s)")
+    typer.echo("")
+    typer.echo("  " + "  ".join(h.ljust(widths[i]) for i, h in enumerate(header)).rstrip())
+    for c in cells:
+        typer.echo("  " + "  ".join(c[i].ljust(widths[i]) for i in range(len(header))).rstrip())
 
     transitions = work.list_transitions(loaded.name)
     typer.echo("\nrecent transitions:")
     for t in transitions[-10:]:
         frm = t.from_state.value if t.from_state is not None else "—"
         typer.echo(f"  {t.seq:>3}  {frm} → {t.to_state.value:<13} {t.unit_id:<17} {t.reason}")
+
+
+@mission_app.command("advance")
+def mission_advance(
+    mission: Path = typer.Argument(..., help="Path to mission document YAML"),
+    store: Path | None = typer.Option(
+        None, "--store", help="Work store directory (default: ~/.armature/work)"),
+    as_json: bool = typer.Option(False, "--json", help="Emit decisions as JSON"),
+):
+    """Pure readiness: which work units may an executor start now.
+
+    Returns decisions; never executes (design §5). Delegated + ready =
+    launchable. human-led is notify-only. Slice 4's sweep submits what
+    this returns.
+    """
+    import json as _json
+    from armature.spec.mission import load_mission
+    from armature.state.work import compute_readiness
+
+    if not mission.exists():
+        typer.echo(f"Mission document not found: {mission}", err=True)
+        raise typer.Exit(1)
+    try:
+        loaded = load_mission(mission)
+    except Exception as exc:
+        typer.echo(f"Failed to load mission document: {exc}", err=True)
+        raise typer.Exit(1)
+    work = _work_store(store)
+    records = {u.id: work.ensure_unit(loaded, u) for u in loaded.work}
+    # dynamic (closure-seeded) records participate too
+    for rec in work.list_units(loaded.name):
+        records.setdefault(rec.unit_id, rec)
+    decisions = compute_readiness(loaded, list(records.values()))
+
+    if as_json:
+        typer.echo(_json.dumps([d.model_dump() for d in decisions], indent=2))
+        return
+    launchable = [d for d in decisions if d.launchable]
+    notify = [d for d in decisions if d.notify_only and not d.launchable]
+    held = [d for d in decisions if not d.launchable and not d.notify_only]
+    typer.echo(f"mission '{loaded.name}' — {len(launchable)} launchable, "
+               f"{len(notify)} notify-only, {len(held)} held")
+    for d in launchable:
+        typer.echo(f"  ▶ {d.unit_id}  launchable")
+    for d in notify:
+        typer.echo(f"  ● {d.unit_id}  notify-only  ({'; '.join(d.reasons)})")
+    for d in held:
+        typer.echo(f"  ■ {d.unit_id}  held  ({'; '.join(d.reasons)})")
 
 
 def _print_provider_error(exc: Exception) -> bool:
