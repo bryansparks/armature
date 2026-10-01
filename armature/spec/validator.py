@@ -6,7 +6,7 @@ Call `validate_spec(spec)` and handle the returned list of `SpecError`.
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from armature.spec.models import HarnessSpec
+from armature.spec.models import CLOSURE_REASONS, HarnessSpec, OutputMode
 from armature.spec.context import (
     MISSION_LAYER_NAME, floor_never, resolve_effective_policy, runtime_context_keys,
 )
@@ -128,6 +128,37 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 message="inject_file_as only has effect inside a fan-out stage; partition_source is missing",
                 stage_id=stage.id,
             ))
+
+    # ── Closure contract (missions design §3) ─────────────────────────────
+    if spec.closure is not None:
+        target = next((s for s in spec.stages if s.id == spec.closure.stage), None)
+        if target is None:
+            errors.append(SpecError(
+                code="CLOSURE_STAGE_UNDEFINED",
+                message=f"closure.stage references unknown stage '{spec.closure.stage}'",
+                stage_id=spec.closure.stage,
+            ))
+        elif target.output_mode != OutputMode.GUIDED_JSON or target.output_schema is None:
+            errors.append(SpecError(
+                code="CLOSURE_STAGE_NOT_GUIDED_JSON",
+                message=(f"closure stage '{target.id}' must use output_mode: guided_json "
+                         "with an output_schema"),
+                stage_id=target.id,
+            ))
+        else:
+            props = target.output_schema.get("properties") or {}
+            required = set(target.output_schema.get("required") or [])
+            reason = props.get("reason") or {}
+            enum = reason.get("enum")
+            if ("reason" not in required or not enum
+                    or not set(enum) <= set(CLOSURE_REASONS)):
+                errors.append(SpecError(
+                    code="CLOSURE_SCHEMA_INVALID",
+                    message=(f"closure stage '{target.id}' output_schema must require "
+                             "'reason' with a non-empty enum drawn from "
+                             f"{list(CLOSURE_REASONS)}"),
+                    stage_id=target.id,
+                ))
 
     # ── on_fail.loop points to a valid stage ──────────────────────────────
     for stage in spec.stages:

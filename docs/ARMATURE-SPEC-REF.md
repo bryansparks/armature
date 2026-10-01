@@ -13,6 +13,9 @@ version: "1.0"               # string
 description: "..."           # one sentence
 mission: >                   # optional: injected into every LLM stage's system prompt
   Background context for all agents — tone, domain, constraints.
+closure:                     # optional: name the stage whose output declares this run's closure
+  stage: final_report
+mission_source: static       # static | work_unit — where the mission context renders from
 ```
 
 ---
@@ -94,6 +97,111 @@ destinations:                     # run output contract; carried verbatim by
                                              # working dir) into artifacts/
   include_trace: false
 ```
+
+---
+
+## closure:
+
+```yaml
+closure:
+  stage: final_report     # a guided_json stage whose output declares the
+                          # run's closure (missions design §3)
+```
+
+Fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `stage` | string | ID of the stage whose output is the closure record |
+
+The named stage must use `output_mode: guided_json` with an
+`output_schema` satisfying the **built-in closure contract**: a required
+`reason` whose enum is non-empty and drawn from `CLOSURE_REASONS`
+(`done_no_follow_on` \| `handed_off` \| `blocked_on` \| `escalation`).
+Optional: `notes` (string) and `follow_on` (array of objects — mini
+work-unit specs the executor upserts into the mission).
+
+```yaml
+# inside the closure stage's output_schema
+required: [reason]
+properties:
+  reason: {type: string, enum: [done_no_follow_on, handed_off, blocked_on, escalation]}
+  notes: {type: string}
+  follow_on: {type: array, items: {type: object}}
+```
+
+A run whose spec declares no closure yields `done_no_follow_on` — silence is
+an explicit default. Validation codes: `CLOSURE_STAGE_UNDEFINED`,
+`CLOSURE_STAGE_NOT_GUIDED_JSON`, `CLOSURE_SCHEMA_INVALID`.
+
+---
+
+## mission_source:
+
+```yaml
+mission_source: static      # static (default) | work_unit
+```
+
+- `static` — the `[Workflow Mission]` context layer renders from the spec's
+  `mission:` string (today's behavior).
+- `work_unit` — a run executed for a work unit renders the mission context
+  from the injected work record instead: the mission's `objective`, plus the
+  unit's `title` and `objective`. Runtime wiring is slice 2 of the missions
+  design; the grammar is final.
+
+See [Mission Documents](#mission-documents) below and
+`docs/MISSION-AS-WORKFLOW-DRIVER.md`.
+
+---
+
+## Mission documents
+
+A mission document is a second YAML type — the work layer *above* workflows.
+It holds a larger objective plus work units, each naming which workflow
+accomplishes it. A workflow never references a mission; a work unit
+references a workflow. Validated with `armature mission validate`.
+
+```yaml
+name: campaign-pretzel
+version: "1.0"
+description: "..."           # one sentence
+objective: |                 # THE context every run of every unit inherits
+  Launch the Dangerous Pretzel ad campaign by Nov 15.
+posture: human-led            # mission default: executors notify, never act
+budget_usd: 200.0             # mission-level allocation ceiling
+
+work:
+  - id: hero-headlines       # unique; the durable address (outlives any run)
+    title: Write hero headline variants
+    objective: 12 variants across 3 tones.   # what "done" means for this unit
+    workflow: ../11_iterative_refinement.yml  # path (validated) or registered name (warned)
+    inputs: {topic: launch}  # runtime inputs, same grammar as --input
+    requires: [brand-approval]  # unit ids that must reach done first
+    posture: delegated       # unit override → mission default → human-led
+    max_budget_usd: 1.0      # per-run ceiling (metered from the run receipt)
+    timeout_hours: 1.0
+    max_attempts: 2
+```
+
+**Mission fields:** `name`, `version`, `description`, `objective`
+(str), `posture` (`human-led` | `delegated`, default `human-led`),
+`budget_usd` (num, optional), `work` (list).
+
+**Work unit fields:** `id` (str, unique), `title` (str), `objective`
+(str, default `""`), `workflow` (str), `inputs` (mapping, default `{}`),
+`requires` (list of unit ids, default `[]`), `posture` (enum or omitted to
+inherit), `max_budget_usd` / `timeout_hours` / `max_attempts`
+(num, default `max_attempts: 2`).
+
+**Lifecycle** (state enforcement arrives with `WorkStore`, slice 2):
+
+```
+pending → in_progress → done
+                    ├→ failed | blocked_on | handed_off | escalation | canceled
+```
+
+Worked example: `examples/missions/campaign-pretzel.mission.yml`. Full
+concept doc: `docs/MISSION-AS-WORKFLOW-DRIVER.md`.
 
 ---
 
@@ -554,6 +662,15 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `CONTEXT_POLICY_CONTRADICTS_FLOOR` | a `must` overlaps an applicable `never` (floor, workflow default, or its own) |
 | `NEVER_BLOCKS_PARTITION_SOURCE` *(warning)* | a fan-out stage closes its own `partition_source` — it resolves pre-filter |
 | `CONTEXT_TRANSIT_LEAK_RISK` *(warning)* | a closed stage's content may flow transitively through a visible stage's output |
+| `CLOSURE_STAGE_UNDEFINED` | `closure.stage` names a stage the spec doesn't have |
+| `CLOSURE_STAGE_NOT_GUIDED_JSON` | the closure stage must use `guided_json` with an `output_schema` |
+| `CLOSURE_SCHEMA_INVALID` | closure schema must require `reason` with a non-empty enum ⊆ `CLOSURE_REASONS` |
+| `MISSION_NO_WORK_UNITS` *(warning)* | mission validation: no work units — it can never run anything |
+| `DUPLICATE_WORK_UNIT` | mission validation: unit id defined more than once |
+| `UNKNOWN_WORK_UNIT` | mission validation: `requires:` names a unit id that doesn't exist |
+| `MISSION_BUDGET_CONFLICT` | mission validation: unit `max_budget_usd` exceeds mission `budget_usd` |
+| `WORKFLOW_NOT_REGISTERED` | mission validation: a path-like `workflow:` doesn't resolve |
+| `WORKFLOW_UNVERIFIED_NAME` *(warning)* | mission validation: bare workflow name resolves at the executor |
 
 ---
 
@@ -561,6 +678,7 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 
 ```bash
 armature validate spec.yml                         # always run before armature run
+armature mission validate my_mission.mission.yml   # validate a mission document
 armature run spec.yml --input topic="..." --quiet
 armature run spec.yml --dry-run                    # validate only, no execution
 armature dashboard spec.yml                        # health metrics after runs

@@ -9,6 +9,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Mission documents (slice 1: grammar + validation).** A new armature
+  document type layers work units above workflows: a mission holds a larger
+  objective plus work units, each naming which workflow accomplishes it and
+  declaring order (`requires:`), autonomy (`posture:`), and ceilings
+  (`max_budget_usd` / `timeout_hours` / `max_attempts`). Ships the
+  `WorkUnit`/`MissionSpec` models + loader (`armature/spec/mission.py`),
+  `validate_mission` with seven error/warning codes, the `armature mission
+  validate` CLI, a shipped worked example
+  (`examples/missions/campaign-pretzel.mission.yml`), and the concept doc
+  `docs/MISSION-AS-WORKFLOW-DRIVER.md`. Additive and zero-runtime-change:
+  workflow specs gain two optional fields — `closure:` (names the
+  guided_json stage whose output declares the run's closure, validated
+  against the fixed closure-reason enum) and `mission_source: static |
+  work_unit` (the seam where a run's mission context renders from the
+  injected work record; runtime wiring arrives with slice 2's LocalWorkStore).
 - **Research currency check.** New `docs/RESEARCH-CURRENCY-CHECK.md` records the
   September 2026 analysis of harness research since July 2026: the verdict (the
   field converged on what Armature already is), the one adopted item (the resume

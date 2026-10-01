@@ -17,6 +17,17 @@ class OutputMode(str, Enum):
     JSON = "json"
 
 
+# ── Mission/work layer (missions design §3): the fixed closure-reason set a
+# closure stage's schema must enumerate. Lives here (not mission.py) so the spec
+# validator can import it without a circular import.
+CLOSURE_REASONS: tuple[str, ...] = (
+    "done_no_follow_on",
+    "handed_off",
+    "blocked_on",
+    "escalation",
+)
+
+
 class ModelTierConfig(BaseModel):
     provider: str
     model: str
@@ -476,6 +487,13 @@ class SpecDestinations(BaseModel):
     include_trace: bool = False
 
 
+class ClosureConfig(BaseModel):
+    """Names the stage whose guided_json output declares this run's closure
+    (design §3). That stage's output_schema must satisfy the built-in closure
+    contract: a required `reason` enumerating CLOSURE_REASONS."""
+    stage: str
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -506,3 +524,7 @@ class HarnessSpec(BaseModel):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)
     destinations: SpecDestinations | None = None  # run destinations; None → package builder infers
+    closure: ClosureConfig | None = None
+    # work_unit: render the mission context layer from the injected work record
+    # (design §4) — slice 2 wires the runtime; the grammar lands here
+    mission_source: Literal["static", "work_unit"] = "static"

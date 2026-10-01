@@ -9,6 +9,9 @@ app = typer.Typer(name="armature", help="ELF ecosystem agent harness runner", no
 channels_app = typer.Typer(name="channels", help="Manage messaging channel connectors")
 app.add_typer(channels_app, name="channels")
 
+mission_app = typer.Typer(name="mission", help="Mission documents: larger objectives coordinating multiple workflows")
+app.add_typer(mission_app, name="mission")
+
 from armature.packaging.cli import package_app  # noqa: E402
 app.add_typer(package_app, name="package")
 
@@ -435,6 +438,41 @@ def validate(
         stage_label = f"  stage='{e.stage_id}'" if e.stage_id else ""
         typer.echo(f"  [{e.code}]{stage_label}: {e.message}", err=True)
     raise typer.Exit(1)
+
+
+@mission_app.command("validate")
+def mission_validate(
+    mission: Path = typer.Argument(..., help="Path to mission document YAML"),
+):
+    """Validate a mission document and report all errors."""
+    if not mission.exists():
+        typer.echo(f"Mission document not found: {mission}", err=True)
+        raise typer.Exit(1)
+
+    from armature.spec.mission import load_mission, validate_mission
+
+    try:
+        loaded = load_mission(mission)
+    except Exception as exc:
+        typer.echo(f"Failed to parse mission document: {exc}", err=True)
+        raise typer.Exit(1)
+
+    issues = validate_mission(loaded, strict=False)
+    hard_errors = [e for e in issues if e.severity == "error"]
+    warnings = [e for e in issues if e.severity == "warning"]
+
+    if warnings:
+        typer.echo(f"⚠ {len(warnings)} warning(s):")
+        for w in warnings:
+            typer.echo(f"  [{w.code}]: {w.message}")
+
+    if hard_errors:
+        typer.echo(f"✗ '{loaded.name}' has {len(hard_errors)} validation error(s):\n", err=True)
+        for e in hard_errors:
+            typer.echo(f"  [{e.code}]: {e.message}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"✓ '{loaded.name}' is valid ({len(loaded.work)} work unit(s))")
 
 
 def _print_provider_error(exc: Exception) -> bool:
