@@ -74,3 +74,120 @@ def test_shipped_example_mission_valid():
     out = plain(result.output)
     assert result.exit_code == 0, out
     assert "is valid" in out
+
+
+# ── Slice 2: mission run + mission status ────────────────────────────────────
+
+from armature.state.work import LocalWorkStore, WorkUnitState
+
+OK_SPEC = """\
+name: ok-flow
+adapters:
+  echo:
+    name: echo
+    type: script
+    cmd: "echo '{\\"ok\\": true}'"
+    parse: json
+stages:
+  - id: work
+    adapter: echo
+    depends_on: []
+"""
+
+FAIL_SPEC = """\
+name: fail-flow
+adapters:
+  boom:
+    name: boom
+    type: script
+    cmd: "exit 3"
+    parse: json
+stages:
+  - id: work
+    adapter: boom
+    depends_on: []
+"""
+
+MISSION_TEXT = """\
+name: m
+objective: Ship it.
+work:
+  - id: a
+    title: A
+    workflow: wf.yml
+  - id: b
+    title: B
+    workflow: wf.yml
+    requires: [a]
+    max_attempts: 2
+"""
+
+
+def _write_pair(tmp_path, mission_text, workflow_text):
+    (tmp_path / "wf.yml").write_text(workflow_text)
+    p = tmp_path / "m.mission.yml"
+    p.write_text(mission_text)
+    return p
+
+
+def test_mission_run_success_reaches_done(tmp_path):
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    out = plain(r.output)
+    assert r.exit_code == 0, out
+    assert "done" in out
+    store = LocalWorkStore(tmp_path / "store")
+    assert store.load("m", "a").state == WorkUnitState.DONE
+    assert store.load("m", "a").attempts == 1
+
+
+def test_mission_run_failure_lands_retry_pending_then_failed(tmp_path):
+    p = _write_pair(tmp_path, MISSION_TEXT, FAIL_SPEC)
+    s = tmp_path / "store"
+    r1 = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(s)])
+    assert r1.exit_code == 1
+    store = LocalWorkStore(s)
+    rec = store.load("m", "a")
+    assert rec.state == WorkUnitState.RETRY_PENDING      # attempts 1 < max 2
+    r2 = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(s)])
+    assert r2.exit_code == 1
+    assert store.load("m", "a").state == WorkUnitState.FAILED   # ceiling reached
+
+
+def test_mission_run_refuses_unready_requires(tmp_path):
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "run", str(p), "b", "--store", str(tmp_path / "store")])
+    out = plain(r.output)
+    assert r.exit_code == 1
+    assert "requires" in out or "a" in out
+    store = LocalWorkStore(tmp_path / "store")
+    assert store.load("m", "b").attempts == 0           # no attempt consumed
+
+
+def test_mission_run_refuses_unknown_unit(tmp_path):
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    r = runner.invoke(app, ["mission", "run", str(p), "nope", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 1
+    assert "unknown unit" in plain(r.output)
+
+
+def test_mission_run_injects_objective_into_context(tmp_path):
+    spec = OK_SPEC.replace("name: ok-flow", "name: ok-flow\nmission_source: work_unit")
+    p = _write_pair(tmp_path, MISSION_TEXT, spec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 0, plain(r.output)
+    # injection itself is asserted at engine level (Task 4); here: run completed
+    # and the record's last_job_id was stamped
+    assert LocalWorkStore(tmp_path / "store").load("m", "a").last_job_id
+
+
+def test_mission_status_renders_states_and_transitions(tmp_path):
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    s = tmp_path / "store"
+    runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(s)])
+    r = runner.invoke(app, ["mission", "status", str(p), "--store", str(s)])
+    out = plain(r.output)
+    assert r.exit_code == 0, out
+    assert "a" in out and "done" in out
+    assert "b" in out and "pending" in out
+    assert "recent transitions" in out

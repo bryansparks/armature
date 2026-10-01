@@ -475,6 +475,177 @@ def mission_validate(
     typer.echo(f"✓ '{loaded.name}' is valid ({len(loaded.work)} work unit(s))")
 
 
+def _work_store(store: Path | None):
+    from armature.state.work import LocalWorkStore
+    return LocalWorkStore(store if store is not None else Path("~/.armature/work").expanduser())
+
+
+@mission_app.command("run")
+def mission_run(
+    mission: Path = typer.Argument(..., help="Path to mission document YAML"),
+    unit_id: str = typer.Argument(..., help="Work unit id to run"),
+    store: Path | None = typer.Option(
+        None, "--store", help="Work store directory (default: ~/.armature/work)"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output"),
+):
+    """Run one work unit's workflow locally, driving the work store.
+
+    Readiness first: a unit whose `requires` are not done refuses without
+    consuming an attempt. Outcomes: success → done; failure → failed, then
+    retry_pending while attempts remain (attempt ceiling enforced here).
+    """
+    from armature.spec.mission import load_mission, resolve_posture, validate_mission
+    from armature.spec.validator import SpecValidationError
+    from armature.state.work import WorkUnitState
+
+    if not mission.exists():
+        typer.echo(f"Mission document not found: {mission}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        loaded = load_mission(mission)
+        validate_mission(loaded)          # strict: hard errors stop the run
+    except Exception as exc:
+        typer.echo(f"Failed to load mission document: {exc}", err=True)
+        raise typer.Exit(1)
+
+    unit = next((u for u in loaded.work if u.id == unit_id), None)
+    if unit is None:
+        typer.echo(f"unknown unit '{unit_id}' in mission '{loaded.name}'", err=True)
+        raise typer.Exit(1)
+
+    if unit.workflow_path is None:
+        typer.echo(
+            f"unit '{unit_id}' names workflow '{unit.workflow}' — bare names are "
+            "registered by executors; local runs require a path", err=True)
+        raise typer.Exit(1)
+    if not Path(unit.workflow_path).exists():
+        typer.echo(f"unit '{unit_id}' workflow path does not exist: {unit.workflow_path}", err=True)
+        raise typer.Exit(1)
+
+    work = _work_store(store)
+    rec = work.ensure_unit(loaded, unit)
+
+    # State gate — only pending / retry_pending may start, and no attempt is
+    # consumed on any refusal below.
+    if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING):
+        why = {
+            WorkUnitState.IN_PROGRESS: "already in progress",
+            WorkUnitState.DONE: "already done",
+            WorkUnitState.FAILED: "failed and out of attempts",
+            WorkUnitState.BLOCKED_ON: "blocked on an upstream unit",
+            WorkUnitState.HANDED_OFF: "handed off to another owner",
+            WorkUnitState.ESCALATION: "needs a human (escalated)",
+            WorkUnitState.CANCELED: "canceled",
+        }.get(rec.state, f"in state {rec.state.value}")
+        typer.echo(f"✗ Refusing to run unit '{unit_id}' ({why})", err=True)
+        raise typer.Exit(1)
+
+    blockers = [
+        dep for dep in unit.requires
+        if (d := work.load(loaded.name, dep)) is None or d.state != WorkUnitState.DONE
+    ]
+    if blockers:
+        typer.echo(
+            f"✗ Unit '{unit_id}' requires unit(s) that are not done: "
+            f"{', '.join(blockers)}", err=True)
+        raise typer.Exit(1)
+
+    merged_inputs = dict(unit.inputs)
+    try:
+        harness = Harness.from_spec(Path(unit.workflow_path), vars=merged_inputs)
+    except SpecValidationError as exc:
+        typer.echo(f"Spec validation failed:\n{exc}", err=True)
+        raise typer.Exit(1)
+
+    # Consume the attempt and move to in_progress with this run as the job.
+    rec.attempts += 1
+    work.save(rec)
+    run_id = harness._run_id
+    work.apply(loaded.name, unit_id, WorkUnitState.IN_PROGRESS,
+               reason=f"attempt {rec.attempts}/{rec.max_attempts}", job_id=run_id)
+
+    record_dict = {
+        "mission": loaded.name,
+        "mission_objective": loaded.objective,
+        "unit_id": unit.id,
+        "title": unit.title,
+        "objective": unit.objective,
+        "requires": list(unit.requires),
+        "posture": resolve_posture(loaded, unit),
+        "state": WorkUnitState.IN_PROGRESS.value,
+        "attempts": rec.attempts,
+    }
+    merged_inputs["work_unit"] = record_dict
+
+    if not quiet:
+        typer.echo(f"▶ mission '{loaded.name}' · unit '{unit_id}' "
+                   f"(attempt {rec.attempts}/{rec.max_attempts}, job {run_id})")
+
+    try:
+        asyncio.run(harness.run(merged_inputs))
+    except Exception as exc:  # noqa: BLE001
+        work.apply(loaded.name, unit_id, WorkUnitState.FAILED,
+                   reason=str(exc)[:200], job_id=run_id)
+        if rec.attempts < rec.max_attempts:
+            work.apply(loaded.name, unit_id, WorkUnitState.RETRY_PENDING,
+                       reason=(f"attempt {rec.attempts}/{rec.max_attempts} "
+                               "failed; retry available"))
+        typer.echo(
+            f"✗ Unit '{unit_id}' failed (attempt {rec.attempts}/{rec.max_attempts}): "
+            f"{exc}", err=True)
+        raise typer.Exit(1)
+
+    work.apply(loaded.name, unit_id, WorkUnitState.DONE,
+               reason="run complete", job_id=run_id)
+    if not quiet:
+        typer.echo(f"✓ unit '{unit_id}' → done (attempt {rec.attempts}/{rec.max_attempts})")
+    else:
+        typer.echo("done")
+
+
+@mission_app.command("status")
+def mission_status(
+    mission: Path = typer.Argument(..., help="Path to mission document YAML"),
+    store: Path | None = typer.Option(
+        None, "--store", help="Work store directory (default: ~/.armature/work)"),
+):
+    """Render work-unit states and recent transitions for a mission.
+
+    First render seeds any missing unit records from the document.
+    """
+    from armature.spec.mission import load_mission
+    from armature.state.work import WorkUnitState
+
+    if not mission.exists():
+        typer.echo(f"Mission document not found: {mission}", err=True)
+        raise typer.Exit(1)
+
+    try:
+        loaded = load_mission(mission)
+    except Exception as exc:
+        typer.echo(f"Failed to load mission document: {exc}", err=True)
+        raise typer.Exit(1)
+
+    work = _work_store(store)
+    records = {u.id: work.ensure_unit(loaded, u) for u in loaded.work}
+
+    typer.echo(f"mission '{loaded.name}' — {len(loaded.work)} work unit(s)")
+    typer.echo("")
+    typer.echo("  unit              state           attempts  posture     requires")
+    for u in loaded.work:
+        rec = records[u.id]
+        reqs = ", ".join(u.requires) if u.requires else "-"
+        typer.echo(f"  {u.id:<17} {rec.state.value:<15} "
+                   f"{rec.attempts}/{rec.max_attempts:<7}  {rec.posture:<10} {reqs}")
+
+    transitions = work.list_transitions(loaded.name)
+    typer.echo("\nrecent transitions:")
+    for t in transitions[-10:]:
+        frm = t.from_state.value if t.from_state is not None else "—"
+        typer.echo(f"  {t.seq:>3}  {frm} → {t.to_state.value:<13} {t.unit_id:<17} {t.reason}")
+
+
 def _print_provider_error(exc: Exception) -> bool:
     """Translate common LLM-provider failures into a concise, actionable message.
 
