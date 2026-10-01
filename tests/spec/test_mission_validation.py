@@ -114,3 +114,38 @@ def test_resolve_posture_inherits_mission_default():
 def test_resolve_posture_defaults_human_led():
     mission = _mission([_unit("a")])
     assert resolve_posture(mission, mission.work[0]) == "human-led"
+
+# ── Slice 2: numeric/field sanity hardening ──────────────────────────────────
+
+def test_zero_max_attempts_invalid():
+    errors = validate_mission(_mission([_unit("a", max_attempts=0)]), strict=False)
+    assert "MISSION_FIELD_INVALID" in codes(errors)
+
+
+def test_negative_budget_invalid():
+    errors = validate_mission(
+        _mission([_unit("a", max_budget_usd=-1.0)], budget_usd=-5.0), strict=False)
+    assert "MISSION_FIELD_INVALID" in codes(errors)
+    assert sum(1 for e in errors if e.code == "MISSION_FIELD_INVALID") == 2
+
+
+def test_negative_timeout_invalid():
+    errors = validate_mission(_mission([_unit("a", timeout_hours=-0.5)]), strict=False)
+    assert "MISSION_FIELD_INVALID" in codes(errors)
+
+
+def test_blank_unit_id_invalid():
+    errors = validate_mission(_mission([_unit("  ")]), strict=False)
+    assert "MISSION_FIELD_INVALID" in codes(errors)
+
+
+def test_numeric_bounds_valid_mission_clean():
+    errors = validate_mission(
+        _mission([_unit("a", max_attempts=3, timeout_hours=1.0, max_budget_usd=2.0)],
+                 budget_usd=10.0), strict=False)
+    assert "MISSION_FIELD_INVALID" not in codes(errors)
+
+
+def test_mission_errors_carry_unit_stage_id():
+    errors = validate_mission(_mission([_unit("a", requires=["nope"])]), strict=False)
+    assert all(e.stage_id == "a" for e in errors if e.code == "UNKNOWN_WORK_UNIT")

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from armature.spec.models import CLOSURE_REASONS, HarnessSpec, OutputMode
 from armature.spec.context import (
-    MISSION_LAYER_NAME, floor_never, resolve_effective_policy, runtime_context_keys,
+    MISSION_LAYER_NAME, WORK_UNIT_LAYER_NAME, floor_never, resolve_effective_policy, runtime_context_keys,
 )
 
 _PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
@@ -526,6 +526,15 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 "context_layers contains a layer named 'mission', which is "
                 "reserved for the auto layer synthesized from the top-level "
                 "'mission' field"
+            ),
+        ))
+    if WORK_UNIT_LAYER_NAME in layer_names:
+        errors.append(SpecError(
+            code="RESERVED_CONTEXT_LAYER_NAME",
+            message=(
+                "context_layers contains a layer named 'work_unit', which is "
+                "reserved for the auto layer synthesized from the work record "
+                "injected by mission executors (mission_source: work_unit)"
             ),
         ))
     all_layer_names = layer_names | ({MISSION_LAYER_NAME} if spec.mission else set())

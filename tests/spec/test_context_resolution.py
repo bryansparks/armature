@@ -113,3 +113,70 @@ def test_resolve_mission_closeable():
 def test_effective_policy_as_dict_is_serializable():
     p = EffectiveContextPolicy(must=("mission", "x"), never=frozenset({"b"}))
     assert p.as_dict() == {"must": ["mission", "x"], "never": ["b"]}
+
+
+# ── Slice 2: work_unit objective injection (mission_source: work_unit) ──────
+
+from armature.spec.context import work_unit_layer
+
+
+def test_work_unit_layer_synthesized_with_record():
+    spec = _spec(mission_source="work_unit")
+    rec = {"mission": "m", "mission_objective": "Ship it.", "unit_id": "a",
+           "title": "Unit A", "objective": "12 variants.", "requires": ["b"],
+           "posture": "delegated", "state": "in_progress", "attempts": 1}
+    layers = ordered_layers(spec, rec)
+    names = [l.name for l in layers]
+    assert "mission" in names and "work_unit" in names
+    wu = next(l for l in layers if l.name == "work_unit")
+    assert "Unit A" in wu.content and "12 variants." in wu.content
+    assert "b" in wu.content
+
+
+def test_work_unit_layer_absent_without_record_or_opt_in():
+    spec = _spec(mission_source="work_unit")
+    assert work_unit_layer(spec, None) is None
+    spec2 = _spec(mission="static", mission_source="static")
+    assert work_unit_layer(spec2, {"title": "x", "objective": ""}) is None
+
+
+def test_mission_layer_content_from_record_when_sourced():
+    spec = _spec(mission="static string", mission_source="work_unit")
+    rec = {"mission": "m", "mission_objective": "From the record.",
+           "unit_id": "a", "title": "A", "objective": "", "requires": []}
+    m = mission_layer(spec, rec)
+    assert m is not None and "From the record." in m.content
+
+
+def test_mission_layer_falls_back_to_static_without_record():
+    spec = _spec(mission="static string", mission_source="work_unit")
+    m = mission_layer(spec, None)
+    assert m is not None and m.content == "static string"
+
+
+def test_runtime_context_keys_include_work_unit_when_sourced():
+    spec = _spec(mission_source="work_unit")
+    assert "work_unit" in runtime_context_keys(spec)
+    assert "work_unit" not in runtime_context_keys(_spec())
+
+
+def test_never_can_target_work_unit_layer():
+    spec = _spec(mission_source="work_unit")
+    stage = HarnessSpec.model_validate({
+        "name": "s",
+        "stages": [{"id": "x", "context_policy": {"never": ["work_unit"]}}],
+    }).stages[0]
+    eff = resolve_effective_policy(spec, stage, {"title": "A", "objective": ""})
+    assert "work_unit" in eff.never and "work_unit" not in eff.must
+
+
+def test_work_unit_layer_reserved_name_rejected():
+    from armature.spec.validator import validate_spec
+    spec = HarnessSpec.model_validate({
+        "name": "s",
+        "context_layers": [{"name": "work_unit", "precedence": 1, "content": "hi"}],
+        "stages": [{"id": "x"}],
+    })
+    errors = validate_spec(spec, strict=False)
+    assert any(e.code == "RESERVED_CONTEXT_LAYER_NAME" and "work_unit" in e.message
+               for e in errors)

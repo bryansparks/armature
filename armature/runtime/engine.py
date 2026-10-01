@@ -9,7 +9,8 @@ from typing import Any, Callable
 from armature.spec.models import HarnessSpec, Stage
 from armature.spec.loader import load_spec
 from armature.spec.context import (
-    MISSION_LAYER_NAME, EffectiveContextPolicy, ordered_layers, resolve_effective_policy,
+    MISSION_LAYER_NAME, WORK_UNIT_LAYER_NAME, EffectiveContextPolicy,
+    ordered_layers, resolve_effective_policy,
 )
 from armature.runtime.dag import DAGExecutor
 from armature.runtime.context import ContextManager
@@ -435,14 +436,15 @@ class Harness:
         `[Context Layer: {name}]`.
         """
         pairs: list[tuple[str, str]] = []
-        for layer in ordered_layers(self._spec):
+        for layer in ordered_layers(self._spec, getattr(self, "_work_record", None)):
             if layer.name not in gov.must or layer.content is None:
                 continue
-            header = (
-                "[Workflow Mission]"
-                if layer.name == MISSION_LAYER_NAME
-                else f"[Context Layer: {layer.name}]"
-            )
+            if layer.name == MISSION_LAYER_NAME:
+                header = "[Workflow Mission]"
+            elif layer.name == WORK_UNIT_LAYER_NAME:
+                header = "[Work Unit]"
+            else:
+                header = f"[Context Layer: {layer.name}]"
             pairs.append((header, layer.content))
         return pairs
 
@@ -1144,6 +1146,19 @@ class Harness:
                 context[self._spec.continuation.inject_as] = _prior
         self._validate_inputs(context)
         self._provenance: dict[str, str] = {k: "user_input" for k in (inputs or {})}
+
+        # Work record injected by a mission executor (mission_source: work_unit).
+        # It drives the mission + work_unit pseudo-layers (design §4); its
+        # absence falls back to the spec's static mission. Per-run state, so
+        # the per-spec policy map built in __init__ is recomputed here.
+        self._work_record = (context.get("work_unit")
+                             if isinstance(context.get("work_unit"), dict) else None)
+        if self._work_record is not None:
+            self._provenance["work_unit"] = "work_record"
+        self._context_policies = {
+            s.id: resolve_effective_policy(self._spec, s, self._work_record)
+            for s in self._spec.stages
+        }
 
         # Load prior checkpoint results so downstream stages can reference them.
         # Split into stage-level keys (for context and n_resumed) and
