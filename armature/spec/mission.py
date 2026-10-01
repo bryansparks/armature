@@ -63,7 +63,7 @@ def load_mission(path: Path) -> MissionSpec:
     if not path.exists():
         raise ValueError(f"mission document not found: {path}")
     try:
-        data = _YAML.load(path.read_text())
+        data = _YAML.load(path.read_text(encoding="utf-8"))
     except YAMLError as exc:
         raise ValueError(f"mission document is not valid YAML: {exc}") from exc
     if not isinstance(data, dict):
@@ -120,8 +120,43 @@ def validate_mission(mission: MissionSpec, *, strict: bool = True) -> list[SpecE
             errors.append(SpecError(
                 code="DUPLICATE_WORK_UNIT",
                 message=f"Work unit '{uid}' is defined more than once",
+                stage_id=uid,
             ))
         seen.add(uid)
+
+    # ── Field sanity (slice-2 hardening: blank ids, numeric bounds) ───────
+    if mission.budget_usd is not None and mission.budget_usd < 0:
+        errors.append(SpecError(
+            code="MISSION_FIELD_INVALID",
+            message=f"mission budget_usd must be >= 0, got {mission.budget_usd}",
+        ))
+    for unit in mission.work:
+        if not unit.id.strip():
+            errors.append(SpecError(
+                code="MISSION_FIELD_INVALID",
+                message=f"work unit id must be non-empty, got {unit.id!r}",
+                stage_id=unit.id,
+            ))
+        if unit.max_attempts < 1:
+            errors.append(SpecError(
+                code="MISSION_FIELD_INVALID",
+                message=f"unit '{unit.id}' max_attempts must be >= 1, got {unit.max_attempts}",
+                stage_id=unit.id,
+            ))
+        if unit.max_budget_usd is not None and unit.max_budget_usd < 0:
+            errors.append(SpecError(
+                code="MISSION_FIELD_INVALID",
+                message=(f"unit '{unit.id}' max_budget_usd must be >= 0, "
+                         f"got {unit.max_budget_usd}"),
+                stage_id=unit.id,
+            ))
+        if unit.timeout_hours is not None and unit.timeout_hours < 0:
+            errors.append(SpecError(
+                code="MISSION_FIELD_INVALID",
+                message=(f"unit '{unit.id}' timeout_hours must be >= 0, "
+                         f"got {unit.timeout_hours}"),
+                stage_id=unit.id,
+            ))
 
     # ── Undefined requires references (order-independent) ──────────────────
     for unit in mission.work:
@@ -130,6 +165,7 @@ def validate_mission(mission: MissionSpec, *, strict: bool = True) -> list[SpecE
                 errors.append(SpecError(
                     code="UNKNOWN_WORK_UNIT",
                     message=f"work unit '{unit.id}' requires unknown unit '{dep}'",
+                    stage_id=unit.id,
                 ))
 
     # ── Cycle detection — same primitive as the workflow validator ────────
@@ -150,6 +186,7 @@ def validate_mission(mission: MissionSpec, *, strict: bool = True) -> list[SpecE
                 code="MISSION_BUDGET_CONFLICT",
                 message=(f"unit '{unit.id}' max_budget_usd {unit.max_budget_usd} "
                          f"exceeds mission budget_usd {mission.budget_usd}"),
+                stage_id=unit.id,
             ))
 
     # ── Workflow references ────────────────────────────────────────────────
@@ -159,6 +196,7 @@ def validate_mission(mission: MissionSpec, *, strict: bool = True) -> list[SpecE
                 errors.append(SpecError(
                     code="WORKFLOW_NOT_REGISTERED",
                     message=f"unit '{unit.id}' workflow path does not resolve: {unit.workflow_path}",
+                    stage_id=unit.id,
                 ))
         else:
             # Registry-style bare name: registration is executor-side, so local
@@ -168,6 +206,7 @@ def validate_mission(mission: MissionSpec, *, strict: bool = True) -> list[SpecE
                 code="WORKFLOW_UNVERIFIED_NAME",
                 message=(f"unit '{unit.id}' names workflow '{unit.workflow}' — "
                          "bare names are registered by executors; cannot verify locally"),
+                stage_id=unit.id,
                 severity="warning",
             ))
 
