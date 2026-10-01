@@ -64,3 +64,13 @@ def test_mission_validate_warnings_do_not_fail(tmp_path):
     out = plain(result.output)
     assert result.exit_code == 0          # WORKFLOW_UNVERIFIED_NAME is a warning
     assert "[WORKFLOW_UNVERIFIED_NAME]" in out
+
+EXAMPLE = Path(__file__).parents[2] / "examples" / "missions" / "campaign-pretzel.mission.yml"
+
+
+def test_shipped_example_mission_valid():
+    assert EXAMPLE.exists(), f"missing shipped example: {EXAMPLE}"
+    result = runner.invoke(app, ["mission", "validate", str(EXAMPLE)])
+    out = plain(result.output)
+    assert result.exit_code == 0, out
+    assert "is valid" in out

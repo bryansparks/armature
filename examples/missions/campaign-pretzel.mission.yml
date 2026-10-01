@@ -1,0 +1,33 @@
+# The reference mission document — examples/missions/ ships alongside the
+# workflow examples it coordinates. Workflow refs are path-like so local
+# validation is fully green; registry-style bare names (armature-code-worker)
+# validate as warnings and resolve at the executor (design §9 decisions).
+name: campaign-pretzel
+version: "1.0"
+description: "Ad campaign chain for Dangerous Pretzel — the missions grammar's worked example."
+
+objective: |
+  Launch the Dangerous Pretzel ad campaign by Nov 15. Brand voice:
+  chaotic-good, never earnest. Total budget is $200 all-in.
+
+posture: human-led          # default for every unit that doesn't override
+budget_usd: 200.0
+
+work:
+  - id: brand-approval
+    title: Human approves brand voice examples
+    objective: |
+      Review the sample headlines for voice fit. Runs a workflow with a
+      human gate — the approval everything else waits on.
+    workflow: ../06_human_in_the_loop.yml
+    posture: human-led      # never auto-re-driven
+
+  - id: hero-headlines
+    title: Write hero headline variants
+    objective: 12 variants across 3 tones, each under 40 characters.
+    workflow: ../11_iterative_refinement.yml
+    requires: [brand-approval]
+    posture: delegated      # this unit may be re-driven by an executor
+    max_budget_usd: 1.0
+    timeout_hours: 1.0
+    max_attempts: 2
