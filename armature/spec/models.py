@@ -17,6 +17,17 @@ class OutputMode(str, Enum):
     JSON = "json"
 
 
+# ── Mission/work layer (missions design §3): the fixed closure-reason set a
+# closure stage's schema must enumerate. Lives here (not mission.py) so the spec
+# validator can import it without a circular import.
+CLOSURE_REASONS: tuple[str, ...] = (
+    "done_no_follow_on",
+    "handed_off",
+    "blocked_on",
+    "escalation",
+)
+
+
 class ModelTierConfig(BaseModel):
     provider: str
     model: str
