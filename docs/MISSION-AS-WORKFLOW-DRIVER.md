@@ -25,7 +25,7 @@ The missions grammar promotes it. Twice.
 
 The direction of reference is one-way and deliberate: a workflow never references a mission. The same workflow spec then serves many work units of many missions — the workflow is the capability, the work unit is the intent.
 
-The seam between them is the spec's new optional `mission_source: work_unit`. With it, a run executed *for a work unit* renders the `[Workflow Mission]` context layer from the work record instead of the static string: every stage in the run inherits the mission's `objective` plus its unit's `title` and `objective`. That is aggregate coherence across a flock of different workflows, with none of them hardcoding it. (The runtime wiring is slice 2; slice 1 ships the grammar.)
+The seam between them is the spec's new optional `mission_source: work_unit`. With it, a run executed *for a work unit* renders the `[Workflow Mission]` context layer from the work record instead of the static string, plus a `[Work Unit]` layer carrying the unit's title and objective; every stage in the run inherits the mission's `objective` plus its unit's slice context. That is aggregate coherence across a flock of different workflows, with none of them hardcoding it. A spec that opts in but runs without a work record (plain `armature run`) falls back to its static `mission:`. The record arrives as the `work_unit` context key, so it is governable like any other context (`never: [work_unit]` closes it) and referenceable in Jinja (`{{ work_unit.title }}`).
 
 ---
 
@@ -89,7 +89,23 @@ pending → in_progress → done
                     └→ canceled
 ```
 
-Every transition produces an append-only transition record — an audit trail, not just a current-state pointer. **Slice 1 ships the grammar and its static validation** (references, cycles, budgets — the rules you can check before anything runs); transition *enforcement* and persistence arrive with the `WorkStore` in slice 2.
+Every transition produces an append-only transition record — an audit trail, not just a current-state pointer. **Enforcement is live**: the transition table above runs in exactly one place (`armature/state/work.py`), and every writer goes through it. Persistence lives behind the `WorkStore` protocol; the local implementation is `LocalWorkStore` (dir of JSON records plus a `transitions.jsonl` audit log, default base `~/.armature/work`, `--store` to override). A dispatch transport later implements the same protocol against S3.
+
+Two verbs drive a mission locally:
+
+```bash
+armature mission status my_mission.mission.yml            # unit states + recent transitions
+armature mission run    my_mission.mission.yml unit_a    # run one unit's workflow
+```
+
+`mission run` is the local executor, and its refusals are the point:
+
+- **Readiness**: a unit whose `requires` are not all `done` refuses, *without consuming an attempt* — the exact premature-run failure this grammar exists to prevent.
+- **State gate**: only `pending` and `retry_pending` units start; a `done` or `escalation` unit refuses with a per-state reason.
+- **Attempt ceiling**: each run increments `attempts`; a failure lands `failed`, then `retry_pending` only while `attempts < max_attempts`. At the ceiling the unit stays `failed` — no unbounded retry loop.
+- **Identity**: the run id becomes the record's `last_job_id`, so a unit's history is traceable run-by-run (design §7: the unit is the durable identity; runs are attempts).
+
+Budget metering (`spent_usd`), closure application (follow-on upserts from a run's closure stage), and `mission advance` arrive with slice 3.
 
 ---
 
@@ -122,6 +138,7 @@ A run whose spec declares no closure yields `done_no_follow_on`. Silence is an e
 | `MISSION_BUDGET_CONFLICT` | Unit `max_budget_usd` exceeds the mission's `budget_usd` |
 | `WORKFLOW_NOT_REGISTERED` | A path-like `workflow:` doesn't resolve to a file |
 | `WORKFLOW_UNVERIFIED_NAME` *(warning)* | Bare registry names resolve at the executor; can't verify locally |
+| `MISSION_FIELD_INVALID` | Blank unit id, `max_attempts < 1`, or a negative `timeout_hours` / `max_budget_usd` / `budget_usd` |
 | `CLOSURE_STAGE_UNDEFINED` | `closure.stage` names a stage the spec doesn't have |
 | `CLOSURE_STAGE_NOT_GUIDED_JSON` | The closure stage must use `guided_json` with an `output_schema` |
 | `CLOSURE_SCHEMA_INVALID` | The closure schema must require `reason` with a non-empty enum ⊆ the closure-reason set |

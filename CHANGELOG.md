@@ -9,6 +9,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Mission lifecycle (slice 2: LocalWorkStore + enforcement).** The
+  work-unit state machine ships: nine states with a single legality table
+  (`armature/state/work.py` — the one place transitions are checked),
+  `WorkUnitRecord`/`TransitionRecord` pydantic models, the `WorkStore`
+  protocol (the persistence seam a dispatch transport implements against
+  S3 later) and `LocalWorkStore` (per-unit JSON records plus an append-only
+  `transitions.jsonl` audit; default base `~/.armature/work`, `--store`
+  overrides). Two new verbs drive a mission locally: `armature mission run`
+  (readiness refusals that never consume an attempt, per-attempt `job_id`
+  stamping, and the attempt ceiling — `failed` stays `failed` at
+  `max_attempts`) and `armature mission status` (unit states + recent
+  transitions). `mission_source: work_unit` is now wired end to end: a run
+  for a work unit renders `[Workflow Mission]` from the mission's objective
+  and a new `[Work Unit]` layer from the unit's title/objective, with the
+  record injectable as `{{ work_unit.* }}` and closable via
+  `never: [work_unit]`. Validation hardens with `MISSION_FIELD_INVALID`
+  (blank ids, non-positive `max_attempts`, negative ceilings) and
+  unit-scoped `stage_id` on every mission error. Budget metering
+  (`spent_usd`), closure application, and `mission advance` are slice 3.
 - **Mission documents (slice 1: grammar + validation).** A new armature
   document type layers work units above workflows: a mission holds a larger
   objective plus work units, each naming which workflow accomplishes it and

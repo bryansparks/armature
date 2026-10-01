@@ -191,3 +191,18 @@ def test_mission_status_renders_states_and_transitions(tmp_path):
     assert "a" in out and "done" in out
     assert "b" in out and "pending" in out
     assert "recent transitions" in out
+
+
+def test_shipped_example_status_renders(tmp_path):
+    r = runner.invoke(app, ["mission", "status", str(EXAMPLE), "--store", str(tmp_path)])
+    assert r.exit_code == 0, plain(r.output)
+    assert "hero-headlines" in plain(r.output)
+    assert "brand-approval" in plain(r.output)
+    assert "pending" in plain(r.output)
+    out = plain(r.output)
+    # strengthened (passed immediately off Task 5's command): per-unit rows
+    # carry posture and the requires column
+    assert "delegated" in out and "human-led" in out
+    hero_row = next(l for l in out.splitlines() if l.startswith("  hero-headlines"))
+    assert "brand-approval" in hero_row          # requires column
+    assert "0/2" in hero_row                     # attempts/max column

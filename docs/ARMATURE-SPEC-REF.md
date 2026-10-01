@@ -145,9 +145,13 @@ mission_source: static      # static (default) | work_unit
 - `static` — the `[Workflow Mission]` context layer renders from the spec's
   `mission:` string (today's behavior).
 - `work_unit` — a run executed for a work unit renders the mission context
-  from the injected work record instead: the mission's `objective`, plus the
-  unit's `title` and `objective`. Runtime wiring is slice 2 of the missions
-  design; the grammar is final.
+  from the injected work record instead: the mission's `objective` in
+  `[Workflow Mission]`, plus the unit's `title` and `objective` in a new
+  `[Work Unit]` layer. The record arrives as the `work_unit` context key
+  (governable via `never: [work_unit]`, referenceable in Jinja as
+  `{{ work_unit.title }}`). A run without a record — plain `armature run` —
+  falls back to the static `mission:` string. `work_unit` is a reserved
+  context-layer name.
 
 See [Mission Documents](#mission-documents) below and
 `docs/MISSION-AS-WORKFLOW-DRIVER.md`.
@@ -193,12 +197,30 @@ work:
 inherit), `max_budget_usd` / `timeout_hours` / `max_attempts`
 (num, default `max_attempts: 2`).
 
-**Lifecycle** (state enforcement arrives with `WorkStore`, slice 2):
+**Lifecycle** (enforced in `armature/state/work.py`; every writer goes
+through the same table):
 
 ```
 pending → in_progress → done
                     ├→ failed | blocked_on | handed_off | escalation | canceled
 ```
+
+**Driving a mission locally** — work-unit records persist in a
+`LocalWorkStore` (default `~/.armature/work/<mission>/<unit_id>.json` plus a
+`transitions.jsonl` audit log; `--store` overrides the base directory):
+
+```bash
+armature mission status my_mission.mission.yml    # unit states + recent transitions
+armature mission run my_mission.mission.yml unit_a   # run one unit's workflow
+```
+
+`mission run` refuses without consuming an attempt when the unit's
+`requires` are not all `done` or the unit is not in `pending` /
+`retry_pending`. Each run increments `attempts`; a failure lands `failed`,
+then `retry_pending` only while `attempts < max_attempts` — at the ceiling
+the unit stays `failed`. The run id is recorded as the unit's `last_job_id`.
+Budget metering (`spent_usd`), closure application, and `mission advance`
+are slice 3.
 
 Worked example: `examples/missions/campaign-pretzel.mission.yml`. Full
 concept doc: `docs/MISSION-AS-WORKFLOW-DRIVER.md`.
@@ -671,6 +693,7 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `MISSION_BUDGET_CONFLICT` | mission validation: unit `max_budget_usd` exceeds mission `budget_usd` |
 | `WORKFLOW_NOT_REGISTERED` | mission validation: a path-like `workflow:` doesn't resolve |
 | `WORKFLOW_UNVERIFIED_NAME` *(warning)* | mission validation: bare workflow name resolves at the executor |
+| `MISSION_FIELD_INVALID` | mission validation: blank unit id, `max_attempts < 1`, or negative `timeout_hours` / `max_budget_usd` / `budget_usd` |
 
 ---
 
@@ -679,6 +702,8 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 ```bash
 armature validate spec.yml                         # always run before armature run
 armature mission validate my_mission.mission.yml   # validate a mission document
+armature mission status my_mission.mission.yml      # unit states + recent transitions
+armature mission run my_mission.mission.yml unit_a  # run one unit's workflow
 armature run spec.yml --input topic="..." --quiet
 armature run spec.yml --dry-run                    # validate only, no execution
 armature dashboard spec.yml                        # health metrics after runs
