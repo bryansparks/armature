@@ -520,6 +520,9 @@ class Harness:
                         from armature.nodes.subagent import SubagentNode
                         node = SubagentNode(stage=stage, session_dir=self._session_dir)
                         result = await node.execute(context)
+                        # Child-run spend is observed spend of this run
+                        # (design §2.3) — meter the node's accumulated total.
+                        self._total_cost_usd += getattr(node, "total_cost_usd", 0.0)
                     elif stage.tool_call:
                         _stage_type = "tool_call"
                         from armature.nodes.tool_call import ToolCallNode

@@ -62,6 +62,22 @@ def test_extract_rejects_non_dict_stage_output():
         extract_closure(_spec_with_closure(), results)
 
 
+def test_extract_tolerates_extra_keys_beyond_the_contract():
+    """Final-review I3: the validator allows closure schemas to carry extra
+    properties (a validating spec must not fail 100% of runs at extraction).
+    Extraction honors the contract it names and tolerates the rest."""
+    results = {"final": {"reason": "done_no_follow_on",
+                         "notes": "all good",
+                         "confidence": 0.9,           # beyond the contract
+                         "follow_on": [{"id": "polish", "title": "P",
+                                        "workflow": "wf.yml",
+                                        "priority": "high"}]}}
+    rec = extract_closure(_spec_with_closure(), results)
+    assert rec.reason == "done_no_follow_on"
+    assert rec.notes == "all good"
+    assert rec.follow_on[0].id == "polish"
+
+
 def test_closure_record_model_round_trips():
     rec = ClosureRecord(reason="blocked_on", follow_on=[
         FollowOnUnit(id="b", title="B", workflow="w")])

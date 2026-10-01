@@ -494,7 +494,10 @@ def mission_run(
     consuming an attempt. Outcomes: success → done; failure → failed, then
     retry_pending while attempts remain (attempt ceiling enforced here).
     """
-    from armature.spec.mission import load_mission, resolve_posture, validate_mission
+    from armature.spec.loader import resolve_spec_ref
+    from armature.spec.mission import (
+        WorkUnit, load_mission, resolve_posture, validate_mission,
+    )
     from armature.spec.validator import SpecValidationError
     from armature.state.work import WorkUnitState
 
@@ -509,10 +512,34 @@ def mission_run(
         typer.echo(f"Failed to load mission document: {exc}", err=True)
         raise typer.Exit(1)
 
+    work = _work_store(store)
     unit = next((u for u in loaded.work if u.id == unit_id), None)
     if unit is None:
-        typer.echo(f"unknown unit '{unit_id}' in mission '{loaded.name}'", err=True)
-        raise typer.Exit(1)
+        # Closure-seeded (dynamic) unit: the doc never knew it — the store
+        # record is its source of truth (design §3 follow-on upserts). Its
+        # workflow ref resolves doc-dir-first, the same convention the
+        # loader stamps for doc units, so the follow-on chain a handed_off
+        # closure started is actually runnable locally.
+        seeded = work.load(loaded.name, unit_id)
+        resolved = (resolve_spec_ref(seeded.workflow, mission.parent)
+                    if seeded is not None else None)
+        if seeded is None or resolved is None:
+            if seeded is None:
+                typer.echo(f"unknown unit '{unit_id}' in mission '{loaded.name}'",
+                           err=True)
+            else:
+                typer.echo(
+                    f"unit '{unit_id}' names workflow '{seeded.workflow}' — bare "
+                    "names are registered by executors; local runs require a path",
+                    err=True)
+            raise typer.Exit(1)
+        unit = WorkUnit(
+            id=seeded.unit_id, title=seeded.title, objective=seeded.objective,
+            workflow=seeded.workflow, workflow_path=str(resolved),
+            inputs=dict(seeded.inputs), requires=list(seeded.requires),
+            posture=(seeded.posture
+                     if seeded.posture in ("human-led", "delegated") else None),
+        )
 
     if unit.workflow_path is None:
         typer.echo(
@@ -523,7 +550,6 @@ def mission_run(
         typer.echo(f"unit '{unit_id}' workflow path does not exist: {unit.workflow_path}", err=True)
         raise typer.Exit(1)
 
-    work = _work_store(store)
     rec = work.ensure_unit(loaded, unit)
 
     # State gate — pending / retry_pending may start; blocked_on is admitted

@@ -332,6 +332,27 @@ def test_mission_run_success_with_closure_hands_off(tmp_path):
     assert store.load("m", "polish").state == WorkUnitState.PENDING
 
 
+def test_mission_run_closure_seeded_follow_on_is_runnable(tmp_path):
+    """Final-review I1: a closure-seeded unit (absent from the doc) is runnable
+    by the local executor — the plan's goal is end-to-end self-coordination,
+    so the follow-on chain must not dead-end at 'unknown unit'. The store
+    record is the source of truth; the workflow ref resolves doc-dir-first,
+    same convention as doc units."""
+    from armature.spec.mission import load_mission
+    from armature.state.closure import FollowOnUnit
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    mission = load_mission(p)
+    store.ensure_unit(mission, mission.work[0])
+    store.seed_follow_on("m", FollowOnUnit(id="polish", title="Polish",
+                                           workflow="wf.yml"))
+    r = runner.invoke(app, ["mission", "run", str(p), "polish", "--store", str(store_dir)])
+    assert r.exit_code == 0, plain(r.output)
+    assert store.load("m", "polish").state == WorkUnitState.DONE
+    assert store.load("m", "polish").attempts == 1
+
+
 def test_mission_run_failure_with_closure_spec_lands_retry_pending(tmp_path):
     """Review Focus #1: the closure stage never ran (the run failed first) —
     no closure, slice-2 failure path."""

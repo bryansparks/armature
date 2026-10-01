@@ -23,9 +23,13 @@ class ClosureError(ValueError):
 
 class FollowOnUnit(BaseModel):
     """A mini work-unit spec declared by a closure (design §3). `id` is the
-    durable address (design §7) — required, like every other work unit."""
+    durable address (design §7) — required, like every other work unit.
 
-    model_config = ConfigDict(extra="forbid")
+    extra="ignore": the closure schema's items may carry fields beyond the
+    contract (the validator requires id/title/workflow but forbids nothing);
+    a typo'd key still fails via the missing required field."""
+
+    model_config = ConfigDict(extra="ignore")
 
     id: str
     title: str
@@ -35,9 +39,15 @@ class FollowOnUnit(BaseModel):
 
 
 class ClosureRecord(BaseModel):
-    """Typed closure of one run, as applied to a work unit through the store."""
+    """Typed closure of one run, as applied to a work unit through the store.
 
-    model_config = ConfigDict(extra="forbid")
+    extra="ignore": a validating closure schema may carry properties beyond
+    the contract (e.g. a confidence score) — extraction honors what the
+    contract names and tolerates the rest, so a validating spec never fails
+    100% of its runs at extraction. Malformed still raises (ClosureError):
+    a missing or invalid contract field is a contract violation."""
+
+    model_config = ConfigDict(extra="ignore")
 
     reason: str
     notes: str = ""
