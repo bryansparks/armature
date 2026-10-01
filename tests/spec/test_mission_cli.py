@@ -181,6 +181,30 @@ def test_mission_run_injects_objective_into_context(tmp_path):
     assert LocalWorkStore(tmp_path / "store").load("m", "a").last_job_id
 
 
+def test_mission_run_does_not_inject_without_opt_in(tmp_path):
+    """Fix M-1: the record is injected only when the spec opts in via
+    mission_source: work_unit — otherwise it would be an ungovernable
+    context key (never: [work_unit] is rejected as UNKNOWN_CONTEXT_SOURCE)."""
+    probe_spec = """\
+name: probe-flow
+adapters:
+  ctx_probe:
+    name: ctx_probe
+    type: script
+    cmd: "if echo \\"$ARMATURE_CONTEXT\\" | grep -q work_unit; then exit 1; else echo '{\\"ok\\": true}'; fi"
+    parse: json
+stages:
+  - id: work
+    adapter: ctx_probe
+    depends_on: []
+"""
+    assert "mission_source" not in probe_spec
+    p = _write_pair(tmp_path, MISSION_TEXT, probe_spec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 0, plain(r.output)
+    assert LocalWorkStore(tmp_path / "store").load("m", "a").state == WorkUnitState.DONE
+
+
 def test_mission_status_renders_states_and_transitions(tmp_path):
     p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
     s = tmp_path / "store"

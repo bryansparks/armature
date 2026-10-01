@@ -76,6 +76,16 @@ def test_ensure_unit_writes_seeding_transition(tmp_path):
     assert transitions.to_state == WorkUnitState.PENDING
 
 
+def test_multi_unit_seeding_seq_strictly_increases(tmp_path):
+    """Seeding two units must not duplicate or skip audit seqs (fix I-1)."""
+    store = LocalWorkStore(tmp_path)
+    mission = _mission()
+    for u in mission.work:
+        store.ensure_unit(mission, u)
+    seqs = [t.seq for t in store.list_transitions("m")]
+    assert seqs == [1, 2]
+
+
 def test_list_units_round_trips(tmp_path):
     store = LocalWorkStore(tmp_path)
     mission = _mission()

@@ -255,7 +255,7 @@ class LocalWorkStore:
         )
         self.save(record)
         self._append_transition(TransitionRecord(
-            seq=1,
+            seq=self._next_seq(mission.name),
             ts=_now_iso(),
             mission=mission.name,
             unit_id=unit.id,

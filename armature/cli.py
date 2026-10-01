@@ -565,18 +565,23 @@ def mission_run(
     work.apply(loaded.name, unit_id, WorkUnitState.IN_PROGRESS,
                reason=f"attempt {rec.attempts}/{rec.max_attempts}", job_id=run_id)
 
-    record_dict = {
-        "mission": loaded.name,
-        "mission_objective": loaded.objective,
-        "unit_id": unit.id,
-        "title": unit.title,
-        "objective": unit.objective,
-        "requires": list(unit.requires),
-        "posture": resolve_posture(loaded, unit),
-        "state": WorkUnitState.IN_PROGRESS.value,
-        "attempts": rec.attempts,
-    }
-    merged_inputs["work_unit"] = record_dict
+    # Injection is conditional (design §4): only a spec that opted in via
+    # mission_source: work_unit receives the record. Injecting into a plain
+    # spec would put an ungovernable key in every stage's context —
+    # never: [work_unit] is rejected as UNKNOWN_CONTEXT_SOURCE there.
+    if harness._spec.mission_source == "work_unit":
+        record_dict = {
+            "mission": loaded.name,
+            "mission_objective": loaded.objective,
+            "unit_id": unit.id,
+            "title": unit.title,
+            "objective": unit.objective,
+            "requires": list(unit.requires),
+            "posture": resolve_posture(loaded, unit),
+            "state": WorkUnitState.IN_PROGRESS.value,
+            "attempts": rec.attempts,
+        }
+        merged_inputs["work_unit"] = record_dict
 
     if not quiet:
         typer.echo(f"▶ mission '{loaded.name}' · unit '{unit_id}' "
