@@ -21,7 +21,7 @@ class ResultsWriter:
               trace_records: list, status: str, started_at: str, finished_at: str,
               duration_s: float, exit_code: int, armature_version: str,
               error: str | None = None, workdir: Path | None = None,
-              capture: bool = True) -> Path:
+              capture: bool = True, cost_usd: float | None = None) -> Path:
         run_dir = self._base / run_id
         (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
         (run_dir / "logs").mkdir(exist_ok=True)
@@ -63,6 +63,7 @@ class ResultsWriter:
             status=status, started_at=started_at, finished_at=finished_at,
             duration_s=duration_s, exit_code=exit_code, armature_version=armature_version,
             artifacts=artifact_results, trace=trace_ref, error=error,
+            cost_usd=cost_usd,
         )
         (run_dir / "receipt.json").write_text(receipt.model_dump_json(indent=2), encoding="utf-8")
         return run_dir

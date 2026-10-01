@@ -80,3 +80,4 @@ class ResultsManifest(BaseModel):
     artifacts: list[ArtifactResult] = Field(default_factory=list)
     trace: TraceRef
     error: str | None = None
+    cost_usd: float | None = None

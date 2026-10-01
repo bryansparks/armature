@@ -49,6 +49,29 @@ def test_json_artifact(tmp_path: Path):
 
 # ── opt-in file capture (dispatch: workflows that write real files to disk) ────
 
+def test_receipt_carries_cost_usd(tmp_path: Path):
+    """A run's metered cost rides on the receipt (mission budget metering)."""
+    w = ResultsWriter(tmp_path / "results")
+    dest = Destinations(artifacts=[], include_trace=False)
+    run_dir = w.write(run_id="rc1", package_name="demo", package_version="1.0",
+                      destinations=dest, result={}, trace_records=[],
+                      status="complete", started_at="t0", finished_at="t1",
+                      duration_s=1.0, exit_code=0, armature_version="0.6.0",
+                      cost_usd=0.02)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    assert receipt["cost_usd"] == 0.02
+
+
+def test_receipt_cost_usd_none_when_not_metered(tmp_path: Path):
+    w = ResultsWriter(tmp_path / "results")
+    dest = Destinations(artifacts=[], include_trace=False)
+    run_dir = w.write(run_id="rc2", package_name="demo", package_version="1.0",
+                      destinations=dest, result={}, trace_records=[],
+                      status="complete", started_at="t0", finished_at="t1",
+                      duration_s=1.0, exit_code=0, armature_version="0.6.0")
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    assert receipt["cost_usd"] is None
+
 def _write_result(**kw):
     """Standard ResultsWriter.write call with sensible defaults."""
     w = kw.pop("writer")

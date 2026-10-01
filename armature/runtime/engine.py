@@ -170,6 +170,7 @@ class Harness:
             validate_spec(spec)
 
         self._spec = spec
+        self._total_cost_usd = 0.0
         self._spec_version = hashlib.sha256(
             self._spec.model_dump_json().encode()
         ).hexdigest()[:12]
@@ -611,6 +612,7 @@ class Harness:
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result
                                                       if not k.startswith("_")})
                         _escalation_count = result.pop("_escalation_count", 0)
+                        self._total_cost_usd += result.pop("_cost_usd", 0.0)
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
@@ -1111,6 +1113,12 @@ class Harness:
                     f"Required output '{key}' from stage '{stage_id}' missing or None in results"
                 )
 
+    @property
+    def total_cost_usd(self) -> float:
+        """Sum of this run's own observed LLM costs (provider-reported per
+        response). Zero when nothing metered — never a provider balance check."""
+        return getattr(self, "_total_cost_usd", 0.0)
+
     async def run(
         self,
         inputs: dict[str, Any] | None = None,
@@ -1137,6 +1145,7 @@ class Harness:
         force: bool = False,
     ) -> dict[str, Any]:
         await self._attach_mcp_servers()
+        self._total_cost_usd = 0.0
 
         context = dict(inputs or {})
         context["run_id"] = self._run_id
