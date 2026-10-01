@@ -18,11 +18,14 @@ import tempfile
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from armature.spec.mission import MissionSpec, WorkUnit, resolve_posture
+
+if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids a work↔closure cycle
+    from armature.state.closure import FollowOnUnit
 
 
 class WorkUnitState(str, Enum):
@@ -304,6 +307,30 @@ class LocalWorkStore:
             reason=reason,
             job_id=job_id,
             actor=actor,
+        ))
+        return record
+
+    def seed_follow_on(self, mission: str, unit: "FollowOnUnit", *,
+                       posture: str = "human-led") -> WorkUnitRecord:
+        """Materialize a closure-declared follow-on unit (design §3). The doc
+        is the origin for authored units; the closure is the origin here.
+        Like ensure_unit, an existing record is returned untouched — live
+        state is never clobbered, and no second seeding transition is written
+        (re-applied closures are idempotent)."""
+        existing = self.load(mission, unit.id)
+        if existing is not None:
+            return existing
+        record = WorkUnitRecord(
+            mission=mission, unit_id=unit.id, title=unit.title,
+            objective=unit.objective, workflow=unit.workflow,
+            inputs=dict(unit.inputs), posture=posture,
+            state=WorkUnitState.PENDING,
+        )
+        self.save(record)
+        self._append_transition(TransitionRecord(
+            seq=self._next_seq(mission), ts=_now_iso(), mission=mission,
+            unit_id=unit.id, from_state=None, to_state=WorkUnitState.PENDING,
+            reason="seeded from a run closure", actor="system",
         ))
         return record
 

@@ -72,3 +72,53 @@ def extract_closure(spec: HarnessSpec, results: dict[str, Any]) -> ClosureRecord
         return ClosureRecord.model_validate(payload)
     except Exception as exc:
         raise ClosureError(f"invalid closure record: {exc}") from exc
+
+
+def apply_closure(store, mission: str, unit_id: str, closure: "ClosureRecord",
+                  *, job_id: str | None = None,
+                  posture: str = "human-led") -> "ClosureRecord | Any":
+    """Apply a run's closure to its work unit through the one-door store.
+
+    Reason → resting state (design §3 / §2.2), all through `store.apply` so
+    legality runs exactly once, everywhere:
+      done_no_follow_on → done
+      handed_off        → handed_off (+ seed each follow_on as pending)
+      blocked_on        → blocked_on (+ seed blockers, extend requires)
+      escalation        → escalation (notes carried as the audit reason)
+
+    At-least-once safe (design §6): a closure whose job_id already moved the
+    unit to the reason's target state is a redelivery — a no-op, not an
+    error. A closure from a DIFFERENT job against a terminal unit still
+    refuses through the legality table. Follow-on seeds are idempotent
+    either way: an existing record is never clobbered or re-seeded.
+    """
+    from armature.state.work import WorkUnitState
+
+    target = {
+        "done_no_follow_on": WorkUnitState.DONE,
+        "handed_off": WorkUnitState.HANDED_OFF,
+        "blocked_on": WorkUnitState.BLOCKED_ON,
+        "escalation": WorkUnitState.ESCALATION,
+    }[closure.reason]
+
+    record = store.load(mission, unit_id)
+    if (record is not None and job_id is not None
+            and record.last_job_id == job_id and record.state == target):
+        return record                          # redelivery of this job's closure
+
+    if closure.reason in ("handed_off", "blocked_on"):
+        for unit in closure.follow_on:
+            store.seed_follow_on(mission, unit, posture=posture)
+    if closure.reason == "blocked_on" and record is not None:
+        new_requires = list(dict.fromkeys(
+            record.requires + [u.id for u in closure.follow_on]))
+        if new_requires != record.requires:
+            record.requires = new_requires
+            store.save(record)
+    reason_note = {
+        "done_no_follow_on": closure.notes or "done, no follow-on",
+        "handed_off": closure.notes or "handed off by run closure",
+        "blocked_on": closure.notes or "blocked by run closure",
+        "escalation": closure.notes or "escalated by run closure",
+    }[closure.reason]
+    return store.apply(mission, unit_id, target, reason=reason_note, job_id=job_id)
