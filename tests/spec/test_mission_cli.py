@@ -230,3 +230,236 @@ def test_shipped_example_status_renders(tmp_path):
     hero_row = next(l for l in out.splitlines() if l.startswith("  hero-headlines"))
     assert "brand-approval" in hero_row          # requires column
     assert "0/2" in hero_row                     # attempts/max column
+
+
+# ── Slice 3: closure-driven terminal states, budget gates, metering ───────────
+
+CLOSURE_SPEC = """\
+name: closure-flow
+adapters:
+  echo:
+    name: echo
+    type: script
+    cmd: "echo '{\\"reason\\": \\"%(reason)s\\"%(extra)s}'"
+    parse: json
+stages:
+  - id: work
+    adapter: echo
+    depends_on: []
+  - id: final
+    adapter: echo
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [done_no_follow_on, handed_off, blocked_on, escalation]
+        follow_on:
+          type: array
+          items:
+            type: object
+            required: [id, title, workflow]
+            properties:
+              id: {type: string}
+              title: {type: string}
+              workflow: {type: string}
+    depends_on: [work]
+closure:
+  stage: final
+"""
+
+MISSION_BUDGET_TEXT = MISSION_TEXT.replace(
+    "objective: Ship it.", "objective: Ship it.\nbudget_usd: 5.0")
+
+
+def test_mission_run_success_with_closure_hands_off(tmp_path):
+    """Review Focus #2: a successful run's closure is authoritative for the
+    resting state — handed_off seeds its follow-ons as pending work."""
+    spec = CLOSURE_SPEC % {"reason": "handed_off",
+        "extra": ', \\"follow_on\\": [{\\"id\\": \\"polish\\", \\"title\\": \\"P\\", \\"workflow\\": \\"wf.yml\\"}]'}
+    p = _write_pair(tmp_path, MISSION_TEXT, spec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 0, plain(r.output)
+    store = LocalWorkStore(tmp_path / "store")
+    assert store.load("m", "a").state == WorkUnitState.HANDED_OFF
+    assert store.load("m", "polish").state == WorkUnitState.PENDING
+
+
+def test_mission_run_failure_with_closure_spec_lands_retry_pending(tmp_path):
+    """Review Focus #1: the closure stage never ran (the run failed first) —
+    no closure, slice-2 failure path."""
+    spec = CLOSURE_SPEC % {"reason": "done_no_follow_on", "extra": ""}
+    spec = spec.replace('cmd: "echo', 'cmd: "exit 3 && echo')
+    p = _write_pair(tmp_path, MISSION_TEXT, spec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 1
+    assert LocalWorkStore(tmp_path / "store").load("m", "a").state == \
+        WorkUnitState.RETRY_PENDING
+
+
+def test_mission_run_malformed_closure_fails_the_unit(tmp_path):
+    """A malformed closure record is loud (design §3): the unit fails and may
+    retry — it never silently lands done."""
+    spec = CLOSURE_SPEC % {"reason": "not-a-closure-reason", "extra": ""}
+    p = _write_pair(tmp_path, MISSION_TEXT, spec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 1
+    assert "closure" in plain(r.output)
+    assert LocalWorkStore(tmp_path / "store").load("m", "a").state == \
+        WorkUnitState.RETRY_PENDING
+
+
+def test_mission_run_blocked_on_reenters_when_requires_done(tmp_path):
+    """Review Focus #4a: a blocked_on unit whose requires are now done may
+    start again (design §2.3 — unblock, then run)."""
+    from armature.spec.mission import load_mission
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(store_dir)])
+    assert r.exit_code == 0, plain(r.output)              # a is done
+    mission = load_mission(p)
+    store.ensure_unit(mission, mission.work[1])
+    store.apply("m", "b", WorkUnitState.IN_PROGRESS, reason="start")
+    store.apply("m", "b", WorkUnitState.BLOCKED_ON, reason="waiting on a")
+    r = runner.invoke(app, ["mission", "run", str(p), "b", "--store", str(store_dir)])
+    assert r.exit_code == 0, plain(r.output)
+    assert store.load("m", "b").state == WorkUnitState.DONE
+
+
+def test_mission_run_blocked_on_refused_while_requires_pending(tmp_path):
+    from armature.spec.mission import load_mission
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    mission = load_mission(p)
+    store.ensure_unit(mission, mission.work[1])
+    store.apply("m", "b", WorkUnitState.IN_PROGRESS, reason="start")
+    store.apply("m", "b", WorkUnitState.BLOCKED_ON, reason="waiting on a")
+    r = runner.invoke(app, ["mission", "run", str(p), "b", "--store", str(store_dir)])
+    assert r.exit_code == 1
+    assert store.load("m", "b").attempts == 0           # no attempt consumed
+    assert store.load("m", "b").state == WorkUnitState.BLOCKED_ON
+
+
+def test_mission_run_blocked_on_checks_record_requires_too(tmp_path):
+    """blocked_on closures rewrite the RECORD's requires (design §3) — re-entry
+    checks those dynamic blockers, not just the spec's static ones."""
+    from armature.spec.mission import load_mission
+    from armature.state.closure import FollowOnUnit
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    mission = load_mission(p)
+    store.ensure_unit(mission, mission.work[0])
+    store.apply("m", "a", WorkUnitState.IN_PROGRESS, reason="start")
+    store.apply("m", "a", WorkUnitState.DONE, reason="done")
+    store.ensure_unit(mission, mission.work[1])
+    store.apply("m", "b", WorkUnitState.IN_PROGRESS, reason="start")
+    store.apply("m", "b", WorkUnitState.BLOCKED_ON, reason="blocked")
+    rec = store.load("m", "b")
+    rec.requires = ["a", "dyn"]
+    store.save(rec)
+    store.seed_follow_on("m", FollowOnUnit(id="dyn", title="Dyn", workflow="wf.yml"))
+    r = runner.invoke(app, ["mission", "run", str(p), "b", "--store", str(store_dir)])
+    assert r.exit_code == 1
+    assert store.load("m", "b").attempts == 0
+    assert store.load("m", "b").state == WorkUnitState.BLOCKED_ON
+
+
+def test_mission_run_refuses_when_unit_budget_spent(tmp_path):
+    """Review Focus #3: budget refusal happens BEFORE attempts += 1."""
+    from armature.spec.mission import load_mission
+    p = _write_pair(tmp_path, MISSION_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    mission = load_mission(p)
+    unit = next(u for u in mission.work if u.id == "a")
+    rec = store.ensure_unit(mission, unit)
+    rec.max_budget_usd = 1.0
+    rec.spent_usd = 1.0
+    store.save(rec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(store_dir)])
+    assert r.exit_code == 1
+    assert "budget" in plain(r.output)
+    assert store.load("m", "a").attempts == 0           # no attempt consumed
+
+
+def test_mission_run_refuses_when_mission_budget_spent(tmp_path):
+    from armature.spec.mission import load_mission
+    p = _write_pair(tmp_path, MISSION_BUDGET_TEXT, OK_SPEC)
+    store_dir = tmp_path / "store"
+    store = LocalWorkStore(store_dir)
+    rec = store.ensure_unit(load_mission(p), load_mission(p).work[0])
+    rec.spent_usd = 6.0
+    store.save(rec)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(store_dir)])
+    assert r.exit_code == 1
+    assert "budget" in plain(r.output)
+    assert store.load("m", "a").attempts == 0
+
+
+LLM_SPEC = """\
+name: llm-flow
+model_tiers:
+  small: {provider: mock, model: m}
+role_type_defaults:
+  worker: small
+stages:
+  - id: work
+    role: {name: W, type: worker, description: do it}
+    depends_on: []
+  - id: work2
+    role: {name: W, type: worker, description: more}
+    depends_on: [work]
+"""
+
+
+class _CostedLLM:
+    """Fake LLM node: each call costs $0.01; with fail_after set, the call
+    after that many successes raises."""
+    calls = 0
+    fail_after: int | None = None
+
+    def __init__(self, **kwargs):
+        pass
+
+    def _resolve_model(self) -> str:
+        return "fake"
+
+    async def execute(self, context):
+        _CostedLLM.calls += 1
+        if _CostedLLM.fail_after is not None and _CostedLLM.calls > _CostedLLM.fail_after:
+            raise RuntimeError("stage 2 boom")
+        return {"content": "ok", "_input_tokens": 1, "_output_tokens": 1,
+                "_cost_usd": 0.01, "_escalation_count": 0, "_tools_called": []}
+
+
+def test_mission_run_meters_spent_usd(tmp_path, monkeypatch):
+    from armature.runtime import engine as engine_mod
+    _CostedLLM.calls = 0
+    _CostedLLM.fail_after = None
+    monkeypatch.setattr(engine_mod, "LLMNode", _CostedLLM)
+    p = _write_pair(tmp_path, MISSION_TEXT, LLM_SPEC)
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(tmp_path / "store")])
+    assert r.exit_code == 0, plain(r.output)
+    rec = LocalWorkStore(tmp_path / "store").load("m", "a")
+    assert abs(rec.spent_usd - 0.02) < 1e-9       # both stages metered
+
+
+def test_mission_run_meters_spent_usd_on_failure(tmp_path, monkeypatch):
+    """A failed attempt still meters what it spent before crashing (design
+    §2.3 — spent_usd is run-observed, on success AND failure)."""
+    from armature.runtime import engine as engine_mod
+    _CostedLLM.calls = 0
+    _CostedLLM.fail_after = 1
+    monkeypatch.setattr(engine_mod, "LLMNode", _CostedLLM)
+    p = _write_pair(tmp_path, MISSION_TEXT, LLM_SPEC)
+    store_dir = tmp_path / "store"
+    r = runner.invoke(app, ["mission", "run", str(p), "a", "--store", str(store_dir)])
+    assert r.exit_code == 1
+    rec = LocalWorkStore(store_dir).load("m", "a")
+    assert rec.state == WorkUnitState.RETRY_PENDING
+    assert abs(rec.spent_usd - 0.01) < 1e-9

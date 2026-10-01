@@ -526,9 +526,11 @@ def mission_run(
     work = _work_store(store)
     rec = work.ensure_unit(loaded, unit)
 
-    # State gate — only pending / retry_pending may start, and no attempt is
-    # consumed on any refusal below.
-    if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING):
+    # State gate — pending / retry_pending may start; blocked_on is admitted
+    # too (design §2.3): the blockers check below decides whether its requires
+    # are done. No attempt is consumed on any refusal below.
+    if rec.state not in (WorkUnitState.PENDING, WorkUnitState.RETRY_PENDING,
+                         WorkUnitState.BLOCKED_ON):
         why = {
             WorkUnitState.IN_PROGRESS: "already in progress",
             WorkUnitState.DONE: "already done",
@@ -541,8 +543,10 @@ def mission_run(
         typer.echo(f"✗ Refusing to run unit '{unit_id}' ({why})", err=True)
         raise typer.Exit(1)
 
+    # Spec requires ∪ record requires — a blocked_on closure rewrites the
+    # record's requires (design §3), and re-entry must honor those too.
     blockers = [
-        dep for dep in unit.requires
+        dep for dep in dict.fromkeys([*unit.requires, *rec.requires])
         if (d := work.load(loaded.name, dep)) is None or d.state != WorkUnitState.DONE
     ]
     if blockers:
@@ -550,6 +554,21 @@ def mission_run(
             f"✗ Unit '{unit_id}' requires unit(s) that are not done: "
             f"{', '.join(blockers)}", err=True)
         raise typer.Exit(1)
+
+    # Budget gates (design §2.3) — metered from run-observed spend (spent_usd),
+    # provider-independent. Refusals consume no attempt.
+    if rec.max_budget_usd is not None and rec.spent_usd >= rec.max_budget_usd:
+        typer.echo(
+            f"✗ Unit '{unit_id}' budget exhausted: spent ${rec.spent_usd:.2f} "
+            f"of ${rec.max_budget_usd:.2f}", err=True)
+        raise typer.Exit(1)
+    if loaded.budget_usd is not None:
+        total_spent = sum(u.spent_usd for u in work.list_units(loaded.name))
+        if total_spent >= loaded.budget_usd:
+            typer.echo(
+                f"✗ Mission '{loaded.name}' budget exhausted: "
+                f"${total_spent:.2f} of ${loaded.budget_usd:.2f} spent", err=True)
+            raise typer.Exit(1)
 
     merged_inputs = dict(unit.inputs)
     try:
@@ -588,8 +607,20 @@ def mission_run(
                    f"(attempt {rec.attempts}/{rec.max_attempts}, job {run_id})")
 
     try:
-        asyncio.run(harness.run(merged_inputs))
+        result = asyncio.run(harness.run(merged_inputs))
+        # Meter run-observed spend (design §2.3). Refresh from the store first:
+        # the on-disk record moved to in_progress; our in-memory copy is stale.
+        rec = work.load(loaded.name, unit_id) or rec
+        rec.spent_usd += harness.total_cost_usd
+        work.save(rec)
     except Exception as exc:  # noqa: BLE001
+        try:    # a failed attempt still spent money — meter before the failure path
+            spent = work.load(loaded.name, unit_id)
+            if spent is not None:
+                spent.spent_usd += harness.total_cost_usd
+                work.save(spent)
+        except Exception:
+            pass
         work.apply(loaded.name, unit_id, WorkUnitState.FAILED,
                    reason=str(exc)[:200], job_id=run_id)
         if rec.attempts < rec.max_attempts:
@@ -601,6 +632,35 @@ def mission_run(
             f"{exc}", err=True)
         raise typer.Exit(1)
 
+    # Success: the closure, when the spec declares one, is authoritative for
+    # the unit's resting state (design §3). No closure → done, as before.
+    from armature.state.closure import ClosureError, apply_closure, extract_closure
+    try:
+        closure = extract_closure(harness._spec, result)
+    except ClosureError as exc:
+        # Malformed is loud, never silently done (design §3): the unit fails
+        # like any other run failure — retry available while attempts remain.
+        work.apply(loaded.name, unit_id, WorkUnitState.FAILED,
+                   reason=f"malformed closure: {exc}"[:200], job_id=run_id)
+        if rec.attempts < rec.max_attempts:
+            work.apply(loaded.name, unit_id, WorkUnitState.RETRY_PENDING,
+                       reason=(f"attempt {rec.attempts}/{rec.max_attempts} "
+                               "failed; retry available"))
+        typer.echo(f"✗ Unit '{unit_id}' produced a malformed closure: {exc}", err=True)
+        raise typer.Exit(1)
+    if closure is not None:
+        closure.unit_id = unit_id
+        closure.mission = loaded.name
+        closure.job_id = run_id
+        final_rec = apply_closure(work, loaded.name, unit_id, closure,
+                                  job_id=run_id,
+                                  posture=resolve_posture(loaded, unit))
+        if not quiet:
+            typer.echo(f"✓ unit '{unit_id}' → {final_rec.state.value} "
+                       f"(closure: {closure.reason})")
+        else:
+            typer.echo(final_rec.state.value)
+        return
     work.apply(loaded.name, unit_id, WorkUnitState.DONE,
                reason="run complete", job_id=run_id)
     if not quiet:
