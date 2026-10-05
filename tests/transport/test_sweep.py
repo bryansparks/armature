@@ -80,15 +80,15 @@ def test_sweep_submits_ready_unit(fleet):
     report = _sweep(fleet)
     out = _by(fleet, report)
     assert out[("pretzel", "research")].action == "submitted"
-    assert out[("pretzel", "research")].job_id == "sweep-pretzel-research-1"
+    assert out[("pretzel", "research")].job_id == "sweep-pretzel~research~1"
     assert out[("pretzel", "hero-copy")].action == "held"      # waiting on research
     assert out[("pretzel", "approve")].action == "held"       # waiting on hero-copy
     rec = fleet["store"].load("pretzel", "research")
     assert rec.state == IN_PROGRESS and rec.attempts == 1
-    assert rec.last_job_id == "sweep-pretzel-research-1"
+    assert rec.last_job_id == "sweep-pretzel~research~1"
     # the launch callable received the deterministic job id + work ref
     assert launch_stub.CALLS == [{"bucket": BUCKET, "workflow": "work-echo",
-                                  "inputs": {}, "job_id": "sweep-pretzel-research-1",
+                                  "inputs": {}, "job_id": "sweep-pretzel~research~1",
                                   "work_unit": {"mission": "pretzel",
                                                 "unit_id": "research"}}]
 
@@ -220,7 +220,7 @@ def test_main_runs_the_sweep(fleet, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert rc == 0
     summary = json.loads(captured.out)
-    assert summary["submitted"] == ["sweep-pretzel-research-1"]
+    assert summary["submitted"] == ["sweep-pretzel~research~1"]
 
 
 def test_main_exit_one_on_errors(fleet, monkeypatch, capsys):
@@ -357,6 +357,37 @@ def test_repair_unreadable_package_holds(fleet):
 
 
 # ── seam/new-behavior tests (Review Focus 2, 3, 5) ───────────────────────────
+
+def test_main_honors_dispatch_cluster_env(s3_bucket, monkeypatch, capsys):
+    # Review Important 1: the cluster name is deployment mechanism — the
+    # entrypoint must take it from env, never hardcode "dispatch". On a
+    # differently-named cluster the repair pass's describe_tasks misses and
+    # every crashed unit is held forever; the orphan rule never fires.
+    from armature.transport import sweep
+    s3, _ = s3_bucket
+    boto3.client("ecs").create_cluster(clusterName="fleetx")
+    store = S3WorkStore(s3, BUCKET)
+    mission = load_mission(MISSION_DOC)
+    store.put_mission_doc("pretzel", MISSION_DOC.read_text())
+    unit = next(u for u in mission.work if u.id == "research")
+    rec = store.ensure_unit(mission, unit)
+    rec.attempts = rec.max_attempts      # at max: orphan-fail lands terminal
+    store.save(rec)
+    store.apply("pretzel", "research", IN_PROGRESS, job_id="job-1")
+    # a task.json naming a task on the deployment's real cluster, dead
+    s3io.put_json(s3, BUCKET, "jobs/job-1/task.json",
+                  {"job_id": "job-1", "package_name": "work-echo",
+                   "package_version": "1.0", "inputs": {},
+                   "submitted_at": "now",
+                   "task_arn": "arn:aws:ecs:us-east-1:123456789012:"
+                               "task/fleetx/dead"})
+    monkeypatch.setenv("DISPATCH_BUCKET", BUCKET)
+    monkeypatch.setenv("DISPATCH_CLUSTER", "fleetx")
+    monkeypatch.setenv("ARMATURE_SWEEP_LAUNCH", "tests.transport.launch_stub:launch")
+    assert sweep.main() == 0
+    # the orphan rule fired against the right cluster: failed, not held
+    assert store.load("pretzel", "research").state.value == "failed"
+
 
 def test_missing_extra_actionable_error(monkeypatch, s3_bucket):
     # Review Focus 2: without boto3 the entrypoint fails with install

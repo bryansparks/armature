@@ -71,6 +71,24 @@ def test_list_run_ids_excludes_bare_results_root_files(s3_bucket):
     assert s3io.list_run_ids(s3, BUCKET, "jobs/j6") == ["run1"]
 
 
+def test_latest_receipt_orders_by_finished_at_not_run_id(s3_bucket):
+    # Review Important 2: run ids are random hex and the runner's
+    # clean-failure path writes the literal run id "failed", which sorts
+    # ABOVE every hex id — lexicographic order would hand the repair pass
+    # the stale failed receipt after an operator re-drives the job and the
+    # second run completes. The newest receipt by finished_at must win.
+    from armature.transport.s3io import latest_receipt, put_json
+    s3, bucket = s3_bucket
+    put_json(s3, bucket, "jobs/j1/results/failed/receipt.json",
+             {"status": "failed", "cost_usd": 0.01,
+              "finished_at": "2026-10-05T10:00:00+00:00"})
+    put_json(s3, bucket, "jobs/j1/results/f00dcafe0123/receipt.json",
+             {"status": "complete", "cost_usd": 0.05,
+              "finished_at": "2026-10-05T11:00:00+00:00"})
+    receipt, run_id = latest_receipt(s3, bucket, "j1")
+    assert run_id == "f00dcafe0123" and receipt["status"] == "complete"
+
+
 def test_latest_receipt_picks_newest_run(s3_bucket):
     from armature.transport.s3io import latest_receipt, put_json
     s3, bucket = s3_bucket

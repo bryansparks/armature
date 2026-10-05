@@ -11,13 +11,21 @@ def test_sweep_job_id_deterministic():
     # The mission is part of the durable address: unit ids are unique only
     # within a mission, so sweep-<unit> alone collides across missions and
     # corrupts the settle/cost metering repair_job reads back.
-    assert sweep_job_id("pretzel", "research", 1) == "sweep-pretzel-research-1"
+    assert sweep_job_id("pretzel", "research", 1) == "sweep-pretzel~research~1"
     assert (sweep_job_id("pretzel", "research", 1)
             == sweep_job_id("pretzel", "research", 1))
     assert (sweep_job_id("pretzel", "research", 2)
             != sweep_job_id("pretzel", "research", 1))
     assert (sweep_job_id("m1", "research", 1)
             != sweep_job_id("m2", "research", 1))
+
+
+def test_sweep_job_id_injective_across_hyphen_splits():
+    # Review Important 5: '-' is a legal id char, so mission a-b/unit c and
+    # mission a/unit b-c minted the SAME id under the '-delimited grammar —
+    # colliding jobs/<id>/ prefixes, silent cross-mission settle/cost
+    # corruption. The separators must sit outside the id grammar.
+    assert sweep_job_id("a-b", "c", 1) != sweep_job_id("a", "b-c", 1)
 
 
 def test_validate_work_names_matrix():

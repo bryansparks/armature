@@ -323,7 +323,9 @@ def main() -> int:
     """Entrypoint for the flock-sweep cron package (`python -m
     armature.transport.sweep`). dry_run defaults from DISPATCH_INPUTS_JSON (the
     cron rule's inputs); the topic ARN is baked into the task def env by the
-    compute stack. ARMATURE_SWEEP_LAUNCH names the launch callable
+    compute stack. DISPATCH_CLUSTER names the ECS cluster the repair pass
+    queries (default: dispatch) — the cluster is deployment mechanism, so the
+    engine never hardcodes it. ARMATURE_SWEEP_LAUNCH names the launch callable
     (module:function) — the ECS launcher is deployment mechanism and is
     injected across the seam; a provider #2 sets its own. Exit 1 on any error
     so the adapter's nonzero exit fails the run and the existing ECS-failure
@@ -356,6 +358,7 @@ def main() -> int:
               f"{exc}", flush=True)
         return 2
     topic_arn = os.environ.get("FLOCK_ALERTS_TOPIC_ARN") or None
+    cluster = os.environ.get("DISPATCH_CLUSTER") or "dispatch"
     bucket = os.environ.get("DISPATCH_BUCKET")
     if not bucket:
         print("flock-sweep: DISPATCH_BUCKET not set", flush=True)
@@ -364,7 +367,7 @@ def main() -> int:
     report = run_sweep(s3, ecs, boto3.client("sns"), bucket,
                        launch=lambda b, w, i, **kw: launch(b, w, i, s3=s3, ecs=ecs,
                                                           ec2=boto3.client("ec2"), **kw),
-                       dry_run=dry_run, topic_arn=topic_arn)
+                       dry_run=dry_run, topic_arn=topic_arn, cluster=cluster)
     print(report.summary(), flush=True)
     if report.errors:
         print(report.summary(), file=sys.stderr, flush=True)

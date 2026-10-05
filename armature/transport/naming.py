@@ -15,8 +15,13 @@ def sweep_job_id(mission: str, unit_id: str, attempt: int) -> str:
     so an overlapping sweep re-drives the same job instead of
     double-submitting. The mission is part of the durable address — unit ids
     are unique only within a mission, and the job id names the S3 keys
-    (jobs/<id>/…) whose receipt repair_job settles records from."""
-    return f"sweep-{mission}-{unit_id}-{attempt}"
+    (jobs/<id>/…) whose receipt repair_job settles records from.
+
+    The '~' separators sit OUTSIDE the id grammar (validate_work_names
+    allows [A-Za-z0-9_.-]), so the (mission, unit, attempt) triple is
+    unambiguous: '-'-delimited ids collided across hyphen splits of
+    different missions/units, minting one jobs/ prefix for two units."""
+    return f"sweep-{mission}~{unit_id}~{attempt}"
 
 
 # \Z, not $: Python's `$` also matches just before a trailing newline, so

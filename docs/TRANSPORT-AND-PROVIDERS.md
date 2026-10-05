@@ -42,7 +42,7 @@ pip install armature-agents[cloud]  # adds boto3 and unlocks armature/transport
 
 | Module | What it owns |
 |---|---|
-| `naming` | Deterministic sweep job ids (`sweep-<mission>-<unit>-<attempt>`, never-2PC) and hostile-id validation (`validate_work_names`) — mission and unit ids reach S3 keys, job-id prefixes, and task env, so every entry point validates. |
+| `naming` | Deterministic sweep job ids (`sweep-<mission>~<unit>~<attempt>` — the `~` separators sit outside the id grammar so the triple is unambiguous; never-2PC) and hostile-id validation (`validate_work_names`) — mission and unit ids reach S3 keys, job-id prefixes, and task env, so every entry point validates. |
 | `s3io` | S3 helpers and the readers of the engine's own `jobs/<id>/results/<run>/…` results layout (`list_run_ids`, `latest_receipt`) — the layout mirrors `ResultsWriter` output verbatim, so the readers live in the engine. |
 | `s3work` | `S3WorkStore` — the S3 implementation of the existing `WorkStore` protocol (`armature/state/work.py`). Owns the `work/<mission>/` key layout: `<unit_id>.json` records (byte-identical to `LocalWorkStore`'s), `mission.yml`, and mission-scoped `transitions/`. |
 | `settle` | Runner step 4.7 (inject the work-unit record as `context['work_unit']` for `mission_source: work_unit` specs) and step 7.6 (settle: meter cost, apply closure, move to done/failed/retry_pending) — the same semantics the local executor uses. |
@@ -84,6 +84,7 @@ The sweep's entrypoint (`python -m armature.transport.sweep`) reads:
 | `DISPATCH_INPUTS_JSON` | the cron rule's inputs | sweep inputs — e.g. `{"dry_run": true}` |
 | `FLOCK_ALERTS_TOPIC_ARN` | the task definition | the alert sink for ready human-led units |
 | `ARMATURE_SWEEP_LAUNCH` | the task definition | `module:function` naming the launch callable (e.g. `dispatch.ops:run_workflow`) |
+| `DISPATCH_CLUSTER` | the task definition | the ECS cluster the repair pass queries for task state (default: `dispatch`) |
 
 Exit 1 on any sweep error so the adapter's nonzero exit fails the cron run and
 the ECS-failure alarm path fires; the summary JSON rides stdout (parsed via the

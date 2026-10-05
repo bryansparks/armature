@@ -56,13 +56,26 @@ def list_run_ids(s3, bucket: str, job_prefix: str) -> list[str]:
 
 
 def _latest_receipt(s3, bucket: str, job_id: str, run_ids: list[str]):
-    for run_id in reversed(run_ids):
+    """The receipt with the newest finished_at. NOT the lexicographically
+    last run id: run ids are random hex, and the runner's clean-failure
+    path writes the literal run id "failed" (armature/packaging/runner.py),
+    which sorts above every hex id — lexicographic order would hand the
+    repair pass a stale failed receipt after an operator re-drives the job
+    and the second run completes. Receipts missing finished_at fall back to
+    run-id order among themselves."""
+    best: tuple[tuple[str, str], Any] | None = None
+    for run_id in run_ids:
         try:
-            return get_json(
-                s3, bucket, f"jobs/{job_id}/results/{run_id}/receipt.json"), run_id
+            receipt = get_json(
+                s3, bucket, f"jobs/{job_id}/results/{run_id}/receipt.json")
         except s3.exceptions.NoSuchKey:
             continue
-    return None, None
+        order_key = (receipt.get("finished_at") or "", run_id)
+        if best is None or order_key > best[0]:
+            best = (order_key, receipt)
+    if best is None:
+        return None, None
+    return best[1], best[0][1]
 
 
 def latest_receipt(s3, bucket: str, job_id: str):

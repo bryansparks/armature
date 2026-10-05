@@ -70,6 +70,36 @@ def test_gate_state_gate_and_attempts_and_budgets(s3_bucket):
         _gate(s3)
 
 
+def test_gate_unit_budget_spent(s3_bucket):
+    # Review Important 3: the budget-before-attempt gates lost coverage in
+    # the test move — pin them (they are this branch's own governance
+    # argument). Unit budget exhausted: refused before any spend.
+    s3, _ = s3_bucket
+    store = S3WorkStore(s3, BUCKET)
+    mission = load_mission(MISSION_DOC)
+    unit = next(u for u in mission.work if u.id == "research")
+    rec = store.ensure_unit(mission, unit)
+    rec.spent_usd = rec.max_budget_usd        # 0.50 — the unit budget, gone
+    store.save(rec)
+    with pytest.raises(WorkSubmitError, match="unit budget spent"):
+        _gate(s3)
+
+
+def test_gate_mission_budget_spent(s3_bucket):
+    # Review Important 3, mission side: another unit's spend exhausts the
+    # mission budget while this unit's own budget is untouched — still
+    # refused.
+    s3, _ = s3_bucket
+    store = S3WorkStore(s3, BUCKET)
+    mission = load_mission(MISSION_DOC)
+    hero = next(u for u in mission.work if u.id == "hero-copy")
+    hrec = store.ensure_unit(mission, hero)
+    hrec.spent_usd = mission.budget_usd       # 1.00 — the mission budget, gone
+    store.save(hrec)
+    with pytest.raises(WorkSubmitError, match="mission budget spent"):
+        _gate(s3)                            # research: spent 0, still refused
+
+
 def test_start_work_unit_same_job_idempotent(s3_bucket):
     # moved verbatim from test_submit_work.py
     s3, _ = s3_bucket

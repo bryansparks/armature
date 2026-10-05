@@ -16,7 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `cloud` extra (`pip install armature-agents[cloud]` adds boto3; the default
   install never imports boto3 or the subpackage — enforced by a CI
   import-clean boundary test). Moved from armature-dispatch:
-  - `naming` — deterministic sweep job ids (`sweep-<mission>-<unit>-<attempt>`,
+  - `naming` — deterministic sweep job ids (`sweep-<mission>~<unit>~<attempt>`,
     never-2PC) + hostile-id name validation
   - `s3io` — S3 helpers + readers of the engine's `jobs/` results layout
     (`list_run_ids`, `latest_receipt`)
