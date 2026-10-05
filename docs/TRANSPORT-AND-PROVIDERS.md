@@ -23,15 +23,25 @@ convention lands in the deployment.
 ## The extras contract
 
 ```
-pip install armature-agents        # gains nothing cloud-side: no boto3, and
-                                   # `import armature` never touches armature/transport
-pip install armature-agents[cloud]  # adds boto3 and unlocks armature/transport
+pip install armature-agents           # `import armature` never reaches boto3
+                                    # or armature/transport
+pip install armature-agents[cloud]   # boto3 becomes an explicit, guaranteed
+                                    # dependency — and armature/transport unlocks
 ```
 
-- The default install stays AWS-free and import-clean; `tests/transport/test_boundary.py`
-  enforces it in CI (an AST scan for boto3/botocore/moto outside `transport/`,
-  plus a fresh-interpreter proof that `import armature` reaches neither).
-- `pip install armature-agents[cloud-dev]` adds `moto` for the test suite.
+- The contract is at the **import** level, not the installed-package level:
+  litellm (a base dependency) pulls boto3 transitively, so boto3 may be
+  present in any install — but `import armature` never loads it and never
+  touches `armature/transport`. That import-cleanliness is what
+  `tests/transport/test_boundary.py` enforces in CI (an AST scan for
+  boto3/botocore/moto outside `transport/`, plus a fresh-interpreter proof
+  that `import armature` reaches neither), and what `[cloud]` makes
+  explicit: a dependency the transport can rely on, not an accident of
+  litellm's pin.
+- For the same reason the transport test modules skip on `moto` — the
+  `[cloud-dev]` marker — not on boto3, which is transitively present
+  either way: `pip install armature-agents[cloud-dev]` adds moto for the
+  test suite.
 - Without boto3, `armature.transport.sweep.main()` fails with an actionable
   install instruction (`pip install armature-agents[cloud]`), not a bare
   `ModuleNotFoundError`. Modules are imported directly

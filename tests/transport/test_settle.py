@@ -7,7 +7,9 @@ dispatch_runner/__main__.main() — the runner pipeline, which is not moving —
 and stay in the dispatch repo."""
 import pytest
 
-pytest.importorskip("boto3")   # transport suite: requires the cloud extra
+pytest.importorskip("moto")  # transport suite: requires the cloud-dev extra —
+                                  # boto3 is NOT a valid marker (litellm pulls it
+                                  # transitively); moto is the [cloud-dev] signal
 
 import boto3  # noqa: E402
 from moto import mock_aws  # noqa: E402

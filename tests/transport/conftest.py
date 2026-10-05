@@ -18,7 +18,8 @@ def pinned_aws_region(monkeypatch):
 
 @pytest.fixture
 def s3_bucket():
-    boto3 = pytest.importorskip("boto3")   # the transport suite needs the extra
+    pytest.importorskip("moto")  # the cloud-dev marker — moto implies boto3
+    import boto3
     from moto import mock_aws
     with mock_aws():
         s3 = boto3.client("s3")

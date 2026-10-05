@@ -1,6 +1,8 @@
 import pytest
 
-pytest.importorskip("boto3")   # transport suite: requires the cloud extra
+pytest.importorskip("moto")  # transport suite: requires the cloud-dev extra —
+                                  # boto3 is NOT a valid marker (litellm pulls it
+                                  # transitively); moto is the [cloud-dev] signal
 
 from armature.transport.naming import sweep_job_id, validate_work_names  # noqa: E402
 
