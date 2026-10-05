@@ -1,0 +1,22 @@
+name: work-echo-fail
+version: "1.0"
+description: >
+  Work-transport failure fixture — same shape as work-echo but the stage
+  exits 3, so the run fails and step 7.6 must meter + fail + retry_pending.
+
+mission_source: work_unit
+
+adapters:
+  boom:
+    name: boom
+    type: script
+    # parse: json makes the adapter a function: exit 3 RAISES, the stage
+    # fails, the run fails. Without it the exit code is envelope data and
+    # the run completes (see echo-fail.yaml, verified 2026-09-21).
+    cmd: "printf 'deliberate failure' >&2; exit 3"
+    parse: json
+
+stages:
+  - id: boom
+    adapter: boom
+    depends_on: []

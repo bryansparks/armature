@@ -1,0 +1,24 @@
+name: work-echo
+version: "1.0"
+description: >
+  Work-transport fixture — one script adapter stage that renders the
+  injected work_unit record into its stdout. mission_source opts the spec
+  into the runner's step-4.7 injection. No LLM, no secrets, no closure
+  (a closure stage must be guided_json — covered at unit level instead).
+
+mission_source: work_unit
+
+adapters:
+  echoer:
+    name: echoer
+    type: script
+    # `is defined` guards: armature's ScriptNode renders adapter cmds with a
+    # strict undefined (unlike description/tool-arg rendering), so an
+    # ungoverned run — no work_unit in context — renders 'none' and still
+    # completes instead of dying on UndefinedError.
+    cmd: "printf 'title={{ work_unit.title if work_unit is defined else \"none\" }} mission={{ work_unit.mission if work_unit is defined else \"none\" }}'"
+
+stages:
+  - id: echoer
+    adapter: echoer
+    depends_on: []
