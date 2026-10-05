@@ -30,10 +30,23 @@ def test_no_aws_imports_outside_transport():
 
 
 def test_transport_is_not_imported_by_core():
-    """armature/__init__ (and everything it pulls) must not reach transport."""
-    import armature  # noqa: F401
-    assert not any(m.startswith("armature.transport") for m in sys.modules), \
-        "importing armature imported armature.transport"
+    """armature/__init__ (and everything it pulls) must not reach transport.
+
+    Runs in a fresh interpreter: this directory's other test modules import
+    armature.transport at collection time, so an in-process check would see
+    their imports, not core's."""
+    import os
+    import subprocess
+    import sys
+    code = ("import sys, armature; "
+            "ok = not any(m.startswith('armature.transport') for m in sys.modules) "
+            "and 'boto3' not in sys.modules; "
+            "sys.exit(0 if ok else 1)")
+    env = dict(os.environ, PYTHONPATH=str(REPO))
+    result = subprocess.run([sys.executable, "-c", code], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, (
+        "import armature reached transport or boto3:\n" + result.stderr)
 
 
 def test_transport_package_and_extras_exist():
