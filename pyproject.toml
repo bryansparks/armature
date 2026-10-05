@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "armature-agents"
-version = "0.6.3"
+version = "0.7.0"
 description = "Agent execution harness — wraps LLMs in structured, inspectable workflow specs"
 readme = "README.md"
 authors = [
@@ -56,6 +56,13 @@ dev = [
     "pytest-cov>=5.0",
     "opentelemetry-sdk>=1.24",
     "ruff>=0.4",
+]
+cloud = [
+    "boto3>=1.28",
+]
+cloud-dev = [
+    "boto3>=1.28",
+    "moto>=5",
 ]
 service = [
     "fastapi>=0.111",

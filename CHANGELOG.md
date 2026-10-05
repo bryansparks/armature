@@ -8,6 +8,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-05
+
+### Added
+
+- **Cloud transport** — `armature/transport/` subpackage behind the optional
+  `cloud` extra (`pip install armature-agents[cloud]` adds boto3; the default
+  install never imports boto3 or the subpackage — enforced by a CI
+  import-clean boundary test). Moved from armature-dispatch:
+  - `naming` — deterministic sweep job ids (`sweep-<mission>~<unit>~<attempt>`,
+    never-2PC) + hostile-id name validation
+  - `s3io` — S3 helpers + readers of the engine's `jobs/` results layout
+    (`list_run_ids`, `latest_receipt`)
+  - `s3work` — `S3WorkStore`, the S3 implementation of the `WorkStore` protocol
+  - `settle` — runner inject (step 4.7) + settle (step 7.6): metering, closure
+    application, resting states, idempotent redelivery
+  - `workops` — submit gates (doc/names/state/requires/attempts/budgets) +
+    `start_work_unit` launch bookkeeping
+  - `sweep` — the flock sweep with the launch callable **injected**
+    (`ARMATURE_SWEEP_LAUNCH`, `module:function`): repair pass (orphan rule),
+    readiness → submit/notify/hold, exit-1-on-errors alarm contract,
+    `python -m armature.transport.sweep` entrypoint
+- Boundary + provider-seam documentation: `docs/TRANSPORT-AND-PROVIDERS.md`
+  (policy-is-grammar rule, extras contract, the five provider seams, env
+  contracts); README + CLAUDE.md cloud-transport sections.
+
+
 ## [0.6.3] - 2026-10-01
 
 ### Added

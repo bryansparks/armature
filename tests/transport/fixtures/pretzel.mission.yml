@@ -1,0 +1,33 @@
+name: pretzel
+version: "1.0"
+description: "Fixture mission for the dispatch work-transport tests."
+
+objective: |
+  Fixture mission — prove the flock transport end to end.
+
+posture: human-led
+budget_usd: 1.00
+
+work:
+  - id: research
+    title: Research the pretzel audience
+    objective: Find who buys giant pretzels.
+    workflow: work-echo
+    posture: delegated
+    max_budget_usd: 0.50
+    max_attempts: 2
+
+  - id: hero-copy
+    title: Write the hero headline
+    objective: One headline, chaotic-good.
+    workflow: work-echo
+    requires: [research]
+    posture: delegated
+    max_budget_usd: 0.50
+    max_attempts: 2
+
+  - id: approve
+    title: Human approves the hero headline
+    objective: The human gate everything waits on.
+    workflow: work-echo
+    requires: [hero-copy]
