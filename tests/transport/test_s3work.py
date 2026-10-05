@@ -6,7 +6,9 @@ only the import target and the AWS imports changed — boto3/moto are guarded
 so this file collects, and skips, without the cloud extra)."""
 import pytest
 
-pytest.importorskip("boto3")   # transport suite: requires the cloud extra
+pytest.importorskip("moto")  # transport suite: requires the cloud-dev extra —
+                                  # boto3 is NOT a valid marker (litellm pulls it
+                                  # transitively); moto is the [cloud-dev] signal
 
 from armature.state.work import IN_PROGRESS, PENDING, WorkUnitState  # noqa: E402
 from armature.spec.mission import MissionSpec, WorkUnit  # noqa: E402

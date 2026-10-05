@@ -208,10 +208,12 @@ work store, submit gates, runner inject/settle, and the flock sweep — lives
 in `armature/transport/` behind an optional extra:
 
 ```bash
-pip install armature-agents[cloud]   # adds boto3 and unlocks armature/transport
+pip install armature-agents[cloud]   # makes boto3 an explicit dependency;
+                                      # unlocks armature/transport
 ```
 
-The default install never imports boto3 or the transport subpackage. The
+The default install never imports boto3 (litellm may install it transitively,
+but `import armature` never loads it) or the transport subpackage. The
 sweep runs as a cron package (`python -m armature.transport.sweep`) with the
 launch target injected via `ARMATURE_SWEEP_LAUNCH`, so the engine owns the
 launch *policy* while the deployment owns the mechanism (today: ECS Fargate).

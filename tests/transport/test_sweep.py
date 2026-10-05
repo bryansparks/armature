@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("boto3")   # transport suite: requires the cloud extra
+pytest.importorskip("moto")  # transport suite: requires the cloud-dev extra —
+                                  # boto3 is NOT a valid marker (litellm pulls it
+                                  # transitively); moto is the [cloud-dev] signal
 
 import boto3  # noqa: E402
 
