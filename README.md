@@ -201,6 +201,23 @@ armature package verify my_pkg                     # 8 completeness checks, no e
 
 Three example packages live in `examples/packages/` (`echo-tool`, `topic-researcher`, `sandbox-shell`) and double as the Docker integration test corpus (`pytest -m docker`). Full feature set, the secrets model, the pool-of-worker-containers path, and the test catalog: **[`docs/WORKFLOW-PACKAGES.md`](docs/WORKFLOW-PACKAGES.md)**.
 
+## Cloud transport
+
+Missions can execute against a remote provider. The transport — S3-backed
+work store, submit gates, runner inject/settle, and the flock sweep — lives
+in `armature/transport/` behind an optional extra:
+
+```bash
+pip install armature-agents[cloud]   # adds boto3 and unlocks armature/transport
+```
+
+The default install never imports boto3 or the transport subpackage. The
+sweep runs as a cron package (`python -m armature.transport.sweep`) with the
+launch target injected via `ARMATURE_SWEEP_LAUNCH`, so the engine owns the
+launch *policy* while the deployment owns the mechanism (today: ECS Fargate).
+Boundary rule, provider seams, and env contracts:
+**[`docs/TRANSPORT-AND-PROVIDERS.md`](docs/TRANSPORT-AND-PROVIDERS.md)**.
+
 ---
 
 ## Built-in tools

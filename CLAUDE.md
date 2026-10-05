@@ -18,6 +18,18 @@ stages, calls LLMs, and handles retries and fan-out automatically.
 
 ---
 
+## Cloud transport (armature[cloud])
+
+The missions transport (S3WorkStore, submit gates, sweep, settle) lives in
+`armature/transport/` behind the optional `cloud` extra — the default
+install never imports boto3. **Boundary rule: policy is grammar
+(this repo), mechanism is transport (the deployment repo).** A control
+that would appear in the governance memo's table lands here; anything that
+exists only because a provider offers it (IAM, KMS, SNS, CloudTrail) lands
+in the deployment. See docs/TRANSPORT-AND-PROVIDERS.md.
+
+---
+
 ## Core Mental Model
 
 ### DAG + cumulative context
