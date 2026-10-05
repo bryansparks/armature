@@ -57,6 +57,13 @@ dev = [
     "opentelemetry-sdk>=1.24",
     "ruff>=0.4",
 ]
+cloud = [
+    "boto3>=1.28",
+]
+cloud-dev = [
+    "boto3>=1.28",
+    "moto>=5",
+]
 service = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
