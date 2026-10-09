@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import typer
 from armature.runtime.engine import Harness
+from armature.state.work import write_atomic
 
 app = typer.Typer(name="armature", help="ELF ecosystem agent harness runner", no_args_is_help=True)
 
@@ -384,15 +385,16 @@ def _show_primary_output(spec, result: dict, quiet: bool) -> None:
     ))
 
 
-def _save_last_result(workflow_name: str, result: dict) -> None:
+def _save_last_result(workflow_name: str, result: dict, run_dir: Path) -> None:
     try:
-        save_dir = Path.home() / ".armature" / "last"
-        save_dir.mkdir(parents=True, exist_ok=True)
-        (save_dir / f"{workflow_name}.json").write_text(
-            json.dumps(result, indent=2, default=str)
-        )
+        text = json.dumps(result, indent=2, default=str)
     except Exception:
-        pass
+        return
+    for target in (Path.home() / ".armature" / "last" / f"{workflow_name}.json", run_dir / "result.json"):
+        try:
+            write_atomic(target, text)
+        except Exception:
+            pass
 
 
 @app.command()
@@ -946,7 +948,7 @@ def run(
         raise
 
     _show_primary_output(harness._spec, result, quiet)
-    _save_last_result(harness._spec.name, result)
+    _save_last_result(harness._spec.name, result, harness._session_dir)
 
     if not quiet:
         from rich.console import Console
