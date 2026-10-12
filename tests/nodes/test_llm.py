@@ -806,6 +806,80 @@ def test_tier_rejects_unknown_reasoning_effort():
         ModelTierConfig(provider="anthropic", model="claude-opus-5-5", reasoning_effort="extreme")
 
 
+def test_tier_extra_kwargs_role_reasoning_effort_overrides_tier():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.reasoning_effort = "max"
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-opus-5-5", reasoning_effort="high"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._tier_extra_kwargs(tiers.small)["reasoning_effort"] == "max"
+
+
+def test_tier_extra_kwargs_role_reasoning_effort_without_tier_default():
+    stage = make_stage(RoleType.WORKER)
+    stage.role.reasoning_effort = "low"
+    tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-opus-5-5"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._tier_extra_kwargs(tiers.small)["reasoning_effort"] == "low"
+
+
+def test_role_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError):
+        Role(name="r", type=RoleType.WORKER, description="d", reasoning_effort="extreme")
+
+
+async def test_reasoning_effort_reaches_litellm_call():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="bedrock", model="bedrock/us.anthropic.claude-opus-5-5", reasoning_effort="xhigh"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    captured_kwargs = {}
+
+    async def mock_completion(**kwargs):
+        captured_kwargs.update(kwargs)
+        return make_litellm_response("done")
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        result = await node.execute({})
+
+    assert captured_kwargs["model"] == "bedrock/us.anthropic.claude-opus-5-5"
+    assert captured_kwargs["reasoning_effort"] == "xhigh"
+    assert result["content"] == "done"
+
+
+async def test_unsupported_reasoning_effort_fails_once_without_escalation():
+    """litellm rejects a param the model cannot map; Armature neither retries, escalates, nor drops it."""
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(
+        small=ModelTierConfig(provider="openai", model="gpt-4o-mini", reasoning_effort="high"),
+        frontier=ModelTierConfig(provider="anthropic", model="claude-opus-5-5"),
+    )
+    node = LLMNode(stage=stage, tiers=tiers)
+
+    calls = []
+
+    async def unsupported(**kwargs):
+        calls.append(kwargs)
+        raise litellm.UnsupportedParamsError(
+            message="openai does not support parameters: ['reasoning_effort'], for model=gpt-4o-mini",
+            llm_provider="openai",
+            model="gpt-4o-mini",
+        )
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=unsupported), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         pytest.raises(litellm.UnsupportedParamsError):
+        await node.execute({})
+
+    assert len(calls) == 1
+    assert calls[0]["model"] == "gpt-4o-mini"
+    assert mock_sleep.call_count == 0
+    assert litellm.drop_params is False
+
+
 # ── _supports_tool_calling ─────────────────────────────────────────────────────
 
 def test_supports_tool_calling_explicit_true_overrides_provider():

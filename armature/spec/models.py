@@ -27,6 +27,8 @@ CLOSURE_REASONS: tuple[str, ...] = (
     "escalation",
 )
 
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max"]
+
 
 class ModelTierConfig(BaseModel):
     provider: str
@@ -37,7 +39,7 @@ class ModelTierConfig(BaseModel):
     max_tokens: int | None = None     # default max output tokens for this tier
     # Passed to litellm, which maps it to the provider's own control
     # (output_config.effort on adaptive-thinking Claude models).
-    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    reasoning_effort: ReasoningEffort | None = None
     tool_calling: bool | None = None  # None → auto-detect by provider; True/False → explicit override
     adapter_support: Literal["dynamic", "static", "none"] = "none"
     # Path template for locating LoRA artifacts served by this tier.
@@ -135,6 +137,7 @@ class Role(BaseModel):
     model_tier: str | None = None      # None → resolved from role_type_defaults
     temperature: float | None = None   # overrides tier-level temperature
     max_tokens: int | None = None      # overrides tier-level max_tokens
+    reasoning_effort: ReasoningEffort | None = None  # overrides tier-level reasoning_effort
 
 
 class LoopConfig(BaseModel):
