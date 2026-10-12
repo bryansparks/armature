@@ -224,6 +224,24 @@ def test_tiers_round_trip_from_and_to():
     assert restored["frontier"]["api_base"] == "http://x"
 
 
+def test_reasoning_effort_round_trips_through_defaults_file(tmp_path):
+    path = tmp_path / "defaults.config"
+    cfg_mod.save({"model_tiers": {
+        "frontier": {"provider": "bedrock", "model": "bedrock/us.anthropic.claude-opus-5-5",
+                     "reasoning_effort": "high"},
+        "small": {"provider": "anthropic", "model": "haiku"},
+    }}, path)
+    wizard_form = cfg_mod.tiers_from_config(cfg_mod.load(path)["model_tiers"])
+    assert {t["tier"]: t["reasoning_effort"] for t in wizard_form} == {"frontier": "high", "small": ""}
+
+    restored = cfg_mod.tiers_to_config(wizard_form)
+    assert restored["frontier"]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in restored["small"]
+
+    cfg_mod.save({"model_tiers": restored}, path)
+    assert cfg_mod.load(path)["model_tiers"]["frontier"]["reasoning_effort"] == "high"
+
+
 # ── summarize ───────────────────────────────────────────────────────────────
 
 def test_summarize_empty_returns_empty_list():

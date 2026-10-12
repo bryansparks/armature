@@ -15,11 +15,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   override it, resolved role → tier → omitted like `temperature` and
   `max_tokens`. Armature passes it to litellm, which maps it to the
   provider's own control (adaptive thinking plus `output_config.effort` on
-  adaptive-thinking Claude models). Claude Opus 5.5 defaults to `medium`
-  effort, so a tier needs this to ask for more. An unknown
-  value fails `armature validate`; a model litellm can't map it for fails
-  the stage on its first call with `UnsupportedParamsError`, without retry
-  or tier escalation, so a requested effort is never silently dropped.
+  adaptive-thinking Claude models). Each model keeps its own default when
+  it's unset. An unknown value fails `armature validate`. A model litellm
+  can't map it for fails the stage on its first call with
+  `UnsupportedParamsError`, without retrying that call or escalating to the
+  next tier, though the stage's own `on_fail.loop` still re-runs it.
+- The LLM cache key includes the resolved `reasoning_effort` when one is set.
+- `~/.armature/defaults.config` and `armature new` keep a tier's
+  `reasoning_effort`.
+
+### Changed
+
+- The litellm floor is now 1.101.0, the version verified to map
+  `reasoning_effort` to adaptive thinking on Claude.
+
+### Fixed
+
+- The ReAct tool loop sends a response's `thinking_blocks` back with its
+  assistant turn, which Anthropic requires when thinking is on.
 
 ## [0.7.0] - 2026-10-05
 

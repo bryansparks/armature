@@ -51,8 +51,8 @@ model_tiers:
 
 `reasoning_effort` goes to litellm, which maps it to the provider's own control
 (adaptive thinking plus `output_config.effort` on Claude, `reasoning_effort` on
-OpenAI reasoning models). Claude Opus 5.5 defaults to `medium`, so set it on a
-tier that needs more. A role can override it. A model litellm can't map it for,
+OpenAI reasoning models). Each model has its own default when it's unset. A
+role can override it. A model litellm can't map it for,
 including many non-reasoning models, fails the stage on its first call, so omit
 it on those tiers.
 
