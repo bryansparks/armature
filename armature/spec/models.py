@@ -37,8 +37,6 @@ class ModelTierConfig(BaseModel):
     api_key_env: str | None = None    # env var name holding the API key for this tier
     temperature: float | None = None  # default temperature for calls on this tier
     max_tokens: int | None = None     # default max output tokens for this tier
-    # Passed to litellm, which maps it to the provider's own control
-    # (output_config.effort on adaptive-thinking Claude models).
     reasoning_effort: ReasoningEffort | None = None
     tool_calling: bool | None = None  # None → auto-detect by provider; True/False → explicit override
     adapter_support: Literal["dynamic", "static", "none"] = "none"

@@ -472,3 +472,26 @@ async def test_supports_tool_calling_helper_explicit_false():
     node = LLMNode(stage=stage, tiers=tiers)
     openai_cfg = MTC(provider="openai", model="gpt-4o-mini", tool_calling=False)
     assert node._supports_tool_calling(openai_cfg) is False
+
+
+async def test_tool_loop_returns_thinking_blocks_with_assistant_turn():
+    stage, tiers = make_tool_stage(tool_names=["search"], provider="anthropic")
+    reg = make_registry("search")
+    node = LLMNode(stage=stage, tiers=tiers, registry=reg)
+
+    thinking = [{"type": "thinking", "thinking": "look it up", "signature": "sig"}]
+    first = make_tool_call_response("search", {"query": "x"})
+    first.choices[0].message.thinking_blocks = thinking
+    sent_messages = []
+
+    async def mock_completion(**kwargs):
+        sent_messages.append([dict(m) for m in kwargs["messages"]])
+        return first if len(sent_messages) == 1 else make_plain_response("done")
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        result = await node.execute({})
+
+    assistant_turn = next(m for m in sent_messages[1] if m["role"] == "assistant")
+    assert assistant_turn["thinking_blocks"] == thinking
+    assert assistant_turn["tool_calls"][0]["function"]["name"] == "search"
+    assert result["content"] == "done"

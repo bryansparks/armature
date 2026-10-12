@@ -498,6 +498,9 @@ class LLMNode(BaseNode):
             }
 
         cache_extra = {"output_mode": self._stage.output_mode.value}
+        effort = self._tier_extra_kwargs(initial_tier_config).get("reasoning_effort")
+        if effort is not None:
+            cache_extra["reasoning_effort"] = effort
         if active_adapters:
             cache_extra["adapters"] = {
                 sid: f"{r.metadata.name}@{r.metadata.version}"
@@ -586,7 +589,7 @@ class LLMNode(BaseNode):
             iterations = 0
             while getattr(msg, "tool_calls", None) and iterations < self._max_tool_iterations:
                 iterations += 1
-                messages.append({
+                assistant_turn = {
                     "role": "assistant",
                     "content": content,
                     "tool_calls": [
@@ -597,7 +600,12 @@ class LLMNode(BaseNode):
                         }
                         for tc in msg.tool_calls
                     ],
-                })
+                }
+                # Anthropic rejects a tool_use turn with thinking on unless its thinking blocks come back.
+                thinking_blocks = getattr(msg, "thinking_blocks", None)
+                if isinstance(thinking_blocks, list) and thinking_blocks:
+                    assistant_turn["thinking_blocks"] = thinking_blocks
+                messages.append(assistant_turn)
                 for tc in msg.tool_calls:
                     tools_called.append(tc.function.name)
                     try:

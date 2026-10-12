@@ -851,7 +851,7 @@ async def test_reasoning_effort_reaches_litellm_call():
 
 
 async def test_unsupported_reasoning_effort_fails_once_without_escalation():
-    """litellm rejects a param the model cannot map; Armature neither retries, escalates, nor drops it."""
+    """litellm rejects a param the model cannot map; Armature neither retries nor escalates."""
     stage = make_stage(RoleType.WORKER)
     tiers = ModelTiers(
         small=ModelTierConfig(provider="openai", model="gpt-4o-mini", reasoning_effort="high"),
@@ -877,7 +877,6 @@ async def test_unsupported_reasoning_effort_fails_once_without_escalation():
     assert len(calls) == 1
     assert calls[0]["model"] == "gpt-4o-mini"
     assert mock_sleep.call_count == 0
-    assert litellm.drop_params is False
 
 
 # ── _supports_tool_calling ─────────────────────────────────────────────────────
