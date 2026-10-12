@@ -493,5 +493,6 @@ async def test_tool_loop_returns_thinking_blocks_with_assistant_turn():
 
     assistant_turn = next(m for m in sent_messages[1] if m["role"] == "assistant")
     assert assistant_turn["thinking_blocks"] == thinking
+    assert assistant_turn["content"] is None
     assert assistant_turn["tool_calls"][0]["function"]["name"] == "search"
     assert result["content"] == "done"

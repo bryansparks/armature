@@ -331,11 +331,15 @@ class LLMNode(BaseNode):
         if max_tok is not None:
             extra["max_tokens"] = max_tok
 
-        effort = role.reasoning_effort if role.reasoning_effort is not None else tier_config.reasoning_effort
+        effort = self._resolve_reasoning_effort(tier_config)
         if effort is not None:
             extra["reasoning_effort"] = effort
 
         return extra
+
+    def _resolve_reasoning_effort(self, tier_config) -> str | None:
+        role = self._stage.role
+        return role.reasoning_effort if role.reasoning_effort is not None else tier_config.reasoning_effort
 
     def _supports_tool_calling(self, tier_config) -> bool:
         """Whether this tier should receive native tool specs.
@@ -498,7 +502,7 @@ class LLMNode(BaseNode):
             }
 
         cache_extra = {"output_mode": self._stage.output_mode.value}
-        effort = self._tier_extra_kwargs(initial_tier_config).get("reasoning_effort")
+        effort = self._resolve_reasoning_effort(initial_tier_config)
         if effort is not None:
             cache_extra["reasoning_effort"] = effort
         if active_adapters:
@@ -591,7 +595,8 @@ class LLMNode(BaseNode):
                 iterations += 1
                 assistant_turn = {
                     "role": "assistant",
-                    "content": content,
+                    # None, not "": litellm pads "" with placeholder text between thinking and tool_use.
+                    "content": content or None,
                     "tool_calls": [
                         {
                             "id": tc.id,
