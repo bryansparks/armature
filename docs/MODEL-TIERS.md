@@ -164,10 +164,12 @@ Older budget-based Claude models, such as Haiku 4.5, get extended thinking with
 `budget_tokens` of 1024, 2048, 4096, 8192, or 16384 for `low` through `max`.
 For OpenAI reasoning models, it's the native `reasoning_effort` parameter. On
 Ollama, only `low`, `medium`, and `high` turn thinking on; `xhigh` and `max`
-map to `think: false`.
+map to `think: false`. Ollama's `gpt-oss` models are the exception: they get
+the value itself as `think`, so use `low`, `medium`, or `high` there.
 
 On Claude, setting an effort turns thinking on, so leave `temperature` unset
-and keep `max_tokens` above the thinking budget.
+and keep `max_tokens` above the thinking budget. `armature validate` warns
+with `REASONING_EFFORT_WITH_TEMPERATURE` when a stage resolves both.
 
 A model that litellm can't map the value for, such as `gpt-4o`, fails the stage
 on its first call with litellm's `UnsupportedParamsError`. Armature doesn't

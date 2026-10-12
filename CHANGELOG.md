@@ -25,6 +25,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `reasoning_effort`.
 - The ReAct tool loop sends a response's `thinking_blocks` back with its
   assistant turn, so the model keeps its reasoning across tool turns.
+- `armature validate` warns with `REASONING_EFFORT_WITH_TEMPERATURE` when a
+  stage resolves both a `reasoning_effort` and a `temperature` other than 1,
+  which Claude rejects while thinking is on.
 
 ### Changed
 

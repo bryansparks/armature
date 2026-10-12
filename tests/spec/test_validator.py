@@ -615,6 +615,31 @@ def test_guided_json_no_model_tiers_no_warning():
     assert "GUIDED_JSON_LOW_TIER_RISK" not in warning_codes
 
 
+# ── reasoning_effort with a non-default temperature ──────────────────────────
+
+def _effort_spec(tier_temp=None, tier_effort=None, role_temp=None, role_effort=None) -> HarnessSpec:
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-haiku-4-5-20251001",
+        temperature=tier_temp, reasoning_effort=tier_effort,
+    ))
+    role = Role(name="r", type=RoleType.WORKER, description="d", model_tier="small",
+                temperature=role_temp, reasoning_effort=role_effort)
+    return HarnessSpec(name="wf", stages=[Stage(id="s", role=role, depends_on=[])], model_tiers=tiers)
+
+
+@pytest.mark.parametrize("kwargs, warns", [
+    (dict(tier_temp=0.2, role_effort="high"), True),
+    (dict(role_temp=0.5, tier_effort="low"), True),
+    (dict(tier_temp=0.2, tier_effort="high", role_temp=1.0), False),
+    (dict(tier_effort="high"), False),
+    (dict(tier_temp=0.2), False),
+])
+def test_reasoning_effort_with_temperature_warning(kwargs, warns):
+    errors = validate_spec(_effort_spec(**kwargs), strict=False)
+    warning_codes = {e.code for e in errors if e.severity == "warning"}
+    assert ("REASONING_EFFORT_WITH_TEMPERATURE" in warning_codes) is warns
+
+
 # ── Memory pyramid (Phase 2): validator warnings + harness-injected _memory_index ──
 
 def test_validator_memory_index_is_harness_injected():
