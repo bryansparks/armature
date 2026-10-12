@@ -8,6 +8,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`reasoning_effort` on model tiers and roles.** A tier can set
+  `reasoning_effort: low | medium | high | xhigh | max`, and a role can
+  override it, resolved role → tier → omitted like `temperature` and
+  `max_tokens`. Armature passes it to litellm, which maps it to the
+  provider's own control (adaptive thinking plus `output_config.effort` on
+  adaptive-thinking Claude models). Claude Opus 5.5 defaults to `medium`
+  effort, so a tier needs this to ask for more. An unknown
+  value fails `armature validate`; a model litellm can't map it for fails
+  the stage on its first call with `UnsupportedParamsError`, without retry
+  or tier escalation, so a requested effort is never silently dropped.
+
 ## [0.7.0] - 2026-10-05
 
 ### Added

@@ -45,8 +45,16 @@ model_tiers:
     api_base: https://...             # required for ollama / azure / bedrock
     temperature: 0.2          # 0.0–1.0
     max_tokens: 2048
+    # reasoning_effort: high  # optional: low | medium | high | xhigh | max; see below
     adapter_support: dynamic  # dynamic | none — see §skill_library
 ```
+
+`reasoning_effort` goes to litellm, which maps it to the provider's own control
+(adaptive thinking plus `output_config.effort` on Claude, `reasoning_effort` on
+OpenAI reasoning models). Claude Opus 5.5 defaults to `medium`, so set it on a
+tier that needs more. A role can override it. A model litellm can't map it for,
+including many non-reasoning models, fails the stage on its first call, so omit
+it on those tiers.
 
 Recommended models (OpenRouter):
 - `qwen/qwen3.6-27b` — small, fast, reliable guided_json
@@ -398,6 +406,7 @@ Every stage requires:
     name: Analyst             # display name
     type: researcher          # worker | researcher | judge | orchestrator
     model_tier: large         # optional; overrides role_type_defaults
+    reasoning_effort: high    # optional; overrides the tier default
     description: |            # system prompt — this is where quality comes from
       Analyze {{ topic }}.
       {% if focus %}Focus on: {{ focus }}{% endif %}

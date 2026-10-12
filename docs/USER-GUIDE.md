@@ -391,6 +391,7 @@ model_tiers:
 | `api_key_env` | string | Name of the env var holding this tier's API key (e.g. `OPENROUTER_API_KEY`). Overrides the provider default. |
 | `temperature` | float | Default sampling temperature for this tier. Can be overridden at the role level. |
 | `max_tokens` | int | Default max output tokens for this tier. Can be overridden at the role level. |
+| `reasoning_effort` | `low` \| `medium` \| `high` \| `xhigh` \| `max` | Default reasoning effort for this tier, passed to litellm, which maps it to the provider's own control. Omit to use the model's default (Claude Opus 5.5 defaults to `medium`). A model litellm can't map it for fails on its first call. Can be overridden at the role level. See `docs/MODEL-TIERS.md`. |
 | `tool_calling` | bool | `true` to force native tool injection; `false` to disable it; omit to auto-detect by provider. |
 | `adapter_support` | `dynamic` \| `none` | `dynamic` loads LoRA adapters from the registry and passes them to the provider per request; `none` disables adapter loading (default: `none`) |
 | `adapter_path_template` | string | Optional path template for locating LoRA artifacts served by this tier. Supports `{adapter_name}` and `{adapter_version}` placeholders. |
@@ -474,6 +475,7 @@ An LLM stage calls a language model. It requires a `role`.
 | `model_tier` | string | no | Which tier to use (`small`, `frontier`, etc.). Omit to inherit from `role_type_defaults`. |
 | `temperature` | float | no | Sampling temperature — overrides the tier-level default |
 | `max_tokens` | int | no | Max output tokens — overrides the tier-level default |
+| `reasoning_effort` | string | no | `low`, `medium`, `high`, `xhigh`, or `max` — overrides the tier-level default |
 | `tools` | list | no | Tool names this stage may call — filters the registry to only these names; empty means no tool access |
 | `skills` | list | no | Skill names from `skill_library:` |
 

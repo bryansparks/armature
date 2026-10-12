@@ -43,6 +43,7 @@ This block lives at the top level of the spec, alongside `name`, `mission`, and 
 | `api_key_env` | `str` | Name of the environment variable holding the API key for this tier |
 | `temperature` | `float` | Default temperature for all calls on this tier |
 | `max_tokens` | `int` | Default max output tokens for all calls on this tier |
+| `reasoning_effort` | `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | Default reasoning effort for all calls on this tier; see [Reasoning effort](#reasoning-effort) |
 | `tool_calling` | `bool` | Force tool calling on or off; `null` auto-detects by provider |
 | `adapter_support` | `"dynamic"` \| `"none"` | Load LoRA adapters from the registry and pass them to the provider per request (`dynamic`) or disable adapter loading (`none`) |
 | `adapter_path_template` | `str` | Optional path template for locating LoRA artifacts served by this tier |
@@ -119,7 +120,7 @@ stages:
         Message: {{ message }}
 ```
 
-Stage-level `temperature` and `max_tokens` also override the tier-level defaults:
+Stage-level `temperature`, `max_tokens`, and `reasoning_effort` also override the tier-level defaults:
 
 ```yaml
   - id: creative_copy
@@ -129,9 +130,45 @@ Stage-level `temperature` and `max_tokens` also override the tier-level defaults
       model_tier: large
       temperature: 0.9          # override the tier default for this stage only
       max_tokens: 2000
+      reasoning_effort: low
 ```
 
 The resolution order is: stage-level → tier-level → provider default.
+
+---
+
+## Reasoning effort
+
+`reasoning_effort` asks the model to think more or less before it answers. It
+takes one of `low`, `medium`, `high`, `xhigh`, or `max`. Set it on a tier to
+apply it to every stage on that tier, or on a stage's `role` to override the
+tier for that stage. When neither sets it, Armature omits it and the model uses
+its own default.
+
+Claude Opus 5.5 defaults to `medium` effort, so a tier that needs deeper
+reasoning from it must ask for more:
+
+```yaml
+model_tiers:
+  frontier:
+    provider: bedrock
+    model: bedrock/us.anthropic.claude-opus-5-5
+    max_tokens: 16000
+    reasoning_effort: high
+```
+
+Armature passes the value to litellm as `reasoning_effort`, and litellm maps it
+to each provider's own control. For adaptive-thinking Claude models on
+Anthropic and Bedrock, that's adaptive thinking plus `output_config.effort`.
+For OpenAI reasoning models, it's the native `reasoning_effort` parameter.
+
+A model that litellm can't map the value for, such as `gpt-4o`, fails the stage
+on its first call with litellm's `UnsupportedParamsError`. Armature doesn't
+retry that error, doesn't escalate to the next tier, and doesn't set
+`litellm.drop_params`, so a requested effort is never silently dropped. Remove
+`reasoning_effort` from that tier, or move the stage to a tier whose model
+supports it. `armature validate` checks only that the value is one of the five
+names; it doesn't check whether the model supports it.
 
 ---
 
