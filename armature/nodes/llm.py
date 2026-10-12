@@ -601,7 +601,7 @@ class LLMNode(BaseNode):
                         for tc in msg.tool_calls
                     ],
                 }
-                # Anthropic rejects a tool_use turn with thinking on unless its thinking blocks come back.
+                # Keeps the model's reasoning across tool turns when thinking is on.
                 thinking_blocks = getattr(msg, "thinking_blocks", None)
                 if isinstance(thinking_blocks, list) and thinking_blocks:
                     assistant_turn["thinking_blocks"] = thinking_blocks

@@ -23,16 +23,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The LLM cache key includes the resolved `reasoning_effort` when one is set.
 - `~/.armature/defaults.config` and `armature new` keep a tier's
   `reasoning_effort`.
+- The ReAct tool loop sends a response's `thinking_blocks` back with its
+  assistant turn, so the model keeps its reasoning across tool turns.
 
 ### Changed
 
 - The litellm floor is now 1.101.0, the version verified to map
   `reasoning_effort` to adaptive thinking on Claude.
-
-### Fixed
-
-- The ReAct tool loop sends a response's `thinking_blocks` back with its
-  assistant turn, which Anthropic requires when thinking is on.
 
 ## [0.7.0] - 2026-10-05
 
