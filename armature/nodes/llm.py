@@ -303,7 +303,7 @@ class LLMNode(BaseNode):
         return model
 
     def _tier_extra_kwargs(self, tier_config) -> dict[str, Any]:
-        """Build litellm kwargs that vary per tier (api_base, auth, temperature, max_tokens).
+        """Build litellm kwargs that vary per tier (api_base, auth, temperature, max_tokens, effort).
 
         Resolution order for temperature and max_tokens:
           role-level override → tier-level default → omitted (model default)
@@ -330,6 +330,9 @@ class LLMNode(BaseNode):
         max_tok = role.max_tokens if role.max_tokens is not None else tier_config.max_tokens
         if max_tok is not None:
             extra["max_tokens"] = max_tok
+
+        if tier_config.reasoning_effort is not None:
+            extra["reasoning_effort"] = tier_config.reasoning_effort
 
         return extra
 

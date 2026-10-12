@@ -785,6 +785,27 @@ def test_tier_extra_kwargs_max_tokens_role_overrides_tier():
     assert extra["max_tokens"] == 512
 
 
+def test_tier_extra_kwargs_passes_reasoning_effort():
+    stage = make_stage(RoleType.JUDGE)
+    tiers = ModelTiers(large=ModelTierConfig(
+        provider="bedrock", model="bedrock/us.anthropic.claude-opus-5-5", reasoning_effort="high"
+    ))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert node._tier_extra_kwargs(tiers.large)["reasoning_effort"] == "high"
+
+
+def test_tier_extra_kwargs_omits_reasoning_effort_by_default():
+    stage = make_stage(RoleType.WORKER)
+    tiers = ModelTiers(small=ModelTierConfig(provider="anthropic", model="claude-sonnet-5-5"))
+    node = LLMNode(stage=stage, tiers=tiers)
+    assert "reasoning_effort" not in node._tier_extra_kwargs(tiers.small)
+
+
+def test_tier_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError):
+        ModelTierConfig(provider="anthropic", model="claude-opus-5-5", reasoning_effort="extreme")
+
+
 # ── _supports_tool_calling ─────────────────────────────────────────────────────
 
 def test_supports_tool_calling_explicit_true_overrides_provider():
