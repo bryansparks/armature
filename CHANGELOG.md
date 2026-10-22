@@ -8,6 +8,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Script adapters no longer block the event loop** — they run as asyncio
+  subprocesses, so fan-out branches and independent stages overlap instead of
+  running one at a time. A script that times out or is cancelled has its whole
+  process group killed.
+
 ## [0.7.0] - 2026-10-05
 
 ### Added
