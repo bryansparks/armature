@@ -1,6 +1,8 @@
 from __future__ import annotations
+import asyncio
 import json
 import os
+import signal
 import subprocess
 from jinja2 import Environment, BaseLoader
 from typing import Any
@@ -27,15 +29,38 @@ class ScriptNode(BaseNode):
             )
 
         env = {**os.environ, "ARMATURE_CONTEXT": json.dumps(context, default=str)}
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=self._adapter.timeout, env=env)
+        proc = await asyncio.create_subprocess_shell(
+            cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._adapter.timeout)
+        except asyncio.TimeoutError:
+            await self._kill_group(proc)
+            raise subprocess.TimeoutExpired(cmd, self._adapter.timeout)
+        except BaseException:
+            await self._kill_group(proc)
+            raise
         envelope = {
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.returncode,
+            "stdout": stdout.decode(errors="replace"),
+            "stderr": stderr.decode(errors="replace"),
+            "exit_code": proc.returncode,
         }
         if self._adapter.parse == "json":
             return self._parse_json(envelope)
         return envelope
+
+    @staticmethod
+    async def _kill_group(proc: asyncio.subprocess.Process) -> None:
+        # The shell's children, such as a CLI the script starts, share its session, so killing only the shell would orphan them.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await proc.wait()
 
     def _parse_json(self, envelope: dict[str, Any]) -> Any:
         """Turn a script's stdout into a structured stage result.
