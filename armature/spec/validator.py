@@ -236,6 +236,28 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 severity="warning",
             ))
 
+    # ── reasoning_effort turns thinking on, which rejects temperature != 1 ─
+    for stage in spec.stages:
+        if stage.role is None:
+            continue
+        tier_name = stage.role.model_tier or getattr(spec.role_type_defaults, stage.role.type.value, None)
+        tier = getattr(spec.model_tiers, tier_name, None) if tier_name else None
+        effort = stage.role.reasoning_effort or (tier.reasoning_effort if tier else None)
+        temperature = stage.role.temperature if stage.role.temperature is not None else (
+            tier.temperature if tier else None
+        )
+        if effort and temperature is not None and temperature != 1:
+            errors.append(SpecError(
+                code="REASONING_EFFORT_WITH_TEMPERATURE",
+                message=(
+                    f"Stage '{stage.id}' resolves reasoning_effort='{effort}' and temperature={temperature}. "
+                    f"Claude rejects a temperature other than 1 while thinking is on, "
+                    f"so leave temperature unset on this tier or role."
+                ),
+                stage_id=stage.id,
+                severity="warning",
+            ))
+
     # ── Contract.inputs entries have required name field ──────────────────
     for i, inp in enumerate(spec.contracts.inputs):
         if "name" not in inp:

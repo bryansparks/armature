@@ -8,6 +8,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`reasoning_effort` on model tiers and roles.** A tier can set
+  `reasoning_effort: low | medium | high | xhigh | max`, and a role can
+  override it, resolved role → tier → omitted like `temperature` and
+  `max_tokens`. Armature passes it to litellm, which maps it to the
+  provider's own control (adaptive thinking plus `output_config.effort` on
+  adaptive-thinking Claude models). Each model keeps its own default when
+  it's unset. An unknown value fails `armature validate`. A model litellm
+  can't map it for fails the stage on its first call with
+  `UnsupportedParamsError`, without retrying that call or escalating to the
+  next tier, though the stage's own `on_fail.loop` still re-runs it.
+- The LLM cache key includes the resolved `reasoning_effort` when one is set.
+- `~/.armature/defaults.config` and `armature new` keep a tier's
+  `reasoning_effort`.
+- The ReAct tool loop sends a response's `thinking_blocks` back with its
+  assistant turn, so the model keeps its reasoning across tool turns.
+- `armature validate` warns with `REASONING_EFFORT_WITH_TEMPERATURE` when a
+  stage resolves both a `reasoning_effort` and a `temperature` other than 1,
+  which Claude rejects while thinking is on.
+
+### Changed
+
+- The litellm floor is now 1.101.0, the version verified to map
+  `reasoning_effort` to adaptive thinking on Claude.
+
 ## [0.7.0] - 2026-10-05
 
 ### Added

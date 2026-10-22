@@ -74,6 +74,8 @@ def save(defaults: dict[str, Any], path: Path | str | None = None) -> Path:
                 lines.append(f"    temperature: {cfg['temperature']}")
             if cfg.get("max_tokens") not in (None, ""):
                 lines.append(f"    max_tokens: {cfg['max_tokens']}")
+            if cfg.get("reasoning_effort"):
+                lines.append(f"    reasoning_effort: {cfg['reasoning_effort']}")
         lines.append("")
 
     role_defaults = defaults.get("role_type_defaults", {})
@@ -103,6 +105,7 @@ def tiers_from_config(config_tiers: dict) -> list[dict]:
             "api_key_env": str(cfg.get("api_key_env", "") or ""),
             "temperature": str(cfg.get("temperature", "") or ""),
             "max_tokens": str(cfg.get("max_tokens", "") or ""),
+            "reasoning_effort": str(cfg.get("reasoning_effort", "") or ""),
         })
     return result
 
@@ -129,6 +132,8 @@ def tiers_to_config(wizard_tiers: list[dict]) -> dict:
                 cfg["max_tokens"] = int(t["max_tokens"])
             except (ValueError, TypeError):
                 pass
+        if t.get("reasoning_effort"):
+            cfg["reasoning_effort"] = t["reasoning_effort"]
         result[t["tier"]] = cfg
     return result
 

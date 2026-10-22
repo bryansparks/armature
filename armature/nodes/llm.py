@@ -303,9 +303,9 @@ class LLMNode(BaseNode):
         return model
 
     def _tier_extra_kwargs(self, tier_config) -> dict[str, Any]:
-        """Build litellm kwargs that vary per tier (api_base, auth, temperature, max_tokens).
+        """Build litellm kwargs that vary per tier (api_base, auth, temperature, max_tokens, effort).
 
-        Resolution order for temperature and max_tokens:
+        Resolution order for temperature, max_tokens, and reasoning_effort:
           role-level override → tier-level default → omitted (model default)
         """
         extra: dict[str, Any] = {}
@@ -331,7 +331,15 @@ class LLMNode(BaseNode):
         if max_tok is not None:
             extra["max_tokens"] = max_tok
 
+        effort = self._resolve_reasoning_effort(tier_config)
+        if effort is not None:
+            extra["reasoning_effort"] = effort
+
         return extra
+
+    def _resolve_reasoning_effort(self, tier_config) -> str | None:
+        role = self._stage.role
+        return role.reasoning_effort if role.reasoning_effort is not None else tier_config.reasoning_effort
 
     def _supports_tool_calling(self, tier_config) -> bool:
         """Whether this tier should receive native tool specs.
@@ -494,6 +502,9 @@ class LLMNode(BaseNode):
             }
 
         cache_extra = {"output_mode": self._stage.output_mode.value}
+        effort = self._resolve_reasoning_effort(initial_tier_config)
+        if effort is not None:
+            cache_extra["reasoning_effort"] = effort
         if active_adapters:
             cache_extra["adapters"] = {
                 sid: f"{r.metadata.name}@{r.metadata.version}"
@@ -582,9 +593,10 @@ class LLMNode(BaseNode):
             iterations = 0
             while getattr(msg, "tool_calls", None) and iterations < self._max_tool_iterations:
                 iterations += 1
-                messages.append({
+                assistant_turn = {
                     "role": "assistant",
-                    "content": content,
+                    # None, not "": litellm pads "" with placeholder text between thinking and tool_use.
+                    "content": content or None,
                     "tool_calls": [
                         {
                             "id": tc.id,
@@ -593,7 +605,12 @@ class LLMNode(BaseNode):
                         }
                         for tc in msg.tool_calls
                     ],
-                })
+                }
+                # Keeps the model's reasoning across tool turns when thinking is on.
+                thinking_blocks = getattr(msg, "thinking_blocks", None)
+                if isinstance(thinking_blocks, list) and thinking_blocks:
+                    assistant_turn["thinking_blocks"] = thinking_blocks
+                messages.append(assistant_turn)
                 for tc in msg.tool_calls:
                     tools_called.append(tc.function.name)
                     try:

@@ -62,3 +62,30 @@ async def test_cache_miss_calls_litellm_and_stores():
     assert stored_key == "miss_key"
     stored = json.loads(stored_json)
     assert stored.get("score") == 1
+
+
+def _node_with_cache(tier_effort, role_effort=None):
+    cache = MagicMock()
+    cache._make_key = MagicMock(return_value="k")
+    cache.get = AsyncMock(return_value='{"answer": "cached"}')
+    stage = make_stage()
+    stage.role.reasoning_effort = role_effort
+    tiers = ModelTiers(small=ModelTierConfig(
+        provider="anthropic", model="claude-opus-5-5", reasoning_effort=tier_effort
+    ))
+    return LLMNode(stage=stage, tiers=tiers, cache=cache), cache
+
+
+async def test_cache_key_includes_resolved_reasoning_effort():
+    keys = []
+    for tier_effort, role_effort in [("high", None), ("low", None), ("high", "max")]:
+        node, cache = _node_with_cache(tier_effort, role_effort)
+        await node.execute({"question": "what?"})
+        keys.append(cache._make_key.call_args[0][2].get("reasoning_effort"))
+    assert keys == ["high", "low", "max"]
+
+
+async def test_cache_key_omits_reasoning_effort_when_unset():
+    node, cache = _node_with_cache(None)
+    await node.execute({"question": "what?"})
+    assert "reasoning_effort" not in cache._make_key.call_args[0][2]
