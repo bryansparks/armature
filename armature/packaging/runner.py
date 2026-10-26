@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from ruamel.yaml import YAML
+from armature.events.env import child_env
 
 from armature.packaging.manifest import PackageManifest, SecretsFile, Destinations, ResultsManifest
 from armature.packaging.verifier import CompletenessVerifier
@@ -157,7 +158,7 @@ class PackageRunner:
             venv_dir.mkdir(parents=True, exist_ok=True)
             subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req),
                             "--target", str(venv_dir), "--quiet"],
-                           check=True, capture_output=True)
+                           check=True, capture_output=True, env=child_env())
             for p in (str(venv_dir),):
                 if p not in sys.path:
                     sys.path.insert(0, p)

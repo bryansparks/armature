@@ -2,10 +2,13 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from armature.nodes.base import BaseNode
 from armature.spec.models import Stage
 from armature.spec.loader import load_child_spec
+
+if TYPE_CHECKING:
+    from armature.events import Emitter
 
 
 async def litellm_completion(**kwargs) -> Any:
@@ -68,11 +71,19 @@ async def _consensus_judge(results: list[dict[str, Any]], stage: Stage) -> dict[
 
 
 class SubagentNode(BaseNode):
-    def __init__(self, stage: Stage, session_dir: Path | None = None):
+    def __init__(
+        self,
+        stage: Stage,
+        session_dir: Path | None = None,
+        emitter: Emitter | None = None,
+        parent_step: str | None = None,
+    ):
         if not stage.subagent_spec:
             raise ValueError(f"Stage '{stage.id}' has no subagent_spec")
         self._stage = stage
         self._session_dir = session_dir
+        self._emitter = emitter
+        self._parent_step = parent_step
         # Child-run spend is observed spend of the parent run too (design
         # §2.3): every child's metered cost accumulates here, and the engine
         # adds it to the run's total after execution — the child's own
@@ -111,6 +122,8 @@ class SubagentNode(BaseNode):
             # only, so multiline stage outputs can't break the child's YAML.
             spec=load_child_spec(spec_path, vars=child_context),
             session_dir=child_dir,
+            emitter=self._emitter,
+            parent_step=self._parent_step,
         )
         result = await child.run(child_context)
         self.total_cost_usd += getattr(child, "total_cost_usd", 0.0)

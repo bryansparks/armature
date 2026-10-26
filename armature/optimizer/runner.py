@@ -6,6 +6,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
+from armature.events.env import child_env
 from pydantic import BaseModel
 from armature.state.diagnostics import DiagnosticAnalyzer
 from armature.state.improvement_store import ImprovementRecord, ImprovementStore
@@ -268,6 +269,7 @@ class OptimizerRunner:
                 ["patch", "--backup", str(spec_path), str(patch_file)],
                 capture_output=True,
                 text=True,
+                env=child_env(),
             )
             if proc.returncode == 0:
                 return True, f"Patched {spec_path.name} (backup at {spec_path.name}.orig)"

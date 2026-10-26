@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
+from armature.events.env import child_env
 
 if TYPE_CHECKING:
     from armature.registry.registry import ToolRegistry
@@ -102,6 +103,7 @@ class DockerSandboxProvider:
                 capture_output=True,
                 text=True,
                 timeout=sandbox.timeout_s,
+                env=child_env(),
             )
             return {
                 "stdout": proc.stdout,

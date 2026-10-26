@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any
-from jinja2 import Environment, BaseLoader
+from armature.runtime.templating import text_env
 from armature.nodes.base import BaseNode
 from armature.spec.models import Stage
 
@@ -12,8 +12,7 @@ class HumanGateNode(BaseNode):
     async def execute(self, context: dict[str, Any]) -> Any:
         message = self._stage.present or "Review required."
         if "{{" in message:
-            env = Environment(loader=BaseLoader(), variable_start_string="{{", variable_end_string="}}")
-            message = env.from_string(message).render(**context)
+            message = text_env().from_string(message).render(**context)
 
         print(f"\n{'='*60}")
         print(f"HUMAN APPROVAL REQUIRED")

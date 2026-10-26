@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from armature.events.env import child_env
 
 
 class DockerRunnerLauncher:
@@ -16,13 +17,13 @@ class DockerRunnerLauncher:
             raise RuntimeError("docker not found on PATH")
         try:
             subprocess.run(["docker", "image", "inspect", self._image],
-                           capture_output=True, timeout=30, check=True)
+                           capture_output=True, timeout=30, check=True, env=child_env())
             return
         except Exception:
             pass
         ctx = dockerfile.parent
         subprocess.run(["docker", "build", "-t", self._image, "-f", str(dockerfile), str(ctx)],
-                       check=True)
+                       check=True, env=child_env())
 
     def build_command(self, *, pkg: Path, results: Path, profile: Path | None,
                       inputs_override: Path | None, include_trace: bool) -> list[str]:
@@ -79,4 +80,4 @@ class DockerRunnerLauncher:
                                  inputs_override=inputs_override, include_trace=include_trace)
         if self._runner is not None:
             return int(self._runner(cmd))
-        return subprocess.run(cmd).returncode
+        return subprocess.run(cmd, env=child_env()).returncode

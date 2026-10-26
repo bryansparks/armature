@@ -1,0 +1,15 @@
+name: hello-pack
+description: Greet someone with the hello pack, then wait a moment.
+contracts:
+  inputs:
+    - name: name
+stages:
+  - id: greet
+    adapter: hello/greet
+    with:
+      name: "{{ name }}"
+  - id: pause
+    adapter: hello/wait
+    depends_on: [greet]
+    with:
+      seconds: 1

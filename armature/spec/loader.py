@@ -1,10 +1,11 @@
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 import jinja2
-from jinja2 import Environment, BaseLoader
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 from pydantic import ValidationError
 from ruamel.yaml import YAML, YAMLError
+from armature.runtime.templating import text_env
 from armature.spec.models import CompiledAgent, HarnessSpec, SkillDef, ToolSafetyRule
 
 _log = logging.getLogger(__name__)
@@ -42,40 +43,82 @@ class _KeepUndefined(jinja2.Undefined):
         return 0
 
 
-def _template_env() -> Environment:
+def _template_env() -> ImmutableSandboxedEnvironment:
     """The shared load-time Jinja2 environment: preserves {{ expr }} for any
     variable not in vars (_KeepUndefined) so runtime placeholders survive."""
-    return Environment(
-        loader=BaseLoader(),
-        variable_start_string="{{",
-        variable_end_string="}}",
-        undefined=_KeepUndefined,
-    )
+    return text_env(_KeepUndefined)
 
 
-def load_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
+STORED_WORKFLOW_HEADER = "# armature: stored-workflow"
+_MARKERS = ("{{", "{%", "{#")
+
+
+def _scalar_markers(data: Any, counts: dict[str, int]) -> None:
+    if isinstance(data, dict):
+        for key, val in data.items():
+            if isinstance(key, str) and any(m in key for m in _MARKERS):
+                raise ValueError(f"TEMPLATE_OUTSIDE_SCALAR: mapping key {key!r} holds a template")
+            _scalar_markers(val, counts)
+    elif isinstance(data, list):
+        for val in data:
+            _scalar_markers(val, counts)
+    elif isinstance(data, str):
+        for marker in _MARKERS:
+            counts[marker] += data.count(marker)
+
+
+def _load_stored(raw: str, vars: dict | None) -> Any:
+    """Parse first, then render vars into string scalars only, so no template can become YAML structure."""
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(raw)
+    counts = dict.fromkeys(_MARKERS, 0)
+    _scalar_markers(data, counts)
+    for marker in _MARKERS:
+        if raw.count(marker) > counts[marker]:
+            raise ValueError(
+                f"TEMPLATE_OUTSIDE_SCALAR: a stored workflow may hold {marker!r} only inside string values, "
+                "never in a comment, key, or YAML syntax"
+            )
+    if vars:
+        _render_string_scalars(data, _template_env(), vars)
+    return data
+
+
+def load_spec(path: Path | str, vars: dict | None = None, *,
+              render: Literal["text", "scalars"] | None = None) -> HarnessSpec:
+    """Load a spec, rendering ``vars`` into it.
+
+    ``render="text"`` renders the whole file before parsing, as plain specs
+    always have. ``render="scalars"``, or a first line of exactly
+    ``# armature: stored-workflow``, parses first and renders string values only.
+    """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Spec not found: {path}")
 
     raw = path.read_text(encoding="utf-8")
+    if render is None:
+        render = "scalars" if raw.split("\n", 1)[0].rstrip("\r") == STORED_WORKFLOW_HEADER else "text"
 
-    if vars:
-        template = _template_env().from_string(raw)
-        raw = template.render(**(vars or {}))
-
-    yaml = YAML()
-    yaml.preserve_quotes = True
-    data = yaml.load(raw)
+    if render == "scalars":
+        data = _load_stored(raw, vars)
+    else:
+        if vars:
+            raw = _template_env().from_string(raw).render(**vars)
+        yaml = YAML()
+        yaml.preserve_quotes = True
+        data = yaml.load(raw)
 
     spec = HarnessSpec.model_validate(data)
+    _resolve_pack_adapters(spec)
     _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
     _resolve_subagent_specs(spec, path.parent)
     return spec
 
 
-def _render_string_scalars(data: Any, env: Environment, vars: dict) -> None:
+def _render_string_scalars(data: Any, env: ImmutableSandboxedEnvironment, vars: dict) -> None:
     """Render carried context into string scalars of an already-parsed spec tree.
 
     Values only — dict keys and YAML structure are untouched, so a multiline or
@@ -143,10 +186,31 @@ def load_child_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
             f"structural templating from carried context is not supported for "
             f"child specs (render values inside string fields instead): {exc}"
         ) from exc
+    _resolve_pack_adapters(spec)
     _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
     _resolve_subagent_specs(spec, path.parent)
     return spec
+
+
+def _resolve_pack_adapters(spec: HarnessSpec, catalog=None) -> None:
+    """Add each installed pack adapter a stage names as ``pack/adapter`` to spec.adapters.
+
+    An adapter the spec defines itself wins. A ref no pack provides is left for
+    validate_spec to report as UNKNOWN_PACK_ADAPTER.
+    """
+    refs = sorted({s.adapter for s in spec.stages
+                   if s.adapter and "/" in s.adapter and s.adapter not in spec.adapters})
+    if not refs:
+        return
+    if catalog is None:
+        from armature.packs import catalog as load_catalog
+        catalog = load_catalog()
+    for ref in refs:
+        found = catalog.resolve(ref)
+        if found is not None:
+            pack, adapter = found
+            spec.adapters[ref] = adapter.to_adapter(ref, pack.dir)
 
 
 def resolve_spec_ref(ref: str, base_dir: Path) -> Path | None:

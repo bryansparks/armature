@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from ruamel.yaml import YAML
 
+from armature.events.env import child_env
 from armature.packaging.manifest import PackageManifest, SecretsFile, Destinations
 from armature.packaging.integrity import write_manifest_sha256
 
@@ -172,7 +173,7 @@ class CompletenessVerifier:
                                detail=f"docker not on PATH; image '{image}' will pull at run")
         try:
             subprocess.run(["docker", "image", "inspect", image],
-                           capture_output=True, timeout=30, check=True)
+                           capture_output=True, timeout=30, check=True, env=child_env())
             return CheckResult(check="SANDBOX_IMAGE", status="pass", detail=f"image '{image}' present")
         except Exception:
             return CheckResult(check="SANDBOX_IMAGE", status="warn",

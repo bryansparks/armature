@@ -19,6 +19,8 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from armature.events.env import child_env
+
 console = Console()
 
 # ── subsystem metadata ─────────────────────────────────────────────────────────
@@ -161,7 +163,7 @@ def _run_subsystem_tests(s: Subsystem, root: Path) -> tuple[int, int]:
 
     result = subprocess.run(
         [sys.executable, "-m", "pytest", *paths, "-q", "--tb=no", "--no-header", "-p", "no:warnings"],
-        capture_output=True, text=True, cwd=str(root),
+        capture_output=True, text=True, cwd=str(root), env=child_env(),
     )
     passed = failed = 0
     for line in result.stdout.splitlines():
