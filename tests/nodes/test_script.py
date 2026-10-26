@@ -224,6 +224,6 @@ async def test_script_node_drains_large_output_on_both_streams():
 
 
 async def test_script_node_replaces_invalid_utf8():
-    node = ScriptNode(adapter=_adapter("printf '\\xff'"))
+    node = ScriptNode(adapter=_adapter("printf '\\377'"))
     result = await node.execute({})
     assert "\ufffd" in result["stdout"]
