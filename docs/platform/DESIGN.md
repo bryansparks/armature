@@ -180,7 +180,7 @@ A run resolves `pack/adapter` refs on the host that runs it, from
 `packs_dir`, so every runner host needs the same packs installed.
 
 armature-ops becomes three packs: `github-review` (PR role review, incremental
-review, discuss, fix loop, and daily review), `jira-work`, and `mobile-port`.
+review, discuss, fix loop, and daily review), `dev-work`, and `mobile-port`.
 Its scripts move with little change, because packs still run through
 `ScriptNode`.
 

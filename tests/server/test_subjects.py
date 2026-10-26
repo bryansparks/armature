@@ -77,7 +77,7 @@ def seeded(engine, keyring):
         _run(conn, own, "pr-merged", at(4), PR, cost=9,
              trigger_ref={**ref, "merge": {"merged_by": "dev", "transitioned": True}})
         _run(conn, own, "code-review", at(5), OTHER_PR, status="running", summary={"title": "Second PR"})
-        _run(conn, own, "jira-work", at(6), ISSUE, status="failed", cost=2, summary={"title": "Add the field"})
+        _run(conn, own, "dev-work", at(6), ISSUE, status="failed", cost=2, summary={"title": "Add the field"})
         _run(conn, own, "code-review", at(7), None)
         _run(conn, other, "code-review", at(8), FOREIGN, summary={"title": "Rival"})
         _finding(conn, first, "k1", "keep", title="Leak", path="a.py", line=4)
@@ -198,6 +198,10 @@ def test_hidden_workflows_change_counts_never_access(engine, keyring, seeded):
     detail = client.get(_path(PR)).json()["subject"]
     assert [r["workflow"] for r in detail["runs"]] == ["code-review", "pr-fix", "code-review", "pr-merged"]
     assert all(r["cost_usd"] is None for r in detail["runs"])
+
+
+def test_dev_work_and_its_old_name_are_work():
+    assert subjects.kind_of("dev-work") == subjects.kind_of("jira-work") == "work"
 
 
 def test_detail_has_runs_links_and_finding_history(engine, keyring, seeded):

@@ -14,7 +14,8 @@ from armature.server.stats import REVIEW_WORKFLOWS
 FIX_WORKFLOWS = ("pr-fix",)
 MERGE_WORKFLOWS = ("pr-merged",)
 PORT_WORKFLOWS = ("ios-port",)
-WORK_WORKFLOWS = ("jira-work",)
+# jira-work is dev-work's old name, kept so its history still reads as work.
+WORK_WORKFLOWS = ("dev-work", "jira-work")
 RUNS_MAX = 500
 FINDINGS_MAX = 2000
 SEARCH_BATCHES = 10
