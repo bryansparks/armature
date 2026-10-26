@@ -49,6 +49,16 @@ def test_tier_in_output():
     assert "claude-haiku-4-5-20251001" in yaml
 
 
+def test_tier_reasoning_effort_in_output(tmp_path):
+    from armature.spec.loader import load_spec
+    tiers = [{"tier": "small", "provider": "anthropic", "model": "claude-opus-5-5",
+              "api_base": "", "api_key_env": "", "temperature": "", "max_tokens": "",
+              "reasoning_effort": "high"}]
+    spec_file = tmp_path / "wf.yml"
+    spec_file.write_text(generate_yaml(**_minimal_args(tiers=tiers)))
+    assert load_spec(spec_file).model_tiers.small.reasoning_effort == "high"
+
+
 def test_stage_id_in_output():
     yaml = generate_yaml(**_minimal_args())
     assert "- id: worker" in yaml

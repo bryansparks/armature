@@ -483,7 +483,7 @@ Armature is the **execution layer** — the first component in a larger system d
 | **Stage** | One unit of work: an LLM call, script, gate, direct tool call, or subagent |
 | **DAG** | Stages declare `depends_on`; the engine resolves execution order |
 | **Context** | Shared dict that accumulates stage outputs; every stage sees all upstream results |
-| **Model tiers** | Named model slots (`tiny`, `small`, `medium`, `large`, `frontier`); the using app defines what each name maps to (provider, model, temperature, max_tokens) |
+| **Model tiers** | Named model slots (`tiny`, `small`, `medium`, `large`, `frontier`); the using app defines what each name maps to (provider, model, temperature, max_tokens, reasoning_effort) |
 | **Role type defaults** | Maps role types to tiers automatically (`worker → small`, `judge → frontier`, etc.); stages can omit `model_tier` and inherit from this mapping |
 | **Native tool calling** | Stages declare `role.tools` to scope which registry tools they can call; the engine runs a ReAct dispatch loop — tool calls returned by the model are executed and results fed back until a final response is produced |
 | **Direct tool call** | A `tool_call` stage invokes a registered tool without an LLM — deterministic, zero-latency, no JSON hallucination. Args are Jinja2-rendered against context. |

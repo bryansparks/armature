@@ -676,6 +676,8 @@ def generate_yaml(
             w(f"    temperature: {t['temperature']}  # 0.0–1.0; lower = more deterministic")
         if t["max_tokens"]:
             w(f"    max_tokens: {t['max_tokens']}")
+        if t.get("reasoning_effort"):
+            w(f"    reasoning_effort: {t['reasoning_effort']}  # low | medium | high | xhigh | max")
     w()
 
     # ── Role type defaults ────────────────────────────────────────────────────
