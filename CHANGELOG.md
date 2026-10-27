@@ -10,6 +10,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workflow kind.** Each workflow has a `kind` (review, fix, merge, port,
+  work, or other) that decides how its runs count on subject pages and in
+  the Overview's reviews today, so renaming a workflow changes only its
+  label. The new-workflow form and the workflow page set it, the workflows
+  list shows it, and `POST /api/workflows/{id}/kind` changes it with a
+  `workflow.kind` audit row. Migration 0009 sets the kind of the workflows
+  the server used to classify by name and links runs recorded only by
+  workflow name to the workflow their name resolves to in their own team.
+  Creating a workflow links the earlier runs that resolve to it, and
+  `armature server runs relink --from OLD --to ID-OR-NAME [--dry-run]` links
+  the runs of a renamed workflow.
 - **Run actions and a Status page.** The server config file (never the UI)
   can list `actions`, each with an `id`, `label`, the `workflows` and
   `statuses` it applies to, a `min_role` (contributor by default),

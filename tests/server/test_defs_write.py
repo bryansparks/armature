@@ -937,3 +937,179 @@ def test_a_lead_edits_only_the_aliases_of_an_instance_scoped_provider(world):
         assert defs.provider_credential(conn, world.keyring, row) == "instance"
     listed = lead.get(f"/api/teams/{world.own.team}/providers").json()["providers"]
     assert [p["configured"] for p in listed] == [True]
+
+
+def test_create_takes_a_workflow_kind_and_defaults_to_other(world):
+    admin = _client(world, "admin")
+    base = {"scope_kind": "team", "scope_id": world.own.team, "body": GOOD}
+    made = admin.post("/api/workflows", json={**base, "name": "fixer", "kind": "fix"})
+    assert made.status_code == 201, made.text
+    assert made.json()["workflow"]["kind"] == "fix"
+    plain = admin.post("/api/workflows", json={**base, "name": "plain"}).json()["workflow"]
+    assert plain["kind"] == "other"
+    assert admin.post("/api/workflows", json={**base, "name": "bad", "kind": "role"}).status_code == 400
+    listed = {w["name"]: w["kind"] for w in admin.get("/api/workflows", params={"team": world.own.team})
+              .json()["workflows"]}
+    assert listed["fixer"] == "fix" and listed["plain"] == "other"
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_set_kind_matrix(world, role):
+    client = _client(world, role, step_up=False)
+    for where in ("instance", "own_team", "own_project", "other_team", "other_project"):
+        object_id = _existing(world, defs.WORKFLOW, where)
+        response = client.post(f"/api/workflows/{object_id}/kind", json={"kind": "review"})
+        _expect(response, WRITE[role][where])
+        if response.status_code == 200:
+            assert response.json()["workflow"]["kind"] == "review"
+
+
+def test_set_kind_route_refusals_and_read_back(world):
+    lead = _client(world, "team_lead")
+    object_id = world.own.wf["team"]
+    assert lead.post(f"/api/workflows/{new_id()}/kind", json={"kind": "fix"}).status_code == 404
+    assert lead.post(f"/api/workflows/{object_id}/kind", json={}).status_code == 400
+    assert lead.post(f"/api/workflows/{object_id}/kind", json={"kind": None}).status_code == 400
+    assert lead.post(f"/api/workflows/{object_id}/kind", json={"kind": "nope"}).status_code == 400
+    assert lead.post(f"/api/workflows/{world.other.wf['team']}/kind", json={"kind": "nope"}).status_code == 404
+    assert lead.post(f"/api/workflows/{object_id}/kind", json={"kind": "fix"}).status_code == 200
+    assert lead.get(f"/api/workflows/{object_id}").json()["workflow"]["kind"] == "fix"
+    with world.engine.connect() as conn:
+        assert conn.execute(select(workflows.c.kind).where(workflows.c.id == object_id)).scalar() == "fix"
+
+
+def test_set_kind_is_audited_without_a_new_version(world):
+    lead = _client(world, "team_lead")
+    object_id = world.own.wf["team"]
+    changed = lead.post(f"/api/workflows/{object_id}/kind", json={"kind": "merge"})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["workflow"]["current_version"] == 1
+    assert lead.post(f"/api/workflows/{object_id}/kind", json={"kind": "merge"}).status_code == 200
+    with world.engine.connect() as conn:
+        rows = conn.execute(select(audit).where(audit.c.target_id == object_id)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.action, row.actor_id, row.team_id, row.target_kind) == (
+        "workflow.kind", world.users["team_lead"], world.own.team, "workflow")
+    assert row.detail == {"scope": world.own.team, "scope_kind": "team", "name": "review", "from": "other",
+                          "to": "merge"}
+
+
+def test_fork_copies_the_workflow_kind(world):
+    admin = _client(world, "admin")
+    assert admin.post(f"/api/workflows/{world.instance_wf}/kind", json={"kind": "port"}).status_code == 200
+    forked = admin.post(f"/api/workflows/{world.instance_wf}/fork",
+                        json={"scope_kind": "team", "scope_id": world.other.team, "name": "ported"})
+    assert forked.status_code == 201, forked.text
+    assert forked.json()["workflow"]["kind"] == "port"
+
+
+def test_a_workflow_kind_never_reads_as_a_document_kind(world):
+    admin = _client(world, "admin")
+    team_id = world.own.wf["team"]
+    assert admin.post(f"/api/workflows/{world.instance_wf}/kind", json={"kind": "review"}).status_code == 200
+    assert admin.post(f"/api/workflows/{team_id}/kind", json={"kind": "fix"}).status_code == 200
+    detail = admin.get(f"/api/workflows/{team_id}").json()["workflow"]
+    assert {e["scope_name"] for e in detail["effective_for"]} == {"team-own", "sib-own"}
+    listed = {w["id"]: w for w in admin.get("/api/workflows", params={"team": world.own.team}).json()["workflows"]}
+    assert listed[world.instance_wf]["effective_for"] == []
+    assert {e["scope_name"] for e in listed[team_id]["effective_for"]} == {"team-own", "sib-own"}
+    validated = admin.post("/api/workflows/validate", json={"body": GOOD, "workflow_id": team_id})
+    assert validated.status_code == 200 and validated.json()["validation"]["errors"] == []
+    edited = GOOD.replace("number: 3", "number: 4")
+    assert admin.post(f"/api/workflows/{team_id}", json={"body": edited, "base_version": 1}).status_code == 200
+    rolled = admin.post(f"/api/workflows/{team_id}/rollback", json={"version": 1})
+    assert rolled.status_code == 200, rolled.text
+    assert rolled.json()["workflow"]["kind"] == "fix"
+
+
+def _named_run(conn, world, team, project, name, workflow_id=None):
+    run_id = new_id()
+    conn.execute(insert(runs).values(id=run_id, team_id=team, project_id=project, workflow_id=workflow_id,
+                                     workflow_name=name, status="succeeded", started_at=world.clock()))
+    return run_id
+
+
+def _links(world):
+    with world.engine.connect() as conn:
+        return dict(conn.execute(select(runs.c.id, runs.c.workflow_id)).all())
+
+
+def _relink_audits(world):
+    with world.engine.connect() as conn:
+        return [r.detail for r in conn.execute(select(audit.c.detail).where(audit.c.action == "workflow.relink"))]
+
+
+def test_relink_to_a_team_workflow_leaves_projects_with_their_own_copy(world):
+    with world.engine.begin() as conn:
+        team = _named_run(conn, world, world.own.team, None, "old-review")
+        sibling = _named_run(conn, world, world.own.team, world.own.sibling, "old-review")
+        own_copy = _named_run(conn, world, world.own.team, world.own.project, "old-review")
+        other = _named_run(conn, world, world.other.team, None, "old-review")
+        cased = _named_run(conn, world, world.own.team, None, "Old-Review")
+        linked = _named_run(conn, world, world.own.team, None, "old-review", world.instance_wf)
+        target = defs.get_row(conn, defs.WORKFLOW, world.own.wf["team"])
+        assert defs.relink(conn, "old-review", target, dry_run=True) == 2
+    assert all(workflow_id is None for run_id, workflow_id in _links(world).items() if run_id != linked)
+    assert _relink_audits(world) == []
+    with world.engine.begin() as conn:
+        assert defs.relink(conn, "old-review", target, actor_id="cli") == 2
+    links = _links(world)
+    assert links[team] == links[sibling] == world.own.wf["team"]
+    assert links[own_copy] is None and links[other] is None and links[cased] is None
+    assert links[linked] == world.instance_wf
+    [detail] = _relink_audits(world)
+    assert detail["from_name"] == "old-review" and detail["runs"] == 2
+
+
+def test_relink_to_an_instance_workflow_leaves_teams_with_their_own_copy(world):
+    third = new_id()
+    with world.engine.begin() as conn:
+        conn.execute(insert(teams).values(id=third, name="team-third", created_at=world.clock()))
+        bare = _named_run(conn, world, third, None, "old-review")
+        own = _named_run(conn, world, world.own.team, None, "old-review")
+        other = _named_run(conn, world, world.other.team, None, "old-review")
+        target = defs.get_row(conn, defs.WORKFLOW, world.instance_wf)
+        assert defs.relink(conn, "old-review", target) == 1
+    links = _links(world)
+    assert links[bare] == world.instance_wf and links[own] is None and links[other] is None
+
+
+def test_relink_to_a_project_workflow_stays_in_the_project(world):
+    with world.engine.begin() as conn:
+        inside = _named_run(conn, world, world.own.team, world.own.project, "old-review")
+        sibling = _named_run(conn, world, world.own.team, world.own.sibling, "old-review")
+        team = _named_run(conn, world, world.own.team, None, "old-review")
+        target = defs.get_row(conn, defs.WORKFLOW, world.own.wf["project"])
+        assert defs.relink(conn, "old-review", target) == 1
+    links = _links(world)
+    assert links[inside] == world.own.wf["project"] and links[sibling] is None and links[team] is None
+
+
+def test_relink_updates_in_chunks(world, monkeypatch):
+    monkeypatch.setattr(defs, "RELINK_CHUNK", 1)
+    with world.engine.begin() as conn:
+        made = [_named_run(conn, world, world.own.team, None, "old-review") for _ in range(3)]
+        target = defs.get_row(conn, defs.WORKFLOW, world.own.wf["team"])
+        assert defs.relink(conn, "old-review", target) == 3
+    links = _links(world)
+    assert all(links[run_id] == world.own.wf["team"] for run_id in made)
+
+
+def test_create_links_earlier_runs_of_its_name_in_its_scope(world):
+    with world.engine.begin() as conn:
+        team = _named_run(conn, world, world.own.team, None, "nightly")
+        project = _named_run(conn, world, world.own.team, world.own.project, "nightly")
+        other = _named_run(conn, world, world.other.team, None, "nightly")
+    lead = _client(world, "team_lead")
+    made = lead.post("/api/workflows", json={"scope_kind": "team", "scope_id": world.own.team, "name": "nightly",
+                                             "body": GOOD})
+    assert made.status_code == 201, made.text
+    workflow_id = made.json()["workflow"]["id"]
+    links = _links(world)
+    assert links[team] == links[project] == workflow_id and links[other] is None
+    [detail] = _relink_audits(world)
+    assert detail["runs"] == 2
+    assert lead.post("/api/workflows", json={"scope_kind": "team", "scope_id": world.own.team, "name": "quiet",
+                                             "body": GOOD}).status_code == 201
+    assert len(_relink_audits(world)) == 1

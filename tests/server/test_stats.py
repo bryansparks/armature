@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, select, update
 
 from armature.server import display, stats
 from armature.server.db import new_id
@@ -33,8 +33,9 @@ def _team(conn, name):
 def _run(conn, team_id, workflow, status, started, finished=None, cost=None, trigger_ref=None, error=None,
          summary=None):
     run_id = new_id()
-    conn.execute(insert(runs).values(id=run_id, team_id=team_id, workflow_name=workflow, status=status,
-                                     started_at=started, finished_at=finished,
+    workflow_id = conn.execute(select(workflows.c.id).where(workflows.c.name == workflow)).scalar()
+    conn.execute(insert(runs).values(id=run_id, team_id=team_id, workflow_id=workflow_id, workflow_name=workflow,
+                                     status=status, started_at=started, finished_at=finished,
                                      cost_usd=Decimal(str(cost)) if cost is not None else None,
                                      trigger_ref=trigger_ref, error=error, summary=summary))
     return run_id
@@ -53,6 +54,8 @@ def seeded(engine, keyring):
     with engine.begin() as conn:
         own, other = _team(conn, "own"), _team(conn, "other")
         conn.execute(insert(workflows).values(id=new_id(), team_id=own, name="unused", current_version=1,
+                                              created_at=NOW, updated_at=NOW))
+        conn.execute(insert(workflows).values(id=new_id(), name="code-review", kind="review", current_version=1,
                                               created_at=NOW, updated_at=NOW))
         review = _run(conn, own, "code-review", "succeeded", at(23, 7), at(23, 7, 10), 1.5, {},
                       summary={"verdict": "approve"})
@@ -121,6 +124,16 @@ def test_overview_counts_only_the_viewers_teams(engine, keyring, seeded):
     assert client.get("/api/overview", params={"team": seeded["other"]}).status_code == 404
     assert client.get("/api/overview", params={"team": "missing"}).status_code == 404
 
+
+def test_reviews_today_count_by_workflow_kind_not_name(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(workflows).where(workflows.c.name == "code-review").values(name="pr-check"))
+        conn.execute(insert(workflows).values(id=new_id(), name="jira-work", kind="review", current_version=1,
+                                              created_at=NOW, updated_at=NOW))
+        _run(conn, seeded["own"], "jira-work", "succeeded", at(23, 10), at(23, 10, 1))
+        _run(conn, seeded["own"], "code-review", "succeeded", at(23, 10, 5), at(23, 10, 6))
+    client, _ = _client(engine, keyring, seeded, "viewer")
+    assert client.get("/api/overview").json()["reviews_today"] == 2
 
 def test_admin_sees_every_team_and_can_narrow(engine, keyring, seeded):
     client, _ = _client(engine, keyring, seeded, "admin")

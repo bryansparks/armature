@@ -1,4 +1,4 @@
-"""`armature server` commands: init, migrate, create-admin, run, export, and pack."""
+"""`armature server` commands: init, migrate, create-admin, run, export, pack, and runs."""
 from __future__ import annotations
 
 import getpass
@@ -11,6 +11,8 @@ server_app = typer.Typer(name="server", help="Run and administer the Armature se
 
 pack_app = typer.Typer(name="pack", help="Install and remove workflow packs on this host", no_args_is_help=True)
 server_app.add_typer(pack_app, name="pack")
+runs_app = typer.Typer(name="runs", help="Maintain recorded runs", no_args_is_help=True)
+server_app.add_typer(runs_app, name="runs")
 
 ConfigOption = typer.Option(None, "--config", help="Server config file (default $ARMATURE_SERVER_CONFIG "
                                                    "or ~/.armature/server.yaml)")
@@ -291,3 +293,56 @@ def pack_remove(
     finally:
         engine.dispose()
     typer.echo(f"Removed {name}{f' {version}' if version else ''}.")
+
+
+def _scope_text(conn, row) -> str:
+    from sqlalchemy import select
+
+    from armature.server.db.schema import projects, teams
+    if row.project_id is not None:
+        return f"project {conn.execute(select(projects.c.name).where(projects.c.id == row.project_id)).scalar()}"
+    if row.team_id is not None:
+        team = conn.execute(select(teams.c.slug, teams.c.name).where(teams.c.id == row.team_id)).first()
+        return f"team {team.slug or team.name}"
+    return "instance"
+
+
+def _relink_target(conn, wanted: str):
+    from sqlalchemy import or_, select
+
+    from armature.server.db.schema import workflows
+    rows = [r for r in conn.execute(select(workflows).where(or_(workflows.c.id == wanted, workflows.c.name == wanted)))
+            if wanted in (r.id, r.name)]
+    by_id = [r for r in rows if r.id == wanted]
+    if by_id:
+        return by_id[0]
+    if not rows:
+        _fail(f"No workflow has the id or name {wanted}.")
+    if len(rows) > 1:
+        listed = "\n".join(f"  {r.id}  {_scope_text(conn, r)}" for r in rows)
+        _fail(f"{len(rows)} workflows are named {wanted}. Pass one of these ids to --to:\n{listed}")
+    return rows[0]
+
+
+@runs_app.command("relink")
+def runs_relink(
+    old_name: str = typer.Option(..., "--from", help="The workflow name the runs were recorded under"),
+    wanted: str = typer.Option(..., "--to", help="The workflow to link them to, by id or by a unique name"),
+    config: Path | None = ConfigOption,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count the runs without changing them"),
+):
+    """Link runs recorded under an old name, and linked to no workflow, to the workflow they now resolve to."""
+    from armature.server import defs
+    from armature.server.db import make_engine
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.begin() as conn:
+            row = _relink_target(conn, wanted)
+            count = defs.relink(conn, old_name, row, dry_run=dry_run)
+            where = _scope_text(conn, row)
+    finally:
+        engine.dispose()
+    verb = "Would link" if dry_run else "Linked"
+    typer.echo(f"{verb} {count} run{'' if count == 1 else 's'} of {old_name} to {row.name} ({where}).")

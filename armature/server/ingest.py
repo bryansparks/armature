@@ -76,6 +76,7 @@ STEP_STATUS = {"step_start": "running", "step_end": "succeeded", "step_failed": 
                "step_skipped": "skipped"}
 SUCCEEDED = frozenset({"succeeded", "success", "ok", "completed", "complete", "done", "passed"})
 CANCELED = frozenset({"canceled", "cancelled"})
+RUN_KIND = func.coalesce(workflows.c.kind, "other")
 
 TRUNCATED = "_truncated"
 UPLOAD = re.compile(r"^[0-9a-f]{16}$")
@@ -264,8 +265,8 @@ def list_row(summary: dict[str, Any]) -> dict[str, Any]:
 
 def run_columns() -> list:
     return [runs.c.id, runs.c.team_id, runs.c.project_id,
-            func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), runs.c.status,
-            func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.trigger_kind,
+            func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), RUN_KIND.label("kind"),
+            runs.c.status, func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.trigger_kind,
             runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.input_tokens, runs.c.output_tokens,
             runs.c.rerun_of, runs.c.cancelled_by, runs.c.error, runs.c.subject, runs.c.summary]
 

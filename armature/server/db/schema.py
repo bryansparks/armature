@@ -41,6 +41,7 @@ metadata = MetaData(naming_convention={
 ROLES = ("admin", "team_lead", "project_lead", "contributor", "viewer")
 PROVIDER_KINDS = ("bedrock", "anthropic", "claude-subscription", "openai-compatible", "ollama")
 DOCUMENT_KINDS = ("role", "prompt", "mission")
+WORKFLOW_KINDS = ("review", "fix", "merge", "port", "work", "other")
 
 INSTANCE_SCOPE = "*"
 
@@ -223,11 +224,13 @@ workflows = Table(
     Column("project_id", String(36), ForeignKey("projects.id")),
     Column("scope", String(36), nullable=False, default=_scope_from_definition),
     Column("name", name_type(191), nullable=False),
+    Column("kind", String(16), nullable=False, default="other", server_default="other"),
     Column("current_version", Integer, nullable=False, default=0),
     _ts("created_at"),
     _ts("updated_at"),
     UniqueConstraint("scope", "name"),
     CheckConstraint(SCOPE_MATCHES_DEFINITION, name="scope"),
+    CheckConstraint(_in("kind", WORKFLOW_KINDS), name="kind"),
 )
 
 documents = Table(

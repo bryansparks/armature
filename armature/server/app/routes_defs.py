@@ -79,6 +79,10 @@ class RollbackBody(BaseModel):
     base_version: StrictInt | None = None
 
 
+class KindBody(BaseModel):
+    kind: str
+
+
 class ParseBody(BaseModel):
     body: str
 
@@ -150,7 +154,7 @@ def _detail(request: Request, session: Session, kind: defs.Kind, object_id: str)
         row = defs.readable_row(conn, kind, object_id, access)
         version, history = _history(conn, kind.object_kind, row.id, row.current_version)
         item = _item(conn, kind, row, access)
-        listed = defs.listing(conn, kind, access, doc_kind=getattr(row, "kind", None))
+        listed = defs.listing(conn, kind, access, doc_kind=defs._doc_kind(kind, row))
         item["effective_for"] = next((entry["effective_for"] for entry in listed if entry["id"] == row.id), [])
     return {kind.object_kind: item, "version": version, "versions": history, "editable": item["editable"]}
 
@@ -180,7 +184,7 @@ def _validate(request: Request, session: Session, kind: defs.Kind, payload: Vali
         if object_id:
             row = defs.readable_row(conn, kind, object_id, access)
             previous = defs.body_of(conn, kind, row.id, row.current_version)
-            doc_kind = getattr(row, "kind", doc_kind)
+            doc_kind = defs._doc_kind(kind, row) or doc_kind
     if kind is defs.WORKFLOW:
         validation = defs.validate_workflow(payload.body, actor=access, previous_body=previous,
                                             catalog=_catalog(request))
@@ -326,6 +330,19 @@ def rollback_workflow(workflow_id: str, payload: RollbackBody, request: Request,
 @router.post("/api/workflows/{workflow_id}/delete")
 def delete_workflow(workflow_id: str, request: Request, session: Session = Depends(signed_in)) -> dict[str, Any]:
     return _delete(request, session, defs.WORKFLOW, workflow_id)
+
+
+@router.post("/api/workflows/{workflow_id}/kind")
+def set_workflow_kind(workflow_id: str, payload: KindBody, request: Request,
+                      session: Session = Depends(signed_in)) -> dict[str, Any]:
+    srv = server(request)
+    with _refusals(), srv.engine.begin() as conn:
+        access = _load_access(conn, session)
+        row = defs.readable_row(conn, defs.WORKFLOW, workflow_id, access)
+        defs.authorize_write(access, defs.row_scope(row))
+        row = defs.set_kind(conn, row, payload.kind, access=access, actor_id=session.user_id, now=srv.now(),
+                            ip=client_ip(request))
+        return {"workflow": _item(conn, defs.WORKFLOW, row, access)}
 
 
 @router.get("/api/documents")

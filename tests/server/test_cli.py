@@ -174,3 +174,54 @@ def test_run_ignores_an_unconfirmed_admin(tmp_path, monkeypatch):
     engine.dispose()
     result = CliRunner().invoke(app, ["server", "run", "--config", str(config)])
     assert result.exit_code == 1 and "No admin exists" in result.output
+
+
+def test_runs_relink_by_id_or_unique_name(tmp_path, monkeypatch):
+    from sqlalchemy import insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import projects, runs, teams, workflows
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    own, other, project = new_id(), new_id(), new_id()
+    check, own_dup, project_dup = new_id(), new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=own, name="own", slug="own", created_at=utcnow()))
+        conn.execute(insert(teams).values(id=other, name="other", slug="other", created_at=utcnow()))
+        conn.execute(insert(projects).values(id=project, team_id=own, name="app", created_at=utcnow()))
+        for workflow_id, team, project_id, name in ((check, own, None, "pr-check"), (own_dup, own, None, "dup"),
+                                                    (project_dup, own, project, "dup")):
+            conn.execute(insert(workflows).values(id=workflow_id, team_id=team, project_id=project_id, name=name,
+                                                  current_version=1, created_at=utcnow(), updated_at=utcnow()))
+        for team, name in ((own, "code-review"), (own, "code-review"), (other, "code-review"), (own, "old-dup")):
+            conn.execute(insert(runs).values(id=new_id(), team_id=team, workflow_name=name, status="succeeded",
+                                             started_at=utcnow()))
+
+    def relink(old, wanted, *extra):
+        return CliRunner().invoke(app, ["server", "runs", "relink", "--config", str(config), "--from", old,
+                                        "--to", wanted, *extra])
+
+    def linked():
+        with engine.connect() as conn:
+            return sorted((r.workflow_name, r.team_id == own, r.workflow_id or "") for r in conn.execute(select(runs)))
+
+    before = linked()
+    dry = relink("code-review", "pr-check", "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert "Would link 2 runs of code-review to pr-check (team own)." in dry.output
+    assert linked() == before
+    done = relink("code-review", "pr-check")
+    assert done.exit_code == 0, done.output
+    assert "Linked 2 runs" in done.output
+    assert linked() == [("code-review", False, ""), ("code-review", True, check), ("code-review", True, check),
+                        ("old-dup", True, "")]
+    ambiguous = relink("old-dup", "dup")
+    assert ambiguous.exit_code == 1
+    assert own_dup in ambiguous.output and project_dup in ambiguous.output
+    assert "team own" in ambiguous.output and "project app" in ambiguous.output
+    by_id = relink("old-dup", own_dup)
+    assert by_id.exit_code == 0 and "Linked 1 run of old-dup to dup (team own)." in by_id.output
+    missing = relink("old-dup", "nothing")
+    assert missing.exit_code == 1 and "No workflow has the id or name nothing" in missing.output
+    engine.dispose()

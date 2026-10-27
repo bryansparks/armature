@@ -4,7 +4,7 @@ from decimal import Decimal
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, select, update
 
 from armature.server import subjects
 from armature.server.db import new_id
@@ -16,6 +16,7 @@ from armature.server.db.schema import (
     runs,
     settings,
     teams,
+    workflows,
 )
 from tests.server.app_support import (
     Clock,
@@ -30,6 +31,7 @@ PR = "acme/app#12"
 OTHER_PR = "acme/app#13"
 ISSUE = "PROJ-7"
 FOREIGN = "rival/app#1"
+KINDS = {"code-review": "review", "pr-fix": "fix", "pr-merged": "merge", "dev-work": "work"}
 
 
 def at(hour: int, minute: int = 0) -> datetime:
@@ -39,8 +41,9 @@ def at(hour: int, minute: int = 0) -> datetime:
 def _run(conn, team_id, workflow, started, subject, *, status="succeeded", cost=None, summary=None,
          trigger_ref=None, project_id=None):
     run_id = new_id()
-    conn.execute(insert(runs).values(id=run_id, team_id=team_id, project_id=project_id, workflow_name=workflow,
-                                     status=status, started_at=started, finished_at=started,
+    workflow_id = conn.execute(select(workflows.c.id).where(workflows.c.name == workflow)).scalar()
+    conn.execute(insert(runs).values(id=run_id, team_id=team_id, project_id=project_id, workflow_id=workflow_id,
+                                     workflow_name=workflow, status=status, started_at=started, finished_at=started,
                                      cost_usd=Decimal(str(cost)) if cost is not None else None, subject=subject,
                                      summary=summary, trigger_ref=trigger_ref))
     return run_id
@@ -58,6 +61,9 @@ def seeded(engine, keyring):
         own, other = new_id(), new_id()
         conn.execute(insert(teams).values(id=own, name="own", created_at=NOW))
         conn.execute(insert(teams).values(id=other, name="other", created_at=NOW))
+        for name, kind in KINDS.items():
+            conn.execute(insert(workflows).values(id=new_id(), name=name, kind=kind, current_version=1,
+                                                  created_at=NOW, updated_at=NOW))
         project = new_id()
         conn.execute(insert(projects).values(id=project, team_id=own, name="app", created_at=NOW))
         ref = {"repo": "acme/app", "number": 12}
@@ -200,8 +206,25 @@ def test_hidden_workflows_change_counts_never_access(engine, keyring, seeded):
     assert all(r["cost_usd"] is None for r in detail["runs"])
 
 
-def test_dev_work_and_its_old_name_are_work():
-    assert subjects.kind_of("dev-work") == subjects.kind_of("jira-work") == "work"
+def test_a_renamed_workflow_keeps_its_kind(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(workflows).where(workflows.c.name == "code-review").values(name="pr-check"))
+        conn.execute(update(workflows).where(workflows.c.name == "pr-merged").values(name="pr-landed"))
+        conn.execute(update(workflows).where(workflows.c.name == "pr-fix").values(kind="other"))
+    client = _client(engine, keyring, seeded, "viewer")
+    row = next(r for r in client.get("/api/subjects").json()["subjects"] if r["subject"] == PR)
+    assert (row["reviews"], row["fixes"], row["latest_verdict"]) == (2, 0, "Approval Recommended")
+    detail = client.get(_path(PR)).json()["subject"]
+    assert detail["status"] == "merged"
+    assert [(r["workflow"], r["kind"]) for r in detail["runs"]] == [
+        ("pr-check", "review"), ("pr-fix", "other"), ("pr-check", "review"), ("pr-landed", "merge")]
+
+
+def test_a_run_with_no_workflow_row_is_other(engine, keyring, seeded):
+    with engine.begin() as conn:
+        _run(conn, seeded["own"], "jira-work", at(9), "PROJ-8")
+    detail = _client(engine, keyring, seeded, "viewer").get(_path("PROJ-8")).json()["subject"]
+    assert [(r["workflow"], r["kind"]) for r in detail["runs"]] == [("jira-work", "other")]
 
 
 def test_detail_has_runs_links_and_finding_history(engine, keyring, seeded):

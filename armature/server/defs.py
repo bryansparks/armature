@@ -48,6 +48,7 @@ from armature.server.db.schema import (
     DOCUMENT_KINDS,
     INSTANCE_SCOPE,
     PROVIDER_KINDS,
+    WORKFLOW_KINDS,
     documents,
     jobs,
     projects,
@@ -88,6 +89,7 @@ RUNTIME_ADAPTER_FIELDS = ("pack_dir", "params")
 # Its UNSAFE_TEMPLATE findings are skipped too, because _lint covers every string and knows the saved version.
 PACK_REF_CODES = ("UNDEFINED_ADAPTER", "UNKNOWN_PACK_ADAPTER")
 ACTIVE_JOBS = ("queued", "claimed", "running")
+RELINK_CHUNK = 500
 
 # Fields of a stage the form editor reads and writes, with the value that means absent.
 STAGE_FIELDS = {"adapter": None, "depends_on": [], "with": {}, "fan_out": None, "partition_source": None,
@@ -774,6 +776,18 @@ WORKFLOW = Kind("workflow", workflows, "name")
 DOCUMENT = Kind("document", documents, "key")
 
 
+def _doc_kind(kind: Kind, row: Any) -> str | None:
+    return row.kind if kind is DOCUMENT else None
+
+
+def _check_workflow_kind(value: Any) -> str:
+    if value is None:
+        return "other"
+    if value not in WORKFLOW_KINDS:
+        raise DefError(400, f"kind must be one of {', '.join(WORKFLOW_KINDS)}.")
+    return value
+
+
 def _validate(kind: Kind, body: str, *, access: rbac.Access, previous_body: str | None, doc_kind: str | None,
               catalog: Any) -> Validation:
     if kind is WORKFLOW:
@@ -871,15 +885,13 @@ def _name_taken(conn: Connection, kind: Kind, scope: DefScope, name: str, doc_ki
     return conn.execute(select(kind.table.c.id).where(*where)).first() is not None
 
 
-def _insert(conn: Connection, kind: Kind, scope: DefScope, name: str, doc_kind: str | None, body: str,
+def _insert(conn: Connection, kind: Kind, scope: DefScope, name: str, row_kind: str, body: str,
             note: str | None, actor_id: str, now: datetime) -> str:
-    if _name_taken(conn, kind, scope, name, doc_kind):
+    if _name_taken(conn, kind, scope, name, row_kind):
         raise DefError(409, f"That scope already has a {kind.object_kind} named {name}.")
     row_id = new_id()
     values = {"id": row_id, kind.name_col: name, "current_version": 1, "created_at": now, "updated_at": now,
-              **scope.columns()}
-    if kind is DOCUMENT:
-        values["kind"] = doc_kind
+              "kind": row_kind, **scope.columns()}
     conn.execute(insert(kind.table).values(**values))
     _add_version(conn, kind, row_id, 1, body, note, actor_id, now)
     return row_id
@@ -892,12 +904,16 @@ def create(conn: Connection, kind: Kind, *, access: rbac.Access, scope: DefScope
     name, body = _check_name(kind, name), _check_body(body)
     if kind is DOCUMENT and doc_kind not in DOCUMENT_KINDS:
         raise DefError(400, f"kind must be one of {', '.join(DOCUMENT_KINDS)}.")
+    row_kind = doc_kind if kind is DOCUMENT else _check_workflow_kind(doc_kind)
     validation = _validate(kind, body, access=access, previous_body=None, doc_kind=doc_kind, catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
-    row_id = _insert(conn, kind, scope, name, doc_kind, body, _note(kind, body, note), actor_id, now)
+    row_id = _insert(conn, kind, scope, name, row_kind, body, _note(kind, body, note), actor_id, now)
     _audit(conn, kind, "create", row_id, scope, actor_id, ip, name=name, version=1)
-    return get_row(conn, kind, row_id), validation
+    row = get_row(conn, kind, row_id)
+    if kind is WORKFLOW:
+        relink(conn, name, row, actor_id=actor_id)
+    return row, validation
 
 
 def _advance(conn: Connection, kind: Kind, row: Any, base: int, body: str, note: str | None, actor_id: str,
@@ -922,7 +938,7 @@ def save(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, body: A
         raise DefError(409, "conflict", current_version=row.current_version)
     previous = body_of(conn, kind, row.id, row.current_version)
     validation = _validate(kind, body, access=access, previous_body=previous,
-                           doc_kind=getattr(row, "kind", None), catalog=catalog)
+                           doc_kind=_doc_kind(kind, row), catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
     version = _advance(conn, kind, row, base_version, body, _note(kind, body, note), actor_id, now)
@@ -940,12 +956,12 @@ def fork(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, dest: D
     body = body_of(conn, kind, row.id, row.current_version)
     if body is None:
         raise DefError(409, f"This {kind.object_kind} has no saved version to fork.")
-    doc_kind = getattr(row, "kind", None)
-    validation = _validate(kind, body, access=access, previous_body=body, doc_kind=doc_kind, catalog=catalog)
+    validation = _validate(kind, body, access=access, previous_body=body, doc_kind=_doc_kind(kind, row),
+                           catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
     note = _note(kind, body, f"Forked from {source.kind} {getattr(row, kind.name_col)} version {row.current_version}.")
-    row_id = _insert(conn, kind, dest, name, doc_kind, body, note, actor_id, now)
+    row_id = _insert(conn, kind, dest, name, row.kind, body, note, actor_id, now)
     _audit(conn, kind, "fork", row_id, dest, actor_id, ip, name=name, source_id=row.id,
            source_version=row.current_version)
     return get_row(conn, kind, row_id)
@@ -963,7 +979,7 @@ def rollback(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, ver
     if body is None:
         raise DefError(404, "No such version.")
     previous = body_of(conn, kind, row.id, row.current_version)
-    validation = _validate(kind, body, access=access, previous_body=previous, doc_kind=getattr(row, "kind", None),
+    validation = _validate(kind, body, access=access, previous_body=previous, doc_kind=_doc_kind(kind, row),
                            catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
@@ -988,6 +1004,42 @@ def remove(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, actor
     conn.execute(delete(kind.table).where(kind.table.c.id == row.id))
     _audit(conn, kind, "delete", row.id, scope, actor_id, ip, name=getattr(row, kind.name_col),
            version=row.current_version)
+
+
+def set_kind(conn: Connection, row: Any, kind: Any, *, access: rbac.Access, actor_id: str, now: datetime,
+             ip: str | None) -> Any:
+    """Change what a workflow's runs count as. Its versions stay as they are."""
+    scope = row_scope(row)
+    authorize_write(access, scope)
+    kind = _check_workflow_kind(kind)
+    if kind != row.kind:
+        conn.execute(update(workflows).where(workflows.c.id == row.id).values(kind=kind, updated_at=now))
+        _audit(conn, WORKFLOW, "kind", row.id, scope, actor_id, ip, name=row.name, **{"from": row.kind, "to": kind})
+    return get_row(conn, WORKFLOW, row.id)
+
+
+def relink(conn: Connection, old_name: str, row: Any, *, actor_id: str | None = None, dry_run: bool = False) -> int:
+    """Point runs recorded under ``old_name`` with no workflow at ``row``, where a run would resolve ``row.name`` to it."""
+    query = select(runs.c.id, runs.c.team_id, runs.c.project_id, runs.c.workflow_name).where(
+        runs.c.workflow_name == old_name, runs.c.workflow_id.is_(None))
+    if row.team_id is not None:
+        query = query.where(runs.c.team_id == row.team_id)
+    groups: dict[tuple, list[str]] = {}
+    for r in conn.execute(query):
+        # Matched again here because MySQL compares workflow_name without case.
+        if r.workflow_name == old_name:
+            groups.setdefault((r.team_id, r.project_id), []).append(r.id)
+    run_ids = [run_id for (team_id, project_id), ids in groups.items()
+               if getattr(resolve_workflow(conn, row.name, team_id, project_id), "id", None) == row.id
+               for run_id in ids]
+    if dry_run or not run_ids:
+        return len(run_ids)
+    for start in range(0, len(run_ids), RELINK_CHUNK):
+        conn.execute(update(runs).where(runs.c.id.in_(run_ids[start:start + RELINK_CHUNK]),
+                                        runs.c.workflow_id.is_(None)).values(workflow_id=row.id))
+    _audit(conn, WORKFLOW, "relink", row.id, row_scope(row), actor_id, None, name=row.name, from_name=old_name,
+           runs=len(run_ids))
+    return len(run_ids)
 
 
 def _resolve(conn: Connection, table: Table, where: list, team_id: str | None, project_id: str | None) -> Any | None:
@@ -1058,8 +1110,7 @@ def summary(kind: Kind, row: Any, access: rbac.Access, names: dict[str, str]) ->
             "scope": row.scope, "team_id": row.team_id, "project_id": row.project_id,
             "current_version": row.current_version, "updated_at": row.updated_at,
             "editable": can_write(access, scope), "can_fork": writes_anywhere(access)}
-    if kind is DOCUMENT:
-        item["kind"] = row.kind
+    item["kind"] = row.kind
     return item
 
 
@@ -1079,7 +1130,7 @@ def listing(conn: Connection, kind: Kind, access: rbac.Access, *, team: str | No
     names = scope_names(conn)
     grouped: dict[tuple, dict[str, Any]] = {}
     for r in rows:
-        key = (getattr(r, "kind", None), getattr(r, kind.name_col))
+        key = (_doc_kind(kind, r), getattr(r, kind.name_col))
         grouped.setdefault(key, {})[r.scope] = r.id
     effective: dict[str, list[dict[str, str]]] = {r.id: [] for r in rows}
     for context in _contexts(conn, access, focus.team_id if focus else None, focus.project_id if focus else None):

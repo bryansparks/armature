@@ -11,6 +11,7 @@ import { canManageTeam, currentSession, isAdmin } from '../session.js';
 import { stepsPanel } from './steps.js';
 
 export const KIND_LABEL = { role: 'Role', prompt: 'Prompt', mission: 'Mission' };
+export const WORKFLOW_KIND_LABEL = { review: 'Review', fix: 'Fix', merge: 'Merge', port: 'Port', work: 'Work', other: 'Other' };
 
 const ROLE_STARTER = `---
 name: new-role
@@ -39,7 +40,8 @@ stages:
 
 export const WORKFLOW = {
   base: '/api/workflows', route: 'workflow', idField: 'workflow_id', format: 'YAML', liveValidate: true, steps: true, lint: true,
-  testRun: true, record: (payload) => payload?.workflow, title: (record) => record.name, noun: () => 'workflow', kindLabel: () => null,
+  testRun: true, record: (payload) => payload?.workflow, title: (record) => record.name, noun: () => 'workflow',
+  kinds: WORKFLOW_KIND_LABEL, kindLabel: (record) => WORKFLOW_KIND_LABEL[record.kind] || record.kind || null,
   listHash: () => '#/workflows', listLabel: 'All workflows', starter: () => WORKFLOW_STARTER,
 };
 
@@ -114,6 +116,32 @@ function scopeSelect(id, scopes, wanted) {
   const select = element('select', { id, required: true }, scopes.map((scope) => element('option', { value: scopeKey(scope) }, scope.label)));
   if (findScope(scopes, wanted)) select.value = wanted;
   return { select, chosen: () => findScope(scopes, select.value) };
+}
+
+export function kindSelect(id, labels, value) {
+  const select = element('select', { id }, Object.entries(labels).map(([kind, label]) => element('option', { value: kind }, label)));
+  select.value = value in labels ? value : 'other';
+  return select;
+}
+
+function kindControl(config, record, editable, status, shown) {
+  const select = kindSelect('workflow-kind', config.kinds, record.kind);
+  select.disabled = !editable;
+  select.addEventListener('change', async () => {
+    clear(status);
+    select.disabled = true;
+    try {
+      await api(itemPath(config, record.id, '/kind'), { method: 'POST', body: { kind: select.value } });
+      record.kind = select.value;
+      shown.textContent = config.kindLabel(record);
+    } catch (err) {
+      select.value = record.kind;
+      status.append(errorBox(err));
+    } finally {
+      select.disabled = false;
+    }
+  });
+  return element('div', { class: 'wf-actions' }, element('label', { for: select.id }, 'Kind'), select);
 }
 
 // Tabs that switch in place, so the editor keeps its text and undo history.
@@ -472,9 +500,11 @@ export async function detailPage(root, config, id, mode) {
   if (editable && !editing) actions.append(link(hashFor(config.route, [record.id, 'edit']), 'Edit', { class: 'btn' }));
   if (canFork && !editable) actions.append(forkButton(config, record, status));
   if (editable) actions.append(deleteButton(config, record, status));
-  root.append(pageHeader(config.title(record)), meta(config.kindLabel(record), scopeText(record, names), versionText,
+  const kindText = config.kindLabel(record) ? element('span', {}, config.kindLabel(record)) : null;
+  root.append(pageHeader(config.title(record)), meta(kindText, scopeText(record, names), versionText,
     config.lint ? lintLabel(record.lint_ok) : null, effectiveText(record.effective_for ?? payload.effective_for) !== '—' ? `Used by ${effectiveText(record.effective_for ?? payload.effective_for)}` : null, link(config.listHash(record), config.listLabel)));
   if (actions.childNodes.length) root.append(actions);
+  if (config.kinds) root.append(kindControl(config, record, editable, status, kindText));
   root.append(status);
   if (mode === 'edit' && !editable) root.append(element('p', { class: 'banner' }, 'You can read this but not change it.'));
 
@@ -509,6 +539,7 @@ export async function newPage(root, config, kind, wantedScope) {
   const status = element('div', { role: 'status' });
   const nameInput = element('input', { type: 'text', id: 'new-name', required: true, maxlength: 100, spellcheck: 'false', autocapitalize: 'none', autocomplete: 'off' });
   const { select, chosen } = scopeSelect('new-scope', scopes, wantedScope);
+  const kindInput = config.kinds ? kindSelect('new-kind', config.kinds, 'other') : null;
   const noteInput = element('input', { type: 'text', id: 'new-note', maxlength: 500, placeholder: 'Why it exists' });
   const createButton = element('button', { type: 'button', class: 'primary' }, `Add ${noun}`);
   let creating = false;
@@ -531,6 +562,7 @@ export async function newPage(root, config, kind, wantedScope) {
     try {
       const body = { name, scope_kind: scope.scope_kind, scope_id: scope.scope_id, body: editor.value(), note: noteInput.value.trim() };
       if (kind) Object.assign(body, { kind, key: name });
+      if (kindInput) body.kind = kindInput.value;
       const created = await api(config.base, { method: 'POST', body });
       release();
       navigate(hashFor(config.route, [(config.record(created) || created).id]));
@@ -548,6 +580,7 @@ export async function newPage(root, config, kind, wantedScope) {
   createButton.addEventListener('click', create);
   root.append(card(element('div', { class: 'stacked-form' },
     element('label', { class: 'stacked', for: nameInput.id }, 'Name', nameInput),
-    element('label', { class: 'stacked', for: select.id }, 'Belongs to', select))), status, ...parts,
+    element('label', { class: 'stacked', for: select.id }, 'Belongs to', select),
+    kindInput ? element('label', { class: 'stacked', for: kindInput.id }, 'Kind', kindInput) : null)), status, ...parts,
   element('div', { class: 'wf-actions save-bar' }, element('label', { for: noteInput.id }, 'Note'), noteInput, createButton, link(config.listHash({ kind }), 'Cancel')));
 }

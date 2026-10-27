@@ -24,7 +24,6 @@ SERIES_MAX = 7
 SLOWEST = 10
 OTHER = "other"
 FAN_OUT_PARENT = "reviews"
-REVIEW_WORKFLOWS = ("code-review", "pr-role-review", "pr-review")
 DISCUSS = "discuss"
 FAILED = ("failed", "lost")
 FINISHED = ("succeeded", "failed", "canceled", "lost")
@@ -188,7 +187,7 @@ def overview(conn: Connection, scope: rbac.Scope, team: str | None, now: datetim
         "spend": {"today": round(sum(_cost(r["cost_usd"]) for r in started_today), 6),
                   "avg_7d": round(sum(_cost(r["cost_usd"]) for r in prior_week) / 7, 6)} if show_cost else None,
         "reviews_today": sum(1 for r in started_today
-                             if r["workflow"] in REVIEW_WORKFLOWS and _mode(r["trigger_ref"]) != DISCUSS),
+                             if r["kind"] == "review" and _mode(r["trigger_ref"]) != DISCUSS),
         "reevaluations_today": sum(1 for r in started_today if _mode(r["trigger_ref"]) == DISCUSS),
         "time": {
             "agent_today": round(agent["today"], 1), "agent_7d": round(agent["7d"], 1),

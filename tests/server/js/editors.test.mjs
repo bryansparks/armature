@@ -12,6 +12,7 @@ const { creatableScopes, mayCreate } = await import(new URL('scopes.js', STATIC)
 const { aliasesFrom, aliasRows, providerBody } = await import(new URL('views/providers.js', STATIC));
 const { scopeParam, settingText } = await import(new URL('views/settings.js', STATIC));
 const { outputNames, paramRows } = await import(new URL('views/packs.js', STATIC));
+const { WORKFLOW, WORKFLOW_KIND_LABEL } = await import(new URL('views/definition.js', STATIC));
 
 const apply = (text, edit) => text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
 
@@ -298,4 +299,11 @@ test('rollback names the version shown as current and reads a conflict like save
   assert.deepEqual(conflictOf(new ApiError(409, 'conflict')), { current: null });
   assert.equal(conflictOf(new ApiError(422, 'invalid', {})), null);
   assert.equal(conflictOf(new Error('network')), null);
+});
+
+test('workflow kinds match the server and label each workflow', () => {
+  assert.deepEqual(Object.keys(WORKFLOW_KIND_LABEL), ['review', 'fix', 'merge', 'port', 'work', 'other']);
+  assert.equal(WORKFLOW.kindLabel({ kind: 'merge' }), 'Merge');
+  assert.equal(WORKFLOW.kindLabel({ kind: 'later' }), 'later');
+  assert.equal(WORKFLOW.kindLabel({}), null);
 });

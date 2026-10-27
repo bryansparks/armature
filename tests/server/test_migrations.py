@@ -191,3 +191,56 @@ def test_0005_backfills_runner_key_scope_and_allows_instance_keys(db_url):
                                                     key_hmac="h3", created_at=utcnow()))
     finally:
         engine.dispose()
+
+
+def test_0009_backfills_kind_and_links_runs_by_scope_precedence(db_url):
+    migrate(db_url, "0008")
+    own, other, project = new_id(), new_id(), new_id()
+    frozen = {"code-review": "review", "pr-role-review": "review", "pr-review": "review", "pr-fix": "fix",
+              "pr-merged": "merge", "ios-port": "port", "dev-work": "work", "jira-work": "work", "Code-Review": "other"}
+    defined = [(f"instance:{name}", None, None, "*", name) for name in frozen]
+    defined += [("team_review", own, None, own, "code-review"), ("project_review", own, project, project, "code-review"),
+                ("team_only", own, None, own, "team-only"), ("team_build", own, None, own, "build")]
+    ids = {key: new_id() for key, *_ in defined}
+    engine = make_engine(db_url)
+    try:
+        with engine.begin() as conn:
+            at = {"at": "2026-10-27 12:00:00"}
+            for team_id, name in ((own, "own"), (other, "other")):
+                conn.execute(text("INSERT INTO teams (id, name, created_at) VALUES (:t, :n, :at)"),
+                             {"t": team_id, "n": name, **at})
+            conn.execute(text("INSERT INTO projects (id, team_id, name, created_at) VALUES (:p, :t, 'app', :at)"),
+                         {"p": project, "t": own, **at})
+            for key, team_id, project_id, scope, name in defined:
+                conn.execute(text("INSERT INTO workflows (id, team_id, project_id, scope, name, current_version, "
+                                  "created_at, updated_at) VALUES (:w, :t, :p, :s, :n, 1, :at, :at)"),
+                             {"w": ids[key], "t": team_id, "p": project_id, "s": scope, "n": name, **at})
+            runs_by_key = {}
+            for key, team_id, project_id, name in (
+                    ("in_project", own, project, "code-review"),
+                    ("in_team", own, None, "code-review"),
+                    ("other_team_review", other, None, "code-review"),
+                    ("other_team_only", other, None, "team-only"),
+                    ("project_build", own, project, "build"),
+                    ("cased", own, None, "CODE-REVIEW"),
+                    ("unknown", own, None, "gone")):
+                runs_by_key[key] = new_id()
+                conn.execute(text("INSERT INTO runs (id, team_id, project_id, workflow_name, status, started_at) "
+                                  "VALUES (:r, :t, :p, :n, 'succeeded', :at)"),
+                             {"r": runs_by_key[key], "t": team_id, "p": project_id, "n": name, **at})
+    finally:
+        engine.dispose()
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        with engine.connect() as conn:
+            kinds = dict(conn.execute(select(workflows.c.id, workflows.c.kind)).all())
+            linked = dict(conn.execute(select(runs.c.id, runs.c.workflow_id)).all())
+    finally:
+        engine.dispose()
+    assert {name: kinds[ids[f"instance:{name}"]] for name in frozen} == frozen
+    assert (kinds[ids["team_review"]], kinds[ids["team_only"]]) == ("review", "other")
+    assert {key: linked[run_id] for key, run_id in runs_by_key.items()} == {
+        "in_project": ids["project_review"], "in_team": ids["team_review"],
+        "other_team_review": ids["instance:code-review"], "other_team_only": None,
+        "project_build": ids["team_build"], "cased": None, "unknown": None}

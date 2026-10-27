@@ -6,8 +6,8 @@ import { currentSession } from '../session.js';
 import { detailPage, effectiveText, lintLabel, newPage, scopeText, teamNames, WORKFLOW } from './definition.js';
 
 export function workflowTable(workflows, names) {
-  return table(['Workflow', 'Scope', ['Version', 'num'], 'Lint', 'Used by', 'Updated'], workflows.map((workflow) => [
-    link(hashFor('workflow', [workflow.id]), workflow.name), scopeText(workflow, names), String(workflow.current_version),
+  return table(['Workflow', 'Kind', 'Scope', ['Version', 'num'], 'Lint', 'Used by', 'Updated'], workflows.map((workflow) => [
+    link(hashFor('workflow', [workflow.id]), workflow.name), WORKFLOW.kindLabel(workflow) || '—', scopeText(workflow, names), String(workflow.current_version),
     lintLabel(workflow.lint_ok), effectiveText(workflow.effective_for), when(workflow.updated_at),
   ]));
 }

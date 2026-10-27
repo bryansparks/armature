@@ -9,13 +9,8 @@ from sqlalchemy import Connection, String, and_, cast, func, or_, select
 
 from armature.server import display, rbac
 from armature.server.db.schema import findings, run_artifacts, runs, workflows
-from armature.server.stats import REVIEW_WORKFLOWS
+from armature.server.ingest import RUN_KIND
 
-FIX_WORKFLOWS = ("pr-fix",)
-MERGE_WORKFLOWS = ("pr-merged",)
-PORT_WORKFLOWS = ("ios-port",)
-# jira-work is dev-work's old name, kept so its history still reads as work.
-WORK_WORKFLOWS = ("dev-work", "jira-work")
 RUNS_MAX = 500
 FINDINGS_MAX = 2000
 SEARCH_BATCHES = 10
@@ -24,20 +19,6 @@ POSTED_LABEL = "Posted result"
 PULL_SUBJECT = re.compile(r"^(?P<repo>[^#\s]+/[^#\s]+)#(?P<number>[1-9][0-9]{0,9})$")
 
 WORKFLOW = func.coalesce(workflows.c.name, runs.c.workflow_name)
-
-
-def kind_of(workflow: str | None) -> str:
-    if workflow in REVIEW_WORKFLOWS:
-        return "review"
-    if workflow in FIX_WORKFLOWS:
-        return "fix"
-    if workflow in MERGE_WORKFLOWS:
-        return "merge"
-    if workflow in PORT_WORKFLOWS:
-        return "port"
-    if workflow in WORK_WORKFLOWS:
-        return "work"
-    return "other"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -73,8 +54,9 @@ def make_cursor(at: datetime, subject: str) -> str:
 
 
 def _run_query(scope: rbac.Scope):
-    return (select(runs.c.id, runs.c.subject, runs.c.team_id, WORKFLOW.label("workflow"), runs.c.status,
-                   runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.summary, runs.c.trigger_ref)
+    return (select(runs.c.id, runs.c.subject, runs.c.team_id, WORKFLOW.label("workflow"), RUN_KIND.label("kind"),
+                   runs.c.status, runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.summary,
+                   runs.c.trigger_ref)
             .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
             .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
 
@@ -91,11 +73,11 @@ def _repo_number(subject: str, ordered: list[Any]) -> tuple[str | None, int | No
 
 def status_of(ordered: list[Any]) -> str:
     """Merged once a merge run exists, else the latest review verdict, else the latest run's status."""
-    if any(run.workflow in MERGE_WORKFLOWS for run in ordered):
+    if any(run.kind == "merge" for run in ordered):
         return "merged"
     for run in reversed(ordered):
         verdict = _text(_dict(run.summary).get("verdict"))
-        if run.workflow in REVIEW_WORKFLOWS and verdict:
+        if run.kind == "review" and verdict:
             return verdict
     return ordered[-1].status if ordered else "unknown"
 
@@ -118,8 +100,8 @@ def pull_states(conn: Connection, scope: rbac.Scope, names: set[str]) -> dict[st
     for run in conn.execute(query).all():
         by_subject[run.subject].append(run)
     return {name: {"title": _latest(ordered, "title"),
-                   "verdict": _latest([run for run in ordered if run.workflow in REVIEW_WORKFLOWS], "verdict"),
-                   "merged": any(run.workflow in MERGE_WORKFLOWS for run in ordered)}
+                   "verdict": _latest([run for run in ordered if run.kind == "review"], "verdict"),
+                   "merged": any(run.kind == "merge" for run in ordered)}
             for name, ordered in by_subject.items() if ordered}
 
 
@@ -134,8 +116,8 @@ def summarize(subject: str, ordered: list[Any], hidden: set[str], show_cost: boo
         "latest_verdict": _latest(ordered, "verdict"),
         "status": status_of(ordered),
         "runs": len(counted),
-        "reviews": sum(1 for run in counted if run.workflow in REVIEW_WORKFLOWS),
-        "fixes": sum(1 for run in counted if run.workflow in FIX_WORKFLOWS),
+        "reviews": sum(1 for run in counted if run.kind == "review"),
+        "fixes": sum(1 for run in counted if run.kind == "fix"),
         "cost_usd": round(cost, 6) if show_cost else None,
         "last_activity": ordered[-1].started_at if ordered else None,
         "repo": repo,
@@ -259,7 +241,7 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
         return {
             "id": run.id, "workflow": run.workflow,
             "workflow_label": _text(_dict(labels.get(run.workflow)).get("label")) or run.workflow,
-            "kind": kind_of(run.workflow), "status": run.status, "started_at": run.started_at,
+            "kind": run.kind, "status": run.status, "started_at": run.started_at,
             "finished_at": run.finished_at, "cost_usd": _cost(run.cost_usd) if show_cost else None,
             "title": _text(summary.get("title")), "verdict": _text(summary.get("verdict")),
             "mode": _text(ref.get("mode")), "head": head[:HEAD_LENGTH] if head else None,

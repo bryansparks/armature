@@ -204,7 +204,10 @@ def test_instance_key_registers_into_the_repositorys_team(live, world, keyring, 
                      headers=auth).status_code == 404
 
 
-def test_ingest_writes_summary_on_run_end(live, world, keyring):
+def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
+    with live.engine.begin() as conn:
+        conn.execute(insert(workflows).values(id=new_id(), team_id=world["team"], name="pr-review", kind="review",
+                                              current_version=1, created_at=clock(), updated_at=clock()))
     http = live.client()
     run = register(http, world["key"])
     token = run["token"]
@@ -224,8 +227,8 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring):
     summary = detail["run"]
     assert set(summary) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "trigger_kind",
                             "started_at", "finished_at", "cost_usd", "input_tokens", "output_tokens", "rerun_of",
-                            "cancelled_by", "error", "subject", "summary", "last_seq", "dry_run"}
-    assert summary["dry_run"] is False
+                            "cancelled_by", "error", "subject", "summary", "last_seq", "dry_run", "kind"}
+    assert summary["dry_run"] is False and summary["kind"] == "review"
     assert (summary["status"], summary["error"], summary["workflow"], summary["triggered_by"]) == \
         ("failed", "build broke", "pr-review", "octocat")
     assert summary["cost_usd"] == pytest.approx(0.75) and summary["input_tokens"] == 105
