@@ -7,7 +7,7 @@ import { isSso, navFor, setSession, ssoStepUpPath, user } from './session.js';
 const NAV_GROUPS = [
   ['Work', [['overview', 'Overview', 'home'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['status', 'Status', 'pulse']]],
   ['Definitions', [['workflows', 'Workflows', 'flow'], ['roles', 'Roles and prompts', 'doc'], ['packs', 'Packs', 'box']]],
-  ['Manage', [['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['settings', 'Settings', 'gear']]],
+  ['Manage', [['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['webhooks', 'Webhooks', 'hook'], ['settings', 'Settings', 'gear']]],
   ['You', [['account', 'Account', 'person']]],
 ];
 
@@ -25,6 +25,7 @@ const ICON_PATHS = {
   box: 'M2 4.5L8 1.5l6 3v7l-6 3-6-3zM2 4.5l6 3 6-3M8 7.5v7',
   gear: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',
   pulse: 'M1.5 8.5h3l2-5 3 9 2-4h3',
+  hook: 'M8 1.5v7a3 3 0 1 1-3-3M8 1.5l2 2M8 1.5l-2 2',
   menu: 'M2 4h12M2 8h12M2 12h12',
   collapse: 'M10 3L5 8l5 5',
 };
@@ -53,6 +54,8 @@ const VIEW_LOADERS = {
   users: () => import('./views/users.js'),
   secrets: () => import('./views/secrets.js'),
   'runner-keys': () => import('./views/runnerkeys.js'),
+  webhooks: () => import('./views/webhooks.js'),
+  webhook: () => import('./views/webhooks.js'),
   workflows: () => import('./views/workflows.js'),
   workflow: () => import('./views/workflows.js'),
   'new-workflow': () => import('./views/workflows.js'),
@@ -65,7 +68,7 @@ const VIEW_LOADERS = {
   account: () => import('./views/account.js'),
 };
 
-const NAV_PARENT = { team: 'teams', project: 'teams', run: 'runs', subject: 'subjects', workflow: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles' };
+const NAV_PARENT = { team: 'teams', project: 'teams', run: 'runs', subject: 'subjects', workflow: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks' };
 
 let allowedViews = [];
 let renderSequence = 0;

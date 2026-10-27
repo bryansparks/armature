@@ -278,6 +278,7 @@ label.check { display: inline-flex; gap: 6px; align-items: center; margin: 4px 1
 .provider-form { margin-top: 14px; padding-top: 4px; border-top: 1px solid var(--rule); }
 .provider-form .stacked-form { max-width: 420px; }
 pre.setting-value { margin: 0; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+pre.payload { margin: 0 0 12px; padding: 8px 10px; background: var(--code-bg); border-radius: 6px; font: 12px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow: auto; }
 section.adapter { border-top: 1px solid var(--rule); margin-top: 14px; padding-top: 2px; }
 .bad.note, .note.bad { color: var(--bad); }
 

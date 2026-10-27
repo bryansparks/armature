@@ -165,8 +165,8 @@ test('a network failure reads as unreachable', async () => {
 test('navFor hides what a role cannot use', () => {
   const lead = { user: { id: 1 }, memberships: [{ scope_kind: 'team', scope_id: 't', role: 'team_lead' }] };
   const viewer = { user: { id: 2 }, memberships: [{ scope_kind: 'project', scope_id: 'p', role: 'viewer' }] };
-  assert.deepEqual(navFor({ user: { is_admin: true } }), ['overview', 'runs', 'subjects', 'trends', 'teams', 'status', 'workflows', 'roles', 'packs', 'users', 'secrets', 'runner-keys', 'settings', 'account']);
-  assert.deepEqual(navFor(lead), ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'users', 'secrets', 'account']);
+  assert.deepEqual(navFor({ user: { is_admin: true } }), ['overview', 'runs', 'subjects', 'trends', 'teams', 'status', 'workflows', 'roles', 'packs', 'users', 'secrets', 'runner-keys', 'webhooks', 'settings', 'account']);
+  assert.deepEqual(navFor(lead), ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'account']);
   assert.deepEqual(navFor(viewer), ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'account']);
   assert.deepEqual(navFor({ user: null }), []);
 });

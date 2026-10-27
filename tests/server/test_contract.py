@@ -1,14 +1,16 @@
 """The response fields the browser code reads, pinned against what the routes return."""
+import hashlib
+import hmac
 import re
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
 from armature.server import secrets as secret_store
 from armature.server.db import new_id
-from armature.server.db.schema import findings, run_artifacts, runs
+from armature.server.db.schema import findings, run_artifacts, runs, workflows
 from tests.server.app_support import (
     ORIGIN,
     Clock,
@@ -59,6 +61,17 @@ READS = [
     ("views/subject.js", "finding", "subject_finding", {"finding_key", "title", "path", "line",
                                                         "current_disposition", "history"}),
     ("views/subject.js", "event", "finding_event", {"run_id", "started_at", "disposition"}),
+    ("views/webhooks.js", "webhook", "webhook", {"id", "team_id", "name", "source", "url", "enabled", "secret_set",
+                                                 "secret_name", "forward_url", "generic_auth",
+                                                 "generic_signature_header", "generic_delivery_header",
+                                                 "last_delivery"}),
+    ("views/webhooks.js", "rule", "webhook_rule", {"id", "workflow_id", "workflow_name", "enabled", "config"}),
+    ("views/webhooks.js", "workflow", "webhook_workflow", {"id", "name", "scope_kind"}),
+    ("views/webhooks.js", "delivery", "delivery", {"id", "received_at", "event", "status", "reason", "matched",
+                                                   "forward_status", "headers", "payload"}),
+    ("views/webhooks.js", "entry", "delivery_match", {"workflow_name", "workflow_id", "shadow", "run_id",
+                                                      "job_status"}),
+    ("views/webhooks.js", "decision", "decision", {"trigger_id", "matched", "reason", "inputs"}),
 ]
 
 
@@ -95,6 +108,21 @@ def responses(sqlite_engine, keyring):
     users = client.get("/api/users").json()["users"]
     subject = client.get("/api/subjects/acme%2Fapp%231").json()["subject"]
     created_key = client.post("/api/runner-keys", json={"name": "host"}, headers=mutation(csrf)).json()
+    hook = client.post(f"/api/teams/{side.team}/webhooks", json={"name": "gh", "source": "github"},
+                       headers=mutation(csrf)).json()["webhook"]
+    client.post(f"/api/webhooks/{hook['id']}/secret", json={"value": "s"}, headers=mutation(csrf))
+    with sqlite_engine.connect() as conn:
+        workflow_id = conn.execute(select(workflows.c.id).where(workflows.c.team_id == side.team)).scalar()
+    client.post(f"/api/webhooks/{hook['id']}/rules", json={"workflow_id": workflow_id, "config": {}},
+                headers=mutation(csrf))
+    raw = b'{"n": 1}'
+    client.post(hook["url"].removeprefix(ORIGIN), content=raw, headers={
+        "X-Hub-Signature-256": "sha256=" + hmac.new(b"s", raw, hashlib.sha256).hexdigest(), "X-GitHub-Event": "push"})
+    hook_detail = client.get(f"/api/webhooks/{hook['id']}").json()
+    delivery_id = client.get(f"/api/webhooks/{hook['id']}/deliveries").json()["deliveries"][0]["id"]
+    delivery = client.get(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}").json()["delivery"]
+    decisions = client.post(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}/test", json={},
+                            headers=mutation(csrf)).json()["decisions"]
     return {
         "inspect": guest.post("/api/invite/inspect", json={"token": token},
                               headers={"Origin": ORIGIN, "X-CSRF-Token": guest_csrf}).json(),
@@ -120,6 +148,12 @@ def responses(sqlite_engine, keyring):
         "subject_run": subject["runs"][0],
         "subject_finding": subject["findings"][0],
         "finding_event": subject["findings"][0]["history"][0],
+        "webhook": client.get(f"/api/teams/{side.team}/webhooks").json()["webhooks"][0],
+        "webhook_rule": hook_detail["rules"][0],
+        "webhook_workflow": hook_detail["workflows"][0],
+        "delivery": delivery,
+        "delivery_match": delivery["matched"][0],
+        "decision": decisions[0],
     }
 
 

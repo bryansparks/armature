@@ -999,11 +999,17 @@ def remove(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, actor
                         .limit(1)).first() is not None:
             raise DefError(409, "This workflow has queued or running jobs.")
         conn.execute(delete(jobs).where(jobs.c.workflow_id == row.id))
+        detach_triggers(conn, select(triggers.c.id).where(triggers.c.workflow_id == row.id))
         conn.execute(delete(triggers).where(triggers.c.workflow_id == row.id))
         conn.execute(update(runs).where(runs.c.workflow_id == row.id).values(workflow_id=None))
     conn.execute(delete(kind.table).where(kind.table.c.id == row.id))
     _audit(conn, kind, "delete", row.id, scope, actor_id, ip, name=getattr(row, kind.name_col),
            version=row.current_version)
+
+
+def detach_triggers(conn: Connection, trigger_ids: Any) -> None:
+    """Unlink jobs from triggers about to be deleted. A job outlives the rule that queued it."""
+    conn.execute(update(jobs).where(jobs.c.trigger_id.in_(trigger_ids.scalar_subquery())).values(trigger_id=None))
 
 
 def set_kind(conn: Connection, row: Any, kind: Any, *, access: rbac.Access, actor_id: str, now: datetime,

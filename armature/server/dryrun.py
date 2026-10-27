@@ -29,7 +29,13 @@ from sqlalchemy.exc import IntegrityError
 
 from armature.packs import PACKS_PATH_ENV
 from armature.server import audit, defs, rbac, runners
-from armature.server.db.schema import INSTANCE_SCOPE, run_steps, runs, settings, workflows
+from armature.server.db.schema import (
+    INSTANCE_SCOPE,
+    run_steps,
+    runs,
+    settings,
+    workflows,
+)
 from armature.server.ingest import load_summary
 from armature.spec.loader import STORED_WORKFLOW_HEADER
 
@@ -177,8 +183,7 @@ def prepare(conn: Connection, keyring: Any, *, access: rbac.Access, user_id: str
         raise DryRunError(400, "This workflow has no saved version.")
     workdir = Path(tempfile.mkdtemp(prefix="armature-test-"))
     try:
-        header = "" if body.split("\n", 1)[0].rstrip("\r") == STORED_WORKFLOW_HEADER else STORED_WORKFLOW_HEADER + "\n"
-        (workdir / "workflow.yaml").write_text(header + body, encoding="utf-8")
+        write_workflow(workdir, body)
         (workdir / "stubs.json").write_text(json.dumps(stubs, default=str), encoding="utf-8")
         trigger_ref = {"dry_run": True, "mode": "stub", "from_run": payload.get("from_run")}
         run_row, token = runners.open_run(conn, keyring, team_id=team_id, project_id=row.project_id,
@@ -196,12 +201,25 @@ def prepare(conn: Connection, keyring: Any, *, access: rbac.Access, user_id: str
     return Launch(run_row["id"], token, workdir, summary), args, missing == "empty"
 
 
+def write_workflow(workdir: Path, body: str) -> None:
+    header = "" if body.split("\n", 1)[0].rstrip("\r") == STORED_WORKFLOW_HEADER else STORED_WORKFLOW_HEADER + "\n"
+    (workdir / "workflow.yaml").write_text(header + body, encoding="utf-8")
+
+
+def events_endpoint(hub: Any, cfg: Any) -> str:
+    if hub.unix_endpoint:
+        return f"unix:{hub.unix_endpoint}"
+    return f"{cfg.public_origin}{cfg.base_path}/api/events"
+
+
+def packs_path(packs_dir: str) -> str:
+    return os.pathsep.join(p for p in (os.environ.get(PACKS_PATH_ENV, ""), str(Path(packs_dir).expanduser())) if p)
+
+
 def child_env(launch: Launch, endpoint: str, packs_dir: str, missing_empty: bool) -> dict[str, str]:
-    packs_path = os.pathsep.join(p for p in (os.environ.get(PACKS_PATH_ENV, ""), str(Path(packs_dir).expanduser()))
-                                 if p)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(launch.workdir),
            "ARMATURE_STUB_OUTPUTS": str(launch.workdir / "stubs.json"), "ARMATURE_EVENTS": endpoint,
-           "ARMATURE_EVENTS_TOKEN": launch.token, PACKS_PATH_ENV: packs_path}
+           "ARMATURE_EVENTS_TOKEN": launch.token, PACKS_PATH_ENV: packs_path(packs_dir)}
     if missing_empty:
         env["ARMATURE_STUB_DEFAULT"] = "empty"
     return env
@@ -258,15 +276,16 @@ def ended(hub: Any, run_id: str, loop: asyncio.AbstractEventLoop | None) -> bool
     return status not in (*ACTIVE, "lost")
 
 
-def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.AbstractEventLoop | None) -> None:
+def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.AbstractEventLoop | None,
+          timeout: float | None = None, label: str = "test run") -> None:
     """Wait for the process, end the run if it never sent run_end, and remove the directory."""
     try:
         try:
-            proc.wait(TIMEOUT_S)
-            error = f"The test run exited with status {proc.returncode} without finishing."
+            proc.wait(timeout)
+            error = f"The {label} exited with status {proc.returncode} without finishing."
         except subprocess.TimeoutExpired:
             _stop(proc)
-            error = f"The test run took longer than {TIMEOUT_S} seconds and was stopped."
+            error = f"The {label} took longer than {timeout:g} seconds and was stopped."
         tail = _tail(launch.workdir / "run.log")
         if tail:
             error += "\n" + tail
@@ -277,12 +296,14 @@ def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.Abstra
         if not ended(hub, launch.run_id, loop):
             fail_run(hub, launch, error, loop)
     except Exception:
-        log.exception("watching test run %s failed", launch.run_id)
+        log.exception("watching %s %s failed", label, launch.run_id)
     finally:
         shutil.rmtree(launch.workdir, ignore_errors=True)
 
 
-def start(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any) -> None:
+def spawn(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any, *,
+          timeout: float | None = None, label: str = "test run") -> subprocess.Popen:
+    """Start ``armature run`` on the workdir's workflow.yaml and a thread that watches it. Fails the run on OSError."""
     loop = getattr(hub, "_loop", None)
     command = [binary, "run", str(launch.workdir / "workflow.yaml"), "--quiet", "--no-cache", *args]
     try:
@@ -290,8 +311,16 @@ def start(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub
             proc = subprocess.Popen(command, env=env, cwd=launch.workdir, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
     except OSError as exc:
-        fail_run(hub, launch, f"The test run could not start: {exc.strerror or exc}.", None)
+        fail_run(hub, launch, f"The {label} could not start: {exc.strerror or exc}.", None)
         shutil.rmtree(launch.workdir, ignore_errors=True)
+        raise
+    threading.Thread(target=watch, args=(proc, launch, hub, loop, timeout, label),
+                     name=f"armature-{label.replace(' ', '-')}-{launch.run_id}", daemon=True).start()
+    return proc
+
+
+def start(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any) -> None:
+    try:
+        spawn(binary, launch, args, env, hub, timeout=TIMEOUT_S)
+    except OSError as exc:
         raise DryRunError(503, "The test run could not start.") from exc
-    threading.Thread(target=watch, args=(proc, launch, hub, loop), name=f"armature-test-{launch.run_id}",
-                     daemon=True).start()

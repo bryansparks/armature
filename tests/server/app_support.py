@@ -35,11 +35,12 @@ class Clock:
 
 
 def make_client(engine, keyring, clock, *, peer=("testclient", 50000), static_dir=None, oidc_transport=None,
-                **overrides) -> TestClient:
+                worker_interval=None, **overrides) -> TestClient:
     cfg = ServerConfig(database_url=str(engine.url), public_origin=overrides.pop("public_origin", ORIGIN),
                        **overrides)
     extra = {"static_dir": static_dir} if static_dir else {}
-    app = create_app(cfg, engine, keyring, clock=clock, password_cost=COST, oidc_transport=oidc_transport, **extra)
+    app = create_app(cfg, engine, keyring, clock=clock, password_cost=COST, oidc_transport=oidc_transport,
+                     worker_interval=worker_interval, **extra)
     base = cfg.public_origin
     return TestClient(app, base_url=base, client=peer, follow_redirects=False)
 

@@ -311,6 +311,50 @@ settings = Table(
     CheckConstraint(SCOPE_MATCHES_TEAM, name="scope"),
 )
 
+WEBHOOK_SOURCES = ("github", "slack", "generic")
+WEBHOOK_GENERIC_AUTH = ("hmac", "bearer")
+DELIVERY_STATUSES = ("accepted", "ignored", "duplicate", "rejected", "error")
+
+webhooks = Table(
+    "webhooks", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False, index=True),
+    Column("name", name_type(191), nullable=False),
+    Column("source", String(16), nullable=False),
+    Column("path_token", String(64), nullable=False, unique=True),
+    Column("secret_name", String(128), nullable=False),
+    Column("generic_auth", String(16)),
+    Column("generic_signature_header", String(64)),
+    Column("generic_delivery_header", String(64)),
+    Column("forward_url", Text),
+    Column("enabled", Boolean, nullable=False, default=True),
+    _ts("created_at"),
+    _ts("updated_at"),
+    UniqueConstraint("team_id", "name"),
+    CheckConstraint(_in("source", WEBHOOK_SOURCES), name="source"),
+    CheckConstraint(f"generic_auth IS NULL OR {_in('generic_auth', WEBHOOK_GENERIC_AUTH)}", name="generic_auth"),
+)
+
+# A NULL delivery_key never collides, so only keyed deliveries are deduplicated.
+webhook_deliveries = Table(
+    "webhook_deliveries", metadata,
+    _id(),
+    Column("webhook_id", String(36), ForeignKey("webhooks.id"), nullable=False),
+    _ts("received_at"),
+    Column("delivery_key", String(191)),
+    Column("event", String(64)),
+    Column("status", String(16), nullable=False),
+    Column("reason", Text),
+    Column("payload", LongText),
+    Column("headers", JSON),
+    Column("matched", JSON),
+    Column("forward_status", String(32)),
+    UniqueConstraint("webhook_id", "delivery_key"),
+    Index(None, "webhook_id", "received_at"),
+    Index(None, "received_at"),
+    CheckConstraint(_in("status", DELIVERY_STATUSES), name="status"),
+)
+
 triggers = Table(
     "triggers", metadata,
     _id(),
@@ -320,6 +364,7 @@ triggers = Table(
     Column("config", JSON),
     Column("enabled", Boolean, nullable=False, default=True),
     _ts("created_at"),
+    Column("webhook_id", String(36), ForeignKey("webhooks.id"), index=True),
 )
 
 jobs = Table(
@@ -337,6 +382,12 @@ jobs = Table(
     _ts("lease_expires_at", nullable=True),
     Column("attempts", Integer, nullable=False, default=0),
     _ts("created_at"),
+    Column("trigger_id", String(36), ForeignKey("triggers.id")),
+    # No foreign key: deliveries are pruned after two weeks and their jobs stay.
+    Column("delivery_id", String(36)),
+    Column("workflow_version", Integer),
+    Column("error", Text),
+    _ts("finished_at", nullable=True),
     Index(None, "status", "created_at"),
 )
 

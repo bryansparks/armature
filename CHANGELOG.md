@@ -10,6 +10,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Webhooks and rules.** A team lead creates a webhook on the Webhooks
+  page and points GitHub, Slack, or any service that signs with HMAC or a
+  bearer token at its URL, `{base}/hooks/{token}`. The server checks the
+  signature, drops repeats by delivery id, and logs each delivery for 14
+  days. Ordered rules on the webhook match on the event and on payload
+  fields (`eq`, `ne`, `in`, `not_in`, `starts_with`, `contains`, `exists`,
+  `missing`), pick the project from a repository field, map payload fields
+  to workflow inputs, and queue a job for each match. A rule can stop later
+  rules or run in shadow mode, and **Test rules** replays a stored delivery
+  through the rules. An admin can forward verified deliveries to a legacy
+  receiver while workflows move over. Migration 0010 adds `webhooks` and
+  `webhook_deliveries` and links triggers and jobs to them.
+- **Job worker.** `armature server run` now runs queued jobs. It claims a
+  job with a compare-and-set update, runs the workflow version pinned when
+  the job was queued, and shows the run live like any other. Each job gets
+  the team's `env.*` settings and only the secrets its rule lists. A job
+  runs once and is never retried, so a lost run can't double its cost. The
+  `worker.slots` setting (2 by default) caps concurrent jobs, and
+  `GET /api/jobs` lists a team's jobs.
 - **Workflow kind.** Each workflow has a `kind` (review, fix, merge, port,
   work, or other) that decides how its runs count on subject pages and in
   the Overview's reviews today, so renaming a workflow changes only its

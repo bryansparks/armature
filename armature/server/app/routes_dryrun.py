@@ -24,19 +24,12 @@ class DryRunBody(BaseModel):
     missing: str | None = None
 
 
-def _endpoint(request: Request, hub: Any) -> str:
-    if hub.unix_endpoint:
-        return f"unix:{hub.unix_endpoint}"
-    cfg = server(request).cfg
-    return f"{cfg.public_origin}{cfg.base_path}/api/events"
-
-
 @router.post("/api/workflows/{workflow_id}/test")
 async def test_workflow(workflow_id: str, payload: DryRunBody, request: Request,
                         session: Session = Depends(signed_in)) -> dict[str, Any]:
     srv = server(request)
     hub = request.app.state.live
-    endpoint = _endpoint(request, hub)
+    endpoint = dryrun.events_endpoint(hub, srv.cfg)
     ip = client_ip(request)
 
     def launch_run() -> dryrun.Launch:
