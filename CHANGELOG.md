@@ -10,6 +10,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workflow renames.** Change `name:` in the editor and save, and the
+  workflow takes the new name. Its runs, rules, jobs, kind, and display
+  label follow it, and the export drops the old file. A name already used
+  in the same scope is refused, and rolling back to a version with the old
+  name renames it back.
 - **Webhooks and rules.** A team lead creates a webhook on the Webhooks
   page and points GitHub, Slack, or any service that signs with HMAC or a
   bearer token at its URL, `{base}/hooks/{token}`. The server checks the

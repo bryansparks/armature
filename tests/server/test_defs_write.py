@@ -1113,3 +1113,102 @@ def test_create_links_earlier_runs_of_its_name_in_its_scope(world):
     assert lead.post("/api/workflows", json={"scope_kind": "team", "scope_id": world.own.team, "name": "quiet",
                                              "body": GOOD}).status_code == 201
     assert len(_relink_audits(world)) == 1
+
+
+def _audits(world, action):
+    with world.engine.connect() as conn:
+        return [r.detail for r in conn.execute(select(audit.c.detail).where(audit.c.action == action))]
+
+
+def _labels(world, scope="*"):
+    with world.engine.connect() as conn:
+        return conn.execute(select(settings.c.value).where(settings.c.scope == scope,
+                                                           settings.c.key == "display.workflow_labels")).scalar()
+
+
+def _name(world, object_id):
+    with world.engine.connect() as conn:
+        return conn.execute(select(workflows.c.name).where(workflows.c.id == object_id)).scalar()
+
+
+def test_saving_a_new_name_renames_the_workflow_and_its_runs_follow(world):
+    object_id = world.own.wf["team"]
+    with world.engine.begin() as conn:
+        run_id = _named_run(conn, world, world.own.team, None, "review", object_id)
+    admin = _client(world, "admin")
+    saved = admin.post(f"/api/workflows/{object_id}",
+                       json={"body": GOOD.replace("name: review", "name: triage"), "base_version": 1})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["workflow"]["name"] == "triage" and _name(world, object_id) == "triage"
+    [renamed] = _audits(world, "workflow.rename")
+    assert (renamed["from"], renamed["to"], renamed["name"]) == ("review", "triage", "triage")
+    assert _links(world)[run_id] == object_id
+    listed = {r["id"]: r["workflow"] for r in admin.get("/api/runs").json()["runs"]}
+    assert listed[run_id] == "triage"
+
+
+def test_a_body_without_a_name_change_keeps_the_row_name(world):
+    object_id = world.own.wf["team"]
+    with world.engine.begin() as conn:
+        conn.execute(workflows.update().where(workflows.c.id == object_id).values(name="created-as"))
+    admin = _client(world, "admin")
+    edited = GOOD.replace("number: 3", "number: 4")
+    assert admin.post(f"/api/workflows/{object_id}", json={"body": edited, "base_version": 1}).status_code == 200
+    assert _name(world, object_id) == "created-as" and _audits(world, "workflow.rename") == []
+
+
+def test_a_body_with_no_name_keeps_the_row_name(world):
+    with world.engine.begin() as conn:
+        row = defs.get_row(conn, defs.WORKFLOW, world.own.wf["team"])
+        assert defs._rename(conn, row, GOOD, "stages: []\n", actor_id="t", now=world.clock(), ip=None) is row
+    assert _name(world, world.own.wf["team"]) == "review"
+
+
+def test_renaming_onto_a_taken_name_is_a_conflict(world):
+    admin = _client(world, "admin")
+    with world.engine.begin() as conn:
+        _add_def(conn, defs.WORKFLOW, defs.DefScope("team", world.own.team), "triage", GOOD, world.clock)
+    refused = admin.post(f"/api/workflows/{world.own.wf['team']}",
+                         json={"body": GOOD.replace("name: review", "name: triage"), "base_version": 1})
+    assert refused.status_code == 409 and refused.json()["error"] == "A workflow named triage already exists here."
+    assert _name(world, world.own.wf["team"]) == "review" and _current(world, defs.WORKFLOW, world.own.wf["team"]) == 1
+
+
+def test_rolling_back_to_an_older_name_renames_back(world):
+    object_id = world.own.wf["team"]
+    admin = _client(world, "admin")
+    assert admin.post(f"/api/workflows/{object_id}", json={"body": GOOD.replace("name: review", "name: triage"),
+                                                           "base_version": 1}).status_code == 200
+    rolled = admin.post(f"/api/workflows/{object_id}/rollback", json={"version": 1})
+    assert rolled.status_code == 200, rolled.text
+    assert rolled.json()["workflow"]["name"] == "review"
+    assert [(d["from"], d["to"]) for d in _audits(world, "workflow.rename")] == [("review", "triage"),
+                                                                                ("triage", "review")]
+
+
+def test_a_rename_moves_the_display_label(world):
+    admin = _client(world, "admin")
+    assert admin.post("/api/settings", json={"scope": "instance", "key": "display.workflow_labels", "value": {
+        "review": {"label": "Review", "color": "s2"}, "other": {"label": "Other"}}}).status_code == 200
+    with world.engine.begin() as conn:
+        conn.execute(insert(settings).values(scope=world.own.team, team_id=world.own.team,
+                                             key="display.workflow_labels",
+                                             value={"review": {"label": "Team"}, "triage": {"label": "Kept"}}))
+    assert admin.post(f"/api/workflows/{world.own.wf['team']}",
+                      json={"body": GOOD.replace("name: review", "name: triage"), "base_version": 1}).status_code == 200
+    assert _labels(world) == {"triage": {"label": "Review", "color": "s2", "hidden": False},
+                              "other": {"label": "Other", "color": "", "hidden": False}}
+    assert _labels(world, world.own.team) == {"review": {"label": "Team"}, "triage": {"label": "Kept"}}
+
+
+def test_a_rename_carries_a_default_label_into_a_stored_one(world):
+    with world.engine.begin() as conn:
+        conn.execute(workflows.update().where(workflows.c.id == world.own.wf["team"]).values(name="pr-merged"))
+        defs._add_version(conn, defs.WORKFLOW, world.own.wf["team"], 2, GOOD.replace("name: review", "name: pr-merged"),
+                          None, "t", world.clock())
+        conn.execute(workflows.update().where(workflows.c.id == world.own.wf["team"]).values(current_version=2))
+    admin = _client(world, "admin")
+    assert admin.post(f"/api/workflows/{world.own.wf['team']}",
+                      json={"body": GOOD.replace("name: review", "name: merged"), "base_version": 2}).status_code == 200
+    labels = _labels(world)
+    assert labels["merged"]["hidden"] and "pr-merged" not in labels and labels["build-announce"]["hidden"]

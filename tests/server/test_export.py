@@ -13,7 +13,8 @@ from sqlalchemy import insert, select
 from typer.testing import CliRunner
 
 from armature.cli import app
-from armature.server import defs
+from armature.packs import AdapterDef
+from armature.server import defs, rbac
 from armature.server import secrets as secret_store
 from armature.server.config import ExportConfig
 from armature.server.db import new_id, utcnow
@@ -324,3 +325,20 @@ def test_the_server_exports_once_at_start(sqlite_engine, keyring, tmp_path):
     with client:
         assert client.app.state.export.flush()
         assert (dest / "manifest.json").is_file()
+
+
+def test_a_renamed_workflow_leaves_no_old_file(seeded, tmp_path):
+    dest = tmp_path / "export"
+    with seeded.connect() as conn:
+        export_definitions(conn, dest)
+    assert (dest / "workflows" / "instance" / "review.yml").is_file()
+    with seeded.begin() as conn:
+        row = conn.execute(select(workflows).where(workflows.c.scope == "*", workflows.c.name == "review")).one()
+        body = WORKFLOW.replace("name: review", "name: triage")
+        defs.save(conn, defs.WORKFLOW, row, access=rbac.Access(is_admin=True), body=body, note=None,
+                  base_version=row.current_version, actor_id="t", now=utcnow(), ip=None,
+                  catalog={"demo/post": AdapterDef(cmd="post.sh")})
+    with seeded.connect() as conn:
+        export_definitions(conn, dest)
+    assert not (dest / "workflows" / "instance" / "review.yml").exists()
+    assert (dest / "workflows" / "instance" / "triage.yml").read_text().endswith(body)

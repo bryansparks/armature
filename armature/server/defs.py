@@ -38,6 +38,7 @@ from ruamel.yaml.events import (
     SequenceStartEvent,
 )
 from sqlalchemy import Connection, Table, delete, insert, select, update
+from sqlalchemy.exc import IntegrityError
 
 from armature.packs.params import with_error_paths
 from armature.runtime.templating import text_env
@@ -927,6 +928,36 @@ def _advance(conn: Connection, kind: Kind, row: Any, base: int, body: str, note:
     return base + 1
 
 
+def _body_name(body: str | None) -> str | None:
+    data = _quiet_load(body)
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def _rename(conn: Connection, row: Any, previous_body: str | None, body: str, *, actor_id: str, now: datetime,
+            ip: str | None) -> Any:
+    """Rename the workflow when this version changes the body's ``name``. Runs, rules, and jobs link by id."""
+    old, new = row.name, _body_name(body)
+    if new is None or new == old or new == _body_name(previous_body):
+        return row
+    new = _check_name(WORKFLOW, new)
+    scope = row_scope(row)
+    taken = DefError(409, f"A workflow named {new} already exists here.")
+    if conn.execute(select(workflows.c.id).where(workflows.c.scope == scope.scope, workflows.c.name == new,
+                                                 workflows.c.id != row.id)).first() is not None:
+        raise taken
+    try:
+        conn.execute(update(workflows).where(workflows.c.id == row.id).values(name=new, updated_at=now))
+    except IntegrityError as exc:
+        raise taken from exc
+    _audit(conn, WORKFLOW, "rename", row.id, scope, actor_id, ip, name=new, **{"from": old, "to": new})
+    for team_id in display.rename_workflow(conn, old, new, actor_id=actor_id, now=now):
+        audit.record(conn, action="setting.set", actor_id=actor_id, team_id=team_id, target_kind="setting",
+                     target_id=display.LABELS_KEY, detail={"key": display.LABELS_KEY, "scope": scope_of(team_id)},
+                     ip=ip)
+    return get_row(conn, WORKFLOW, row.id)
+
+
 def save(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, body: Any, note: Any, base_version: Any,
          actor_id: str, now: datetime, ip: str | None, catalog: Any = None) -> tuple[Any, Validation]:
     scope = row_scope(row)
@@ -941,6 +972,8 @@ def save(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, body: A
                            doc_kind=_doc_kind(kind, row), catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
+    if kind is WORKFLOW:
+        row = _rename(conn, row, previous, body, actor_id=actor_id, now=now, ip=ip)
     version = _advance(conn, kind, row, base_version, body, _note(kind, body, note), actor_id, now)
     _audit(conn, kind, "version", row.id, scope, actor_id, ip, name=getattr(row, kind.name_col), version=version)
     return get_row(conn, kind, row.id), validation
@@ -983,6 +1016,8 @@ def rollback(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, ver
                            catalog=catalog)
     if not validation.ok:
         raise _invalid(validation)
+    if kind is WORKFLOW:
+        row = _rename(conn, row, previous, body, actor_id=actor_id, now=now, ip=ip)
     text = note if isinstance(note, str) and note.strip() else f"Rolled back to version {version}."
     new = _advance(conn, kind, row, row.current_version, body, _note(kind, body, text), actor_id, now)
     _audit(conn, kind, "rollback", row.id, scope, actor_id, ip, name=getattr(row, kind.name_col), version=new,

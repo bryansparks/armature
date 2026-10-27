@@ -4,10 +4,11 @@ from __future__ import annotations
 import copy
 import math
 import re
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import Connection, select
+from sqlalchemy import Connection, insert, select, update
 
 from armature.server.db.schema import INSTANCE_SCOPE, settings
 
@@ -21,6 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "workflow_labels": {name: {"label": "", "color": "", "hidden": True} for name in ("pr-merged", "build-announce")},
     "hidden_actors": [],
 }
+LABELS_KEY = PREFIX + "workflow_labels"
 HUMAN_MULTIPLIER_MAX = 100
 LABEL_MAX = 32
 COLORS = tuple(f"s{n}" for n in range(1, 9))
@@ -143,3 +145,25 @@ def load(conn: Connection) -> dict[str, Any]:
         except Invalid:
             continue
     return current
+
+
+def rename_workflow(conn: Connection, old: str, new: str, *, actor_id: str, now: datetime) -> list[str | None]:
+    """Move ``old``'s label to ``new`` wherever ``new`` has none. Returns the team id of each scope moved."""
+    rows = conn.execute(select(settings.c.scope, settings.c.team_id, settings.c.value)
+                        .where(settings.c.key == LABELS_KEY)).all()
+    found = [(r.scope, r.team_id, r.value, True) for r in rows]
+    if INSTANCE_SCOPE not in {r.scope for r in rows}:
+        found.append((INSTANCE_SCOPE, None, DEFAULTS["workflow_labels"], False))
+    moved = []
+    for scope, team_id, labels, stored in found:
+        if not isinstance(labels, dict) or old not in labels or new in labels:
+            continue
+        values = {"value": {new if name == old else name: entry for name, entry in labels.items()},
+                  "updated_at": now, "updated_by": actor_id}
+        if stored:
+            conn.execute(update(settings).where(settings.c.scope == scope, settings.c.key == LABELS_KEY)
+                         .values(**values))
+        else:
+            conn.execute(insert(settings).values(key=LABELS_KEY, scope=scope, team_id=team_id, **values))
+        moved.append(team_id)
+    return moved
