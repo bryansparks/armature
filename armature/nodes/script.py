@@ -2,8 +2,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
+from collections.abc import Callable
 from typing import Any
 from armature.events.env import child_env
 from armature.nodes.base import BaseNode
@@ -11,11 +13,28 @@ from armature.runtime.templating import text_env
 from armature.spec.models import Adapter
 from armature.permissions.permissions import classify_shell_command, requires_approval
 
+_ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+LOG_LINE_CHARS = 2000
+LOG_LINES_PER_S = 20
+PARTIAL_FLUSH_S = 1.0
+PARTIAL_FLUSH_BYTES = 4096
+
 
 class ScriptNode(BaseNode):
-    def __init__(self, adapter: Adapter, env: dict[str, str] | None = None):
+    def __init__(
+        self,
+        adapter: Adapter,
+        env: dict[str, str] | None = None,
+        emit: Callable[..., None] | None = None,
+        step_id: str | None = None,
+    ):
         self._adapter = adapter
         self._env = env or {}
+        self._emit = emit
+        self._step_id = step_id
+        self._window_start = 0.0
+        self._window_lines = 0
+        self._skipped = 0
 
     async def execute(self, context: dict[str, Any]) -> Any:
         cmd = self._adapter.cmd or ""
@@ -39,7 +58,7 @@ class ScriptNode(BaseNode):
             start_new_session=True,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._adapter.timeout)
+            stdout, stderr = await asyncio.wait_for(self._communicate(proc), timeout=self._adapter.timeout)
         except asyncio.TimeoutError:
             await self._kill_group(proc)
             raise subprocess.TimeoutExpired(cmd, self._adapter.timeout)
@@ -54,6 +73,71 @@ class ScriptNode(BaseNode):
         if self._adapter.parse == "json":
             return self._parse_json(envelope)
         return envelope
+
+    async def _communicate(self, proc: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
+        if self._emit is None:
+            return await proc.communicate()
+        stdout, stderr = await asyncio.gather(proc.stdout.read(), self._tail_stderr(proc.stderr))
+        await proc.wait()
+        return stdout, stderr
+
+    async def _tail_stderr(self, stream: asyncio.StreamReader) -> bytes:
+        """All of stderr, sending each line as a `log` event as it arrives."""
+        loop = asyncio.get_running_loop()
+        collected = bytearray()
+        partial = b""
+        partial_since = 0.0
+        while True:
+            timeout = max(0.0, partial_since + PARTIAL_FLUSH_S - loop.time()) if partial else None
+            try:
+                chunk = await asyncio.wait_for(stream.read(PARTIAL_FLUSH_BYTES), timeout)
+            except asyncio.TimeoutError:
+                self._log_line(partial)
+                partial = b""
+                continue
+            if not chunk:
+                break
+            collected += chunk
+            had_partial = bool(partial)
+            *lines, rest = (partial + chunk).split(b"\n")
+            for line in lines:
+                self._log_line(line)
+            if len(rest) >= PARTIAL_FLUSH_BYTES:
+                self._log_line(rest)
+                rest = b""
+            if rest and (lines or not had_partial):
+                partial_since = loop.time()
+            partial = rest
+        if partial:
+            self._log_line(partial)
+        self._report_skipped()
+        return bytes(collected)
+
+    def _log_line(self, raw: bytes) -> None:
+        text = _ANSI.sub("", raw.decode(errors="replace")).rstrip()
+        if not text.strip():
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._window_start >= 1.0:
+            self._report_skipped()
+            self._window_start = now
+            self._window_lines = 0
+        if self._window_lines >= LOG_LINES_PER_S:
+            self._skipped += 1
+            return
+        self._window_lines += 1
+        self._send(text[:LOG_LINE_CHARS])
+
+    def _report_skipped(self) -> None:
+        if self._skipped:
+            self._send(f"{self._skipped} lines skipped")
+            self._skipped = 0
+
+    def _send(self, message: str) -> None:
+        try:
+            self._emit("log", self._step_id, stream="stderr", message=message)
+        except Exception:
+            pass
 
     @staticmethod
     async def _kill_group(proc: asyncio.subprocess.Process) -> None:

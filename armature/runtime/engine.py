@@ -642,7 +642,10 @@ class Harness:
                         if adapter is None:
                             raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
                         script_env, script_context = self._script_inputs(stage, adapter, context)
-                        node = ScriptNode(adapter=adapter, env=script_env)
+                        node = ScriptNode(
+                            adapter=adapter, env=script_env,
+                            emit=self._emit if self._events.enabled else None, step_id=stage.id,
+                        )
                         tool_args = {"cmd": adapter.cmd or ""}
                         decision = await self._hooks.run_pre_tool(stage.adapter, tool_args, context)
                         if decision == HookDecision.BLOCK:

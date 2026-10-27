@@ -394,6 +394,19 @@ async def test_running_stage_sends_heartbeats(reader, monkeypatch, tmp_path):
     assert not [e for e in events[wait_end + 1:] if e["kind"] == "progress" and e["step_id"] == "wait"]
 
 
+async def test_script_stderr_reaches_the_server_as_log_events(reader, tmp_path):
+    spec = HarnessSpec(
+        name="tail",
+        stages=[Stage(id="noisy", adapter="noisy")],
+        adapters={"noisy": Adapter(name="noisy", type="script", cmd="echo first >&2; echo second >&2")},
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path, traces_db=tmp_path / "t.db")
+    await harness.run({})
+    events = _flush_and_read(harness, reader)
+    logs = [e for e in events if e["kind"] == "log" and e["payload"].get("stream") == "stderr"]
+    assert [(e["step_id"], e["payload"]["message"]) for e in logs] == [("noisy", "first"), ("noisy", "second")]
+
+
 def test_child_env_never_passes_the_runner_key():
     base = {"PATH": "/bin", "ARMATURE_RUNNER_KEY": "rk", "ARMATURE_EVENTS": "unix:/p",
             "ARMATURE_EVENTS_TOKEN": "parent"}
