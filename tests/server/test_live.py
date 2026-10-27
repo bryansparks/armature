@@ -227,7 +227,7 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
     summary = detail["run"]
     assert set(summary) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "trigger_kind",
                             "started_at", "finished_at", "cost_usd", "input_tokens", "output_tokens", "rerun_of",
-                            "cancelled_by", "error", "subject", "summary", "last_seq", "dry_run", "kind"}
+                            "cancelled_by", "error", "subject", "summary", "last_seq", "dry_run", "kind", "trigger"}
     assert summary["dry_run"] is False and summary["kind"] == "review"
     assert (summary["status"], summary["error"], summary["workflow"], summary["triggered_by"]) == \
         ("failed", "build broke", "pr-review", "octocat")
@@ -398,7 +398,7 @@ def test_runs_stream_is_scoped(live, world):
         assert {r["id"] for r in rows} == {run["run_id"]}
         assert [r["status"] for r in rows] == ["running", "succeeded"]
         assert set(rows[0]) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "started_at",
-                                "finished_at", "cost_usd", "subject", "title", "verdict"}
+                                "finished_at", "cost_usd", "subject", "title", "verdict", "trigger"}
         theirs_frames = theirs.until(lambda f: any(x.get("event") == "run" for x in f))
         assert [f["data"]["id"] for f in theirs_frames if f.get("event") == "run"] == [other_run["run_id"]]
 

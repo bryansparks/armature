@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
-const { chosenWorkflows, hashParams, isHidden, listParams, matches, prTitle, repoOf, runHeaders, runStatus, subjectHref, verdictText, verdictTone,
-  workflowOptions } =
+const { capsules, chosenWorkflows, hashParams, isHidden, isLive, listParams, liveElapsed, liveRuns, matches, prTitle, repoOf, runHeaders, runStatus,
+  subjectHref, triggerOf, verdictText, verdictTone, workflowOptions } =
   await import(new URL('views/runs.js', STATIC));
 const { hashFor } = await import(new URL('router.js', STATIC));
 
@@ -127,4 +127,48 @@ test('workflowOptions merges configured and seen workflows by label', () => {
 test('runHeaders drops the Cost column when cost is hidden', () => {
   assert.deepEqual(runHeaders({ show_cost: true }).at(-1), ['Cost', 'num']);
   assert.deepEqual(runHeaders({ show_cost: false }).at(-1), ['Time', 'num']);
+});
+
+test('runHeaders names the Trigger column, not Triggered by', () => {
+  assert.ok(runHeaders({}).includes('Trigger'));
+  assert.ok(!runHeaders({}).includes('Triggered by'));
+});
+
+test('triggerOf reads the server trigger and falls back to the actor', () => {
+  assert.deepEqual(triggerOf({ trigger: { label: 'repo hooks', detail: 'pull_request' }, triggered_by: 'runner' }), { label: 'repo hooks', detail: 'pull_request' });
+  assert.deepEqual(triggerOf({ trigger: { label: 'Schedule', detail: null } }), { label: 'Schedule', detail: '' });
+  assert.deepEqual(triggerOf({ trigger: null, triggered_by: 'ada' }), { label: 'ada', detail: '' });
+  assert.deepEqual(triggerOf({}), { label: '—', detail: '' });
+});
+
+test('capsules list All and each visible workflow, pressing one only for a single choice', () => {
+  const items = capsules(display, ['jira-work', 'code-review'], []);
+  assert.deepEqual(items.map((item) => [item.id, item.name, item.pressed]), [['', 'All', true], ['code-review', 'Code review', false], ['jira-work', 'jira-work', false]]);
+  assert.equal(items[1].color, 's1');
+  assert.equal(items[2].color, 's2');
+  assert.deepEqual(capsules(display, ['jira-work', 'code-review'], ['jira-work']).filter((item) => item.pressed).map((item) => item.id), ['jira-work']);
+  assert.deepEqual(capsules(display, ['jira-work', 'code-review'], ['jira-work', 'code-review']).filter((item) => item.pressed), []);
+  assert.ok(!capsules(display, ['digest'], []).some((item) => item.id === 'digest'));
+});
+
+test('live runs are running or queued, pass the filter, and ignore the status filter', () => {
+  const base = { team: '', project: '', status: 'failed', subject: '', workflows: [], hidden: false };
+  assert.equal(isLive({ status: 'running', workflow: 'code-review' }, base, display), true);
+  assert.equal(isLive({ status: 'queued', workflow: 'code-review' }, base, display), true);
+  assert.equal(isLive({ status: 'succeeded', workflow: 'code-review' }, base, display), false);
+  assert.equal(isLive({ status: 'running', workflow: 'digest' }, base, display), false);
+  assert.equal(isLive({ status: 'running', workflow: 'jira-work' }, { ...base, workflows: ['code-review'] }, display), false);
+  assert.equal(isLive({ status: 'running', workflow: 'code-review', triggered_by: 'bot' }, base, { ...display, hidden_actors: ['bot'] }), false);
+  const runs = [
+    { id: 1, status: 'running', workflow: 'code-review', started_at: '2026-10-01T00:00:00Z' },
+    { id: 2, status: 'queued', workflow: 'code-review', started_at: '2026-10-02T00:00:00Z' },
+    { id: 3, status: 'failed', workflow: 'code-review', started_at: '2026-10-03T00:00:00Z' },
+    { id: 1, status: 'running', workflow: 'code-review', started_at: '2026-10-01T00:00:00Z' },
+  ];
+  assert.deepEqual(liveRuns(runs, base, display).map((run) => run.id), [2, 1]);
+});
+
+test('liveElapsed ticks from the start and waits without one', () => {
+  assert.equal(liveElapsed({ started_at: '2026-10-01T00:00:00Z' }, Date.parse('2026-10-01T00:04:05Z')), '4m 5s');
+  assert.equal(liveElapsed({ started_at: null }), 'Waiting');
 });

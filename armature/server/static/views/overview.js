@@ -28,12 +28,15 @@ function elapsed(run) {
   return duration(secondsBetween(run.started_at, run.finished_at));
 }
 
-function runningCard(run, display) {
-  return element('a', { class: 'running-run', href: hashFor('run', [run.id]) },
-    element('span', { class: 'running-name' }, workflowLabel(display, run.workflow)),
+// A link to the run, or with ``open`` a button that calls it. ``details`` replaces the started and by lines.
+export function runningCard(run, display, { open = null, color = null, details = null } = {}) {
+  const parts = [
+    element('span', { class: 'running-name' }, color ? element('span', { class: `swatch sw-${color}`, 'aria-hidden': 'true' }) : null, workflowLabel(display, run.workflow)),
     statusChip(run.status),
-    element('span', { class: 'muted' }, `Started ${ago(run.started_at)}`),
-    run.triggered_by ? element('span', { class: 'muted' }, `by ${run.triggered_by}`) : null);
+    details ?? [element('span', { class: 'muted' }, `Started ${ago(run.started_at)}`), run.triggered_by ? element('span', { class: 'muted' }, `by ${run.triggered_by}`) : null],
+  ];
+  if (!open) return element('a', { class: 'running-run', href: hashFor('run', [run.id]) }, parts);
+  return element('button', { type: 'button', class: 'running-run', 'data-run-id': String(run.id), onclick: open }, parts);
 }
 
 const DISMISSED_KEY = 'armature.dismissed-alerts';

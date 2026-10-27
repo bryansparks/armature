@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import audit, display, invites, rbac, subjects
+from armature.server import audit, display, invites, rbac, subjects, trigger
 from armature.server import secrets as secret_store
 from armature.server.app.deps import (
     Granted,
@@ -528,7 +528,7 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
     query = (select(runs.c.id, runs.c.team_id, runs.c.project_id,
                     func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), runs.c.status,
                     func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.started_at,
-                    runs.c.finished_at, runs.c.cost_usd, runs.c.subject, runs.c.summary, runs.c.trigger_ref)
+                    runs.c.finished_at, runs.c.cost_usd, runs.c.subject, runs.c.summary, *trigger.columns())
              .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
              .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
     if team:
@@ -566,11 +566,13 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
                 query = query.where(or_(actor.is_(None), actor.not_in(actors)))
         rows = conn.execute(query).all()
         pulls = subjects.pull_states(conn, scope, {r.subject for r in rows if r.subject})
+        started = trigger.describe(conn, [r._mapping for r in rows])
     listed = [{"id": r.id, "team_id": r.team_id, "project_id": r.project_id, "workflow": r.workflow,
                "status": r.status, "triggered_by": r.triggered_by, "started_at": r.started_at,
                "finished_at": r.finished_at,
                "cost_usd": float(r.cost_usd) if r.cost_usd is not None and settings["show_cost"] else None,
-               **about(r.subject, r.summary), "pr": pulls.get(r.subject), "outcome": _fix_outcome(r.trigger_ref)}
+               **about(r.subject, r.summary), "pr": pulls.get(r.subject), "outcome": _fix_outcome(r.trigger_ref),
+               "trigger": started[r.id]}
               for r in rows]
     return {"runs": listed, "next_before": _next(rows, limit, "started_at")}
 

@@ -38,7 +38,7 @@ from armature.events.emitter import (
 )
 from armature.events.redact import REDACTED, redact_text
 from armature.events.summary import merge_summary, summary_patch
-from armature.server import runners
+from armature.server import runners, trigger
 from armature.server import secrets as secret_store
 from armature.server.auth import valid_token
 from armature.server.crypto import Keyring
@@ -260,7 +260,7 @@ def list_row(summary: dict[str, Any]) -> dict[str, Any]:
     """The fields a row of ``GET /api/runs`` has."""
     return {**{k: summary[k] for k in ("id", "team_id", "project_id", "workflow", "status", "triggered_by",
                                        "started_at", "finished_at", "cost_usd")},
-            **about(summary.get("subject"), summary.get("summary"))}
+            **about(summary.get("subject"), summary.get("summary")), "trigger": summary.get("trigger")}
 
 
 def run_columns() -> list:
@@ -283,7 +283,7 @@ def summary_of(row: Any) -> dict[str, Any]:
 
 def load_summary(conn: Connection, run_id: str) -> dict[str, Any] | None:
     row = conn.execute(run_query().where(runs.c.id == run_id)).first()
-    return summary_of(row) if row else None
+    return {**summary_of(row), "trigger": trigger.describe_one(conn, run_id)} if row else None
 
 
 def team_secret_values(conn: Connection, keyring: Keyring, team_id: str) -> tuple[str, ...]:
