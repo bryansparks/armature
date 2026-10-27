@@ -440,6 +440,9 @@ section.adapter { border-top: 1px solid var(--rule); margin-top: 14px; padding-t
 .capsule .swatch, .running-name .swatch, .tail-title .swatch { width: 8px; height: 8px; border-radius: 999px; margin-right: 0; }
 .picker-toggle[aria-expanded="true"] { border-color: var(--accent); }
 .trigger-detail { font-size: 12.5px; }
+td .trigger-label, td .trigger-detail { display: block; }
+th.col-tight, td.col-tight { white-space: nowrap; }
+th.col-title, td.col-title { width: 100%; min-width: 16em; }
 .live-runs h2 { margin: 8px 0; }
 .live-runs .running-list:focus { outline: none; }
 .live-empty { margin: 0 0 6px; color: var(--muted); font-size: 13.5px; }

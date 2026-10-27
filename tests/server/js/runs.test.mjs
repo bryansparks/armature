@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
-const { capsules, chosenWorkflows, hashParams, isHidden, isLive, listParams, liveElapsed, liveRuns, matches, prTitle, repoOf, runHeaders, runStatus,
+const { capsules, chosenWorkflows, hashParams, isHidden, isLive, listParams, liveElapsed, liveRuns, matches, prTitle, repoOf, runHeaders, runStatus, shortWhen,
   subjectHref, triggerOf, verdictText, verdictTone, workflowOptions } =
   await import(new URL('views/runs.js', STATIC));
 const { hashFor } = await import(new URL('router.js', STATIC));
@@ -125,8 +125,8 @@ test('workflowOptions merges configured and seen workflows by label', () => {
 });
 
 test('runHeaders drops the Cost column when cost is hidden', () => {
-  assert.deepEqual(runHeaders({ show_cost: true }).at(-1), ['Cost', 'num']);
-  assert.deepEqual(runHeaders({ show_cost: false }).at(-1), ['Time', 'num']);
+  assert.deepEqual(runHeaders({ show_cost: true }).at(-1), ['Cost', 'num col-tight']);
+  assert.deepEqual(runHeaders({ show_cost: false }).at(-1), ['Time', 'num col-tight']);
 });
 
 test('runHeaders names the Trigger column, not Triggered by', () => {
@@ -171,4 +171,11 @@ test('live runs are running or queued, pass the filter, and ignore the status fi
 test('liveElapsed ticks from the start and waits without one', () => {
   assert.equal(liveElapsed({ started_at: '2026-10-01T00:00:00Z' }, Date.parse('2026-10-01T00:04:05Z')), '4m 5s');
   assert.equal(liveElapsed({ started_at: null }), 'Waiting');
+});
+
+test('shortWhen keeps the start time to month/day and time', () => {
+  const now = new Date(2026, 9, 27, 12, 0);
+  assert.equal(shortWhen(new Date(2026, 9, 27, 9, 5).toISOString(), now), '10/27 9:05');
+  assert.equal(shortWhen(new Date(2025, 11, 31, 23, 59).toISOString(), now), '12/31/25 23:59');
+  assert.equal(shortWhen(null, now), '—');
 });

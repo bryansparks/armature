@@ -17,8 +17,16 @@ const CHANGES = new Set(['comment', 'changes', 'request_changes', 'changes_reque
 const ACTIVE = new Set(['queued', 'running']);
 const ENDED = new Set(['failed', 'canceled', 'lost']);
 
-export const runHeaders = (display) => ['Started', 'Run', 'Workflow', 'Repository', 'Status', 'Trigger', ['Time', 'num'],
-  ...(display?.show_cost ? [['Cost', 'num']] : [])];
+export const runHeaders = (display) => [['Started', 'col-tight'], ['Run', 'col-title'], ['Workflow', 'col-tight'], 'Repository',
+  ['Status', 'col-tight'], 'Trigger', ['Time', 'num col-tight'], ...(display?.show_cost ? [['Cost', 'num col-tight']] : [])];
+
+export function shortWhen(timestamp, now = new Date()) {
+  const date = new Date(timestamp || '');
+  if (!timestamp || Number.isNaN(date.getTime())) return '—';
+  const time = `${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const day = `${date.getMonth() + 1}/${date.getDate()}`;
+  return date.getFullYear() === now.getFullYear() ? `${day} ${time}` : `${day}/${String(date.getFullYear()).slice(2)} ${time}`;
+}
 
 export const prTitle = (run, pr, display) => pr?.title || run.title || workflowLabel(display, run.workflow);
 
@@ -132,7 +140,7 @@ export function subjectLink(subject) {
 
 function triggerCell(run) {
   const { label, detail } = triggerOf(run);
-  return [label, detail ? element('span', { class: 'muted trigger-detail' }, ` ${detail}`) : null];
+  return [element('span', { class: 'trigger-label' }, label), detail ? element('span', { class: 'muted trigger-detail' }, detail) : null];
 }
 
 function setText(node, text) {
@@ -242,7 +250,7 @@ export async function render(root, { query, signal }) {
     const pr = prFor(run);
     const status = runStatus(run, pr);
     return [
-      element('span', { title: run.started_at || null }, when(run.started_at)),
+      element('span', { title: when(run.started_at) }, shortWhen(run.started_at)),
       link(hashFor('run', [run.id]), prTitle(run, pr, display)), workflowLabel(display, run.workflow),
       repoCell(run.subject), element('span', { class: `state state-${status.tone}` }, status.text),
       triggerCell(run), elapsed(run), ...(display.show_cost ? [money(run.cost_usd)] : []),
