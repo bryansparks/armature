@@ -2169,6 +2169,7 @@ Each run writes to `~/.armature/runs/<run_id>/`:
 ```
 ~/.armature/runs/<run_id>/
 ├── session.jsonl     # structured event log for the run
+├── result.json       # full final result of a successful `armature run`
 ├── traces.db         # SQLite trace store (tokens, latency, outputs)
 └── artifacts/        # any artifacts written by script stages
 ```

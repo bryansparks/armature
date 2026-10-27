@@ -28,6 +28,19 @@ if TYPE_CHECKING:  # pragma: no cover - annotation-only; avoids a work↔closure
     from armature.state.closure import FollowOnUnit
 
 
+def write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 class WorkUnitState(str, Enum):
     """Lifecycle states of a work unit (design §2.2)."""
 
@@ -185,16 +198,7 @@ class LocalWorkStore:
     # -- low-level IO ------------------------------------------------------
 
     def _write_atomic(self, path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            os.replace(tmp, path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        write_atomic(path, text)
 
     def _append_line(self, path: Path, line: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
