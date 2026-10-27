@@ -65,9 +65,10 @@ export class TailModel {
 
 export function tailLine(row, { showCost = true } = {}) {
   const payload = row.payload || {};
-  if (row.kind === 'log' && payload.line !== undefined && payload.line !== null) {
-    const text = String(payload.line);
-    return { tone: payload.stream === 'stderr' ? 'warn' : 'muted', label: payload.stream ? String(payload.stream) : 'log',
+  const logged = payload.message ?? payload.line;
+  if (row.kind === 'log' && logged !== undefined && logged !== null) {
+    const text = String(logged);
+    return { tone: 'muted', label: payload.stream ? String(payload.stream) : 'log',
       text: text.length > LOG_LINE_MAX ? `${text.slice(0, LOG_LINE_MAX - 1)}…` : text, mono: true };
   }
   if (row.kind === 'text') return { tone: 'text', label: 'Text', text: oneLine(payload.text, 400), mono: false };

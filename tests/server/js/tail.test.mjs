@@ -49,11 +49,18 @@ test('the tail skips events it already has', () => {
 });
 
 test('tailLine draws log lines as monospace and the rest through describe', () => {
-  assert.deepEqual(tailLine({ kind: 'log', payload: { line: '  npm ERR!', stream: 'stderr' } }), { tone: 'warn', label: 'stderr', text: '  npm ERR!', mono: true });
+  assert.deepEqual(tailLine({ kind: 'log', payload: { line: '  npm ERR!', stream: 'stderr' } }), { tone: 'muted', label: 'stderr', text: '  npm ERR!', mono: true });
   assert.deepEqual(tailLine({ kind: 'log', payload: { line: 'ok' } }), { tone: 'muted', label: 'log', text: 'ok', mono: true });
-  assert.equal(tailLine({ kind: 'log', payload: { message: 'older log' } }).mono, false);
+  assert.equal(tailLine({ kind: 'log', payload: { message: 'from the engine' } }).mono, true);
   assert.equal(tailLine({ kind: 'log', payload: { line: 'x'.repeat(5000) } }).text.length, 2000);
   assert.deepEqual(tailLine({ kind: 'tool_call', payload: { tool: 'Bash', input: '{"command":"ls -la"}' } }), { tone: 'muted', label: 'Bash', text: 'ls -la', mono: false });
   assert.equal(tailLine({ kind: 'text', payload: { text: 'hello\nthere' } }).text, 'hello there');
   assert.deepEqual(tailLine({ kind: 'step_failed', payload: { error: 'boom' } }), { tone: 'bad', label: 'Step', text: 'Failed: boom', mono: false });
+});
+
+test('a script log line from the engine renders as monospace text', () => {
+  const line = tailLine({ kind: 'log', step_id: 'build', payload: { stream: 'stderr', message: 'Compiling 12 files' } });
+  assert.equal(line.text, 'Compiling 12 files');
+  assert.equal(line.mono, true);
+  assert.equal(line.tone, 'muted');
 });
