@@ -1,16 +1,19 @@
 """The response fields the browser code reads, pinned against what the routes return."""
 import hashlib
 import hmac
+import json
 import re
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import insert, select
 
+from armature.server import llm
 from armature.server import secrets as secret_store
 from armature.server.db import new_id
-from armature.server.db.schema import findings, run_artifacts, runs, workflows
+from armature.server.db.schema import findings, providers, run_artifacts, runs, workflows
 from tests.server.app_support import (
     ORIGIN,
     Clock,
@@ -75,19 +78,46 @@ READS = [
     ("views/webhooks.js", "entry", "delivery_match", {"workflow_name", "workflow_id", "shadow", "run_id",
                                                       "job_status"}),
     ("views/webhooks.js", "decision", "decision", {"trigger_id", "matched", "reason", "inputs"}),
+    ("views/definition.js", "detail", "workflow_detail", {"summary", "started_by", "version"}),
+    ("views/definition.js", "proposal", "assist", {"body", "base_version"}),
+    ("assistant.js", "proposal", "assist", {"body", "explanation", "diff", "validation", "summary", "changes",
+                                            "team_name"}),
+    ("assistant.js", "changes", "assist_changes", {"added", "removed", "changed", "renamed"}),
+    ("assistant.js", "described", "workflow_summary", {"error", "description", "inputs", "steps", "post_run"}),
+    ("assistant.js", "step", "summary_step", {"id", "label", "kind", "what", "after", "fan_out", "output", "optional",
+                                              "retry"}),
+    ("assistant.js", "starter", "started_by", {"webhook", "events", "shadow", "enabled"}),
 ]
+
+DESCRIBED = """name: described
+description: Ask for approval.
+stages:
+  - id: approve
+    gate: human
+"""
 
 
 def _read_fields(source: str, variable: str) -> set[str]:
     return set(re.findall(rf"\b{variable}\??\.([a-z_]+)\b", source))
 
 
+class _Model:
+    def __call__(self, **kwargs):
+        content = json.dumps({"body": DESCRIBED.replace("Ask for", "Wait for"), "explanation": "Reworded it."})
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
+                               usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1), _hidden_params={})
+
+
 @pytest.fixture
-def responses(sqlite_engine, keyring):
+def responses(sqlite_engine, keyring, monkeypatch):
     clock = Clock()
+    monkeypatch.setattr(llm, "litellm_completion", _Model())
     with sqlite_engine.begin() as conn:
         side = _side(conn, "own", clock)
         secret_store.set_secret(conn, keyring, team_id=side.team, name="K", value="v", actor_id=None)
+        conn.execute(insert(providers).values(id=new_id(), team_id=side.team, kind="anthropic",
+                                              config={"credential_secret": "K"}, aliases={"lead": "claude"},
+                                              created_at=clock(), updated_at=clock()))
         run_id = new_id()
         conn.execute(insert(runs).values(id=run_id, team_id=side.team, status="running", started_at=clock(),
                                          cost_usd=Decimal(1)))
@@ -126,7 +156,20 @@ def responses(sqlite_engine, keyring):
     delivery = client.get(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}").json()["delivery"]
     decisions = client.post(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}/test", json={},
                             headers=mutation(csrf)).json()["decisions"]
+    described = client.post("/api/workflows", json={"name": "described", "scope_kind": "team", "scope_id": side.team,
+                                                    "body": DESCRIBED}, headers=mutation(csrf)).json()["workflow"]
+    client.post(f"/api/webhooks/{hook['id']}/rules", json={"workflow_id": described["id"], "config": {}},
+                headers=mutation(csrf))
+    workflow_detail = client.get(f"/api/workflows/{described['id']}").json()
+    proposal = client.post("/api/assist", json={"workflow_id": described["id"], "base_version": 1,
+                                                "instruction": "Reword it."}, headers=mutation(csrf)).json()
     return {
+        "workflow_detail": workflow_detail,
+        "workflow_summary": workflow_detail["summary"],
+        "summary_step": workflow_detail["summary"]["steps"][0],
+        "started_by": workflow_detail["started_by"][0],
+        "assist": proposal,
+        "assist_changes": proposal["changes"],
         "inspect": guest.post("/api/invite/inspect", json={"token": token},
                               headers={"Origin": ORIGIN, "X-CSRF-Token": guest_csrf}).json(),
         "create_user": created,

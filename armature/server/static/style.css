@@ -326,6 +326,31 @@ section.adapter { border-top: 1px solid var(--rule); margin-top: 14px; padding-t
 .source { margin: 8px 0 0; padding: 10px 12px; background: var(--code-bg); border-radius: 6px; font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 70vh; overflow: auto; }
 .pre-line { white-space: pre-line; }
 
+/* Describe a workflow in words, then read Claude's proposal as steps. */
+.btn.small { font-size: 12.5px; padding: 3px 10px; }
+.describe .prompt-label { font-size: 15px; font-weight: 600; color: var(--ink); }
+.describe .stacked-form { margin-top: 12px; }
+.describe .refine { margin-top: 18px; max-width: none; }
+.drafting { color: var(--ink-2); }
+.proposal-explanation { font-size: 14.5px; max-width: 72ch; }
+.proposal-steps { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.yaml-changes { margin-top: 14px; }
+.yaml-changes > summary, .card details > summary { cursor: pointer; font-size: 13.5px; color: var(--accent); }
+.steps-list { margin: 10px 0 0; padding-left: 1.6em; }
+.steps-list > .step-item { padding: 8px 0; border-top: 1px solid var(--rule); }
+.steps-list > .step-item:first-child { border-top: 0; }
+.step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.step-what { margin: 4px 0 0; }
+.step-notes { margin-top: 2px; }
+.step-kind, .step-marker { display: inline-block; border-radius: 999px; padding: 0 8px; font-size: 12.5px; line-height: 20px; white-space: nowrap; }
+.step-kind { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--rule); }
+.step-marker { font-weight: 600; }
+.step-marker.marker-added { background: var(--ok-bg); color: var(--ok); }
+.step-marker.marker-removed { background: var(--danger-bg); color: var(--bad); }
+.step-marker.marker-changed, .step-marker.marker-renamed { background: var(--warn-bg); color: var(--warn); }
+.step-item.marker-removed .step-title { text-decoration: line-through; color: var(--muted); }
+.started-by { margin: 8px 0 0; padding-left: 1.2em; }
+
 /* Overview and Trends. Series slots are the dataviz reference palette, stepped separately for dark. */
 :root { --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; }
 @media (prefers-color-scheme: dark) {

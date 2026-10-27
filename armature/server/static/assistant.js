@@ -1,4 +1,4 @@
-import { api, listOf } from './api.js';
+import { api, ApiError, listOf } from './api.js';
 import { card, clear, confirmDialog, element, errorBox, loading, money, when } from './dom.js';
 import { diffView } from './diff.js';
 import { issueList, issueText } from './editor.js';
@@ -181,4 +181,283 @@ export function testRunPanel(record) {
       element('label', { for: missing.id }, missing, ' Treat steps with no recorded output as empty')),
     element('div', { class: 'wf-actions' }, startButton),
     status);
+}
+
+export const HISTORY_MAX = 5;
+export const EXPLANATION_MAX = 4000;
+export const NOTE_MAX = 500;
+export const CONFLICT_TEXT = 'The workflow changed since Claude proposed this; ask again.';
+
+export const STEP_KINDS = {
+  llm: { icon: '◆', label: 'Model' },
+  script: { icon: '▶', label: 'Script' },
+  tool: { icon: '⚒', label: 'Tool' },
+  gate: { icon: '⏸', label: 'Approval' },
+  subagent: { icon: '↳', label: 'Workflow' },
+  other: { icon: '•', label: 'Step' },
+};
+
+export const MARKERS = {
+  added: { icon: '+', text: 'Added' },
+  removed: { icon: '−', text: 'Removed' },
+  changed: { icon: '~', text: 'Changed' },
+  renamed: { icon: '→', text: 'Renamed' },
+};
+
+const FIELD_WORDS = { label: 'name', kind: 'kind', what: 'what it does', after: 'order', fan_out: 'fan-out', output: 'output', optional: 'optional', retry: 'retries', details: 'details' };
+
+export const stepKind = (kind) => STEP_KINDS[kind] || STEP_KINDS.other;
+
+export function stepRows(described, changes) {
+  const changed = new Map((changes?.changed || []).map((entry) => [entry.id, entry.fields || []]));
+  const renamedFrom = new Map((changes?.renamed || []).map((entry) => [entry.to, entry.from]));
+  const added = new Set(changes?.added || []);
+  const rows = (list) => (list || []).map((step) => {
+    let marker = null;
+    if (added.has(step.id)) marker = 'added';
+    else if (renamedFrom.has(step.id)) marker = 'renamed';
+    else if (changed.has(step.id)) marker = 'changed';
+    return { step, marker, fields: changed.get(step.id) || [], renamedFrom: renamedFrom.get(step.id) || null };
+  });
+  return { steps: rows(described?.steps), postRun: rows(described?.post_run), removed: [...(changes?.removed || [])] };
+}
+
+export function markerText(row) {
+  if (!row?.marker) return null;
+  const base = MARKERS[row.marker].text;
+  if (row.marker === 'renamed') return `${base} from ${row.renamedFrom}`;
+  if (row.marker === 'changed' && row.fields?.length) return `${base}: ${row.fields.map((field) => FIELD_WORDS[field] || field).join(', ')}`;
+  return base;
+}
+
+export function outputText(output) {
+  if (!output || output === 'text') return 'Returns text';
+  if (output === 'structured') return 'Returns structured data';
+  return `Returns ${String(output).replace(/^structured: /, '')}`;
+}
+
+export function stepNotes(step) {
+  const notes = [];
+  if (step.after?.length) notes.push(`After ${step.after.join(', ')}`);
+  if (step.fan_out) notes.push(`Runs ${step.fan_out}`);
+  notes.push(outputText(step.output));
+  if (step.optional) notes.push('Optional: the run goes on if it fails');
+  if (step.retry) notes.push(step.retry);
+  return notes;
+}
+
+export function inputsText(inputs) {
+  if (!inputs?.length) return 'none';
+  return inputs.map((declared) => (declared.required ? `${declared.name} (required)` : declared.name)).join(', ');
+}
+
+export function startedByText(starter) {
+  const events = starter.events?.length ? starter.events.join(', ') : 'any event';
+  const states = [];
+  if (starter.shadow) states.push('shadow: records only');
+  if (!starter.enabled) states.push('off');
+  return `${starter.webhook} on ${events}${states.length ? ` (${states.join(', ')})` : ''}`;
+}
+
+export function pushHistory(history, instruction, explanation) {
+  const turn = { instruction: String(instruction ?? '').slice(0, INSTRUCTION_MAX), explanation: String(explanation ?? '').slice(0, EXPLANATION_MAX) };
+  return [...(history || []), turn].slice(-HISTORY_MAX);
+}
+
+export function applyNote(history) {
+  const text = (history || []).map((turn) => turn.instruction).join(' Then: ').replace(/\s+/g, ' ').trim();
+  return text.length > NOTE_MAX ? `${text.slice(0, NOTE_MAX - 1)}…` : text;
+}
+
+export function proposeBody({ record, baseVersion, instruction, history, draft, name, scope }) {
+  const text = String(instruction ?? '').trim();
+  if (!text) return { error: 'Describe what you want first.' };
+  if (text.length > INSTRUCTION_MAX) return { error: `A description is at most ${INSTRUCTION_MAX} characters.` };
+  const body = { kind: 'workflow', instruction: text, alias: DEFAULT_ALIAS };
+  if (record?.id) {
+    body.workflow_id = record.id;
+    body.base_version = baseVersion;
+  } else {
+    const named = String(name ?? '').trim();
+    if (!named) return { error: 'Give the workflow a name first.' };
+    if (!scope) return { error: 'Pick where the workflow belongs.' };
+    body.name = named;
+    body.scope_kind = scope.scope_kind;
+    if (scope.scope_id) body.scope_id = scope.scope_id;
+  }
+  if (history?.length) body.history = history.slice(-HISTORY_MAX);
+  if (typeof draft === 'string') body.draft = draft;
+  return { body };
+}
+
+export const elapsedText = (seconds) => `${Math.max(0, Math.floor(seconds))}s`;
+
+function kindBadge(kind) {
+  const shown = stepKind(kind);
+  return element('span', { class: 'step-kind' }, element('span', { 'aria-hidden': 'true' }, shown.icon), ` ${shown.label}`);
+}
+
+function markerBadge(row) {
+  const text = markerText(row);
+  if (!text) return null;
+  return element('span', { class: `step-marker marker-${row.marker}` }, element('span', { 'aria-hidden': 'true' }, MARKERS[row.marker].icon), ` ${text}`);
+}
+
+function stepItem(row) {
+  const { step } = row;
+  return element('li', { class: `step-item${row.marker ? ` marker-${row.marker}` : ''}` },
+    element('div', { class: 'step-head' }, markerBadge(row), kindBadge(step.kind), element('strong', { class: 'step-title' }, step.label)),
+    element('p', { class: 'step-what' }, step.what),
+    element('p', { class: 'note step-notes' }, stepNotes(step).join(' · ')));
+}
+
+export function summaryParts(described, { changes = null, heading = 'What it does', action = null } = {}) {
+  const rows = stepRows(described, changes);
+  const parts = [element('div', { class: 'card-head' }, element('h2', { class: 'inline' }, heading), action)];
+  if (described?.error) parts.push(element('p', { class: 'note bad' }, described.error));
+  if (described?.description) parts.push(element('p', {}, described.description));
+  parts.push(element('p', { class: 'note' }, `Inputs: ${inputsText(described?.inputs)}`));
+  if (rows.steps.length) parts.push(element('ol', { class: 'steps-list', 'aria-label': 'Steps' }, rows.steps.map(stepItem)));
+  else if (!described?.error) parts.push(element('p', { class: 'note' }, 'No steps yet.'));
+  if (rows.postRun.length) parts.push(element('h3', {}, 'After the run'), element('ol', { class: 'steps-list', 'aria-label': 'After the run' }, rows.postRun.map(stepItem)));
+  if (rows.removed.length) {
+    parts.push(element('h3', {}, 'Removed steps'), element('ul', { class: 'steps-list', 'aria-label': 'Removed steps' },
+      rows.removed.map((id) => element('li', { class: 'step-item marker-removed' }, element('div', { class: 'step-head' }, markerBadge({ marker: 'removed' }), element('strong', { class: 'step-title' }, id))))));
+  }
+  return parts;
+}
+
+export const summaryView = (described, options) => card(...summaryParts(described, options));
+
+export function startedByCard(starters) {
+  const list = starters || [];
+  return card(element('h2', { class: 'inline' }, 'Started by'),
+    list.length ? element('ul', { class: 'started-by' }, list.map((starter) => element('li', {}, startedByText(starter))))
+      : element('p', { class: 'note' }, 'No webhook rule starts this workflow.'));
+}
+
+// Claude proposes, the user reads the plain-words summary, and only Apply saves.
+export function describePanel({ idPrefix, label, placeholder, fields = null, request, apply }) {
+  const instruction = element('textarea', { id: `${idPrefix}-instruction`, rows: 10, maxlength: INSTRUCTION_MAX, placeholder, 'aria-describedby': `${idPrefix}-hint` });
+  const sendButton = element('button', { type: 'button', class: 'primary' }, 'Send');
+  const cancelButton = element('button', { type: 'button', hidden: true }, 'Cancel');
+  const working = element('div', { role: 'status' });
+  const proposalSlot = element('div');
+  let history = [];
+  let current = null;
+  let sequence = 0;
+  let timer = null;
+  let busy = [];
+
+  function settle() {
+    clearInterval(timer);
+    timer = null;
+    cancelButton.hidden = true;
+    for (const button of busy) button.disabled = false;
+    busy = [];
+  }
+
+  function reset() {
+    sequence += 1;
+    settle();
+    history = [];
+    current = null;
+    clear(proposalSlot);
+    clear(working);
+  }
+
+  async function ask(text, refining, buttons) {
+    const { body, error } = request({ instruction: text, history: refining ? history : [], draft: refining ? current?.body : null });
+    if (error) {
+      clear(working).append(errorBox({ message: error }));
+      return;
+    }
+    const mine = ++sequence;
+    const started = Date.now();
+    const seconds = element('span', { 'aria-hidden': 'true' }, elapsedText(0));
+    clear(working).append(element('p', { class: 'note drafting' }, 'Claude is drafting… ', seconds));
+    timer = setInterval(() => { seconds.textContent = elapsedText((Date.now() - started) / 1000); }, 1000);
+    busy = buttons;
+    for (const button of busy) button.disabled = true;
+    cancelButton.hidden = false;
+    try {
+      const proposal = await api('/api/assist', { method: 'POST', body });
+      if (mine !== sequence) return;
+      history = pushHistory(refining ? history : [], text, proposal.explanation);
+      current = proposal;
+      clear(working);
+      showProposal(proposal);
+    } catch (err) {
+      if (mine === sequence) clear(working).append(errorBox(err));
+    } finally {
+      if (mine === sequence) settle();
+    }
+  }
+
+  function showProposal(proposal) {
+    const outcome = resultSummary(proposal);
+    const applyButton = element('button', { type: 'button', class: 'primary' }, 'Apply');
+    const discardButton = element('button', { type: 'button' }, 'Discard');
+    const applyStatus = element('div', { role: 'status' });
+    const refine = element('textarea', { id: `${idPrefix}-refine`, rows: 3, maxlength: INSTRUCTION_MAX, placeholder: 'For example: also skip draft pull requests.' });
+    const refineButton = element('button', { type: 'button' }, 'Send');
+    const sendRefine = () => ask(refine.value, true, [refineButton, applyButton, sendButton]);
+    refineButton.addEventListener('click', sendRefine);
+    refine.addEventListener('keydown', (keyEvent) => {
+      if (keyEvent.key === 'Enter' && (keyEvent.metaKey || keyEvent.ctrlKey)) sendRefine();
+    });
+    discardButton.addEventListener('click', () => {
+      reset();
+      instruction.focus();
+    });
+    applyButton.addEventListener('click', async () => {
+      clear(applyStatus);
+      applyButton.disabled = true;
+      try {
+        await apply(proposal, applyNote(history));
+        reset();
+        instruction.value = '';
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) applyStatus.append(errorBox({ message: CONFLICT_TEXT }));
+        else if (err instanceof ApiError && err.status === 422) applyStatus.append(errorBox({ message: 'Not saved. The proposal has errors. Refine it, or edit the YAML.' }), issuesView(err.payload?.validation));
+        else applyStatus.append(errorBox(err));
+      } finally {
+        applyButton.disabled = false;
+      }
+    });
+    const provider = proposal.team_name ? ` Used ${proposal.team_name}'s provider.` : '';
+    const disclosure = element('details', { class: 'yaml-changes' }, element('summary', {}, 'Show YAML changes'), diffView(proposal.diff, 'YAML changes'));
+    clear(proposalSlot).append(card(
+      element('h2', { class: 'inline' }, "Claude's proposal"),
+      element('p', { class: 'pre-line proposal-explanation' }, proposal.explanation || 'No explanation given.'),
+      element('p', { class: outcome.valid ? 'note' : 'note bad' }, outcome.status, ' ', outcome.cost, '.', provider),
+      issuesView(proposal.validation),
+      proposal.summary ? element('section', { class: 'proposal-steps', 'aria-label': 'Steps after the change' }, summaryParts(proposal.summary, { changes: proposal.changes, heading: 'Steps after the change' })) : null,
+      disclosure,
+      element('div', { class: 'wf-actions' }, applyButton, discardButton),
+      applyStatus,
+      element('div', { class: 'stacked-form refine' }, element('label', { class: 'stacked', for: refine.id }, 'Refine this', refine)),
+      element('div', { class: 'wf-actions' }, refineButton)));
+    proposalSlot.querySelector('h2')?.setAttribute('tabindex', '-1');
+    proposalSlot.querySelector('h2')?.focus();
+  }
+
+  const send = () => ask(instruction.value, false, [sendButton]);
+  sendButton.addEventListener('click', send);
+  instruction.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.key === 'Enter' && (keyEvent.metaKey || keyEvent.ctrlKey)) send();
+  });
+  cancelButton.addEventListener('click', () => {
+    sequence += 1;
+    settle();
+    clear(working).append(element('p', { class: 'note' }, 'Cancelled. Nothing was saved.'));
+  });
+
+  const prompt = card(
+    element('label', { class: 'stacked prompt-label', for: instruction.id }, label, instruction),
+    fields,
+    element('div', { class: 'wf-actions' }, sendButton, cancelButton,
+      element('span', { class: 'note', id: `${idPrefix}-hint` }, 'Cmd or Ctrl + Enter sends. Nothing is saved until you apply the proposal.')),
+    working);
+  return { root: element('div', { class: 'describe' }, prompt, proposalSlot), isDirty: () => instruction.value.trim() !== '' || current !== null, focus: () => instruction.focus() };
 }

@@ -23,7 +23,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from sqlalchemy import Connection, Engine, delete, func, insert, select, update
 
-from armature.server import audit
+from armature.server import audit, rbac
 from armature.server import secrets as secret_store
 from armature.server.auth import safe_equal
 from armature.server.db import new_id
@@ -379,6 +379,19 @@ def evaluate(conn: Connection, team_id: str, source: str, rules: list[Any], even
 
 def rules_of(conn: Connection, webhook_id: str) -> list[Any]:
     return conn.execute(select(triggers).where(triggers.c.webhook_id == webhook_id, triggers.c.kind == KIND)).all()
+
+
+def started_by(conn: Connection, workflow_id: str, access: rbac.Access) -> list[dict[str, Any]]:
+    """The webhook rules that queue this workflow, from webhooks in teams the user can see."""
+    rows = conn.execute(
+        select(webhooks.c.id, webhooks.c.name, webhooks.c.team_id, webhooks.c.enabled.label("webhook_enabled"),
+               triggers.c.enabled, triggers.c.config)
+        .select_from(triggers.join(webhooks, webhooks.c.id == triggers.c.webhook_id))
+        .where(triggers.c.workflow_id == workflow_id, triggers.c.kind == KIND)
+        .order_by(webhooks.c.name, triggers.c.created_at, triggers.c.id)).all()
+    return [{"webhook_id": r.id, "webhook": r.name, "events": list((r.config or {}).get("events") or []),
+             "shadow": bool((r.config or {}).get("shadow")), "enabled": bool(r.enabled and r.webhook_enabled)}
+            for r in rows if rbac.sees_team(access, r.team_id)]
 
 
 def enqueue(conn: Connection, *, team_id: str, delivery_id: str, decisions: list[dict[str, Any]],

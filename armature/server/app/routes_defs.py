@@ -16,7 +16,7 @@ from pydantic import BaseModel, StrictInt
 from sqlalchemy import Connection, and_, func, select
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import defs, rbac
+from armature.server import defs, rbac, summary, webhooks
 from armature.server.app.deps import (
     Granted,
     by_team,
@@ -156,7 +156,11 @@ def _detail(request: Request, session: Session, kind: defs.Kind, object_id: str)
         item = _item(conn, kind, row, access)
         listed = defs.listing(conn, kind, access, doc_kind=defs._doc_kind(kind, row))
         item["effective_for"] = next((entry["effective_for"] for entry in listed if entry["id"] == row.id), [])
-    return {kind.object_kind: item, "version": version, "versions": history, "editable": item["editable"]}
+        detail = {kind.object_kind: item, "version": version, "versions": history, "editable": item["editable"]}
+        if kind is defs.WORKFLOW:
+            detail["summary"] = summary.describe_workflow(version["body"] if version else None)
+            detail["started_by"] = webhooks.started_by(conn, row.id, access)
+    return detail
 
 
 def _version(request: Request, session: Session, kind: defs.Kind, object_id: str, version: int) -> dict[str, Any]:

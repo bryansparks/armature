@@ -1,5 +1,5 @@
 import { api, ApiError, listOf } from '../api.js';
-import { assistantPanel, testRunPanel } from '../assistant.js';
+import { assistantPanel, describePanel, proposeBody, startedByCard, summaryView, testRunPanel } from '../assistant.js';
 import { card, clear, confirmDialog, element, empty, errorBox, link, loading, meta, pageHeader, table, when } from '../dom.js';
 import { codeEditor, debounce } from '../editor.js';
 import { diffView } from '../diff.js';
@@ -40,7 +40,7 @@ stages:
 
 export const WORKFLOW = {
   base: '/api/workflows', route: 'workflow', idField: 'workflow_id', format: 'YAML', liveValidate: true, steps: true, lint: true,
-  testRun: true, record: (payload) => payload?.workflow, title: (record) => record.name, noun: () => 'workflow',
+  testRun: true, describe: true, record: (payload) => payload?.workflow, title: (record) => record.name, noun: () => 'workflow',
   kinds: WORKFLOW_KIND_LABEL, kindLabel: (record) => WORKFLOW_KIND_LABEL[record.kind] || record.kind || null,
   listHash: () => '#/workflows', listLabel: 'All workflows', starter: () => WORKFLOW_STARTER,
 };
@@ -480,6 +480,54 @@ function editPane(config, record, version, status, onSaved) {
   return element('div', {}, conflictSlot, ...parts, saveBar, assistant);
 }
 
+let savedNotice = null;
+
+const CHANGE_EXAMPLE = 'For example: after the review step, post a short summary to the team channel, and skip draft pull requests.';
+const NEW_EXAMPLE = 'For example: when a pull request opens, review it for security problems, then post the findings as one comment.';
+
+// The plain-words view: describe a change, read Claude's proposal, apply it. The YAML stays one click away.
+function describedView(config, record, detail, editable) {
+  const editYaml = editable ? link(hashFor(config.route, [record.id, 'edit']), 'Edit YAML', { class: 'btn small' }) : null;
+  const parts = [];
+  if (editable) {
+    const panel = describePanel({
+      idPrefix: `describe-${record.id}`, label: 'Describe a change', placeholder: CHANGE_EXAMPLE,
+      request: (args) => proposeBody({ record, baseVersion: record.current_version, ...args }),
+      apply: async (proposal, note) => {
+        const saved = await api(itemPath(config, record.id), { method: 'POST', body: { body: proposal.body, note, base_version: proposal.base_version ?? record.current_version } });
+        savedNotice = `Saved as version ${saved?.version?.version ?? record.current_version + 1}.`;
+        release();
+        navigate(hashFor(config.route, [record.id]));
+      },
+    });
+    protect(panel.isDirty);
+    parts.push(panel.root);
+  }
+  parts.push(summaryView(detail.summary, { action: editYaml }), startedByCard(detail.started_by),
+    card(element('details', {}, element('summary', {}, 'Show YAML'), element('pre', { class: 'source', tabindex: 0 }, detail.version?.body ?? ''))));
+  if (config.testRun) parts.push(testRunPanel(record));
+  return parts;
+}
+
+function describeNew(config, { nameInput, chosen, kindInput, fields, onYaml }) {
+  const panel = describePanel({
+    idPrefix: 'describe-new', label: 'Describe the workflow', placeholder: NEW_EXAMPLE, fields,
+    request: (args) => proposeBody({ name: nameInput.value, scope: chosen(), ...args }),
+    apply: async (proposal, note) => {
+      const scope = chosen();
+      const body = { name: nameInput.value.trim(), scope_kind: scope.scope_kind, scope_id: scope.scope_id, body: proposal.body, note };
+      if (kindInput) body.kind = kindInput.value;
+      const created = await api(config.base, { method: 'POST', body });
+      release();
+      navigate(hashFor(config.route, [(config.record(created) || created).id]));
+    },
+  });
+  protect(() => panel.isDirty() || nameInput.value.trim() !== '');
+  const yamlButton = element('button', { type: 'button', class: 'link-button' }, 'Start from YAML');
+  yamlButton.addEventListener('click', onYaml);
+  return element('div', {}, panel.root, element('p', { class: 'note' }, 'Prefer to write it yourself? ', yamlButton));
+}
+
 export async function detailPage(root, config, id, mode) {
   let payload;
   try {
@@ -497,7 +545,7 @@ export async function detailPage(root, config, id, mode) {
   const status = element('div', { role: 'status' });
   const versionText = element('span', {}, `Version ${record.current_version}`);
   const actions = element('div', { class: 'wf-actions' });
-  if (editable && !editing) actions.append(link(hashFor(config.route, [record.id, 'edit']), 'Edit', { class: 'btn' }));
+  if (editable && !editing && !config.describe) actions.append(link(hashFor(config.route, [record.id, 'edit']), 'Edit', { class: 'btn' }));
   if (canFork && !editable) actions.append(forkButton(config, record, status));
   if (editable) actions.append(deleteButton(config, record, status));
   const kindText = config.kindLabel(record) ? element('span', {}, config.kindLabel(record)) : null;
@@ -506,6 +554,8 @@ export async function detailPage(root, config, id, mode) {
   if (actions.childNodes.length) root.append(actions);
   if (config.kinds) root.append(kindControl(config, record, editable, status, kindText));
   root.append(status);
+  if (savedNotice) status.append(element('p', { class: 'note' }, savedNotice));
+  savedNotice = null;
   if (mode === 'edit' && !editable) root.append(element('p', { class: 'banner' }, 'You can read this but not change it.'));
 
   const versions = versionsPanel(config, record, editable, { versions: listOf(payload, 'versions'), current: record.current_version });
@@ -520,6 +570,7 @@ export async function detailPage(root, config, id, mode) {
 
   if (editing) root.append(editPane(config, record, version, status, refreshVersions));
   else if (!version) root.append(card(empty('This has no saved version.')));
+  else if (config.describe) root.append(...describedView(config, record, payload, editable));
   else {
     if (config.frontMatter) root.append(card(element('h2', { class: 'inline' }, 'Front matter'), frontMatterView(version.body)));
     root.append(sourceCard(config.format, version.body));
@@ -543,44 +594,59 @@ export async function newPage(root, config, kind, wantedScope) {
   const noteInput = element('input', { type: 'text', id: 'new-note', maxlength: 500, placeholder: 'Why it exists' });
   const createButton = element('button', { type: 'button', class: 'primary' }, `Add ${noun}`);
   let creating = false;
-  const { editor, parts, stopValidating } = sourceEditor(config, { initial: config.starter(kind), recordId: null, onSave: () => create() });
-  protect(() => editor.isDirty() || nameInput.value.trim() !== '');
-
-  async function create() {
-    if (creating) return;
-    clear(status);
-    const name = nameInput.value.trim();
-    if (!name) {
-      status.append(errorBox({ message: 'Give it a name.' }));
-      nameInput.focus();
-      return;
-    }
-    const scope = chosen();
-    creating = true;
-    createButton.disabled = true;
-    stopValidating();
-    try {
-      const body = { name, scope_kind: scope.scope_kind, scope_id: scope.scope_id, body: editor.value(), note: noteInput.value.trim() };
-      if (kind) Object.assign(body, { kind, key: name });
-      if (kindInput) body.kind = kindInput.value;
-      const created = await api(config.base, { method: 'POST', body });
-      release();
-      navigate(hashFor(config.route, [(config.record(created) || created).id]));
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 422) {
-        editor.setIssues(err.payload?.validation?.errors, err.payload?.validation?.warnings);
-        status.append(errorBox({ message: 'Not added. Fix the errors listed under the editor.' }));
-      } else status.append(errorBox(err));
-    } finally {
-      creating = false;
-      createButton.disabled = false;
-    }
-  }
-
-  createButton.addEventListener('click', create);
-  root.append(card(element('div', { class: 'stacked-form' },
+  const fields = element('div', { class: 'stacked-form' },
     element('label', { class: 'stacked', for: nameInput.id }, 'Name', nameInput),
     element('label', { class: 'stacked', for: select.id }, 'Belongs to', select),
-    kindInput ? element('label', { class: 'stacked', for: kindInput.id }, 'Kind', kindInput) : null)), status, ...parts,
-  element('div', { class: 'wf-actions save-bar' }, element('label', { for: noteInput.id }, 'Note'), noteInput, createButton, link(config.listHash({ kind }), 'Cancel')));
+    kindInput ? element('label', { class: 'stacked', for: kindInput.id }, 'Kind', kindInput) : null);
+  const slot = element('div');
+  root.append(slot);
+  if (config.describe) {
+    slot.append(describeNew(config, { nameInput, chosen, kindInput, fields, onYaml: () => {
+      clear(slot);
+      startFromYaml();
+      nameInput.focus();
+    } }));
+    return;
+  }
+  startFromYaml();
+
+  function startFromYaml() {
+    const { editor, parts, stopValidating } = sourceEditor(config, { initial: config.starter(kind), recordId: null, onSave: () => create() });
+    protect(() => editor.isDirty() || nameInput.value.trim() !== '');
+
+    async function create() {
+      if (creating) return;
+      clear(status);
+      const name = nameInput.value.trim();
+      if (!name) {
+        status.append(errorBox({ message: 'Give it a name.' }));
+        nameInput.focus();
+        return;
+      }
+      const scope = chosen();
+      creating = true;
+      createButton.disabled = true;
+      stopValidating();
+      try {
+        const body = { name, scope_kind: scope.scope_kind, scope_id: scope.scope_id, body: editor.value(), note: noteInput.value.trim() };
+        if (kind) Object.assign(body, { kind, key: name });
+        if (kindInput) body.kind = kindInput.value;
+        const created = await api(config.base, { method: 'POST', body });
+        release();
+        navigate(hashFor(config.route, [(config.record(created) || created).id]));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 422) {
+          editor.setIssues(err.payload?.validation?.errors, err.payload?.validation?.warnings);
+          status.append(errorBox({ message: 'Not added. Fix the errors listed under the editor.' }));
+        } else status.append(errorBox(err));
+      } finally {
+        creating = false;
+        createButton.disabled = false;
+      }
+    }
+
+    createButton.addEventListener('click', create);
+    slot.append(card(fields), status, ...parts,
+      element('div', { class: 'wf-actions save-bar' }, element('label', { for: noteInput.id }, 'Note'), noteInput, createButton, link(config.listHash({ kind }), 'Cancel')));
+  }
 }

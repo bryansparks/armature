@@ -1,8 +1,8 @@
 """One structured-output model call on a team's provider, for server features such as the assistant.
 
 The credential comes from the team's secrets and is passed to litellm, or to
-the ``claude`` CLI's environment, for that one call. It never enters the
-server's own environment.
+the ``claude`` CLI's environment (a subscription, or Claude Code on Bedrock),
+for that one call. It never enters the server's own environment.
 """
 from __future__ import annotations
 
@@ -122,16 +122,13 @@ def _prompt_text(messages: list[dict[str, Any]]) -> str:
 
 
 # env -i with a home of its own, so the CLI reads no settings, credentials, or MCP servers of this host's user.
-def _claude_call(model_id: str, token: str | None, system: str, messages: list[dict[str, Any]],
-                 schema: dict[str, Any]) -> Completion:
+def _claude_call(model_id: str, credentials: dict[str, str], system: str, messages: list[dict[str, Any]],
+                 schema: dict[str, Any], provider_kind: str) -> Completion:
     binary = claude_binary()
     if binary is None:
         raise LLMError(503, "The claude CLI is not installed on this server.")
-    if not token:
-        raise LLMError(400, "The provider's credential secret is not set.")
     with tempfile.TemporaryDirectory(prefix="armature-claude-") as home:
-        env = {"HOME": home, "CLAUDE_CODE_OAUTH_TOKEN": token,
-               "PATH": f"{os.path.dirname(binary)}:{SYSTEM_PATH}"}
+        env = {"HOME": home, **credentials, "PATH": f"{os.path.dirname(binary)}:{SYSTEM_PATH}"}
         command = [binary, "-p", "--output-format", "json", "--json-schema", json.dumps(schema),
                    "--model", model_id, "--system-prompt", system, "--permission-mode", "manual",
                    "--permission-prompts", "none", "--strict-mcp-config", "--mcp-config", EMPTY_MCP,
@@ -149,9 +146,17 @@ def _claude_call(model_id: str, token: str | None, system: str, messages: list[d
         raise LLMError(502, f"The claude CLI failed with exit status {done.returncode}.")
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     return Completion(data=_parse_json(result.get("structured_output")), model=model_id,
-                      provider_kind="claude-subscription", cost_usd=float(result.get("total_cost_usd") or 0),
+                      provider_kind=provider_kind, cost_usd=float(result.get("total_cost_usd") or 0),
                       input_tokens=int(usage.get("input_tokens") or 0),
                       output_tokens=int(usage.get("output_tokens") or 0))
+
+
+def bedrock_env(row: Any, token: str) -> dict[str, str]:
+    env = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": token}
+    region = (row.config or {}).get("region")
+    if region:
+        env["AWS_REGION"] = region
+    return env
 
 
 @dataclass(frozen=True)
@@ -164,7 +169,14 @@ class Call:
 
     def complete(self, system: str, messages: list[dict[str, Any]], schema: dict[str, Any]) -> Completion:
         if self.row.kind == "claude-subscription":
-            return _claude_call(self.model_id, self.credential, system, messages, schema)
+            if not self.credential:
+                raise LLMError(400, "The provider's credential secret is not set.")
+            return _claude_call(self.model_id, {"CLAUDE_CODE_OAUTH_TOKEN": self.credential}, system, messages,
+                                schema, self.row.kind)
+        # Without a bearer token, or without the CLI, Bedrock stays on litellm and the host's AWS chain.
+        if self.row.kind == "bedrock" and self.credential and claude_binary() is not None:
+            return _claude_call(self.model_id, bedrock_env(self.row, self.credential), system, messages, schema,
+                                self.row.kind)
         return _litellm_call(self.row, self.model_id, self.credential, system, messages, schema)
 
 

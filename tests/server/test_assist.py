@@ -326,3 +326,146 @@ def test_every_request_is_audited_even_when_it_fails(world, model, monkeypatch):
     assert [(r.detail["ok"], r.detail.get("error")) for r in rows] == [
         (False, "LLMError"), (False, "AssistError"), (False, "LLMError")]
     assert rows[0].team_id == world.team and rows[1].team_id is None
+
+
+def _propose(client, **body):
+    return client.post("/api/assist", json={"instruction": "Reword the description.", **body})
+
+
+def test_a_proposal_carries_the_explanation_summary_and_changes(world, model):
+    model.answers = [{"body": GOOD.replace("number: 3", "number: 4") + "  - id: approve\n    gate: human\n"
+                      "    depends_on: [resolve]\n", "explanation": "Added an approval step."}]
+    response = _propose(_client(world, "admin"), workflow_id=world.team_wf, base_version=1)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["explanation"] == "Added an approval step.", result["validation"]
+    assert result["base_version"] == 1 and result["team_name"] == "own"
+    assert [step["id"] for step in result["summary"]["steps"]] == ["resolve", "approve"]
+    assert result["summary"]["steps"][1]["what"] == "Waits for human approval"
+    assert result["changes"]["added"] == ["approve"] and result["changes"]["removed"] == []
+    assert result["changes"]["changed"] == [{"id": "resolve", "fields": ["details"]}]
+    assert "+    gate: human" in result["diff"] and result["diff"].startswith("--- current")
+    assert GOOD in model.calls[0]["messages"][1]["content"]
+    assert "does not read YAML" in model.calls[0]["messages"][0]["content"]
+
+
+def test_a_document_proposal_has_no_workflow_summary(world, model):
+    model.answers = [{"body": ROLE_DOC, "explanation": "Nothing to do."}]
+    result = _ask(_client(world, "lead"), kind="document", id=world.role_doc, body=ROLE_DOC).json()
+    assert "summary" not in result and "changes" not in result
+
+
+def test_a_stale_base_version_is_refused_before_the_model(world, model):
+    response = _propose(_client(world, "lead"), workflow_id=world.team_wf, base_version=0)
+    assert response.status_code == 409
+    assert "changed since" in response.text
+    assert model.calls == []
+
+
+def test_refining_sends_the_draft_and_history_and_diffs_against_the_saved_version(world, model):
+    history = [{"instruction": "Reword the description.", "explanation": "Reworded it."}]
+    model.answers = [{"body": RENAMED.replace("number: 3", "number: 5"), "explanation": "Also changed the number."}]
+    result = _propose(_client(world, "lead"), workflow_id=world.team_wf, base_version=1, draft=RENAMED,
+                      history=history, instruction="Use pull request 5.").json()
+    prompt = model.calls[0]["messages"][1]["content"]
+    tag = re.search(r"<<<INSTRUCTION ([0-9a-f]{16})\n", prompt).group(1)
+    assert f"<<<BODY {tag}\n{RENAMED}\nBODY {tag}>>>" in prompt
+    assert "already has the changes" in prompt
+    assert f"<<<EXPLANATION {tag}\nReworded it.\nEXPLANATION {tag}>>>" in prompt
+    assert prompt.index("Reword the description.") < prompt.index("Use pull request 5.")
+    assert "-description: Review one pull request." in result["diff"] and "+      number: 5" in result["diff"]
+
+
+@pytest.mark.parametrize("history", [
+    [{"instruction": "a", "explanation": "b"}] * (assist.HISTORY_MAX + 1),
+    [{"instruction": "a" * (assist.INSTRUCTION_MAX + 1), "explanation": "b"}],
+    [{"instruction": "a", "explanation": "b" * (assist.EXPLANATION_MAX + 1)}],
+    [{"instruction": "a"}],
+    ["just text"],
+])
+def test_history_is_bounded(world, model, history):
+    response = _propose(_client(world, "lead"), workflow_id=world.team_wf, history=history)
+    assert response.status_code == 400, response.text
+    assert model.calls == []
+
+
+def test_five_earlier_requests_are_fine(world, model):
+    history = [{"instruction": f"step {n}", "explanation": f"did {n}"} for n in range(assist.HISTORY_MAX)]
+    assert _propose(_client(world, "lead"), workflow_id=world.team_wf, history=history).status_code == 200
+
+
+def test_a_viewer_may_not_ask(world, model):
+    assert _propose(_client(world, "viewer"), workflow_id=world.team_wf).status_code == 403
+    assert model.calls == []
+
+
+def test_an_instance_workflow_uses_the_oldest_membership_with_the_alias(world, model):
+    admin = world.users["admin"]
+    add_membership(world.engine, world.clock, admin, "team", world.other, "viewer")
+    world.clock.advance(seconds=1)
+    add_membership(world.engine, world.clock, admin, "team", world.team, "viewer")
+    result = _propose(_client(world, "admin"), workflow_id=world.instance_wf).json()
+    assert result["team_id"] == world.other and result["team_name"] == "other"
+    assert model.calls[0]["api_key"] == f"key-{world.other}"
+    with world.engine.begin() as conn:
+        conn.execute(providers.update().where(providers.c.team_id == world.other).values(aliases={"fast": "m"}))
+    assert _propose(_client(world, "admin"), workflow_id=world.instance_wf).json()["team_id"] == world.team
+
+
+def test_a_new_workflow_is_described_then_created_on_confirm(world, model):
+    client = _client(world, "lead")
+    model.answers = [{"body": GOOD, "explanation": "A workflow that reads one pull request."}]
+    proposal = _propose(client, team_id=world.team, name="review-two", instruction="Read pull request 3.").json()
+    prompt = model.calls[0]["messages"][1]["content"]
+    assert "review-two" in prompt and "It is empty, so write the whole workflow." in prompt
+    assert proposal["changes"]["added"] == ["resolve"] and proposal["base_version"] is None
+    assert "+name: review" in proposal["diff"]
+    created = client.post("/api/workflows", json={"name": "review-two", "scope_kind": "team", "scope_id": world.team,
+                                                  "body": proposal["body"], "note": "Read pull request 3."})
+    assert created.status_code == 201, created.text
+    assert created.json()["version"]["note"].startswith("Read pull request 3.")
+
+
+def test_a_new_workflow_takes_its_team_from_the_scope(world, model):
+    plead = _client(world, "plead")
+    response = _propose(plead, scope_kind="project", scope_id=world.project, name="x")
+    assert response.status_code == 200 and response.json()["team_id"] == world.team
+    assert _propose(_client(world, "lead"), scope_kind="team", scope_id=world.team, name="x").status_code == 200
+    assert _propose(_client(world, "lead"), scope_kind="team", scope_id=world.other, name="x").status_code == 404
+    assert _propose(plead, scope_kind="project", scope_id="nope", name="x").status_code == 404
+
+
+def test_a_new_instance_workflow_needs_an_admin(world, model):
+    assert _propose(_client(world, "lead"), scope_kind="instance", name="x").status_code == 403
+    add_membership(world.engine, world.clock, world.users["admin"], "team", world.team, "viewer")
+    response = _propose(_client(world, "admin"), scope_kind="instance", name="x")
+    assert response.status_code == 200 and response.json()["team_id"] == world.team
+
+
+def test_applying_after_someone_else_saved_is_a_conflict(world, model):
+    client = _client(world, "lead")
+    proposal = _propose(client, workflow_id=world.team_wf, base_version=1).json()
+    other = _client(world, "admin")
+    assert other.post(f"/api/workflows/{world.team_wf}", json={"body": GOOD + "# x\n", "base_version": 1}
+                      ).status_code == 200
+    applied = client.post(f"/api/workflows/{world.team_wf}", json={"body": proposal["body"], "note": "Reword",
+                                                                    "base_version": proposal["base_version"]})
+    assert applied.status_code == 409
+    assert applied.json()["current_version"] == 2
+
+
+def test_the_detail_tells_the_workflow_and_its_webhook_rules(world, model):
+    client = _client(world, "lead")
+    hook = client.post(f"/api/teams/{world.team}/webhooks", json={"name": "gh", "source": "github"}).json()["webhook"]
+    rule = client.post(f"/api/webhooks/{hook['id']}/rules",
+                       json={"workflow_id": world.team_wf, "config": {"events": ["pull_request"], "shadow": True}})
+    assert rule.status_code in (200, 201), rule.text
+    detail = client.get(f"/api/workflows/{world.team_wf}").json()
+    assert detail["summary"]["steps"][0]["what"] == "Runs script demo/resolve"
+    assert detail["started_by"] == [{"webhook_id": hook["id"], "webhook": "gh", "events": ["pull_request"],
+                                     "shadow": True, "enabled": True}]
+    shared = client.post(f"/api/webhooks/{hook['id']}/rules", json={"workflow_id": world.instance_wf, "config": {}})
+    assert shared.status_code in (200, 201), shared.text
+    assert len(client.get(f"/api/workflows/{world.instance_wf}").json()["started_by"]) == 1
+    assert _client(world, "outsider").get(f"/api/workflows/{world.instance_wf}").json()["started_by"] == []
+    assert "summary" not in client.get(f"/api/documents/{world.role_doc}").json()

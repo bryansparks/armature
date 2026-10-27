@@ -80,6 +80,7 @@ def _call(engine, keyring, team, alias="lead"):
 def test_litellm_gets_the_model_string_and_credential_as_kwargs(engine, keyring, fake_litellm, monkeypatch, kind,
                                                                 config, model, extra):
     monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+    monkeypatch.setattr(llm, "claude_binary", lambda: None)
     clock = Clock()
     team = _team(engine, clock)
     _provider(engine, keyring, clock, team, kind, config, {"lead": "us.anthropic.claude-opus-5-5"}, secret="s3cret")
@@ -188,6 +189,50 @@ def test_claude_subscription_runs_the_cli_with_no_inherited_env(engine, keyring,
     assert seen["stdin"] == "Rename the step."
     assert result.data == {"body": "from claude"}
     assert (result.cost_usd, result.input_tokens, result.output_tokens) == (0.03, 5, 4)
+
+
+def test_bedrock_runs_claude_code_on_bedrock_with_the_token_and_region(engine, keyring, tmp_path, monkeypatch,
+                                                                       fake_litellm):
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "host-key")
+    record = _fake_claude(tmp_path, monkeypatch)
+    clock = Clock()
+    team = _team(engine, clock)
+    _provider(engine, keyring, clock, team, "bedrock", {"region": "us-west-2", "credential_secret": "BEDROCK_TOKEN"},
+              {"lead": "us.anthropic.claude-opus-5-5"}, secret="bedrock-token")
+    result = _call(engine, keyring, team)
+    seen = json.loads(record.read_text())
+    env = seen["env"]
+    for added in ("__CF_USER_TEXT_ENCODING", "LC_CTYPE"):
+        env.pop(added, None)
+    assert set(env) == {"HOME", "PATH", "CLAUDE_CODE_USE_BEDROCK", "AWS_REGION", "AWS_BEARER_TOKEN_BEDROCK"}
+    assert (env["CLAUDE_CODE_USE_BEDROCK"], env["AWS_REGION"], env["AWS_BEARER_TOKEN_BEDROCK"]) == (
+        "1", "us-west-2", "bedrock-token")
+    assert "host-key" not in json.dumps(seen)
+    argv = seen["argv"]
+    assert argv[argv.index("--model") + 1] == "us.anthropic.claude-opus-5-5"
+    assert argv[argv.index("--tools") + 1] == "" and "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}
+    assert argv[argv.index("--permission-mode") + 1] == "manual"
+    assert argv[argv.index("--max-turns") + 1] == "2"
+    assert "bedrock-token" not in argv
+    assert fake_litellm.calls == []
+    assert result.provider_kind == "bedrock" and result.data == {"body": "from claude"}
+    assert (result.cost_usd, result.input_tokens, result.output_tokens) == (0.03, 5, 4)
+
+
+def test_bedrock_falls_back_to_litellm_without_the_cli_or_a_token(engine, keyring, monkeypatch, fake_litellm):
+    monkeypatch.setattr(llm, "claude_binary", lambda: None)
+    clock = Clock()
+    team = _team(engine, clock)
+    _provider(engine, keyring, clock, team, "bedrock", {"region": "us-east-1", "credential_secret": "BEDROCK_TOKEN"},
+              {"lead": "us.anthropic.claude-opus-5-5"}, secret="bedrock-token")
+    assert _call(engine, keyring, team).provider_kind == "bedrock"
+    assert fake_litellm.calls[-1]["model"] == "bedrock/us.anthropic.claude-opus-5-5"
+    monkeypatch.setattr(llm, "claude_binary", lambda: "/nonexistent/claude")
+    call = llm.Call(row=SimpleNamespace(kind="bedrock", config={"region": "us-east-1"}), model_id="m",
+                    credential=None)
+    call.complete("system", MESSAGES, SCHEMA)
+    assert fake_litellm.calls[-1]["model"] == "bedrock/m" and "api_key" not in fake_litellm.calls[-1]
 
 
 def test_claude_subscription_times_out(engine, keyring, tmp_path, monkeypatch):
