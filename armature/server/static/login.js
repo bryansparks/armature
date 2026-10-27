@@ -1,12 +1,13 @@
 import { api, ApiError, setCsrf, url } from './api.js';
-import { signInNotice } from './session.js';
+import { returnHash, signInNotice, ssoLoginPath } from './session.js';
 
 const form = document.getElementById('login');
 const intro = document.getElementById('intro');
 const errorMessage = document.getElementById('err');
 const sso = document.getElementById('sso');
+const back = returnHash(location.search);
 
-document.getElementById('sso-button').addEventListener('click', () => location.assign(url('/auth/oidc/login')));
+document.getElementById('sso-button').addEventListener('click', () => location.assign(url(ssoLoginPath(back))));
 
 form.addEventListener('submit', async (submitEvent) => {
   submitEvent.preventDefault();
@@ -15,7 +16,7 @@ form.addEventListener('submit', async (submitEvent) => {
   errorMessage.textContent = '';
   try {
     await api('/api/login', { method: 'POST', body: { username: form.username.value, password: form.password.value, totp: form.totp.value.replace(/\s+/g, '') } });
-    location.replace(url('/'));
+    location.replace(url('/') + back);
   } catch (err) {
     form.password.value = '';
     form.totp.value = '';
@@ -36,7 +37,7 @@ async function start() {
     return;
   }
   if (sessionPayload?.user) {
-    location.replace(url('/'));
+    location.replace(url('/') + back);
     return;
   }
   setCsrf(sessionPayload?.csrf);

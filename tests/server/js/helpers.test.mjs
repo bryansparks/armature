@@ -4,7 +4,7 @@ import { afterEach, test } from 'node:test';
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
 const { parseHash, hashFor } = await import(new URL('router.js', STATIC));
 const { api, ApiError, basePath, configure, errorMessage, listOf, outcome, setCsrf } = await import(new URL('api.js', STATIC));
-const { navFor, signInNotice, ssoStepUpPath } = await import(new URL('session.js', STATIC));
+const { loginPath, navFor, returnHash, signInNotice, ssoLoginPath, ssoStepUpPath } = await import(new URL('session.js', STATIC));
 const { secretFromOtpauth, tokenFromHash } = await import(new URL('otpauth.js', STATIC));
 const { deleteKeyPath, keyCells, keysPath } = await import(new URL('views/runnerkeys.js', STATIC));
 
@@ -197,4 +197,17 @@ test('signInNotice is generic for a failed single sign-on', () => {
   assert.equal(signInNotice('?error=sso&detail=token%20expired'), 'Single sign-on did not complete. Try again, or ask an admin for help.');
   assert.equal(signInNotice('?error=other'), '');
   assert.equal(signInNotice(''), '');
+});
+
+test('sign-in keeps the view a link pointed at', () => {
+  assert.equal(loginPath('#/run/d59ade37-59ff/log'), '/login?return=%23%2Frun%2Fd59ade37-59ff%2Flog');
+  assert.equal(loginPath('#/'), '/login');
+  assert.equal(loginPath(''), '/login');
+  assert.equal(loginPath('#/x"><script>'), '/login');
+  assert.equal(returnHash('?return=%23%2Frun%2Fabc%2Flog'), '#/run/abc/log');
+  assert.equal(returnHash('?return=https%3A%2F%2Fevil.test'), '');
+  assert.equal(returnHash('?return=%2F%2Fevil.test'), '');
+  assert.equal(returnHash(''), '');
+  assert.equal(ssoLoginPath('#/run/abc/log'), '/auth/oidc/login?return=%23%2Frun%2Fabc%2Flog');
+  assert.equal(ssoLoginPath(''), '/auth/oidc/login');
 });

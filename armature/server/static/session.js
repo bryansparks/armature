@@ -31,6 +31,22 @@ export function ssoStepUpPath(hash) {
 }
 
 // The reason stays in the server log. The page says only that single sign-on did not finish.
+// Mirrors RETURN_HASH in routes_oidc.py, so a link from a pull request survives sign-in.
+const RETURN_HASH = /^#\/[A-Za-z0-9/_?=&.%+-]{0,200}$/;
+
+export function returnHash(search) {
+  const back = new URLSearchParams(search || '').get('return') || '';
+  return RETURN_HASH.test(back) ? back : '';
+}
+
+export function loginPath(hash) {
+  return RETURN_HASH.test(hash || '') && hash !== '#/' ? `/login?return=${encodeURIComponent(hash)}` : '/login';
+}
+
+export function ssoLoginPath(back) {
+  return back ? `/auth/oidc/login?return=${encodeURIComponent(back)}` : '/auth/oidc/login';
+}
+
 export function signInNotice(search) {
   return new URLSearchParams(search || '').get('error') === 'sso' ? 'Single sign-on did not complete. Try again, or ask an admin for help.' : '';
 }

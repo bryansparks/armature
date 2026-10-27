@@ -2,7 +2,7 @@ import { api, configure, setCsrf, url } from './api.js';
 import { clear, confirmDialog, element, errorBox, loading, pageHeader, stepUpDialog } from './dom.js';
 import { hasUnsaved, mayLeave, release } from './guard.js';
 import { parseHash } from './router.js';
-import { isSso, navFor, setSession, ssoStepUpPath, user } from './session.js';
+import { isSso, loginPath, navFor, setSession, ssoStepUpPath, user } from './session.js';
 
 const NAV_GROUPS = [
   ['Work', [['overview', 'Overview', 'home'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['status', 'Status', 'pulse']]],
@@ -244,7 +244,7 @@ function stepUp() {
   return Promise.resolve(null);
 }
 
-configure({ signedOut: () => location.replace(url('/login')), stepUp });
+configure({ signedOut: () => location.replace(url(loginPath(location.hash))), stepUp });
 
 async function start() {
   let sessionPayload;
@@ -255,7 +255,7 @@ async function start() {
     return;
   }
   if (!sessionPayload?.user) {
-    location.replace(url('/login'));
+    location.replace(url(loginPath(location.hash)));
     return;
   }
   setSession(sessionPayload);
