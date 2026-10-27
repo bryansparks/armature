@@ -211,3 +211,14 @@ test('sign-in keeps the view a link pointed at', () => {
   assert.equal(ssoLoginPath('#/run/abc/log'), '/auth/oidc/login?return=%23%2Frun%2Fabc%2Flog');
   assert.equal(ssoLoginPath(''), '/auth/oidc/login');
 });
+
+const { alertKey, keptDismissals, visibleAlerts } = await import(new URL('views/overview.js', STATIC));
+
+test('a dismissed alert stays hidden until a newer run fails', () => {
+  const alert = { kind: 'failed', workflow: 'code-review', run_id: 'r1', message: '10 runs of code-review failed' };
+  assert.equal(alertKey(alert), 'failed:code-review');
+  assert.deepEqual(visibleAlerts([alert], {}), [alert]);
+  assert.deepEqual(visibleAlerts([alert], { 'failed:code-review': 'r1' }), []);
+  assert.deepEqual(visibleAlerts([{ ...alert, run_id: 'r2' }], { 'failed:code-review': 'r1' }).length, 1);
+  assert.deepEqual(keptDismissals([alert], { 'failed:code-review': 'r1', 'lost:': 'r9' }), { 'failed:code-review': 'r1' });
+});

@@ -36,9 +36,43 @@ function runningCard(run, display) {
     run.triggered_by ? element('span', { class: 'muted' }, `by ${run.triggered_by}`) : null);
 }
 
-function alertBanner(alert) {
+const DISMISSED_KEY = 'armature.dismissed-alerts';
+
+export const alertKey = (alert) => `${alert.kind}:${alert.workflow || ''}`;
+
+// A dismissal holds only while the alert's latest run is the same, so a new failure brings it back.
+export function visibleAlerts(alerts, dismissed) {
+  return alerts.filter((alert) => !alert.run_id || dismissed[alertKey(alert)] !== alert.run_id);
+}
+
+export function keptDismissals(alerts, dismissed) {
+  const live = new Set(alerts.map(alertKey));
+  return Object.fromEntries(Object.entries(dismissed).filter(([key]) => live.has(key)));
+}
+
+function loadDismissed() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DISMISSED_KEY) || '{}');
+    return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDismissed(dismissed) {
+  try {
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify(dismissed));
+  } catch {}
+}
+
+function alertBanner(alert, onDismiss) {
+  const dismiss = alert.run_id
+    ? element('button', { type: 'button', class: 'banner-dismiss', 'aria-label': `Dismiss: ${alert.message}`, title: 'Dismiss' }, '×')
+    : null;
+  dismiss?.addEventListener('click', () => onDismiss(alert));
   return element('div', { class: `banner ${ALERT_TONE[alert.kind] || 'warn'}`, role: alert.kind === 'credential' ? 'alert' : null },
-    alert.message, alert.run_id ? [' ', link(hashFor('run', [alert.run_id]), 'Open the latest run')] : null);
+    element('span', {}, alert.message, alert.run_id ? [' ', link(hashFor('run', [alert.run_id]), 'Open the latest run')] : null),
+    dismiss);
 }
 
 export async function render(root, { query, signal }) {
@@ -63,7 +97,14 @@ export async function render(root, { query, signal }) {
     running.clear();
     for (const run of overview.running) running.set(String(run.id), run);
     drawRunning();
-    clear(alertArea).append(...overview.alerts.map(alertBanner));
+    let dismissed = keptDismissals(overview.alerts, loadDismissed());
+    saveDismissed(dismissed);
+    const drawAlerts = () => clear(alertArea).append(...visibleAlerts(overview.alerts, dismissed).map((alert) => alertBanner(alert, (gone) => {
+      dismissed = { ...dismissed, [alertKey(gone)]: gone.run_id };
+      saveDismissed(dismissed);
+      drawAlerts();
+    })));
+    drawAlerts();
     const { counts, spend, time } = overview;
     const figures = [
       figure(String(counts.running), 'running now'),
