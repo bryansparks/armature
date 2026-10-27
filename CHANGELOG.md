@@ -28,11 +28,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `armature validate` warns with `REASONING_EFFORT_WITH_TEMPERATURE` when a
   stage resolves both a `reasoning_effort` and a `temperature` other than 1,
   which Claude rejects while thinking is on.
+- `armature run` also saves the full result to
+  `~/.armature/runs/<run_id>/result.json`, so every run keeps its untruncated
+  stage outputs instead of only the latest run per workflow.
 
 ### Changed
 
 - The litellm floor is now 1.101.0, the version verified to map
   `reasoning_effort` to adaptive thinking on Claude.
+
+### Fixed
+
+- `~/.armature/last/<workflow>.json` is written atomically (temp file plus
+  rename), so concurrent runs of the same workflow can no longer leave a
+  corrupt file.
 
 ## [0.7.0] - 2026-10-05
 
