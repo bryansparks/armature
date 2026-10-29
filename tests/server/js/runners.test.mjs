@@ -43,3 +43,11 @@ test('rerunNote links the rerun once it has a run and says where its job stands 
   assert.equal(rerunPending({ status: 'running', run_id: 'r2' }), false);
   assert.equal(rerunPending({ status: 'failed', run_id: null }), false);
 });
+
+const { settledJob } = await import(new URL('runpage.js', STATIC));
+
+test('settledJob waits for a held job to let go before the rerun answer is final', () => {
+  assert.equal(settledJob(null), true);
+  for (const status of ['queued', 'provisioning', 'claimed', 'running']) assert.equal(settledJob({ status }), false);
+  for (const status of ['succeeded', 'failed', 'canceled', 'suspended']) assert.equal(settledJob({ status }), true);
+});

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import insert, select, update
+from sqlalchemy import delete, insert, select, update
 
 from armature.server import defs, worker
 from armature.server.db import new_id
@@ -30,11 +30,11 @@ def world(sqlite_engine, clock):
         defs._add_version(conn, defs.WORKFLOW, workflow, 1, BODY, "seed", None, clock())
         defs._add_version(conn, defs.WORKFLOW, workflow, 2, BODY, "edit", None, clock())
         conn.execute(insert(webhooks).values(id=hook, team_id=team, name="gh", source="github",
-                                             path_token=new_id(), secret_name="HOOK", created_at=clock(),
-                                             updated_at=clock()))
+                                             path_token=new_id(), secret_name="HOOK", approval="approved",
+                                             created_at=clock(), updated_at=clock()))
         conn.execute(insert(triggers).values(id=rule, team_id=team, workflow_id=workflow, kind="webhook",
                                              config={}, webhook_id=hook, created_at=clock()))
-    return {"team": team, "other": other, "project": project, "workflow": workflow, "rule": rule}
+    return {"team": team, "other": other, "project": project, "workflow": workflow, "rule": rule, "hook": hook}
 
 
 def _finished(engine, clock, world, *, status="failed", job_status="failed", summary=None, with_job=True,
@@ -175,3 +175,59 @@ def test_a_second_rerun_waits_until_the_first_is_done(sqlite_engine, keyring, cl
 def test_rerunning_an_unknown_run_is_not_found(sqlite_engine, keyring, clock, world):
     contributor = _user(sqlite_engine, keyring, clock, world["team"], "contributor")
     assert contributor.post(f"/api/runs/{new_id()}/rerun").status_code == 404
+
+
+@pytest.mark.parametrize("change, message", [
+    ("rule_off", "off or gone"),
+    ("rule_gone", "off or gone"),
+    ("shadow", "shadow mode"),
+    ("hook_off", "not approved"),
+    ("hook_pending", "not approved"),
+])
+def test_a_rerun_obeys_the_triggers_controls_now(sqlite_engine, keyring, clock, world, change, message):
+    run_id = _finished(sqlite_engine, clock, world)
+    with sqlite_engine.begin() as conn:
+        if change == "rule_off":
+            conn.execute(update(triggers).where(triggers.c.id == world["rule"]).values(enabled=False))
+        if change == "rule_gone":
+            defs.detach_triggers(conn, select(triggers.c.id).where(triggers.c.id == world["rule"]))
+            conn.execute(delete(triggers).where(triggers.c.id == world["rule"]))
+        if change == "shadow":
+            conn.execute(update(triggers).where(triggers.c.id == world["rule"]).values(config={"shadow": True}))
+        if change == "hook_off":
+            conn.execute(update(webhooks).where(webhooks.c.id == world["hook"]).values(enabled=False))
+        if change == "hook_pending":
+            conn.execute(update(webhooks).where(webhooks.c.id == world["hook"]).values(approval="pending"))
+    contributor = _user(sqlite_engine, keyring, clock, world["team"], "contributor")
+    assert contributor.get(f"/api/runs/{run_id}").json()["run"]["can_rerun"] is False
+    response = contributor.post(f"/api/runs/{run_id}/rerun")
+    assert response.status_code == 409 and message in response.json()["error"], response.text
+    assert _reruns(sqlite_engine, run_id) == []
+
+
+def test_a_rule_made_dry_since_keeps_the_rerun_dry(sqlite_engine, keyring, clock, world):
+    run_id = _finished(sqlite_engine, clock, world, dry_run=False)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(triggers).where(triggers.c.id == world["rule"]).values(config={"dry": True}))
+    assert _user(sqlite_engine, keyring, clock, world["team"], "contributor").post(
+        f"/api/runs/{run_id}/rerun").status_code == 200
+    [job] = _reruns(sqlite_engine, run_id)
+    assert job.dry_run is True
+
+
+def test_a_double_click_queues_one_rerun_and_refuses_the_other(sqlite_engine, keyring, clock, world):
+    import threading
+    run_id = _finished(sqlite_engine, clock, world, concurrency_key=None)
+    clients = [_user(sqlite_engine, keyring, clock, world["team"], "contributor") for _ in range(2)]
+    gate, codes = threading.Barrier(2), []
+
+    def go(client):
+        gate.wait()
+        codes.append(client.post(f"/api/runs/{run_id}/rerun").status_code)
+
+    threads = [threading.Thread(target=go, args=(c,)) for c in clients]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(codes) == [200, 409] and len(_reruns(sqlite_engine, run_id)) == 1

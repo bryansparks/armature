@@ -9,7 +9,7 @@ import { renderMarkdown } from '../markdown.js';
 import { decisionSummary, externalLink, externalLinks, outcomeSentence, riskBadge } from '../outcome.js';
 import { findingCard, resultView } from '../result.js';
 import { hashFor } from '../router.js';
-import { activeTab, artifactForTab, byteSize, canCancel, canRerun, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, rerunNote, rerunPending, runTabs } from '../runpage.js';
+import { activeTab, artifactForTab, byteSize, canCancel, canRerun, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, rerunNote, rerunPending, runTabs, settledJob } from '../runpage.js';
 import { currentSession } from '../session.js';
 import { gateCard } from './gates.js';
 import { isNewer, locationChip, runStatus, subjectHref } from './runs.js';
@@ -19,6 +19,7 @@ const PAGE = 1000;
 const EARLIER_PAGE = 500;
 const POLL_MS = 2000;
 const RERUN_POLL_MS = 5000;
+const RERUN_SETTLE_TRIES = 12;
 const REFRESH_MS = 1500;
 const SETTLE_MS = 1500;
 const ANNOUNCE_MS = 2000;
@@ -378,6 +379,18 @@ export async function render(root, { args, signal }) {
       if (fresh?.run) run = { ...run, can_rerun: fresh.run.can_rerun, rerun: fresh.run.rerun };
       drawRerun();
       return rerunPending(run.rerun);
+    }, signal);
+  };
+  // A run ends before its runner lets go of the job, so whether it may be rerun is known only once the job settles.
+  const settleRerun = () => {
+    let tries = 0;
+    every(RERUN_POLL_MS, async () => {
+      tries += 1;
+      const fresh = await api(runPath(runId));
+      if (fresh?.run) run = { ...run, can_rerun: fresh.run.can_rerun, rerun: fresh.run.rerun };
+      if (fresh && 'job' in fresh) job = fresh.job;
+      drawRerun();
+      return !settledJob(job) && tries < RERUN_SETTLE_TRIES;
     }, signal);
   };
   const drawRerun = () => {
@@ -791,6 +804,7 @@ export async function render(root, { args, signal }) {
       updateHeader();
       drawWhere();
       outputSoon();
+      if (!settledJob(job)) settleRerun();
     }, SETTLE_MS);
   };
   signal?.addEventListener('abort', () => {
@@ -875,6 +889,7 @@ export async function render(root, { args, signal }) {
     settled = true;
     clearInterval(ticker);
     setLive('ended');
+    if (!settledJob(job)) settleRerun();
   } else {
     openStream(hasBefore ? Math.max(lastSeq, seenSeq()) : null);
   }

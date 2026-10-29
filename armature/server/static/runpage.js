@@ -142,3 +142,10 @@ export function rerunNote(rerun) {
 export function rerunPending(rerun) {
   return Boolean(rerun && !rerun.run_id && (rerun.status === 'queued' || RERUN_STARTING.has(rerun.status)));
 }
+
+const HELD_JOB = new Set(['queued', 'provisioning', 'claimed', 'running']);
+
+// Whether the run's job is done with, so the server's answer on rerunning it won't change by waiting.
+export function settledJob(job) {
+  return !job || !HELD_JOB.has(job.status);
+}
