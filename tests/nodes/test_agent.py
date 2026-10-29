@@ -455,6 +455,41 @@ async def test_git_token_rides_in_env_scoped_to_the_host(tmp_path, monkeypatch):
     assert env["GIT_ALLOW_PROTOCOL"] == "https"
 
 
+def _fake_gh(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text('#!/bin/sh\n[ "$1 $2 $3 $4" = "auth token --hostname github.com" ] && echo gho_from_gh\n')
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+
+def _auth_header(env):
+    config = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))}
+    return config.get("http.https://github.com/.extraHeader")
+
+
+def test_same_user_clone_falls_back_to_the_gh_login(tmp_path, monkeypatch):
+    import base64
+
+    from armature.nodes.agent import git_env
+    from armature.nodes.harness import SAME_USER_ENV
+    _fake_gh(tmp_path, monkeypatch)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv(SAME_USER_ENV, "1")
+    header = _auth_header(git_env(tmp_path, "github.com"))
+    assert header == "Authorization: Basic " + base64.b64encode(b"x-access-token:gho_from_gh").decode()
+
+
+def test_gh_login_is_never_used_off_a_same_user_runner(tmp_path, monkeypatch):
+    from armature.nodes.agent import git_env
+    from armature.nodes.harness import SAME_USER_ENV
+    _fake_gh(tmp_path, monkeypatch)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv(SAME_USER_ENV, "true")
+    assert _auth_header(git_env(tmp_path, "github.com")) is None
+
+
 def test_strip_repo_config_follows_no_links(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()

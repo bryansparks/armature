@@ -17,6 +17,7 @@ import re
 import shutil
 import signal
 import stat
+import subprocess
 import tarfile
 import tempfile
 from dataclasses import replace
@@ -28,13 +29,30 @@ from jinja2 import ChainableUndefined
 
 from armature.events.claude_stream import ClaudeStreamParser
 from armature.nodes.harness import (
-    AGENT_DIR_ENV, AGENT_USER_ENV, GIT_HOSTS_ENV, HARNESSES, MODELS_ENV, PROJECT_REPO_ENV, ROLES_ENV, SAME_USER_ENV,
-    SESSIONS_ENV, SKILLS_ENV, WRITE_ENV,
-    Harness, Launch, tools,
+    AGENT_DIR_ENV,
+    AGENT_USER_ENV,
+    GIT_HOSTS_ENV,
+    HARNESSES,
+    MODELS_ENV,
+    PROJECT_REPO_ENV,
+    ROLES_ENV,
+    SAME_USER_ENV,
+    SESSIONS_ENV,
+    SKILLS_ENV,
+    WRITE_ENV,
+    Harness,
+    Launch,
+    tools,
 )
 from armature.nodes.llm import _extract_json_from_response
 from armature.runtime.templating import text_env
-from armature.spec.models import CONTEXT_FILE_NAME, ROLE_KEY, SKILL_NAME, OutputMode, Stage
+from armature.spec.models import (
+    CONTEXT_FILE_NAME,
+    ROLE_KEY,
+    SKILL_NAME,
+    OutputMode,
+    Stage,
+)
 
 GIT_TOKEN_ENV = "GITHUB_TOKEN"
 DEFAULT_GIT_HOSTS = ("github.com",)
@@ -122,7 +140,7 @@ def _project_repo(project: str) -> tuple[str, str]:
 def git_env(home: Path, host: str) -> dict[str, str]:
     # The token travels as a config value in the environment, never on a command line, and only to the repo's host.
     config = [("http.followRedirects", "false")]
-    token = os.environ.get(GIT_TOKEN_ENV)
+    token = os.environ.get(GIT_TOKEN_ENV) or _same_user_token(host)
     if token:
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         config.append((f"http.https://{host}/.extraHeader", f"Authorization: Basic {basic}"))
@@ -132,6 +150,21 @@ def git_env(home: Path, host: str) -> dict[str, str]:
     for i, (key, value) in enumerate(config):
         env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
     return env
+
+
+def _same_user_token(host: str) -> str | None:
+    """The gh login's token on a --same-user runner, whose sessions can already read it."""
+    gh = shutil.which("gh")
+    if os.environ.get(SAME_USER_ENV) != "1" or gh is None:
+        return None
+    try:
+        done = subprocess.run([gh, "auth", "token", "--hostname", host], capture_output=True, text=True, check=False,
+                              timeout=10, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout.strip() or None
 
 
 def _inert_git_env(home: Path) -> dict[str, str]:

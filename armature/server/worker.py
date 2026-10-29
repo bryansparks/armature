@@ -43,7 +43,13 @@ from armature.nodes.harness import (
 )
 from armature.packs import PACKS_PATH_ENV
 from armature.packs.tool import URL_ENV as TOOLS_URL_ENV
-from armature.runner.process import BUNDLE_VERSION, ROLES_DIR, SKILLS_DIR, write_bundle
+from armature.runner.process import (
+    BUNDLE_VERSION,
+    ROLES_DIR,
+    SKILLS_DIR,
+    job_path,
+    write_bundle,
+)
 from armature.server import (
     calls,
     conversations,
@@ -857,7 +863,7 @@ class Worker:
         launch = dryrun.Launch(bundle.run_id, bundle.token, workdir, bundle.summary, bundle.engine_key)
         # The host's PATH, HOME, and packs path go last, so no setting or secret replaces them.
         env = {**{k: v for k, v in bundle.env().items() if k not in HOST_ONLY_ENV},
-               "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME") or str(Path.home()),
+               "PATH": job_path(binary), "HOME": os.environ.get("HOME") or str(Path.home()),
                PACKS_PATH_ENV: dryrun.packs_path(self.cfg.packs_dir),
                TOOLS_URL_ENV: f"{self.cfg.public_origin}{self.cfg.base_path}"}
         if bundle.skills:

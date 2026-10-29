@@ -133,13 +133,13 @@ def runner(
         _fail("--server is an http:// or https:// address.")
     if plain_http_to_remote(server):
         _fail("--server must use https unless it is on this host, so the key and secrets never travel in clear.")
+    if same_user and (job_user is not None or agent_user is not None):
+        _fail("--same-user can't go with --job-user or --agent-user.")
     if job_user is not None:
         if slots > 1:
             _fail("--job-user needs --slots 1: a job's cleanup stops every process of that user, and would stop "
                   "the other jobs too.")
         _check_job_user(job_user)
-    if same_user and (job_user is not None or agent_user is not None):
-        _fail("--same-user can't go with --job-user or --agent-user.")
     if agent_user is not None:
         if job_user is None:
             _fail("--agent-user needs --job-user.")

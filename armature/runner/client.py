@@ -44,6 +44,7 @@ from armature.runner.process import (
     SESSIONS_DIR,
     SKILLS_DIR,
     check_bundle_version,
+    job_path,
     popen,
     share,
     stop,
@@ -241,7 +242,7 @@ class Runner:
     def env(self, bundle: dict[str, Any]) -> dict[str, str]:
         # The host's PATH, HOME, and packs path go last, so no setting or secret replaces them.
         env = {**bundle["settings"], **bundle["secrets"], "ARMATURE_EVENTS": bundle["events_url"],
-               "ARMATURE_EVENTS_TOKEN": bundle["run_token"], "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+               "ARMATURE_EVENTS_TOKEN": bundle["run_token"], "PATH": job_path(self.binary),
                "HOME": os.environ.get("HOME") or str(Path.home())}
         if bundle.get("thread"):
             env["ARMATURE_THREAD"] = bundle["thread"]

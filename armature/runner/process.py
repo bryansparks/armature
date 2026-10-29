@@ -46,6 +46,12 @@ def armature_binary() -> str | None:
     return str(beside) if beside.is_file() else shutil.which("armature")
 
 
+def job_path(binary: str | None) -> str:
+    """The host's PATH with the running armature's directory first, so a step's `armature tool` finds it."""
+    host = os.environ.get("PATH", "/usr/bin:/bin")
+    return f"{os.path.dirname(binary)}:{host}" if binary else host
+
+
 # macOS refuses to lower RLIMIT_AS or RLIMIT_DATA from unlimited, so a memory cap applies on Linux only.
 MEMORY_LIMIT = None if sys.platform == "darwin" else resource.RLIMIT_AS
 
