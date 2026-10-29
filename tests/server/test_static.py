@@ -78,6 +78,7 @@ CONTRACT = [
     "GET /api/runs/{id}/artifacts/{name}",
     "GET /api/runs/{id}/outputs",
     "POST /api/runs/{id}/cancel",
+    "POST /api/runs/{id}/rerun",
     "GET /api/stream/runs",
     "GET /api/workflows",
     "GET /api/workflows/{id}",

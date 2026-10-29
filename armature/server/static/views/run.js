@@ -9,7 +9,7 @@ import { renderMarkdown } from '../markdown.js';
 import { decisionSummary, externalLink, externalLinks, outcomeSentence, riskBadge } from '../outcome.js';
 import { findingCard, resultView } from '../result.js';
 import { hashFor } from '../router.js';
-import { activeTab, artifactForTab, byteSize, canCancel, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, runTabs } from '../runpage.js';
+import { activeTab, artifactForTab, byteSize, canCancel, canRerun, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, rerunNote, rerunPending, runTabs } from '../runpage.js';
 import { currentSession } from '../session.js';
 import { gateCard } from './gates.js';
 import { isNewer, locationChip, runStatus, subjectHref } from './runs.js';
@@ -18,6 +18,7 @@ import { subjectPath } from './subject.js';
 const PAGE = 1000;
 const EARLIER_PAGE = 500;
 const POLL_MS = 2000;
+const RERUN_POLL_MS = 5000;
 const REFRESH_MS = 1500;
 const SETTLE_MS = 1500;
 const ANNOUNCE_MS = 2000;
@@ -367,6 +368,38 @@ export async function render(root, { args, signal }) {
     });
     cancelSlot.append(button, status);
   };
+  const rerunSlot = element('div', { class: 'run-actions' });
+  let shownRerun = null;
+  let rerunPoller = null;
+  const followRerun = () => {
+    rerunPoller?.stop();
+    rerunPoller = every(RERUN_POLL_MS, async () => {
+      const fresh = await api(runPath(runId));
+      if (fresh?.run) run = { ...run, can_rerun: fresh.run.can_rerun, rerun: fresh.run.rerun };
+      drawRerun();
+      return rerunPending(run.rerun);
+    }, signal);
+  };
+  const drawRerun = () => {
+    const note = rerunNote(run.rerun);
+    const key = JSON.stringify([canRerun(run), note]);
+    if (key === shownRerun) return;
+    shownRerun = key;
+    clear(rerunSlot);
+    if (note) rerunSlot.append(note.runId ? link(hashFor('run', [note.runId]), note.text) : element('p', { class: 'muted' }, note.text));
+    if (!canRerun(run)) return;
+    const button = element('button', { type: 'button' }, 'Rerun');
+    const status = element('span', { role: 'status' });
+    button.addEventListener('click', async () => {
+      if (!(await confirmDialog('Rerun this run?', 'A new run of this workflow starts at its current version, with the same inputs and trigger. This run stays as it is.', 'Rerun'))) return;
+      const answer = await attempt(status, button, () => api(`${runPath(runId)}/rerun`, { method: 'POST', body: {} }));
+      if (!answer?.job) return;
+      run = { ...run, can_rerun: false, rerun: answer.job };
+      drawRerun();
+      followRerun();
+    });
+    rerunSlot.append(button, status);
+  };
   const heading = pageHeader('', chipSlot, locationSlot, run.dry_run ? element('span', { class: 'chip warn', title: 'Recorded outputs stood in for every step.' }, 'Dry run') : null, liveNote);
   heading.querySelector('h1').append(titleText);
   root.append(element('p', { class: 'crumb' }, link(hashFor('runs'), 'Runs'), thread ? [' / ', link(subjectHref(thread), thread)] : null), heading,
@@ -375,7 +408,7 @@ export async function render(root, { args, signal }) {
       run.summary?.title ? labelled('Workflow', element('span', {}, workflowName)) : null,
       labelled('Started', element('span', { title: run.started_at || null }, when(run.started_at))),
       labelled('Took', durationText), extraMeta),
-    threadSlot, actions.node, cancelSlot, gatesSlot, progressText, errorSlot);
+    threadSlot, actions.node, cancelSlot, rerunSlot, gatesSlot, progressText, errorSlot);
   const where = whereView();
   const activity = new RunActivity();
   let activityReady = false;
@@ -396,6 +429,7 @@ export async function render(root, { args, signal }) {
   };
   root.append(where.node);
   actions.refresh();
+  if (rerunPending(run.rerun)) followRerun();
   if (thread) threadNote(threadSlot, run, signal);
   if (run.team_id) {
     api(`/api/teams/${encodeURIComponent(run.team_id)}/projects`).then((payload) => {
@@ -438,6 +472,7 @@ export async function render(root, { args, signal }) {
         risk ? element('span', { class: `chip ${risk.tone}`, title: risk.title }, risk.text) : null]);
       drawCancel();
     }
+    drawRerun();
     drawSummary();
     drawSentence();
     const placed = JSON.stringify(run.location || null);

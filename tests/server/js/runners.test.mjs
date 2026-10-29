@@ -24,3 +24,22 @@ test('canCancel needs a job that is still waiting or running and not already ask
   assert.equal(canCancel({ status: 'succeeded' }, run, admin), false);
   assert.equal(canCancel({ status: 'running', cancel_requested_at: '2026-10-28T00:00:00Z' }, run, admin), false);
 });
+
+const { canRerun, rerunNote, rerunPending } = await import(new URL('runpage.js', STATIC));
+
+test('canRerun follows the server\'s can_rerun on any finished run, a refused-looking success included', () => {
+  for (const status of ['succeeded', 'failed', 'canceled', 'lost']) assert.equal(canRerun({ status, can_rerun: true }), true);
+  assert.equal(canRerun({ status: 'running', can_rerun: true }), false);
+  assert.equal(canRerun({ status: 'failed', can_rerun: false }), false);
+  assert.equal(canRerun({ status: 'failed' }), false);
+});
+
+test('rerunNote links the rerun once it has a run and says where its job stands before', () => {
+  assert.equal(rerunNote(null), null);
+  assert.deepEqual(rerunNote({ id: 'j1', status: 'running', run_id: 'r2' }), { text: 'Open the rerun', runId: 'r2' });
+  assert.match(rerunNote({ id: 'j1', status: 'queued', run_id: null }).text, /queued/);
+  assert.match(rerunNote({ id: 'j1', status: 'failed', run_id: null }).text, /ended failed/);
+  assert.equal(rerunPending({ status: 'queued', run_id: null }), true);
+  assert.equal(rerunPending({ status: 'running', run_id: 'r2' }), false);
+  assert.equal(rerunPending({ status: 'failed', run_id: null }), false);
+});

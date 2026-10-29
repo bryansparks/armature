@@ -1,4 +1,4 @@
-"""Jobs the webhook rules queued, how the worker left each one, and canceling them."""
+"""Jobs the webhook rules queued, how the worker left each one, canceling them, and rerunning a run."""
 from __future__ import annotations
 
 from typing import Any
@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 
-from armature.server import dispatch, environments, rbac
+from armature.server import dispatch, environments, rbac, reruns
 from armature.server.app.deps import Granted, ScopeFrom, by_run, require, server, signed_in
 from armature.server.app.http import ApiError, client_ip
 from armature.server.auth import Session
@@ -67,3 +67,15 @@ def cancel_job(job_id: str, request: Request,
 def cancel_run(run_id: str, request: Request,
                granted: Granted = Depends(require("contributor", by_run()))) -> dict[str, Any]:
     return _cancel(request, granted, jobs.c.run_id == run_id, "Only a run the server started can be canceled here.")
+
+
+@router.post("/api/runs/{run_id}/rerun")
+def rerun_run(run_id: str, request: Request,
+              granted: Granted = Depends(require("contributor", by_run()))) -> dict[str, Any]:
+    srv = server(request)
+    try:
+        with srv.engine.begin() as conn:
+            return {"job": reruns.rerun(conn, run_id, actor_id=granted.user_id, now=srv.now(),
+                                        ip=client_ip(request))}
+    except reruns.RerunError as exc:
+        raise ApiError(exc.status, exc.message) from exc

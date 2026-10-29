@@ -120,3 +120,25 @@ export function canCancel(job, run, session) {
     && ((membership.scope_kind === 'team' && membership.scope_id === run?.team_id)
       || (membership.scope_kind === 'project' && membership.scope_id === run?.project_id)));
 }
+
+const RUN_FINISHED = new Set(['succeeded', 'failed', 'canceled', 'lost']);
+const RERUN_STARTING = new Set(['provisioning', 'claimed', 'running']);
+
+// Whether to offer Rerun. The server says whether this user may rerun this run now, and checks again on the POST.
+export function canRerun(run) {
+  return run?.can_rerun === true && RUN_FINISHED.has(run.status);
+}
+
+// Where the run's newest rerun stands: its run once it has one, else a note on its job.
+export function rerunNote(rerun) {
+  if (!rerun || typeof rerun !== 'object') return null;
+  if (rerun.run_id) return { text: 'Open the rerun', runId: String(rerun.run_id) };
+  if (rerun.status === 'queued') return { text: 'Rerun queued. It starts when a runner picks it up.' };
+  if (RERUN_STARTING.has(rerun.status)) return { text: 'Rerun starting.' };
+  return { text: `The rerun ended ${rerun.status || 'early'} before it started.` };
+}
+
+// Whether the newest rerun is still waiting for a runner to open its run.
+export function rerunPending(rerun) {
+  return Boolean(rerun && !rerun.run_id && (rerun.status === 'queued' || RERUN_STARTING.has(rerun.status)));
+}

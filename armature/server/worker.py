@@ -183,7 +183,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
               now: datetime, trigger_id: str | None = None, delivery_id: str | None = None,
               thread: str | None = None, resume: tuple[str, Any] | None = None, dry_run: bool = False,
               key: str | None = None, not_before: datetime | None = None, supersede: bool = False,
-              cancel_running: bool = False, sticky: Iterable[str] = ()) -> str:
+              cancel_running: bool = False, sticky: Iterable[str] = (), rerun_of: str | None = None) -> str:
     """Queue a workflow job at the workflow's current version, with its callees pinned. Returns the job id.
 
     ``resume`` is a gate id and the job that paused there: the new job continues that job's run, at the version,
@@ -191,7 +191,8 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
 
     Jobs of the workflow with the same ``key`` run one at a time. With ``supersede`` the new job replaces the key's
     queued ones and keeps any ``sticky`` input one of them set. With ``cancel_running`` it also asks the key's
-    running job to stop. A job with ``not_before`` waits until then to be claimed.
+    running job to stop. A job with ``not_before`` waits until then to be claimed. The run a job with ``rerun_of``
+    opens links back to that run.
     """
     if resume is not None:
         gate_id, paused = resume
@@ -218,7 +219,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
     conn.execute(insert(jobs).values(id=job_id, team_id=team_id, project_id=project_id, workflow_id=workflow_id,
                                      inputs=inputs, status="queued", attempts=0, trigger_id=trigger_id,
                                      delivery_id=delivery_id, thread=thread, created_at=now, concurrency_key=key,
-                                     not_before=not_before, **pinned))
+                                     not_before=not_before, rerun_of=rerun_of, **pinned))
     if older:
         conn.execute(update(jobs).where(jobs.c.id.in_([row.id for row in older]), jobs.c.status == "queued")
                      .values(status="superseded", superseded_by=job_id, finished_at=now, error=SUPERSEDED))
@@ -577,7 +578,8 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
                                           workflow_id=workflow.id, workflow_name=workflow.name, now=now,
                                           workflow_version=job.workflow_version, triggered_by=None, actor=None,
                                           trigger_kind=trigger_kind, trigger_ref=trigger_ref,
-                                          runner_key_id=runner_key_id, thread=job.thread, location=location)
+                                          runner_key_id=runner_key_id, thread=job.thread, location=location,
+                                          rerun_of=job.rerun_of)
         run_id = run_row["id"]
     conn.execute(update(jobs).where(jobs.c.id == job.id).values(
         run_id=run_id, status="running", heartbeat_at=now, lease_expires_at=now + lease))

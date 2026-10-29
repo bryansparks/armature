@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_, select
 
-from armature.server import display, rbac, threads
+from armature.server import display, rbac, reruns, threads
 from armature.server.app.deps import Granted, by_run, require, server, signed_in
 from armature.server.app.http import ApiError
 from armature.server.auth import Session, load_session
@@ -55,23 +55,25 @@ def _step(row: Any, show_cost: bool) -> dict[str, Any]:
 @router.get("/api/runs/{run_id}")
 async def get_run(run_id: str, request: Request,
                   granted: Granted = Depends(require("viewer", by_run()))) -> dict[str, Any]:
-    def read() -> tuple[dict[str, Any] | None, list[Any], Any, bool]:
+    def read() -> tuple[dict[str, Any] | None, list[Any], Any, bool, dict[str, Any] | None, dict[str, Any]]:
         with server(request).engine.connect() as conn:
+            rerun = {"can_rerun": rbac.at_least(granted.role, "contributor") and reruns.allowed(conn, run_id),
+                     "rerun": reruns.latest(conn, run_id)}
             steps = conn.execute(select(run_steps).where(run_steps.c.run_id == run_id)
                                  .order_by(run_steps.c.started_at, run_steps.c.step_key)).all()
             trigger_ref = conn.execute(select(runs.c.trigger_ref).where(runs.c.id == run_id)).scalar()
             job = conn.execute(select(jobs.c.id, jobs.c.status, jobs.c.cancel_requested_at)
                                .where(jobs.c.run_id == run_id).order_by(jobs.c.created_at.desc(), jobs.c.id)).first()
             return (load_summary(conn, run_id), steps, trigger_ref, display.load(conn)["show_cost"],
-                    dict(job._mapping) if job else None)
+                    dict(job._mapping) if job else None, rerun)
 
-    stored, steps, trigger_ref, show_cost, job = await asyncio.to_thread(read)
+    stored, steps, trigger_ref, show_cost, job, rerun = await asyncio.to_thread(read)
     hub = _live(request)
     summary = hub.summary(run_id) or stored
     dry_run = isinstance(trigger_ref, dict) and trigger_ref.get("dry_run") is True
     cost = summary["cost_usd"] if show_cost else None
     return {"run": {**summary, "cost_usd": cost, "last_seq": await hub.last_seq(run_id), "dry_run": dry_run,
-                    "links": threads.links(summary.get("subject"), summary.get("summary"))},
+                    "links": threads.links(summary.get("subject"), summary.get("summary")), **rerun},
             "steps": [_step(r, show_cost) for r in steps], "job": job}
 
 
