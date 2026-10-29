@@ -632,7 +632,8 @@ and only a runner that reads bundle version 4 claims such a job.
 Only `prompt` and `context_files` may hold templates. Inputs never render
 into an `agent:` block at load time, so an input holding `{{ ... }}` renders
 once. Each context file is written to `ctx/<name>.md` in the session's own
-directory and passed with `--add-dir`. The prompt tells the model to treat
+directory, or to `ctx/<name>` when the name ends in `.json`, and the directory
+is passed with `--add-dir`. The prompt tells the model to treat
 those files as data. The prompt reaches the CLI on stdin, never on its
 command line.
 

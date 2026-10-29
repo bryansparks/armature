@@ -245,7 +245,8 @@ class FileState(BaseModel):
 AGENT_HARNESSES = ("claude-code", "codex")
 # Claude Code's own rule for a skill name, which also keeps it a safe directory name.
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-CONTEXT_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# A context file is written as <name>.md, or as named when the name ends in .json.
+CONTEXT_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}(\.json)?$")
 # A role document's key, as the server stores it. No template marker fits, so a role is never rendered.
 ROLE_KEY = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")
 

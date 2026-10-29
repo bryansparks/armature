@@ -175,8 +175,9 @@ async def run_flow(tmp_path, name, inputs):
 
 
 def passes(tools):
-    """The tool steps in order, without review.decisions, which runs in the same wave as the post."""
-    return [t for t in tools if t != "review.decisions"]
+    """The tool steps in order, without review.decisions, which runs in the same wave as the post, and
+    review.context, which runs beside the rating."""
+    return [t for t in tools if t not in ("review.decisions", "review.context")]
 
 
 def findings_of(engine):
@@ -199,7 +200,7 @@ async def test_a_low_risk_review_runs_the_small_panel_and_marks_the_approved_hea
     result = await run_flow(tmp_path, "code-review", INPUTS)
     assert sorted(flow.specialists[0]) == sorted(risk.DEFAULT_LOW_RISK_PANEL)
     assert passes(flow.tools) == ["review.marked", "review.risk", "github.post-review", "review.mark"]
-    assert flow.tools.count("review.decisions") == 1
+    assert flow.tools.count("review.decisions") == 1 and flow.tools.count("review.context") == 1
     assert [(f.step_id, f.decision, f.reason) for f in findings_of(sqlite_engine)] == [("decisions", "drop", "r")]
     assert result["first"]["risk"] == "low" and result["first"]["verdict"] == "approve"
     assert result["fix"] == {"_skipped": True}

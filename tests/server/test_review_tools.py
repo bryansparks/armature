@@ -343,11 +343,12 @@ def test_review_tools_tell_the_live_hub_the_run_changed(sqlite_engine, keyring, 
     assert heard == [run.id]
 
 
-def test_a_dry_run_rates_nothing(app, sqlite_engine, keyring, clock, world):
+def test_a_dry_run_rates_its_own_run_from_githubs_files(app, sqlite_engine, keyring, clock, world, vendor):
     run = start_run(sqlite_engine, keyring, clock, world, trigger_ref={"dry_run": True}, risk=None)
     out = _risk(app, run)
-    assert out["dry_run"] is True and _row(sqlite_engine, run.id).risk is None
-    assert [c.mode for c in calls(sqlite_engine)] == ["dry"]
+    assert "dry_run" not in out and out["level"] == "low" and out["head"] == HEAD and out["panel"]
+    assert _row(sqlite_engine, run.id).risk == "low" and vendor.writes() == []
+    assert [c.mode for c in calls(sqlite_engine)] == ["live"]
 
 
 def test_the_runs_risk_reads_high_once_its_row_is_gone(sqlite_engine, run):
@@ -520,3 +521,41 @@ def test_a_live_hub_takes_the_decisions_as_events(sqlite_engine, keyring, clock,
     assert (run_id, step, payload["finding_key"], payload["decision"]) == (run.id, "decisions", "0123456789ab",
                                                                             "block")
     assert "token" not in payload and "finding_id" not in payload
+
+
+# review.context
+
+
+def test_context_lists_each_files_commentable_ranges_and_the_jira_keys_once():
+    from armature.server.tools import context
+    patch = "@@ -1,3 +1,3 @@\n line 1\n-old\n+new\n line 3\n@@ -10,0 +11,2 @@\n+a\n+b"
+    assert context.files_of([{"filename": "a.swift", "status": "modified", "patch": patch},
+                             {"filename": "gone.swift", "status": "removed"}]) == [
+        {"path": "a.swift", "status": "modified", "lines": [[1, 3], [11, 12]]},
+        {"path": "gone.swift", "status": "deleted", "lines": []}]
+    assert context.jira_keys("MOB-1 and MOB-1", "MOB-2-x MOB-3 MOB-4") == ["MOB-1", "MOB-2", "MOB-3"]
+    assert context.jira_keys("UTF-8 fix for MOB-7", "feature/ABC-2-MOB-9", project="MOB") == ["MOB-7", "MOB-9"]
+
+
+def test_context_keeps_only_the_jira_projects_keys_once_it_is_set(app, sqlite_engine, world, vendor, run):
+    vendor.pr.update(title="MOB-12 and UTF-8 cleanup")
+
+    def keys():
+        response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+        assert response.status_code == 200, response.text
+        return response.json()["jira_keys"]
+
+    assert keys() == ["MOB-12", "UTF-8"]
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(settings).values(team_id=world.team, key="jira.project", value="MOB"))
+    assert keys() == ["MOB-12"]
+
+
+def test_context_keeps_the_newest_comments_past_the_cap(monkeypatch):
+    from armature.server.tools import context
+    monkeypatch.setattr(context, "COMMENT_CAP", 2)
+    comments = [{"id": n, "user": {"login": "ana"}, "created_at": f"2026-10-2{n}T00:00:00Z", "body": f"note {n}"}
+                for n in range(1, 4)]
+    text = context.discussion_md(REPO, NUMBER, comments, [], [], lambda item: False)
+    assert "note 1" not in text and "note 2" in text and "note 3" in text
+    assert "1 older comments were left out" in text

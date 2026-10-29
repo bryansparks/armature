@@ -103,6 +103,8 @@ async def test_runs_claude_with_locked_down_flags(stub, tmp_path, monkeypatch):
     assert {"Edit", "Write", "NotebookEdit", "Read(~/.ssh/**)", "Read(//proc/**)", "Grep(//etc/armature/**)",
             "Glob(//sys/**)", "Bash(git *--out*)", "Bash(git *--ext-d*)", *GIT_ESCAPES} <= set(denied)
     assert "Bash(git *-c *)" in denied and "Read(./**)" in allowed and "Read" not in allowed
+    assert {"Bash(cat:*)", "Bash(grep:*)", "Bash(head:*)", "Bash(git diff:*)"} <= set(allowed)
+    assert "Bash" not in allowed and not any(t.startswith(("Bash(find", "Bash(rg")) for t in allowed)
     settings = Path(argv[argv.index("--settings") + 1])
     assert settings.parent == Path(env["CLAUDE_CONFIG_DIR"])
     assert call["config"] == ["settings.json"]
@@ -363,6 +365,9 @@ async def test_write_runs_as_the_runners_own_user_in_same_user_mode(stub, tmp_pa
     assert stub.sudo_calls() == []
     [call] = stub.calls()
     assert call["writable"] is True and Path(result["worktree"]).is_dir()
+    argv = call["argv"]
+    allowed = argv[argv.index("--allowed-tools") + 1:argv.index("--disallowed-tools")]
+    assert {"Bash", "Edit", "Write"} <= set(allowed) and "Write(./.git/**)" in argv
 
 
 @pytest.mark.parametrize("value", ["", "0", "true", "yes"])

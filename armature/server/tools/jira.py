@@ -17,6 +17,8 @@ PROJECT_KEY = "jira.project"
 SUMMARY_MAX = 255
 ISSUE_FIELDS = "summary,description,status,issuetype,components,labels,comment"
 COMMENTS_MAX = 50
+# The description and each comment, so one long issue can't crowd the code out of a session's context.
+BODY_MAX = 4000
 
 
 def _lines(block: str) -> list[dict[str, Any]]:
@@ -74,6 +76,10 @@ def text_of(doc: Any) -> str:
     return ("\n\n" if doc.get("type") == "doc" else "").join(parts)
 
 
+def _capped(text: str) -> str:
+    return text[:BODY_MAX] + "\n[truncated]" if len(text) > BODY_MAX else text
+
+
 def get_issue(ctx: Call, params: dict[str, Any]) -> dict[str, Any]:
     issue = params["issue"]
     with Jira(ctx) as jira:
@@ -83,12 +89,12 @@ def get_issue(ctx: Call, params: dict[str, Any]) -> dict[str, Any]:
         fields = json_of(response, "Jira GET /issue/{key}").get("fields") or {}
     comments = ((fields.get("comment") or {}).get("comments") or [])[-COMMENTS_MAX:]
     return {"issue": issue, "found": True, "summary": fields.get("summary") or "",
-            "description": text_of(fields.get("description")),
+            "description": _capped(text_of(fields.get("description"))),
             "status": (fields.get("status") or {}).get("name") or "",
             "type": (fields.get("issuetype") or {}).get("name") or "",
             "components": [c.get("name") for c in fields.get("components") or [] if isinstance(c, dict)],
             "labels": [x for x in fields.get("labels") or [] if isinstance(x, str)],
-            "comments": [{"author": (c.get("author") or {}).get("displayName") or "", "body": text_of(c.get("body"))}
+            "comments": [{"author": (c.get("author") or {}).get("displayName") or "", "body": _capped(text_of(c.get("body")))}
                          for c in comments if isinstance(c, dict)],
             "url": f"{ctx.config['site_url']}/browse/{issue}"}
 

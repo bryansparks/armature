@@ -52,17 +52,27 @@ class Call:
 class Tool:
     kind: str
     run: Callable[[Call, dict[str, Any]], dict[str, Any]] | None
+    # A dry run calls a tool that only reads for real, so later steps branch on real data. It records every other.
+    reads: bool = False
 
 
 def registry() -> dict[str, Tool]:
-    from armature.server.tools import github, jira, linear, marks, review, slack
+    from armature.server.tools import (
+        context,
+        github,
+        jira,
+        linear,
+        marks,
+        review,
+        slack,
+    )
     return {
         "github.post-review": Tool("github_app", review.post),
         "github.check-run": Tool("github_app", github.check_run),
         "github.pr-comment": Tool("github_app", github.pr_comment),
         "github.open-pr": Tool("github_app", github.open_pr),
-        "github.permission": Tool("github_app", github.permission),
-        "github.pr-diff": Tool("github_app", github.pr_diff),
+        "github.permission": Tool("github_app", github.permission, reads=True),
+        "github.pr-diff": Tool("github_app", github.pr_diff, reads=True),
         # Checkout only earns a read credential for git, through the broker's git-credential route.
         "github.checkout": Tool("github_app", None),
         "github.push": Tool("github_app", github.push_gate),
@@ -70,13 +80,15 @@ def registry() -> dict[str, Tool]:
         "slack.update": Tool("slack", slack.update),
         "jira.comment": Tool("jira", jira.comment),
         "jira.create": Tool("jira", jira.create),
-        "jira.get-issue": Tool("jira", jira.get_issue),
+        "jira.get-issue": Tool("jira", jira.get_issue, reads=True),
         "jira.transition": Tool("jira", jira.transition),
         "linear.comment": Tool("linear", linear.comment),
         "linear.transition": Tool("linear", linear.transition),
-        "review.risk": Tool("github_app", marks.risk),
-        "review.marked": Tool("github_app", marks.marked),
+        # risk and marked read only GitHub, and record the level or the no-op on their own run.
+        "review.risk": Tool("github_app", marks.risk, reads=True),
+        "review.marked": Tool("github_app", marks.marked, reads=True),
         "review.mark": Tool("github_app", marks.mark),
-        "review.pushable": Tool("github_app", marks.pushable),
+        "review.pushable": Tool("github_app", marks.pushable, reads=True),
         "review.decisions": Tool("github_app", marks.decisions),
+        "review.context": Tool("github_app", context.context, reads=True),
     }

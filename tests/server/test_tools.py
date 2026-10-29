@@ -267,11 +267,28 @@ def test_pr_diff_leaves_out_patch_text_past_the_cap(app, run, vendor):
     assert sum(len(f["patch"]) for f in out["files"]) <= DIFF_MAX
 
 
-def test_permission_and_pr_diff_in_a_dry_run_reach_no_vendor(app, sqlite_engine, keyring, clock, world, vendor):
+def test_permission_and_pr_diff_in_a_dry_run_read_github_for_real(app, sqlite_engine, keyring, clock, world, vendor):
     run = start_run(sqlite_engine, keyring, clock, world, trigger_ref={"dry_run": True})
+    assert "dry_run" not in tool(app, run, "permission", "github.permission", {"repo": REPO, "user": "ana"}).json()
+    assert tool(app, run, "diff", "github.pr-diff", {"repo": REPO, "number": NUMBER}).json()["files"]
+    assert vendor.requests and vendor.writes() == []
+    assert [(c.tool, c.mode) for c in calls(sqlite_engine)] == [("github.permission", "live"),
+                                                                ("github.pr-diff", "live")]
+
+
+def test_a_stub_mode_test_run_reads_nothing_for_real(app, sqlite_engine, keyring, clock, world, vendor):
+    run = start_run(sqlite_engine, keyring, clock, world, trigger_ref={"dry_run": True, "mode": "stub"})
     assert tool(app, run, "permission", "github.permission", {"repo": REPO, "user": "ana"}).json()["dry_run"]
-    assert tool(app, run, "diff", "github.pr-diff", {"repo": REPO, "number": NUMBER}).json()["dry_run"]
+    assert tool(app, run, "read", "jira.get-issue", {"issue": "MOB-12"}).json()["dry_run"] is True
     assert [r for r in vendor.requests if "/access_tokens" not in r.url.path] == []
+    assert [c.mode for c in calls(sqlite_engine)] == ["dry", "dry"]
+
+
+def test_every_tool_is_classified_and_only_reads_run_in_a_dry_run():
+    from armature.server.tools import registry
+    reads = {name for name, spec in registry().items() if spec.reads}
+    assert reads == {"github.permission", "github.pr-diff", "jira.get-issue", "review.risk", "review.marked",
+                     "review.pushable", "review.context"}
 
 
 # Jira and Linear.
@@ -302,13 +319,13 @@ def test_jira_create_refuses_any_field_off_the_allowlist(app, sqlite_engine, run
     assert response.status_code == 400 and vendor.requests == []
 
 
-def test_jira_create_and_read_in_a_dry_run_record_the_call_and_reach_no_vendor(app, sqlite_engine, keyring, clock,
-                                                                               world, vendor):
+def test_a_dry_run_records_jira_create_and_reads_the_issue_for_real(app, sqlite_engine, keyring, clock, world, vendor):
     run = start_run(sqlite_engine, keyring, clock, world, trigger_ref={"dry_run": True})
     assert tool(app, run, "create", "jira.create", CREATE).json()["dry_run"] is True
-    assert tool(app, run, "read", "jira.get-issue", {"issue": "MOB-12"}).json()["dry_run"] is True
-    assert vendor.requests == []
-    assert [(c.tool, c.mode) for c in calls(sqlite_engine)] == [("jira.create", "dry"), ("jira.get-issue", "dry")]
+    read = tool(app, run, "read", "jira.get-issue", {"issue": "MOB-12"}).json()
+    assert "dry_run" not in read and read["status"] == "In Progress"
+    assert [r.method for r in vendor.requests] == ["GET"]
+    assert [(c.tool, c.mode) for c in calls(sqlite_engine)] == [("jira.create", "dry"), ("jira.get-issue", "live")]
 
 
 def test_jira_get_issue_returns_plain_text_and_hides_an_unreadable_issue(app, run, vendor):
@@ -326,6 +343,14 @@ def test_jira_get_issue_returns_plain_text_and_hides_an_unreadable_issue(app, ru
     vendor.jira_issue = None
     assert tool(app, run, "read", "jira.get-issue", {"issue": "MOB-12"}).json() == {"issue": "MOB-12",
                                                                                  "found": False}
+
+
+def test_jira_get_issue_caps_the_description_and_each_comment(app, run, vendor):
+    from armature.server.tools.jira import BODY_MAX
+    long = "x" * (BODY_MAX + 10)
+    vendor.jira_issue = {"fields": {"description": adf(long), "comment": {"comments": [{"body": adf(long)}]}}}
+    out = tool(app, run, "read", "jira.get-issue", {"issue": "MOB-12"}).json()
+    assert out["description"] == "x" * BODY_MAX + "\n[truncated]" == out["comments"][0]["body"]
 
 
 def test_jira_comment_goes_out_as_plain_adf(app, run, vendor):
