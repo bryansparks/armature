@@ -1,6 +1,7 @@
 import subprocess
 import httpx
 from pathlib import Path
+from armature.events.env import child_env
 from armature.registry.registry import ToolRegistry, ToolDescriptor, PermissionLevel
 from armature.permissions.permissions import Reversibility, classify_shell_command, requires_approval
 
@@ -28,7 +29,7 @@ async def _shell_run(args: dict) -> dict:
             "Use a HumanGateNode before this stage, or block/allow it explicitly via safety_rules."
         )
     result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=30
+        cmd, shell=True, capture_output=True, text=True, timeout=30, env=child_env()
     )
     return {"stdout": result.stdout, "stderr": result.stderr, "exit_code": result.returncode}
 

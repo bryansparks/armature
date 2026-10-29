@@ -34,6 +34,25 @@ def _harness_injected_keys_set() -> set[str]:
     return {"run_id", "_transcript", "_diagnostics", "_stale_memory_keys", "_memory_index"}
 
 
+def _with_errors(spec: HarnessSpec) -> list[SpecError]:
+    from armature.packs.params import template_strings, with_errors
+    from armature.spec.template_lint import lint_template
+
+    errors: list[SpecError] = []
+    for stage in spec.stages:
+        if stage.with_ is not None and stage.adapter is None:
+            errors.append(SpecError(code="INVALID_WITH", message="with: needs an adapter", stage_id=stage.id))
+            continue
+        for where, text in template_strings(stage.with_ or {}):
+            for message in lint_template(text):
+                errors.append(SpecError(code="UNSAFE_TEMPLATE", message=f"{where}: {message}", stage_id=stage.id))
+        adapter = spec.adapters.get(stage.adapter) if stage.adapter else None
+        if adapter is not None and adapter.params is not None:
+            for message in with_errors(adapter.params, stage.with_ or {}, allow_templates=True):
+                errors.append(SpecError(code="INVALID_WITH", message=message, stage_id=stage.id))
+    return errors
+
+
 def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
     """Validate a HarnessSpec and return a list of errors (empty = valid).
 
@@ -79,11 +98,20 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
     # ── Undefined adapter references ───────────────────────────────────────
     for stage in spec.stages:
         if stage.adapter is not None and stage.adapter not in spec.adapters:
+            if "/" in stage.adapter:
+                errors.append(SpecError(
+                    code="UNKNOWN_PACK_ADAPTER",
+                    message=f"Stage references adapter '{stage.adapter}', which no installed pack provides",
+                    stage_id=stage.id,
+                ))
+                continue
             errors.append(SpecError(
                 code="UNDEFINED_ADAPTER",
                 message=f"Stage references adapter '{stage.adapter}' which is not defined in spec.adapters",
                 stage_id=stage.id,
             ))
+
+    errors.extend(_with_errors(spec))
 
     # ── Stage has no execution type ────────────────────────────────────────
     for stage in spec.stages:
@@ -426,8 +454,8 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             ))
         if lc.until is not None:
             try:
-                from jinja2 import Environment, BaseLoader
-                Environment(loader=BaseLoader()).parse(lc.until)
+                from armature.runtime.templating import text_env
+                text_env().parse(lc.until)
             except Exception as exc:
                 errors.append(SpecError(
                     code="LOOP_INVALID_UNTIL_EXPR",

@@ -16,6 +16,12 @@ app.add_typer(mission_app, name="mission")
 from armature.packaging.cli import package_app  # noqa: E402
 app.add_typer(package_app, name="package")
 
+from armature.server.cli import server_app  # noqa: E402
+app.add_typer(server_app, name="server")
+
+from armature.packs.cli import pack_app  # noqa: E402
+app.add_typer(pack_app, name="pack")
+
 
 @app.command()
 def new(
@@ -400,6 +406,10 @@ def _save_last_result(workflow_name: str, result: dict, run_dir: Path) -> None:
 @app.command()
 def validate(
     spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
+    strict_templates: bool = typer.Option(
+        False, "--strict-templates",
+        help="Also require every template to use only references, comparisons, and safe filters.",
+    ),
 ):
     """Validate a workflow spec file and report all errors."""
     if not spec.exists():
@@ -416,6 +426,10 @@ def validate(
         raise typer.Exit(1)
 
     all_issues = validate_spec(loaded, strict=False)
+    if strict_templates:
+        from ruamel.yaml import YAML
+        from armature.spec.template_lint import lint_tree
+        all_issues += lint_tree(YAML(typ="safe").load(spec.read_text(encoding="utf-8")))
     hard_errors = [e for e in all_issues if e.severity == "error"]
     warnings = [e for e in all_issues if e.severity == "warning"]
 
@@ -1927,6 +1941,16 @@ def channels_start(
 
     typer.echo(f"Channel spec '{spec.name}' loaded — {len(spec.channels)} channel(s).")
     typer.echo("(Live channel server not yet implemented — spec validated successfully.)")
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+def emit(ctx: typer.Context) -> None:
+    """Send an event to ARMATURE_EVENTS (same as `python -m armature.events`)."""
+    from armature.events.cli import main
+    raise typer.Exit(main(list(ctx.args)))
 
 
 @app.command()

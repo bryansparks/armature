@@ -1,7 +1,8 @@
 from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic_core import PydanticCustomError
 
 
 class RoleType(str, Enum):
@@ -160,6 +161,10 @@ class IterationConfig(BaseModel):
     backoff_max_s: float = 60.0
 
 
+PACK_ADAPTER_CONTEXT = "pack_adapter"
+LOADER_ONLY_ADAPTER_FIELDS = ("pack_dir", "params")
+
+
 class Adapter(BaseModel):
     name: str
     type: str  # "python" | "script"
@@ -170,6 +175,21 @@ class Adapter(BaseModel):
     # When set, stdout is parsed into the stage result instead of returning
     # the {stdout, stderr, exit_code} envelope. Currently "json" only.
     parse: Literal["json"] | None = None
+    # Stamped by the loader for a pack adapter: $PACK_DIR in the child env and the schema for a step's with:.
+    pack_dir: str | None = None
+    params: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _loader_only_fields(cls, data: Any, info: ValidationInfo) -> Any:
+        if isinstance(data, dict) and not (info.context or {}).get(PACK_ADAPTER_CONTEXT):
+            reserved = sorted(k for k in LOADER_ONLY_ADAPTER_FIELDS if data.get(k) is not None)
+            if reserved:
+                raise PydanticCustomError(
+                    "RESERVED_FIELD", "RESERVED_FIELD: adapter fields {fields} are set only by the pack loader",
+                    {"fields": ", ".join(reserved)},
+                )
+        return data
 
 
 class Failure(BaseModel):
@@ -199,10 +219,13 @@ class FileState(BaseModel):
 
 
 class Stage(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
     role: Role | None = None
     depends_on: list[str] = Field(default_factory=list)
     adapter: str | None = None
+    with_: dict[str, Any] | None = Field(None, alias="with")  # parameters for the adapter, rendered at run time
     gate: str | None = None
     tool_call: ToolCallConfig | None = None
     signature: Signature | None = None

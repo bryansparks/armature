@@ -2,9 +2,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import uuid
 import time
 from pathlib import Path
+from contextvars import ContextVar
 from typing import Any, Callable
 from armature.spec.models import HarnessSpec, Stage
 from armature.spec.loader import load_spec
@@ -18,6 +20,7 @@ from armature.runtime.prompt import PromptAssembler
 from armature.nodes.llm import LLMNode
 from armature.nodes.script import ScriptNode
 from armature.nodes.gate import HumanGateNode
+from armature.nodes.stub import StubNode, StubOutputs
 from armature.nodes.provider_errors import classify_provider_error
 from armature.registry.registry import ToolRegistry
 from armature.registry.builtins import register_builtins
@@ -26,6 +29,10 @@ from armature.state.session import SessionLog, SessionEvent
 from armature.state.artifacts import ArtifactStore
 from armature.state.traces import TraceStore, TraceRecord
 from armature.telemetry import get_tracer
+from armature.events import Emitter, NullEmitter
+from armature.events.engine import forward_engine_event
+from armature.events.env import child_env
+from armature.events.register import register_run, registration_body
 
 
 def new_run_id() -> str:
@@ -95,6 +102,13 @@ def _merge_carry_forward(target: dict, carry: dict) -> None:
 
 _GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
 
+HEARTBEAT_S = 60.0
+
+# (harness id, stage id, branch index, branch count) for the fan-out branch running in this task.
+_FAN_OUT_BRANCH: ContextVar[tuple[int, str, int, int] | None] = ContextVar(
+    "armature_fan_out_branch", default=None
+)
+
 
 def _carry_output_cap(stage_id: str, spec: "HarnessSpec") -> int:
     if spec.continuation:
@@ -154,6 +168,82 @@ def _apply_context_never(never: frozenset[str], context: dict[str, Any]) -> dict
 
 
 class Harness:
+    @property
+    def _on_event(self) -> Callable[[str, dict[str, Any]], None] | None:
+        if self._events.enabled:
+            return self._forward_event
+        return self._user_on_event
+
+    @_on_event.setter
+    def _on_event(self, callback: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._user_on_event = callback
+
+    def _forward_event(self, name: str, data: dict[str, Any]) -> None:
+        try:
+            forward_engine_event(self._emit, name, data)
+        except Exception:
+            pass
+        if self._user_on_event:
+            self._user_on_event(name, data)
+
+    def _emit(self, kind: str, step_id: str | None = None, /, **payload: Any) -> None:
+        if not self._events.enabled:
+            return
+        branch = _FAN_OUT_BRANCH.get()
+        if branch is not None and branch[0] == id(self) and branch[1] == step_id:
+            payload["branch"], payload["branches"] = branch[2], branch[3]
+        if self._event_parent_step is not None:
+            payload["parent_step"] = self._event_parent_step
+        self._events.emit(kind, step_id, **payload)
+
+    def _emit_step_failed(self, stage: Stage, exc: BaseException) -> None:
+        self._emit("step_failed", stage.id, type=type(exc).__name__, reason=str(exc))
+
+    async def _open_run_emitter(self, inputs: dict[str, Any] | None) -> Emitter | None:
+        """This run's own emitter, or None. Sets whether the run is nested in another."""
+        if os.environ.get("ARMATURE_EVENTS") and os.environ.get("ARMATURE_EVENTS_TOKEN"):
+            # ARMATURE_STEP_ID means a step of another run started this one.
+            outer_step = os.environ.get("ARMATURE_STEP_ID") or None
+            if outer_step is not None:
+                self._event_parent_step = outer_step
+                self._events_run_id = os.environ.get("ARMATURE_RUN_ID") or None
+            return Emitter.from_env()
+        server = os.environ.get("ARMATURE_SERVER")
+        runner_key = os.environ.get("ARMATURE_RUNNER_KEY")
+        if not (server and runner_key):
+            return None
+        registered = await asyncio.to_thread(
+            register_run, server, runner_key, registration_body(self._spec.name, inputs)
+        )
+        if registered is None:
+            return None
+        self._events_run_id, emitter = registered
+        return emitter
+
+    def _script_env(self, step_id: str) -> dict[str, str]:
+        env = {"ARMATURE_RUN_ID": self._events_run_id or self._run_id, "ARMATURE_STEP_ID": step_id}
+        if self._events.enabled:
+            env["ARMATURE_EVENTS"] = self._events.endpoint
+            env["ARMATURE_EVENTS_TOKEN"] = self._events.token
+        return env
+
+    def _script_inputs(self, stage, adapter, context: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any]]:
+        """The child env and context for a script stage, with its rendered with: and $PACK_DIR."""
+        env = self._script_env(stage.id)
+        if adapter.pack_dir is not None:
+            env["PACK_DIR"] = adapter.pack_dir
+        if stage.with_ is None and adapter.params is None:
+            return env, context
+        from armature.packs.params import render_with, with_errors
+        values = render_with(stage.with_ or {}, context)
+        if adapter.params is not None:
+            problems = with_errors(adapter.params, values, allow_templates=False)
+            if problems:
+                raise ValueError(f"Stage '{stage.id}' with: does not match adapter '{adapter.name}': "
+                                 + "; ".join(problems))
+        env["ARMATURE_WITH"] = json.dumps(values, default=str)
+        return env, {**context, "with": values}
+
     def __init__(
         self,
         spec: HarnessSpec,
@@ -164,12 +254,15 @@ class Harness:
         traces_db: Path | str | None = None,
         use_cache: bool = True,
         adapter_registry=None,
+        emitter: Emitter | None = None,
+        parent_step: str | None = None,
     ):
         if validate:
             from armature.spec.validator import validate_spec
             validate_spec(spec)
 
         self._spec = spec
+        self._stubs = StubOutputs.from_env()
         self._total_cost_usd = 0.0
         self._spec_version = hashlib.sha256(
             self._spec.model_dump_json().encode()
@@ -190,12 +283,12 @@ class Harness:
             Path(self._spec.sandbox.host_workspace).expanduser().resolve(),
         )
         self._sandbox_image_digest: str | None = None
-        if self._spec.sandbox.mode == SandboxMode.DOCKER:
+        if self._spec.sandbox.mode == SandboxMode.DOCKER and self._stubs is None:
             try:
                 import subprocess as _sp
                 _proc = _sp.run(
                     [self._spec.sandbox.runtime, "inspect", "--format", "{{.Id}}", self._spec.sandbox.image],
-                    capture_output=True, text=True, timeout=10,
+                    capture_output=True, text=True, timeout=10, env=child_env(),
                 )
                 if _proc.returncode == 0:
                     self._sandbox_image_digest = _proc.stdout.strip() or None
@@ -232,6 +325,11 @@ class Harness:
         self._session_dir = base_dir
         resolved_traces = Path(traces_db).expanduser() if traces_db else _GLOBAL_TRACES_DB.expanduser()
         self._traces = TraceStore(resolved_traces)
+        self._given_emitter = emitter
+        self._events: Emitter = emitter if emitter is not None else NullEmitter()
+        self._parent_step = parent_step
+        self._event_parent_step = parent_step
+        self._events_run_id: str | None = None
         self._on_event = on_event
         self._on_token = None   # async (chunk: str)->None; set by service layer for streaming
         self._transcript: list[dict[str, Any]] = []
@@ -334,6 +432,8 @@ class Harness:
         self._mcp_sessions: list[Any] = []
 
     def _load_tool_modules(self) -> None:
+        if self._stubs is not None:
+            return
         import importlib
         for tool_mod in self._spec.tools:
             mod = importlib.import_module(tool_mod.module)
@@ -345,7 +445,7 @@ class Harness:
             mod.register(self._registry)
 
     async def _attach_mcp_servers(self) -> None:
-        if not self._spec.mcp_servers:
+        if not self._spec.mcp_servers or self._stubs is not None:
             return
         from armature.mcp.client import MCPRegistrar
         self._mcp_sessions = await MCPRegistrar.register_all(
@@ -490,7 +590,12 @@ class Harness:
                 attributes={"stage": stage.id, "workflow": self._spec.name},
             ) as span:
                 try:
-                    if stage.gate == "human":
+                    if self._stubs is not None:
+                        _stage_type = "stub"
+                        branch = _FAN_OUT_BRANCH.get()
+                        index = branch[2] if branch is not None and branch[:2] == (id(self), stage.id) else None
+                        result = await StubNode(stage, self._stubs, index).execute(context)
+                    elif stage.gate == "human":
                         _stage_type = "gate"
                         node = HumanGateNode(stage=stage)
                         result = await node.execute(context)
@@ -518,7 +623,10 @@ class Harness:
                     elif stage.subagent_spec:
                         _stage_type = "subagent"
                         from armature.nodes.subagent import SubagentNode
-                        node = SubagentNode(stage=stage, session_dir=self._session_dir)
+                        node = SubagentNode(
+                            stage=stage, session_dir=self._session_dir,
+                            emitter=self._events, parent_step=stage.id,
+                        )
                         result = await node.execute(context)
                         # Child-run spend is observed spend of this run
                         # (design §2.3) — meter the node's accumulated total.
@@ -533,7 +641,11 @@ class Harness:
                         adapter = self._spec.adapters.get(stage.adapter)
                         if adapter is None:
                             raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
-                        node = ScriptNode(adapter=adapter)
+                        script_env, script_context = self._script_inputs(stage, adapter, context)
+                        node = ScriptNode(
+                            adapter=adapter, env=script_env,
+                            emit=self._emit if self._events.enabled else None, step_id=stage.id,
+                        )
                         tool_args = {"cmd": adapter.cmd or ""}
                         decision = await self._hooks.run_pre_tool(stage.adapter, tool_args, context)
                         if decision == HookDecision.BLOCK:
@@ -541,7 +653,7 @@ class Harness:
                             # SafetyHookBuilder hooks raise ToolBlocked directly (carrying rule.message).
                             from armature.hooks.lifecycle import ToolBlocked
                             raise ToolBlocked(stage.adapter, adapter.cmd or "", "blocked by safety rule")
-                        result = await node.execute(context)
+                        result = await node.execute(script_context)
                         await self._hooks.run_post_tool(stage.adapter, result, context)
                         script_latency = (time.monotonic() - t0) * 1000
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
@@ -615,15 +727,23 @@ class Harness:
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result
                                                       if not k.startswith("_")})
                         _escalation_count = result.pop("_escalation_count", 0)
-                        self._total_cost_usd += result.pop("_cost_usd", 0.0)
+                        _cost_usd = result.pop("_cost_usd", 0.0)
+                        self._total_cost_usd += _cost_usd
+                        _model = _llm_node._resolve_model()
+                        _input_tokens = result.pop("_input_tokens", 0)
+                        _output_tokens = result.pop("_output_tokens", 0)
+                        self._emit(
+                            "cost", stage.id, model=_model, input_tokens=_input_tokens,
+                            output_tokens=_output_tokens, cost_usd=_cost_usd,
+                        )
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type=stage.role.type.value,
-                            model=_llm_node._resolve_model(),
-                            input_tokens=result.pop("_input_tokens", 0),
-                            output_tokens=result.pop("_output_tokens", 0),
+                            model=_model,
+                            input_tokens=_input_tokens,
+                            output_tokens=_output_tokens,
                             latency_ms=latency,
                             success=True,
                             output_valid=output_valid,
@@ -731,7 +851,7 @@ class Harness:
 
         if self._on_event:
             elapsed = round(time.monotonic() - t0, 1)
-            self._on_event("stage_complete", {"stage": stage.id, "elapsed_s": elapsed})
+            self._on_event("stage_complete", {"stage": stage.id, "elapsed_s": elapsed, "output": result})
 
         return result
 
@@ -750,11 +870,10 @@ class Harness:
         """
         import asyncio
         from pathlib import Path as _Path
-        from jinja2.nativetypes import NativeEnvironment
         from jinja2 import ChainableUndefined
+        from armature.runtime.templating import native_env
 
-        env = NativeEnvironment(undefined=ChainableUndefined)
-        items = env.from_string(stage.partition_source).render(**context)
+        items = native_env(ChainableUndefined).from_string(stage.partition_source).render(**context)
 
         if not isinstance(items, (list, tuple)):
             hint = ""
@@ -791,15 +910,19 @@ class Harness:
                     # machinery's _iteration) letting SubagentNode give each
                     # engine-fanned child a distinct session directory.
                     per_ctx["_fan_out_item_index"] = item_index
-                if stage.inject_file_as is not None:
+                if stage.inject_file_as is not None and self._stubs is None:
                     try:
                         per_ctx[stage.inject_file_as] = _Path(str(item)).read_text(errors="replace")
                     except Exception:
                         per_ctx[stage.inject_file_as] = ""
+                branch = _FAN_OUT_BRANCH.set((id(self), stage.id, item_index, len(items)))
                 try:
                     return await self._execute_stage(stage, per_ctx)
                 except Exception as exc:
+                    self._emit_step_failed(stage, exc)
                     return {"_fan_out_error": str(exc), "vulnerabilities": []}
+                finally:
+                    _FAN_OUT_BRANCH.reset(branch)
 
         raw = await asyncio.gather(*[_run_one(i, item) for i, item in enumerate(items)])
         results = list(raw)
@@ -823,8 +946,9 @@ class Harness:
         The result's keys (if it's a dict) are merged into the template context
         so authors can write `until: "{{ status == 'done' }}"` directly.
         """
-        from jinja2 import Environment, BaseLoader, ChainableUndefined
-        env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+        from jinja2 import ChainableUndefined
+        from armature.runtime.templating import text_env
+        env = text_env(ChainableUndefined)
         eval_ctx = {**context}
         if isinstance(result, dict):
             eval_ctx.update(result)
@@ -995,6 +1119,25 @@ class Harness:
         self, stage: Stage, context: dict[str, Any],
         _loop_iteration: int | None = None,
     ) -> Any:
+        heartbeat = (
+            asyncio.create_task(self._heartbeat(stage.id)) if self._events.enabled else None
+        )
+        try:
+            return await self._execute_stage_recovering(stage, context, _loop_iteration)
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+
+    async def _heartbeat(self, stage_id: str) -> None:
+        t0 = time.monotonic()
+        while True:
+            await asyncio.sleep(HEARTBEAT_S)
+            self._emit("progress", stage_id, stage=stage_id, elapsed_s=round(time.monotonic() - t0, 1))
+
+    async def _execute_stage_recovering(
+        self, stage: Stage, context: dict[str, Any],
+        _loop_iteration: int | None = None,
+    ) -> Any:
         # Return cached result from a prior run (checkpoint resume).
         # For loop iterations, use iteration-scoped keys so that iteration N
         # doesn't short-circuit iteration N+1.
@@ -1012,8 +1155,9 @@ class Harness:
         # Evaluate skip_if (negative gate) and condition (positive gate).
         # condition is the inverse: stage runs only when truthy, skips when falsy.
         # Both are evaluated; if either triggers a skip, the stage is skipped.
-        from jinja2 import ChainableUndefined, Environment, BaseLoader
-        _jinja_env = Environment(loader=BaseLoader(), undefined=ChainableUndefined)
+        from jinja2 import ChainableUndefined
+        from armature.runtime.templating import text_env
+        _jinja_env = text_env(ChainableUndefined)
 
         if stage.skip_if is not None:
             rendered = _jinja_env.from_string(stage.skip_if).render(**context).strip().lower()
@@ -1047,6 +1191,7 @@ class Harness:
                         })
                     self._checkpoint_write(stage.id, failed, _loop_iteration)
                     return failed
+                self._emit_step_failed(stage, exc)
                 raise
             result = self._maybe_truncate(stage, result)
             self._checkpoint_write(stage.id, result, _loop_iteration)
@@ -1076,7 +1221,9 @@ class Harness:
                     })
                 self._checkpoint_write(stage.id, failed, _loop_iteration)
                 return failed
-            raise TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
+            timeout_exc = TimeoutError(f"Stage '{stage.id}' timed out after {stage.timeout_s}s")
+            self._emit_step_failed(stage, timeout_exc)
+            raise timeout_exc
         except Exception as exc:
             if stage.fail_as_value:
                 failed = {
@@ -1092,6 +1239,7 @@ class Harness:
                     })
                 self._checkpoint_write(stage.id, failed, _loop_iteration)
                 return failed
+            self._emit_step_failed(stage, exc)
             raise
 
     def _validate_inputs(self, context: dict[str, Any]) -> None:
@@ -1136,6 +1284,44 @@ class Harness:
         un-checkpointed stage effects. See docs/CHECKPOINT-AND-RESUME.md
         → Effect-delivery contract.
         """
+        owned: Emitter | None = None
+        if self._given_emitter is None:
+            self._event_parent_step = self._parent_step
+            self._events_run_id = None
+            owned = await self._open_run_emitter(inputs)
+            self._events = owned if owned is not None else NullEmitter()
+        lifecycle = self._events.enabled and self._event_parent_step is None
+        if not lifecycle and owned is None:
+            return await self._run_guarded(inputs, force=force)
+        if lifecycle:
+            self._emit("run_start", workflow=self._spec.name, spec_version=self._spec_version)
+        t0 = time.monotonic()
+        status, error = "failed", None
+        try:
+            results = await self._run_guarded(inputs, force=force)
+            status = "succeeded"
+            return results
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except BaseException as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            if lifecycle:
+                self._emit(
+                    "run_end", status=status, error=error,
+                    elapsed_s=round(time.monotonic() - t0, 2),
+                )
+            if owned is not None:
+                await asyncio.to_thread(owned.close)
+
+    async def _run_guarded(
+        self,
+        inputs: dict[str, Any] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
         if self._session_lock is not None:
             with self._session_lock:
                 return await self._run_locked(inputs, force=force)
@@ -1286,7 +1472,7 @@ class Harness:
                 })
 
             # Post-run knowledge extraction (non-blocking)
-            if self._knowledge_extractor is not None and self._memory_store is not None:
+            if self._knowledge_extractor is not None and self._memory_store is not None and self._stubs is None:
                 try:
                     updated_memories, _ = await self._memory_store.load(self._memory_workflow_name)
                     await self._knowledge_extractor.extract(

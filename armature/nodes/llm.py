@@ -14,6 +14,9 @@ from armature.runtime.prompt import PromptAssembler
 if TYPE_CHECKING:
     from armature.cache.llm_cache import LLMCache
 
+litellm.suppress_debug_info = True
+litellm.set_verbose = False
+
 
 async def litellm_completion(**kwargs) -> Any:
     return await litellm.acompletion(**kwargs)

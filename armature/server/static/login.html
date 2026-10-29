@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="armature-base" content="">
+<title>Armature sign-in</title>
+<link rel="icon" href="data:,">
+<script src="static/theme.js"></script>
+<link rel="stylesheet" href="static/style.css">
+<script type="module" src="static/login.js"></script>
+</head>
+<body>
+<main class="login-wrap">
+  <h1>Armature</h1>
+  <p class="sub" id="intro">Loading sign-in options…</p>
+  <form id="login" hidden novalidate>
+    <label>Username <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+    <label>Password <input id="password" name="password" type="password" autocomplete="current-password" required></label>
+    <label>Authenticator code <input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <div class="sso" id="sso" hidden>
+    <p class="or" id="sso-or" hidden>or</p>
+    <button type="button" id="sso-button">Sign in with SSO</button>
+  </div>
+  <div class="err" id="err" role="alert" aria-live="assertive"></div>
+  <div class="appearance" data-theme-toggle></div>
+</main>
+</body>
+</html>

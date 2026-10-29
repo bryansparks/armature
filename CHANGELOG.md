@@ -10,6 +10,237 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Workflow renames.** Change `name:` in the editor and save, and the
+  workflow takes the new name. Its runs, rules, jobs, kind, and display
+  label follow it, and the export drops the old file. A name already used
+  in the same scope is refused, and rolling back to a version with the old
+  name renames it back.
+- **Webhooks and rules.** A team lead creates a webhook on the Webhooks
+  page and points GitHub, Slack, or any service that signs with HMAC or a
+  bearer token at its URL, `{base}/hooks/{token}`. The server checks the
+  signature, drops repeats by delivery id, and logs each delivery for 14
+  days. Ordered rules on the webhook match on the event and on payload
+  fields (`eq`, `ne`, `in`, `not_in`, `starts_with`, `contains`, `exists`,
+  `missing`), pick the project from a repository field, map payload fields
+  to workflow inputs, and queue a job for each match. A rule can stop later
+  rules or run in shadow mode, and **Test rules** replays a stored delivery
+  through the rules. An admin can forward verified deliveries to a legacy
+  receiver while workflows move over. Migration 0010 adds `webhooks` and
+  `webhook_deliveries` and links triggers and jobs to them.
+- **Job worker.** `armature server run` now runs queued jobs. It claims a
+  job with a compare-and-set update, runs the workflow version pinned when
+  the job was queued, and shows the run live like any other. Each job gets
+  the team's `env.*` settings and only the secrets its rule lists. A job
+  runs once and is never retried, so a lost run can't double its cost. The
+  `worker.slots` setting (2 by default) caps concurrent jobs, and
+  `GET /api/jobs` lists a team's jobs.
+- **Workflow kind.** Each workflow has a `kind` (review, fix, merge, port,
+  work, or other) that decides how its runs count on subject pages and in
+  the Overview's reviews today, so renaming a workflow changes only its
+  label. The new-workflow form and the workflow page set it, the workflows
+  list shows it, and `POST /api/workflows/{id}/kind` changes it with a
+  `workflow.kind` audit row. Migration 0009 sets the kind of the workflows
+  the server used to classify by name and links runs recorded only by
+  workflow name to the workflow their name resolves to in their own team.
+  Creating a workflow links the earlier runs that resolve to it, and
+  `armature server runs relink --from OLD --to ID-OR-NAME [--dry-run]` links
+  the runs of a renamed workflow.
+- **Run actions and a Status page.** The server config file (never the UI)
+  can list `actions`, each with an `id`, `label`, the `workflows` and
+  `statuses` it applies to, a `min_role` (contributor by default),
+  `admin_only`, `confirm` text, and a `command`. The run page shows a button
+  for each action the viewer may use, asks for confirmation, then runs the
+  command with no shell, a minimal environment, and a 120-second timeout. The
+  run's fields reach it only as JSON in the file `ARMATURE_ACTION_RUN` names.
+  Exit 0 is done, 3 is refused with the command's message, and anything else
+  failed. Each run is recorded in the new `operations` table, with its
+  message (up to 2 KB) and log (up to 64 KB) redacted, plus an audit row.
+  Only one operation runs at a time per run and per action, and an
+  `admin_only` action needs step-up. `GET /api/runs/{id}/actions`,
+  `POST /api/runs/{id}/actions/{action}`, `GET /api/operations`, and
+  `GET /api/operations/{id}` serve them, the last with the log for admins
+  only. A `status` command runs every `interval_seconds` on a background
+  thread, and `GET /api/status` and the new Status page show its latest
+  Markdown, redacted with the instance's secret values. Admins also see the
+  recent operations there.
+- **Pull request and issue pages.** `GET /api/subjects` lists every subject
+  the viewer can see (a pull request such as `owner/repo#123`, or an issue
+  key) with its latest title and verdict, a status of `merged` once a
+  `pr-merged` run exists, else the latest review verdict, else the latest
+  run's status, and counts of runs, reviews, and fixes. It searches subject
+  and title with `q`, narrows with `team`, and pages with `before`. Hidden
+  workflows stay out of the counts and cost, never out of access or status.
+  `GET /api/subjects/{subject}` returns every visible run in order with its
+  head, verdict, mode, cost, and report names, the merged links, and each
+  finding with its disposition in every review, and answers 404 when the
+  viewer sees none of its runs. The new Pull requests page lists them, and a
+  subject link anywhere now opens `#/subject/<subject>` with Runs, Findings,
+  and Activity tabs.
+- **Run artifacts and a tabbed run page.** A step can save a named report
+  with `python -m armature.events artifact --name review.md --file PATH` (or
+  `--text`, with `--type text/markdown`, `text/plain`, or
+  `application/json`), up to 1 MB. The emitter redacts it and sends it in
+  parts that each fit one event, over the socket or HTTP, and the server
+  redacts the whole artifact again before storing it in `run_artifacts`. A
+  later artifact with the same name replaces the earlier one.
+  `GET /api/runs/{id}/artifacts` lists them, `GET /api/runs/{id}/artifacts/{name}`
+  returns one, and the run stream carries an `artifact` event so a tab appears
+  while the run is still going. The run page now has a header with the run's
+  title, verdict, subject, links, and a one-line progress strip, then one tab
+  per artifact (`review.md` first and default), Output (each step's status,
+  duration, error, and stored output, from `GET /api/runs/{id}/outputs`),
+  and Log (the live event feed). Markdown artifacts render through a small
+  renderer that builds only elements and text nodes: raw HTML shows as text,
+  images show their alt text and URL, and only http, https, mailto, and
+  same-page links become links. Each artifact has Copy and Download.
+- **Overview and Trends pages.** Signing in lands on an Overview of what is
+  running (live), what failed or was lost in the last 24 hours, provider
+  credential errors, today's spend against the 7-day average, code reviews
+  and re-evaluations today, agent time and man hours, and the latest runs.
+  Trends charts spend, runs, failure rate, median run time, review verdicts,
+  and man hours per day over 7, 30, or 90 days, with the slowest steps and
+  per-role review cost. Both read `GET /api/overview` and `GET /api/trends`,
+  scoped to the viewer's teams, with day boundaries and percentiles computed
+  in the configured time zone so the SQL stays portable. Admins set
+  `display.show_cost`, `display.show_man_hours`, `display.human_multiplier`,
+  `display.timezone`, and per-workflow labels, colors, and "show in runs by
+  default" from a Display section on the Settings page, and every page reads
+  them from `GET /api/display`. `GET /api/runs` leaves out hidden workflows
+  (`pr-merged` and `build-announce` until an admin saves otherwise) unless it
+  gets `workflows=` or `include_hidden=1`.
+- **`armature server init`, `migrate`, and `create-admin`** (the new
+  `server` extra, with `postgres` and `mysql` extras for those drivers).
+  `init` writes `~/.armature/server.yaml` if missing, generates a mode 0600
+  master key file, migrates SQLite, MySQL 8, or Postgres to every table in
+  the platform design with Alembic, and creates the first admin with a
+  prompted password and a TOTP secret. Secrets are sealed with AES-256-GCM
+  under HKDF sub-keys of the master key, bound to their team, id, and name.
+  The server refuses a non-loopback bind unless `allow_public_bind` is set.
+- **`armature server run`** serves a signed-in JSON API and the browser UI
+  under `base_path`, and refuses to start without an admin or a master key.
+  Local users join through a single-use invite link, valid for 72 hours,
+  where they set a password and enroll TOTP. Admins invite anyone, and a team
+  lead invites into a team they lead. Sign-in is password plus TOTP, with
+  replay blocked by a conditional update, or OIDC (authorization code with
+  PKCE, accounts linked on issuer and subject only, roles recomputed from
+  `oidc.group_roles` on every sign-in, admin only through
+  `oidc.admin_groups`, step-up only through a fresh provider sign-in).
+  Sessions are HMAC-keyed rows with 30-minute idle and 12-hour absolute
+  limits, a `__Secure-armature` cookie, an Origin and CSRF check on every
+  mutation, per-address and per-user throttles, HSTS, and step-up for users
+  and secrets. Five roles (admin, team lead, project lead, contributor,
+  viewer) are checked per route against the team and project read from the
+  database. `create-admin` now confirms a TOTP code before it exits.
+  `trust_real_ip` reads `X-Real-IP` from a proxy on the same host
+  (docs/platform/DEPLOY.md). `oidc.group_roles` now maps a group to a list of
+  `{scope_kind, scope, role}` grants. Names are case-sensitive and usernames
+  case-insensitive on every database.
+- **Run events and `armature emit`.** A run sends `run_start`, `run_end`,
+  `step_start`, `step_end`, `step_failed`, `step_skipped`, `retry`, and
+  per-LLM-stage `cost` events, alongside any `on_event` callback. It uses the
+  emitter passed to `Harness(emitter=...)`, else `ARMATURE_EVENTS` (`unix:`
+  socket or `http(s)://` URL) and `ARMATURE_EVENTS_TOKEN`, else registers
+  itself with `ARMATURE_SERVER` using `ARMATURE_RUNNER_KEY`, and runs
+  without events if that fails. Subagent runs and runs started inside a
+  step tag their events with `parent_step` and send no `run_start` or
+  `run_end`, and fan-out branches carry `branch` and `branches`. Script steps
+  get the run's `ARMATURE_EVENTS`, `ARMATURE_EVENTS_TOKEN`,
+  `ARMATURE_RUN_ID`, and `ARMATURE_STEP_ID`, and never the runner key.
+  `armature emit <kind>`, or the faster `python -m armature.events <kind>`,
+  sends one event from a script. `--stream-claude` sits in a Claude Code
+  `stream-json` pipe, copies every line through unchanged, and emits the
+  session's tool calls, results, text, and cost. Emitting never blocks or
+  raises: a full queue drops `text`, `log`, and `progress` first and sends a
+  `dropped` count, `text` is coalesced to four a second per step, and known
+  token patterns and the values of variables named in `ARMATURE_REDACT_ENV`
+  are redacted, as are the run's own token, the runner key, and any
+  `ark_` key. Every event carries an `eid` that stays the same across
+  retries, so the server can drop repeats. HTTP batches stay under 900 KB,
+  and a 413 splits the batch instead of dropping events. A running stage
+  sends a `progress` heartbeat every 60 seconds. Registration gives up after
+  3 seconds and then waits 5 minutes before trying that server again. Event
+  endpoints and registration refuse plain `http://` to a non-loopback host,
+  and the Unix socket is used only when `ARMATURE_SERVER` is on loopback.
+  `import armature` no longer imports litellm or the engine until
+  `armature.Harness` or a subpackage is used.
+- **Live runs on the server.** A team lead creates runner keys
+  (`ark_...`, shown once, stored as an HMAC, step-up to create or delete)
+  under `/api/teams/{id}/runner-keys`. A runner registers a run with
+  `POST /api/runner/runs` and gets a per-run event token, valid 48 hours or
+  until `run_end`, and the endpoints to send to: a mode 0600 Unix datagram
+  socket (`events_socket`, default `~/.armature/server-events.sock`) or
+  `POST /api/events` with NDJSON up to 1 MB. The server takes the run and
+  team only from the token, caps each event at 64 KB and each run at 50,000
+  events and 500 a second, redacts token patterns and the exact value of
+  every secret the team can see, numbers events per run from 1, and
+  broadcasts each one before a single writer stores it, flushing every
+  second or 500 events in one transaction. Run, step, cost, finding, and
+  end rows follow from the events, and a run silent for
+  `lost_after_minutes` (60) is marked `lost` until it speaks again.
+  `GET /api/runs/{id}` and `/api/runs/{id}/events` (forward with `after`,
+  backward with `before`) read history, and `/api/runs/{id}/stream` and
+  `/api/stream/runs` stream it as Server-Sent Events with `Last-Event-ID`
+  resume, a heartbeat, and per-user (`sse_per_user`) and per-process
+  (`sse_total`) caps. SQLite now runs in WAL mode. Measured with
+  `python -m tests.server.live_load` (20 runs at 200 events a second, 100
+  viewers): p99 from emit to viewer about 320 ms on SQLite, Postgres, and
+  MySQL, with nothing dropped.
+- **Instance runner keys.** Migration 0005 lets a runner key belong to the
+  instance (`team_id` NULL, scope `*`). Admins manage them under
+  `/api/runner-keys` and on the new Runner keys page, with step-up to create
+  or delete, and team leads manage their team's keys on its card on the
+  Teams page. An instance key's run lands in the team whose project's
+  repository matches its `project` without regard to case, then by
+  `team-slug/project-name`, else in an admin-only `operations` team created
+  on first use. A registering engine sends `ARMATURE_PROJECT`, else the
+  run's `project` input, else its `repo` input. DEPLOY.md lists the
+  environment variables under "Streaming runs from a host".
+- **Instance-level and team-scoped definitions.** Migration 0003 adds
+  `teams.slug`, `projects.repo`, instance-level workflows (`team_id` NULL,
+  scope `*`), and team-scoped settings keyed by scope and key. `GET
+  /api/workflows`, `/api/workflows/{id}`, `/api/documents`,
+  `/api/documents/{id}`, `/api/teams/{id}/providers`, and the admin-only
+  `/api/settings` read them, and the UI shows workflows, roles and prompts,
+  and each team's providers.
+- **`armature server export <dir> [--team SLUG]`** writes the instance's
+  definitions to files: `workflows/<scope>/<name>.yml` with a first line of
+  `# armature: stored-workflow`, `roles/`, `prompts/`, and `missions/`
+  Markdown verbatim, `teams.json`, `settings.json`, `providers.json` with
+  credential names only, and `manifest.json` with each object's version and
+  each file's sha256. A scope is `instance`, `team-<slug>`, or
+  `project-<team-slug>-<project>`. Secrets, users, and history are never
+  exported. The export is built beside `<dir>` and swapped in whole, and a
+  non-empty `<dir>` with no `manifest.json` is refused.
+- **`export_on_change`** in the server config (`dir`, `command`,
+  `debounce_seconds`) re-exports after every committed workflow, document,
+  provider, setting, team, or project write, debounced and one at a time on
+  a background thread, then runs `command` as argv in `dir` with only
+  `PATH`, `HOME`, `LANG`, and `ARMATURE_EXPORT_DIR` and a 120-second
+  timeout. Each run is audited as `export.run`, and the admin-only `GET
+  /api/export/status` reports the last run. Only the config file can set a
+  command. The armature-ops importers moved to that repository's
+  `tools/platform/`.
+- **Editing definitions on the server.** Workflows, roles, prompts, and
+  missions can belong to the instance, a team, or a project, and a run
+  resolves a name project first, then team, then instance. Admins edit
+  anything, team leads edit their teams' and those teams' projects'
+  definitions, and project leads edit their projects'. Each can fork what
+  they can read into a scope they can write, roll back to any version, and
+  delete. Every save is validated with YAML line numbers (schema, spec
+  checks, template lint, and pack adapter references and `with:` parameters
+  against the installed packs), appends a version, is audited, and is
+  refused with 409 when its `base_version` is stale. A non-admin may change
+  only the description, the mission, and each stage's wiring to pack
+  adapters, and may not save a workflow whose adapter commands are
+  templates or widen a role's `tools` and `mcp_servers` past the packs'
+  allowlists. Template markers outside values, a `{{ }}` that refers to no
+  input or step, YAML anchors and aliases, and more than 20,000 nodes are
+  refused. Team leads manage their team's model providers, with config
+  checked per kind, a credential read only from the team's own secrets, and
+  `api_base` held to public https unless an admin saves it. Admins manage
+  settings, which refuse secret-looking keys. Everything but a body edit
+  needs step-up. `POST /api/workflows/parse` and `render` back the form
+  editor, keep comments and unknown keys, and rename a stage in place.
 - **`reasoning_effort` on model tiers and roles.** A tier can set
   `reasoning_effort: low | medium | high | xhigh | max`, and a role can
   override it, resolved role → tier → omitted like `temperature` and
@@ -34,6 +265,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Cost display setting covers runs.** With cost turned off in display
+  settings, the runs list, run page, pull request pages, and live log show no
+  cost, and `GET /api/runs` and `GET /api/runs/{id}` send `cost_usd` as null.
+- **Team pages show workflows.** A team's page has a Workflows tab listing
+  the workflows that apply to that team, and team managers get an Add
+  workflow link that opens the new workflow page with that team chosen.
+- **Teams page lists teams.** The Teams page is now a list of the teams you
+  can see, and each team opens its own page with Projects, Model providers,
+  and Runner keys tabs. Only the open tab loads its data, and Runner keys
+  shows only for team managers.
+- Script steps now get `ARMATURE_RUN_ID` and `ARMATURE_STEP_ID` in their
+  environment. No process Armature starts, whether a script step, the
+  `shell` tool, or a docker, pip, or patch call, inherits
+  `ARMATURE_RUNNER_KEY`, or a parent run's `ARMATURE_EVENTS` and
+  `ARMATURE_EVENTS_TOKEN` unless they belong to the current run.
 - The litellm floor is now 1.101.0, the version verified to map
   `reasoning_effort` to adaptive thinking on Claude.
 

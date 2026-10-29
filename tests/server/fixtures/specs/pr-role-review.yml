@@ -1,0 +1,9 @@
+name: pr-role-review
+description: Review one pull request with roles, then a team lead.
+stages:
+  - id: resolve
+    adapter: resolve
+  - id: post
+    adapter: post
+    depends_on: [resolve]
+    skip_if: "{{ resolve.skip }}"

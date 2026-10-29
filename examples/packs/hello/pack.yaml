@@ -1,0 +1,40 @@
+name: hello
+version: 1.0.0
+description: A minimal pack that greets someone and then waits.
+tools_allowlist: [Read]
+mcp_allowlist: []
+adapters:
+  greet:
+    description: Print a greeting for the name in with.name.
+    cmd: 'python3 "$PACK_DIR/adapters/greet.py"'
+    params:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+      required: [name]
+      additionalProperties: false
+    outputs:
+      type: object
+      properties:
+        greeting: {type: string}
+        pack_dir: {type: string}
+    timeout: 30
+  wait:
+    description: Sleep for with.seconds seconds.
+    cmd: 'python3 "$PACK_DIR/adapters/wait.py"'
+    params:
+      type: object
+      properties:
+        seconds:
+          type: integer
+          minimum: 0
+          maximum: 60
+      required: [seconds]
+      additionalProperties: false
+    outputs:
+      type: object
+      properties:
+        waited: {type: integer}
+    timeout: 90

@@ -146,13 +146,8 @@ def _render_description(description: str, context: dict[str, Any]) -> str:
     if "{{" not in description:
         return description
     try:
-        from jinja2 import ChainableUndefined, Environment, BaseLoader
-        env = Environment(
-            loader=BaseLoader(),
-            variable_start_string="{{",
-            variable_end_string="}}",
-            undefined=ChainableUndefined,
-        )
-        return env.from_string(description).render(**context)
+        from jinja2 import ChainableUndefined
+        from armature.runtime.templating import text_env
+        return text_env(ChainableUndefined).from_string(description).render(**context)
     except Exception:
         return description
