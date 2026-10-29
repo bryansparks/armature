@@ -32,7 +32,8 @@ class PackageBuilder:
     def build(self, *, spec: Path, out: Path, inputs: dict | None = None,
               tools: Path | None = None, requirements: Path | None = None,
               destinations: Path | None = None, runtime_inputs: list[str] | None = None,
-              profile_env: dict[str, str] | None = None, archive: str | None = None) -> Path:
+              profile_env: dict[str, str] | None = None, archive: str | None = None,
+              call_resolver=None) -> Path:
         # 1. validate + load spec
         from armature.spec.loader import load_spec
         try:
@@ -46,7 +47,10 @@ class PackageBuilder:
 
         # 2.5 bundle file references (covered by manifest.sha256): context-layer
         # src: files and subagent_spec child workflows, recursively.
-        self._bundle_spec_file_refs(loaded, spec, out)
+        children = self._bundle_spec_file_refs(loaded, spec, out)
+
+        # 2.6 bundle the stored workflows call: stages name, as calls/ beside workflow.yaml
+        self._bundle_calls(loaded, children, out, call_resolver)
 
         # 3. inputs
         _dump_yaml(inputs or {}, out / "inputs.yaml")
@@ -116,7 +120,34 @@ class PackageBuilder:
         return out
 
     @staticmethod
-    def _bundle_spec_file_refs(spec, spec_path: Path, out: Path) -> None:
+    def _bundle_calls(spec, children: list[Path], out: Path, call_resolver) -> None:
+        """Vendor every workflow reachable through call: from the spec or its subagent
+        children into ``out/calls``, pinned as the source resolver pins them."""
+        from armature.packaging.refs import walk_spec_call_refs
+        from armature.spec.calls import (
+            CALLS_DIR, BundleCallResolver, CallNotFound, call_graph_refs, write_call_bundle,
+        )
+
+        refs = [(s.id, s.call.workflow, s.call.version) for s in spec.stages if s.call is not None]
+        for child in children:
+            refs.extend(walk_spec_call_refs(child))
+        if not refs:
+            return
+        resolver = call_resolver if call_resolver is not None else BundleCallResolver.for_spec(spec)
+        calls, errors = call_graph_refs(refs, resolver, spec.name)
+        if errors:
+            raise PackageBuildError("called workflows do not resolve: "
+                                    + "; ".join(f"[{e.code}] {e.message}" for e in errors))
+        pins: dict[str, int] = {}
+        for name in sorted({c.workflow for c in calls}):
+            try:
+                pins[name] = resolver.resolve(name, None).version
+            except CallNotFound:
+                pass
+        write_call_bundle(out / CALLS_DIR, calls, pins)
+
+    @staticmethod
+    def _bundle_spec_file_refs(spec, spec_path: Path, out: Path) -> list[Path]:
         """Vendor every file the spec tree references: context-layer src:
         files and subagent_spec child workflows, recursively — children may
         reference grandchildren and their own layer files.
@@ -135,6 +166,8 @@ class PackageBuilder:
         portably. Still-templated refs (``{{ ... }}`` the load render didn't
         substitute) are skipped with a warning — the package must provide the
         file at run time.
+
+        Returns the source files of every child spec walked.
         """
         from armature.packaging.refs import walk_spec_file_refs
         from armature.spec.loader import resolve_spec_ref
@@ -195,6 +228,7 @@ class PackageBuilder:
             [l.src for l in spec.context_layers if l.src],
             spec_path.parent, out, "spec",
         )
+        return sorted(walked)
 
     @staticmethod
     def _destinations_from_spec(spec_dest) -> Destinations:
@@ -216,7 +250,7 @@ class PackageBuilder:
             # SKIP gate stages (human gates produce no artifact) and stages with no execution type.
             if s.gate:
                 continue
-            if not any(getattr(s, attr, None) for attr in ("role", "tool_call", "adapter", "subagent_spec")):
+            if not any(getattr(s, attr, None) for attr in ("role", "tool_call", "adapter", "subagent_spec", "call")):
                 continue
             fmt = "json" if s.output_mode == OutputMode.GUIDED_JSON else "markdown"
             artifacts.append(ArtifactSpec(stage_id=s.id, name=s.id, format=fmt))

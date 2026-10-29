@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import resource
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import insert, select, update
 
+from armature.runner import process
 from armature.server import defs, dryrun, runners
 from armature.server.db import new_id
 from armature.server.db.schema import audit, projects, run_steps, runs, teams
@@ -53,9 +55,10 @@ adapters:
 """
 
 FAKE_ARMATURE = """#!{python}
-import json, os, sys
+import json, os, resource, sys
 with open({record!r}, "w") as out:
     json.dump({{"argv": sys.argv[1:], "env": dict(os.environ), "cwd": os.getcwd(),
+               "memory": resource.getrlimit(resource.RLIMIT_AS),
                "workflow": open(sys.argv[2]).read(),
                "stubs": json.load(open(os.environ["ARMATURE_STUB_OUTPUTS"]))}}, out)
 print("boom: the fake runner stopped")
@@ -195,6 +198,20 @@ def test_a_test_run_launches_with_a_clean_env_and_ends_when_the_process_does(wor
         row = conn.execute(select(audit).where(audit.c.action == "run.test")).one()
     assert row.actor_id == world.users["contrib"] and row.target_id == run_id
     assert row.detail["stubbed_steps"] == ["post", "resolve"]
+    assert seen["memory"] == _memory_limit(2048)
+
+
+def test_a_test_run_takes_its_memory_limit_from_the_config(world, tmp_path, monkeypatch):
+    record = _fake_armature(tmp_path, monkeypatch)
+    with _client(world, "contrib", dry_run={"memory_mb": 512}) as client:
+        response = client.post(f"/api/workflows/{world.workflow}/test", json={"mode": "stub"})
+        assert response.status_code == 200, response.text
+        seen = json.loads(_wait(lambda: record.exists() and record.read_text() or None))
+    assert seen["memory"] == _memory_limit(512)
+
+
+def _memory_limit(mb):
+    return [mb << 20, mb << 20] if process.MEMORY_LIMIT is not None else list(resource.getrlimit(resource.RLIMIT_AS))
 
 
 @pytest.mark.parametrize(("who", "expected"), [("admin", 200), ("contrib", 200), ("viewer", 403),
@@ -331,7 +348,7 @@ def test_parallel_requests_cannot_pass_the_instance_cap(world, tmp_path, monkeyp
     for client in clients:
         client.__enter__()
     try:
-        monkeypatch.setattr(dryrun, "start", lambda *args: None)
+        monkeypatch.setattr(dryrun, "start", lambda *args, **kwargs: None)
         with ThreadPoolExecutor(len(clients)) as pool:
             codes = list(pool.map(lambda c: c.post(f"/api/workflows/{world.workflow}/test",
                                                    json={"mode": "stub"}).status_code, clients))

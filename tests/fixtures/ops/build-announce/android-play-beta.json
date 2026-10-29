@@ -1,0 +1,33 @@
+{
+  "description": "An Android Play beta build with a numeric build and no notes.",
+  "source": "generic",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/ci"
+  },
+  "env": {
+    "SLACK_BUILD_CHANNEL": "C04BUILDS9Z"
+  },
+  "payload": {
+    "app": "FamilySearch Tree",
+    "version": "6.14.0",
+    "build": 61400412,
+    "track": "Play beta",
+    "url": "https://play.google.com/apps/testing/org.familysearch.mobile.android"
+  },
+  "ops": {
+    "effects": [
+      {
+        "vendor": "slack",
+        "op": "post",
+        "channel": "C04BUILDS9Z",
+        "text": ":rocket: *FamilySearch Tree* 6.14.0 (61400412) is on Play beta\n\n\n\nhttps://play.google.com/apps/testing/org.familysearch.mobile.android"
+      }
+    ],
+    "result": {
+      "posted": true,
+      "channel": "C04BUILDS9Z",
+      "ts": "1700000000.000100"
+    }
+  }
+}

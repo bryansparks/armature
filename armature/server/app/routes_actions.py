@@ -26,6 +26,7 @@ router = APIRouter()
 
 OPERATIONS_LIMIT = 50
 OPERATIONS_LIMIT_MAX = 200
+CANCEL_ACTION = "cancel"
 
 
 async def _summary(request: Request, run_id: str) -> dict[str, Any]:
@@ -85,6 +86,9 @@ async def run_action(run_id: str, action_id: str, request: Request,
         row = await asyncio.to_thread(start_and_run)
     except actions.ActionError as exc:
         raise ApiError(exc.status, exc.message) from exc
+    if action.id == CANCEL_ACTION and row.outcome == "ok":
+        # The command stopped the process, which never reports its own end, so the server records it.
+        await request.app.state.live.end_run(run_id, "canceled", f"Cancelled by {session.user.username}.")
     return {"operation": actions.shown(row, admin=granted.role == "admin")}
 
 

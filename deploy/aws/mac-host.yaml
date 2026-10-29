@@ -1,0 +1,222 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Armature platform Mac hosts: the host role, Tart image repository, and the
+  launch template for macOS instances on Dedicated Hosts. Allocates no host,
+  because each one bills a 24 hour minimum. The account owner or, when
+  host-role.yaml sets AllowHostAllocation, an Armature admin allocates them.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z][a-z0-9-]{1,19}$"
+  InstallId:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9-]{1,11}$"
+  TagProject:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*$"
+    Description: Value of the project tag. Never armature, which belongs to armature-ops.
+  Owner:
+    Type: String
+    MinLength: 1
+  Council:
+    Type: String
+    MinLength: 1
+  FinopsTeam:
+    Type: String
+    MinLength: 1
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: SecurityGroupId output of stack.yaml.
+  BucketName:
+    Type: String
+    MinLength: 3
+    Description: BucketName output of stack.yaml.
+  HostAmiId:
+    Type: AWS::EC2::Image::Id
+    Description: macOS AMI for the host. Must be at least as new as the guest macOS in the Tart image.
+  HostInstanceType:
+    Type: String
+    Default: mac-m4.metal
+    AllowedPattern: "^mac[a-z0-9-]*\\.metal$"
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 500
+    MinValue: 200
+
+Rules:
+  ProjectIsNotArmatureOps:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TagProject, armature]]
+        AssertDescription: TagProject can't be armature, which armature-ops owns.
+
+Resources:
+  ImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${Prefix}-${InstallId}/ios-vm
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the last 10 images across every type",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  # The host runs Tart VMs for jobs, so it pulls images, reads the VM key, and
+  # writes results. No Bedrock: a job's model credentials come from the session role.
+  MacHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-${InstallId}-mac-host
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub ${Prefix}-${InstallId}-mac-host
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RegistryLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              # Pull only. The account owner pushes images with their own credentials.
+              - Sid: PullImages
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !GetAtt ImageRepository.Arn
+              - Sid: VmKey
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Prefix}-${InstallId}/mac-host/vm-key-??????
+              - Sid: WriteResults
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/${InstallId}/results/*
+              # The server stages each Mac environment's one-time enrollment file here. The host reads it once and deletes it.
+              - Sid: TakeEnrollment
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/${InstallId}/enroll/*
+              # The managed SSM policy reads every parameter, and job VMs run beside these credentials.
+              - Sid: NoParameters
+                Effect: Deny
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:GetParameterHistory
+                Resource: "*"
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  MacHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Prefix}-${InstallId}-mac-host
+      Path: /
+      Roles: [!Ref MacHostRole]
+
+  # No HostId or zone: the server passes the allocated host and its zone at launch.
+  MacLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${Prefix}-${InstallId}-mac-host
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - { Key: project, Value: !Ref TagProject }
+            - { Key: armature-install, Value: !Ref InstallId }
+            - { Key: owner, Value: !Ref Owner }
+            - { Key: council, Value: !Ref Council }
+            - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+      LaunchTemplateData:
+        InstanceType: !Ref HostInstanceType
+        ImageId: !Ref HostAmiId
+        IamInstanceProfile:
+          Arn: !GetAtt MacHostInstanceProfile.Arn
+        Placement:
+          Tenancy: host
+        SecurityGroupIds: [!Ref SecurityGroupId]
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: !Ref RootVolumeSizeGiB
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpProtocolIpv6: disabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "${Prefix}-${InstallId}-mac-host" }
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${Prefix}-${InstallId}-mac-host" }
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+          - ResourceType: network-interface
+            Tags:
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+Outputs:
+  MacLaunchTemplateId:
+    Value: !Ref MacLaunchTemplate
+  MacInstanceProfileName:
+    Value: !Ref MacHostInstanceProfile
+  MacHostRoleArn:
+    Value: !GetAtt MacHostRole.Arn
+  ImageRepositoryUri:
+    Value: !GetAtt ImageRepository.RepositoryUri

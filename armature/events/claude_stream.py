@@ -24,9 +24,10 @@ def _text(value: Any) -> str:
 
 
 class ClaudeStreamParser:
-    def __init__(self, emitter: Emitter, step_id: str | None = None):
+    def __init__(self, emitter: Emitter, step_id: str | None = None, fields: dict[str, Any] | None = None):
         self._emitter = emitter
         self._step_id = step_id
+        self._fields = dict(fields or {})
         self._tool_names: dict[str, str] = {}
         self._started = False
         self._ended = False
@@ -53,7 +54,7 @@ class ClaudeStreamParser:
             self._ended = True
 
     def _emit(self, kind: str, **payload: Any) -> None:
-        self._emitter.emit(kind, self._step_id, **payload)
+        self._emitter.emit(kind, self._step_id, **{**self._fields, **payload})
 
     def _summary(self, value: Any) -> str:
         # Redact before cutting, so a cut can't leave part of a secret behind.
@@ -120,9 +121,12 @@ class ClaudeStreamParser:
         self._ended = True
 
 
-def pipe(emitter: Emitter, step_id: str | None, stdin: BinaryIO, stdout: BinaryIO) -> None:
+def pipe(
+    emitter: Emitter, step_id: str | None, stdin: BinaryIO, stdout: BinaryIO,
+    fields: dict[str, Any] | None = None,
+) -> None:
     """Copy every stdin line to stdout unchanged, emitting events as it goes."""
-    parser = ClaudeStreamParser(emitter, step_id)
+    parser = ClaudeStreamParser(emitter, step_id, fields)
     writable = True
     for raw in iter(stdin.readline, b""):
         if writable:

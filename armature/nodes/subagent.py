@@ -9,6 +9,7 @@ from armature.spec.loader import load_child_spec
 
 if TYPE_CHECKING:
     from armature.events import Emitter
+    from armature.spec.calls import CallResolver
 
 
 async def litellm_completion(**kwargs) -> Any:
@@ -77,6 +78,8 @@ class SubagentNode(BaseNode):
         session_dir: Path | None = None,
         emitter: Emitter | None = None,
         parent_step: str | None = None,
+        call_resolver: CallResolver | None = None,
+        engine_key: tuple[str, str] | None = None,
     ):
         if not stage.subagent_spec:
             raise ValueError(f"Stage '{stage.id}' has no subagent_spec")
@@ -84,6 +87,8 @@ class SubagentNode(BaseNode):
         self._session_dir = session_dir
         self._emitter = emitter
         self._parent_step = parent_step
+        self._call_resolver = call_resolver
+        self._engine_key = engine_key
         # Child-run spend is observed spend of the parent run too (design
         # §2.3): every child's metered cost accumulates here, and the engine
         # adds it to the run's total after execution — the child's own
@@ -124,10 +129,13 @@ class SubagentNode(BaseNode):
             session_dir=child_dir,
             emitter=self._emitter,
             parent_step=self._parent_step,
+            call_resolver=self._call_resolver,
+            engine_key=self._engine_key,
         )
-        result = await child.run(child_context)
-        self.total_cost_usd += getattr(child, "total_cost_usd", 0.0)
-        return result
+        try:
+            return await child.run(child_context)
+        finally:
+            self.total_cost_usd += getattr(child, "total_cost_usd", 0.0)
 
     def _build_contexts(self, context: dict[str, Any], n: int) -> list[dict[str, Any]]:
         key = self._stage.partition_key

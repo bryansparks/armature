@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
-const { activityRuns, dispositionLabel, outcomeText, statusCapsuleTone, statusLabel, subjectPageHref, subjectPath, totals, workText } =
+const { currentRun, dispositionLabel, joinsPage, nextRedraw, outcomeText, statusCapsuleTone, statusLabel, subjectPageHref, subjectPath, totals, workText } =
   await import(new URL('views/subject.js', STATIC));
 const { parseHash } = await import(new URL('router.js', STATIC));
 
@@ -42,9 +42,11 @@ test('totals add the page and keep cost unknown when every row hides it', () => 
   assert.equal(workText({ runs: 1, reviews: 1, fixes: 0 }), '1 review, 0 fixes');
 });
 
-test('activityRuns keeps fixes, merges, ports, and work in order', () => {
-  const runs = [{ id: 1, kind: 'review' }, { id: 2, kind: 'fix' }, { id: 3, kind: 'merge' }, { id: 4, kind: 'other' }, { id: 5, kind: 'port' }];
-  assert.deepEqual(activityRuns(runs).map((run) => run.id), [2, 3, 5]);
+test('currentRun leads with a run in progress, else the newest', () => {
+  assert.equal(currentRun([{ id: 1, status: 'succeeded' }, { id: 2, status: 'running' }, { id: 3, status: 'failed' }]).id, 2);
+  assert.equal(currentRun([{ id: 1, status: 'succeeded' }, { id: 2, status: 'failed' }]).id, 2);
+  assert.equal(currentRun([{ id: 1, status: 'queued' }, { id: 2, status: 'running' }]).id, 2);
+  assert.equal(currentRun([]), null);
 });
 
 test('outcomeText summarizes what a fix or merge reported', () => {
@@ -54,3 +56,24 @@ test('outcomeText summarizes what a fix or merge reported', () => {
   assert.equal(outcomeText({ kind: 'merge', merge: null }), 'Merged');
   assert.equal(outcomeText({ kind: 'work', verdict: 'opened', fields: { platform: 'ios' } }), 'opened · platform ios');
 });
+
+test('nextRedraw redraws at once, then backs off, then stops until things go quiet', () => {
+  let state = { count: 0, last: 0 };
+  const delays = [];
+  for (let now = 1000; ; now += 10) {
+    const next = nextRedraw(state, now);
+    if (!next) break;
+    delays.push(next.delay);
+    state = next;
+  }
+  assert.deepEqual(delays, [0, 2000, 4000, 8000, 16000]);
+  assert.equal(nextRedraw(state, state.last + 61000).delay, 0, 'a quiet minute starts over');
+});
+
+test('joinsPage takes a run whose subject or thread is the page', () => {
+  assert.equal(joinsPage({ subject: 'acme/app#2', thread: 'FS-1' }, 'FS-1'), true);
+  assert.equal(joinsPage({ subject: 'acme/app#2', thread: 'FS-1' }, 'acme/app#2'), true);
+  assert.equal(joinsPage({ subject: 'acme/app#3', thread: null }, 'acme/app#2'), false);
+  assert.equal(joinsPage({ subject: 'acme/app#3', thread: 'FS-2' }, 'FS-1'), false);
+});
+

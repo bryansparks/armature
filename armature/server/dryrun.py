@@ -14,12 +14,11 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,8 +26,13 @@ from typing import Any
 from sqlalchemy import Connection, Engine, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from armature.events.location import this_machine
 from armature.packs import PACKS_PATH_ENV
-from armature.server import audit, defs, rbac, runners
+from armature.runner.process import LOG_FILE, popen, write_bundle
+from armature.runner.process import armature_binary as armature_binary
+from armature.runner.process import stop as _stop
+from armature.runner.process import tail as _tail
+from armature.server import audit, calls, defs, rbac, runners
 from armature.server.db.schema import (
     INSTANCE_SCOPE,
     run_steps,
@@ -46,13 +50,11 @@ MISSING = ("fail", "empty")
 TRIGGER_KIND = "test"
 MAX_CONCURRENT = 2
 TIMEOUT_S = 600
-KILL_GRACE_S = 5
 END_GRACE_S = 1.0
 END_WAIT_S = 10.0
 LOCK_KEY = "_lock.dry_run"
 OUTPUTS_MAX = 256 * 1024
 INPUT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-LOG_TAIL = 1500
 ACTIVE = ("queued", "running")
 
 
@@ -69,11 +71,8 @@ class Launch:
     token: str
     workdir: Path
     summary: dict[str, Any]
-
-
-def armature_binary() -> str | None:
-    beside = Path(sys.executable).parent / "armature"
-    return str(beside) if beside.is_file() else shutil.which("armature")
+    # The run's engine key, which spawn hands over on a pipe.
+    engine_key: str | None = None
 
 
 def _team(conn: Connection, access: rbac.Access, row: Any, team_id: Any) -> str:
@@ -181,15 +180,20 @@ def prepare(conn: Connection, keyring: Any, *, access: rbac.Access, user_id: str
     body = defs.body_of(conn, defs.WORKFLOW, row.id, row.current_version)
     if body is None:
         raise DryRunError(400, "This workflow has no saved version.")
+    try:
+        call_files = calls.bundle(conn, row.scope, body, row.name, None, stored_body)
+    except ValueError as exc:
+        raise DryRunError(400, f"A called workflow doesn't resolve: {exc}") from exc
     workdir = Path(tempfile.mkdtemp(prefix="armature-test-"))
     try:
-        write_workflow(workdir, body)
+        write_bundle(workdir, stored_body(body), call_files)
         (workdir / "stubs.json").write_text(json.dumps(stubs, default=str), encoding="utf-8")
         trigger_ref = {"dry_run": True, "mode": "stub", "from_run": payload.get("from_run")}
         run_row, token = runners.open_run(conn, keyring, team_id=team_id, project_id=row.project_id,
                                           workflow_id=row.id, workflow_name=row.name, now=now,
                                           workflow_version=row.current_version, triggered_by=user_id,
-                                          actor=username, trigger_kind=TRIGGER_KIND, trigger_ref=trigger_ref)
+                                          actor=username, trigger_kind=TRIGGER_KIND, trigger_ref=trigger_ref,
+                                          location=this_machine())
         audit.record(conn, action="run.test", actor_id=user_id, team_id=team_id, target_kind="run",
                      target_id=run_row["id"], detail={"workflow": row.name, "workflow_id": row.id, "mode": "stub",
                                                       "from_run": payload.get("from_run"),
@@ -201,9 +205,10 @@ def prepare(conn: Connection, keyring: Any, *, access: rbac.Access, user_id: str
     return Launch(run_row["id"], token, workdir, summary), args, missing == "empty"
 
 
-def write_workflow(workdir: Path, body: str) -> None:
+def stored_body(body: str) -> str:
+    """The body with the stored-workflow header first, so ``armature run`` parses it as one."""
     header = "" if body.split("\n", 1)[0].rstrip("\r") == STORED_WORKFLOW_HEADER else STORED_WORKFLOW_HEADER + "\n"
-    (workdir / "workflow.yaml").write_text(header + body, encoding="utf-8")
+    return header + body
 
 
 def events_endpoint(hub: Any, cfg: Any) -> str:
@@ -225,40 +230,20 @@ def child_env(launch: Launch, endpoint: str, packs_dir: str, missing_empty: bool
     return env
 
 
-def _tail(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return text[-LOG_TAIL:].strip()
-
-
-def _stop(proc: subprocess.Popen) -> None:
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            return
-        try:
-            proc.wait(KILL_GRACE_S)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-
-
-def _end_line(token: str, error: str) -> bytes:
+def _end_line(token: str, error: str, status: str = "failed") -> bytes:
     return json.dumps({"v": 1, "token": token, "kind": "run_end",
-                       "payload": {"status": "failed", "error": error}}).encode()
+                       "payload": {"status": status, "error": error}}).encode()
 
 
-def fail_run(hub: Any, launch: Launch, error: str, loop: asyncio.AbstractEventLoop | None) -> None:
+def fail_run(hub: Any, launch: Launch, error: str, loop: asyncio.AbstractEventLoop | None,
+             status: str = "failed") -> None:
     """End the run as failed unless it already ended. Through ingest when it runs, so the page updates live."""
     if loop is not None and hub.running:
-        asyncio.run_coroutine_threadsafe(hub.ingest(_end_line(launch.token, error)), loop).result(30)
+        asyncio.run_coroutine_threadsafe(hub.ingest(_end_line(launch.token, error, status)), loop).result(30)
         return
     with hub.engine.begin() as conn:
         conn.execute(update(runs).where(runs.c.id == launch.run_id, runs.c.status.in_(ACTIVE))
-                     .values(status="failed", finished_at=hub.clock(), error=error))
+                     .values(status=status, finished_at=hub.clock(), error=error))
         runners.revoke_tokens(conn, [launch.run_id])
 
 
@@ -277,8 +262,11 @@ def ended(hub: Any, run_id: str, loop: asyncio.AbstractEventLoop | None) -> bool
 
 
 def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.AbstractEventLoop | None,
-          timeout: float | None = None, label: str = "test run") -> None:
-    """Wait for the process, end the run if it never sent run_end, and remove the directory."""
+          timeout: float | None = None, label: str = "test run", paused: Callable[[], bool] | None = None) -> None:
+    """Wait for the process, end the run if it never sent run_end, and remove the directory.
+
+    ``paused`` settles a run that stopped at a gate and says whether it did, before the directory goes.
+    """
     try:
         try:
             proc.wait(timeout)
@@ -286,7 +274,10 @@ def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.Abstra
         except subprocess.TimeoutExpired:
             _stop(proc)
             error = f"The {label} took longer than {timeout:g} seconds and was stopped."
-        tail = _tail(launch.workdir / "run.log")
+        else:
+            if paused is not None and paused():
+                return
+        tail = _tail(launch.workdir / LOG_FILE)
         if tail:
             error += "\n" + tail
         # A run_end the process sent may still sit in the socket, so give it time to land first.
@@ -302,25 +293,24 @@ def watch(proc: subprocess.Popen, launch: Launch, hub: Any, loop: asyncio.Abstra
 
 
 def spawn(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any, *,
-          timeout: float | None = None, label: str = "test run") -> subprocess.Popen:
+          timeout: float | None = None, label: str = "test run", memory_mb: int | None = None,
+          paused: Callable[[], bool] | None = None) -> subprocess.Popen:
     """Start ``armature run`` on the workdir's workflow.yaml and a thread that watches it. Fails the run on OSError."""
     loop = getattr(hub, "_loop", None)
-    command = [binary, "run", str(launch.workdir / "workflow.yaml"), "--quiet", "--no-cache", *args]
     try:
-        with open(launch.workdir / "run.log", "wb") as out:
-            proc = subprocess.Popen(command, env=env, cwd=launch.workdir, stdin=subprocess.DEVNULL, stdout=out,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
+        proc = popen(binary, launch.workdir, args, env, engine_key=launch.engine_key, memory_mb=memory_mb)
     except OSError as exc:
         fail_run(hub, launch, f"The {label} could not start: {exc.strerror or exc}.", None)
         shutil.rmtree(launch.workdir, ignore_errors=True)
         raise
-    threading.Thread(target=watch, args=(proc, launch, hub, loop, timeout, label),
+    threading.Thread(target=watch, args=(proc, launch, hub, loop, timeout, label, paused),
                      name=f"armature-{label.replace(' ', '-')}-{launch.run_id}", daemon=True).start()
     return proc
 
 
-def start(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any) -> None:
+def start(binary: str, launch: Launch, args: list[str], env: dict[str, str], hub: Any, *,
+          memory_mb: int | None = None) -> None:
     try:
-        spawn(binary, launch, args, env, hub, timeout=TIMEOUT_S)
+        spawn(binary, launch, args, env, hub, timeout=TIMEOUT_S, memory_mb=memory_mb)
     except OSError as exc:
         raise DryRunError(503, "The test run could not start.") from exc

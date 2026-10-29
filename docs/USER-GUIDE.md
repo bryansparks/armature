@@ -717,7 +717,7 @@ adapters:
   fetch_data:
     name: fetch_data
     type: script
-    cmd: "python scripts/fetch.py --source {{ source_url }}"
+    cmd: "python scripts/fetch.py"   # reads source_url from $ARMATURE_CONTEXT
 
 stages:
   - id: fetch
@@ -731,7 +731,7 @@ stages:
 |---|---|---|
 | `name` | string | Adapter identifier |
 | `type` | string | `script` or `python` |
-| `cmd` | string | Shell command to run |
+| `cmd` | string | Shell command to run. It may template only `{{ run_id }}`. Read other values from `ARMATURE_CONTEXT` |
 | `fn` | string | Python callable path (for `type: python`) |
 | `args` | object | Static arguments merged into context |
 | `parse` | `json`? | Parse stdout as a JSON object and use it as the stage result (see below) |

@@ -114,7 +114,8 @@ def _sign_in(srv: Server, request: Request, provider: oidc.Provider, claims: dic
             old_token = request.cookies.get(srv.cookie_name)
             if auth.valid_token(old_token):
                 auth.end_session(conn, auth.token_hmac(srv.keyring, old_token))
-            token, _csrf = auth.start_session(conn, srv.keyring, user_id, now, ip=ip, step_up=fresh)
+            token, _csrf = auth.start_session(conn, srv.keyring, user_id, now, ip=ip,
+                                              step_up=fresh or not srv.cfg.require_totp)
             audit.record(conn, action="login", actor_id=user_id, ip=ip, target_kind="user", target_id=user_id,
                          detail={"outcome": "ok", "method": "oidc", "fresh": fresh})
         return token

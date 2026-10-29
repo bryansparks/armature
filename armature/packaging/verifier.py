@@ -53,7 +53,7 @@ def collect_api_key_envs(spec) -> set[str]:
 
 
 def _has_execution_type(stage) -> bool:
-    return any(getattr(stage, attr, None) for attr in ("role", "tool_call", "adapter", "subagent_spec", "gate"))
+    return any(getattr(stage, attr, None) for attr in ("role", "tool_call", "adapter", "subagent_spec", "call", "gate"))
 
 
 class CompletenessVerifier:
@@ -226,14 +226,17 @@ class CompletenessVerifier:
         """Every subagent_spec referenced by the bundled spec tree (children
         reference children, recursively) must exist inside the package, at the
         ref's as-written path — the run-time loader resolves spec-dir first,
-        and the packaged entry spec sits at the package root.
+        and the packaged entry spec sits at the package root. Every workflow a
+        call: stage in that tree reaches must resolve from the package's calls/
+        bundle, with no call cycle.
         """
         try:
             spec = self._spec(pkg_dir, manifest)
         except Exception:
             return CheckResult(check="SUBAGENTS_BUNDLED", status="fail", detail="spec did not load")
 
-        from armature.packaging.refs import walk_spec_file_refs
+        from armature.packaging.refs import walk_spec_call_refs, walk_spec_file_refs
+        from armature.spec.calls import CALLS_DIR, BundleCallResolver, call_graph_refs
         problems: list[str] = []
         warnings: list[str] = []
         visited: set[Path] = set()
@@ -266,17 +269,28 @@ class CompletenessVerifier:
 
         check_level([s.subagent_spec for s in spec.stages if s.subagent_spec],
                     [], pkg_dir, "spec")
+
+        call_refs = [(s.id, s.call.workflow, s.call.version) for s in spec.stages if s.call is not None]
+        for child in sorted(visited):
+            call_refs.extend(walk_spec_call_refs(child))
+        n_calls = 0
+        if call_refs:
+            calls, call_errors = call_graph_refs(call_refs, BundleCallResolver(pkg_dir / CALLS_DIR), spec.name)
+            problems.extend(f"[{e.code}] {e.message}" for e in call_errors)
+            n_calls = len(calls)
         if problems:
             return CheckResult(check="SUBAGENTS_BUNDLED", status="fail",
                               detail="; ".join(problems))
         if warnings:
             return CheckResult(check="SUBAGENTS_BUNDLED", status="warn",
                               detail="; ".join(warnings))
-        if n_refs == 0:
+        if n_refs == 0 and n_calls == 0:
             return CheckResult(check="SUBAGENTS_BUNDLED", status="pass",
                                detail="no subagent stages")
-        return CheckResult(check="SUBAGENTS_BUNDLED", status="pass",
-                           detail=f"{n_refs} subagent spec(s) bundled")
+        detail = f"{n_refs} subagent spec(s) bundled"
+        if n_calls:
+            detail += f", {n_calls} called workflow(s) bundled"
+        return CheckResult(check="SUBAGENTS_BUNDLED", status="pass", detail=detail)
 
     # -- helpers -------------------------------------------------------------
     @staticmethod

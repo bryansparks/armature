@@ -1,0 +1,134 @@
+{
+  "mission/code-review": {
+    "sha256": "9566435a27e03492f1b95e014b944c13532e993ca30c7b7f3d7cf4a660a53181",
+    "source": "specs/code-review.yml mission"
+  },
+  "mission/development": {
+    "sha256": "1b093380b3d19dc59093959f45cb3bac0f03a52439ed5226e115eee17c8f37e7",
+    "source": "specs/development.yml mission"
+  },
+  "mission/ios-port": {
+    "sha256": "a9b3d8288f59d96cc510228575e10a324862134085de17008a20ce9548099927",
+    "source": "specs/ios-port.yml mission"
+  },
+  "mission/repo-review": {
+    "sha256": "13a9b2d6b0c1da836085efac27e88335bbacc8dc7a48bb331ca6869df75656c0",
+    "source": "specs/repo-review.yml mission"
+  },
+  "mission/slack-intake": {
+    "sha256": "a4a985d60c315abbd61ade12bc3c291676756671ad9a61605f5bdc2d85973610",
+    "source": "specs/slack-intake.yml mission"
+  },
+  "prompt/_shared": {
+    "sha256": "df9f45ecdb8eeab0cc53a94177610a7ff806d57f5000f01da36eb80a0968709d",
+    "source": "prompts/_shared.md"
+  },
+  "prompt/_shared_jira_consult": {
+    "sha256": "56b500d3f1350c0f69e924d59958f66aa2e27690ca2044703736715a76680a62",
+    "source": "prompts/_shared_jira_consult.md"
+  },
+  "prompt/_shared_jira_review": {
+    "sha256": "f586cba680ad29b9b26608315a0698bdc2766092cf4ce10a079a96536f83b971",
+    "source": "prompts/_shared_jira_review.md"
+  },
+  "prompt/development_brief": {
+    "sha256": "c1d3792c54d1f763113b99071f6e97b3de2ef1a35386f6c3b24d8e78645f02ab",
+    "source": "specs/development.yml stages.brief.role"
+  },
+  "prompt/development_platform": {
+    "sha256": "d73cffc9b6974f98f5acfeefb58efb31d4056d61f0b24a8192351dd1a126f9f5",
+    "source": "specs/development.yml stages.platform.role"
+  },
+  "prompt/development_principles": {
+    "sha256": "8b2bc260337b1d6352a3a3f3cc6f1fa11a6335eb091cfec726776df83f65e547",
+    "source": "specs/development.yml context_layers.principles"
+  },
+  "prompt/incremental_pr": {
+    "sha256": "dfeefa50ae019485de0ab3638459ed48a7627e8b5f78c7073dfc0bc4df339cdb",
+    "source": "prompts/incremental_pr.md"
+  },
+  "prompt/ios_port": {
+    "sha256": "cdefc9c7a357c4eaafa8c7b995318dd1d8cd9b2ffdb936bad3a21ad726c72b9f",
+    "source": "prompts/ios_port.md"
+  },
+  "prompt/ios_port_aws": {
+    "sha256": "22e2110d7df3aca2e11753dcd5000c156b7cec8a7e6fe6b68c0b3f10e686b981",
+    "source": "prompts/ios_port_aws.md"
+  },
+  "prompt/ios_port_decide": {
+    "sha256": "dc2099aa0c170c9f088719df154d046092a5db709093265452d8e3293cc969e4",
+    "source": "specs/ios-port.yml stages.decide.role"
+  },
+  "prompt/ios_port_principles": {
+    "sha256": "039c8df7fc40779d7edf4ab38ebef954f0cfb60dad449fb549a7878cde0b7ed4",
+    "source": "specs/ios-port.yml context_layers.principles"
+  },
+  "prompt/jira_work": {
+    "sha256": "89eff99b77a44c3f7a7e46f019c09e8d4560bec227389c67f6245597595cbd37",
+    "source": "prompts/jira_work.md"
+  },
+  "prompt/jira_work_aws": {
+    "sha256": "bfb1819725d8c3a448b246f68b592209ee0a70f2c90b50b78e9e8cc91f8a5c43",
+    "source": "prompts/jira_work_aws.md"
+  },
+  "prompt/jira_work_aws_backend": {
+    "sha256": "2c37f9c8e44c1e40da85c5cc9788583dc3dfafa1b761267c3818a1e9a1676cd0",
+    "source": "prompts/jira_work_aws_backend.md"
+  },
+  "prompt/jira_work_aws_ios": {
+    "sha256": "d43c86595a8064fd0d93a1db22e279d08456f5f0d991377a450eed2f496f501b",
+    "source": "prompts/jira_work_aws_ios.md"
+  },
+  "prompt/jira_work_backend": {
+    "sha256": "65b9caaa2335df3cac49c2520ca9ecca3789dd57947290a98e5177cc5abfb37c",
+    "source": "prompts/jira_work_backend.md"
+  },
+  "prompt/localization_translate": {
+    "sha256": "93df41c3b2438bc456de3b6a48f8ac435ea81454322d79c6544129862b481f55",
+    "source": "prompts/localization_translate.md"
+  },
+  "prompt/pr_fix": {
+    "sha256": "12a8a4905fb81c9a801f54186bff6bacd9c975bffddb5de6c5e7633cb8e13bdc",
+    "source": "prompts/pr_fix.md"
+  },
+  "prompt/pr_fix_merge": {
+    "sha256": "4de3fb624038ce66c4532c4640b28cd74cf69b5bd533e2e5cb70b7474e5a5051",
+    "source": "prompts/pr_fix_merge.md"
+  },
+  "prompt/repo_review_digest": {
+    "sha256": "aaf44f4447e42cb9c3b6a483e7b888db7e8387422b2a9ccd6380d596263e2137",
+    "source": "specs/repo-review.yml stages.digest.role"
+  },
+  "prompt/repo_review_director": {
+    "sha256": "00251ca29e197f35e2b6535cbc126d1aa8f72a4e7afb4a1f235c1bda969dc4ae",
+    "source": "specs/repo-review.yml stages.self_analyst.role"
+  },
+  "prompt/repo_review_principles": {
+    "sha256": "aa8780dc9a4df9d40825ce809a92a3877c94b66eae4b6d4b13226693810c182c",
+    "source": "specs/repo-review.yml context_layers.principles"
+  },
+  "prompt/repo_review_team_lead": {
+    "sha256": "81e1050988d0d63938995f9315c608df757da6c000c1d162f434d1f36c6212ba",
+    "source": "specs/repo-review.yml stages.team_lead.role"
+  },
+  "prompt/slack_intake_classify": {
+    "sha256": "4db14ea1e8eb415444f6b54d10ca9afb6c035bf3e4d488077c625826634d353d",
+    "source": "specs/slack-intake.yml stages.classify.role"
+  },
+  "prompt/slack_intake_principles": {
+    "sha256": "ddd764d916afb4a9ffcdd19271bbcc821defa0fa5f39e506ce34aa74981086f4",
+    "source": "specs/slack-intake.yml context_layers.principles"
+  },
+  "schemas/incremental.json": {
+    "sha256": "4e4c1ddbc1604dc766b6f718139ebd07c3c0be4e3b89989e56b9a88ad00fb0c0",
+    "source": "config/incremental-schema.json"
+  },
+  "schemas/team-lead.json": {
+    "sha256": "7eba4c342fa2bc55ca9d2840b91be55822e73c155a9eb34633156ba41ec4a1d0",
+    "source": "config/team-lead-schema.json"
+  },
+  "templates/slack_intake_reply.txt": {
+    "sha256": "fcc38aec64bca6ad95c09f1fe1c69a7c16ec25b8fff62aaf0c65181ea2ae674a",
+    "source": "templates/slack_intake_reply.txt"
+  }
+}

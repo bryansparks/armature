@@ -11,6 +11,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlsplit
 
+from armature.events import location
 from armature.events.emitter import (
     Emitter,
     is_loopback_host,
@@ -64,6 +65,20 @@ def _subject() -> str | None:
     return value
 
 
+def _location() -> dict[str, Any]:
+    raw = os.environ.get("ARMATURE_LOCATION")
+    if not raw:
+        return location.this_machine()
+    try:
+        value = location.parse(json.loads(raw))
+    except ValueError:
+        value = None
+    if value is None:
+        warn_once("location", "Ignoring ARMATURE_LOCATION: it is not a location object with a known kind")
+        return location.this_machine()
+    return value
+
+
 def registration_body(workflow: str, inputs: dict[str, Any] | None) -> dict[str, Any]:
     inputs = inputs or {}
     return {
@@ -74,6 +89,8 @@ def registration_body(workflow: str, inputs: dict[str, Any] | None) -> dict[str,
         "trigger_ref": _trigger_ref(),
         "subject": _subject(),
         "rerun_of": os.environ.get("ARMATURE_RERUN_OF"),
+        **({"thread": os.environ["ARMATURE_THREAD"]} if os.environ.get("ARMATURE_THREAD") else {}),
+        "location": _location(),
     }
 
 

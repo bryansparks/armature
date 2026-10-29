@@ -124,9 +124,15 @@ def _path(hook):
     return hook["url"].removeprefix(ORIGIN)
 
 
+def _approve(lead, hook, **values):
+    with lead.client.app.state.server.engine.begin() as conn:
+        conn.execute(webhooks.update().where(webhooks.c.id == hook["id"]).values(approval="approved", **values))
+
+
 def _hook(lead, world, source="github", **body):
     hook = _create(lead, world, source, **body)
     _set_secret(lead, hook)
+    _approve(lead, hook)
     return hook
 
 
@@ -220,6 +226,37 @@ def test_github_delivery_queues_a_job_pinned_to_the_version(sqlite_engine, lead,
     assert "x-hub-signature-256" not in delivery.headers and delivery.headers["x-github-event"] == "pull_request"
 
 
+def _mark(sqlite_engine, keyring, clock, world, head):
+    from armature.server import runners
+    from armature.server.db.schema import review_marks
+    with sqlite_engine.begin() as conn:
+        row, _ = runners.open_run(conn, keyring, team_id=world.team, project_id=world.project, workflow_id=world.wf,
+                                  workflow_name="code-review", now=clock())
+        conn.execute(insert(review_marks).values(id=new_id(), team_id=world.team, project_id=world.project,
+                                                 repo="acme/app", pr_number=7, head_sha=head, run_id=row["id"],
+                                                 conclusion="success", created_at=clock()))
+
+
+@pytest.mark.parametrize("kind,queued", [("review", 0), ("fix", 1)])
+def test_a_review_of_a_head_that_carries_a_mark_is_not_queued(sqlite_engine, keyring, clock, lead, world, kind,
+                                                              queued):
+    head = "a" * 40
+    with sqlite_engine.begin() as conn:
+        conn.execute(workflows.update().where(workflows.c.id == world.wf).values(kind=kind))
+    _mark(sqlite_engine, keyring, clock, world, head)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, events=["pull_request"], project_from="repository.full_name")
+    raw = _body({"repository": {"full_name": "Acme/App"}, "pull_request": {"head": {"sha": head}}})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == queued
+    [delivery] = _deliveries(sqlite_engine)
+    assert ("skipped" in delivery.matched[0]) is (queued == 0)
+    if not queued:
+        assert delivery.matched[0]["skipped"] == f"head {head[:12]} already carries an Armature review mark"
+        raw = _body({"repository": {"full_name": "Acme/App"}, "pull_request": {"head": {"sha": "b" * 40}}})
+        response = lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2"))
+        assert response.json()["jobs"] == 1
+
+
 def test_github_ping_pongs(sqlite_engine, lead, world):
     hook = _hook(lead, world)
     raw = _body({"zen": "hi"})
@@ -302,6 +339,43 @@ def test_slack_event_callback_matches_on_inner_type(sqlite_engine, lead, world, 
     raw = _body({"type": "event_callback", "event_id": "Ev1", "event": {"type": "app_mention", "text": "hi"}})
     assert lead.client.post(_path(hook), content=raw, headers=_slack(raw, clock)).json()["jobs"] == 1
     assert _jobs(sqlite_engine)[0].inputs == {"text": "hi"}
+
+
+def test_a_rule_thread_template_sets_the_job_thread(sqlite_engine, lead, world, clock):
+    hook = _hook(lead, world, "slack")
+    _rule(lead, hook, world.wf, events=["message"],
+          thread="slack:{{ event.channel }}:{{ event.thread_ts or event.ts }}")
+    for event_id, extra in (("Ev1", {}), ("Ev2", {"thread_ts": "1700.1"})):
+        raw = _body({"type": "event_callback", "event_id": event_id,
+                     "event": {"type": "message", "channel": "C9", "ts": "1700.5", **extra}})
+        assert lead.client.post(_path(hook), content=raw, headers=_slack(raw, clock)).json()["jobs"] == 1
+    assert sorted(job.thread for job in _jobs(sqlite_engine)) == ["slack:C9:1700.1", "slack:C9:1700.5"]
+
+
+def test_cancel_only_needs_a_key_and_never_a_conversation():
+    assert hooks.check_rule({"key": ["pull_request.number"], "cancel_only": True})["cancel_only"] is True
+    assert "cancel_only" not in hooks.check_rule({})
+    for config, message in (({"cancel_only": True}, "needs a key"), ({"cancel_only": "yes"}, "true or false"),
+                            ({"key": ["a"], "cancel_only": True, "conversation": True}, "conversation")):
+        with pytest.raises(hooks.WebhookError, match=message):
+            hooks.check_rule(config)
+
+
+def test_a_rule_dry_flag_is_a_boolean_and_defaults_off():
+    assert hooks.check_rule({})["dry"] is False and hooks.check_rule({"dry": True})["dry"] is True
+    with pytest.raises(hooks.WebhookError, match="dry must be true or false"):
+        hooks.check_rule({"dry": "yes"})
+
+
+def test_a_rule_thread_must_be_a_template_and_renders_to_none_when_empty():
+    with pytest.raises(hooks.WebhookError, match="thread"):
+        hooks.check_rule({"thread": "{{ broken"})
+    with pytest.raises(hooks.WebhookError, match="thread"):
+        hooks.check_rule({"thread": 7})
+    assert hooks.check_rule({"thread": "gh:{{ repo }}"})["thread"] == "gh:{{ repo }}"
+    assert hooks.render_thread("{{ missing }}", {}) is None
+    assert hooks.render_thread("x" * 192, {}) is None
+    assert hooks.render_thread("{{ ''.__class__ }}", {}) is None
 
 
 def test_generic_bearer_and_delivery_header(sqlite_engine, lead, world):
@@ -887,3 +961,687 @@ def test_rule_secrets_need_a_step_up(app, sqlite_engine, keyring, clock, world):
     kept = app.post(path, json={"config": {"order": 3, "secrets": ["GH_TOKEN"]}}, headers=headers)
     assert kept.status_code == 200
     assert app.post(path, json={"enabled": False}, headers=headers).status_code == 200
+
+
+# Jira and Linear
+
+def _jira(raw, delivery="j-1", secret=SECRET):
+    return {"X-Hub-Signature": "sha256=" + _sig(secret, raw), "X-Atlassian-Webhook-Identifier": delivery,
+            "Content-Type": "application/json"}
+
+
+def _linear(raw, delivery="l-1", secret=SECRET):
+    return {"Linear-Signature": _sig(secret, raw), "Linear-Delivery": delivery, "Linear-Event": "Issue",
+            "Content-Type": "application/json"}
+
+
+def _linear_body(clock, **fields):
+    return _body({"type": "Issue", "action": "create", "organizationId": "org-1",
+                  "webhookTimestamp": int(clock().timestamp() * 1000), **fields})
+
+
+def test_verify_jira_matches_the_vendor_test_vector(clock):
+    secret, raw = "It's a Secret to Everybody", b"Hello World!"
+    signed = {"X-Hub-Signature": "sha256=a4771c39fbe90f317c7824e83ddef3caae9cb3d976c214ace1f2937e133263c9"}
+    assert hooks.verify("jira", {}, secret, signed, raw, clock()) is None
+    assert hooks.verify("jira", {}, SECRET, signed, raw, clock()) == "bad signature"
+    sha1 = {"X-Hub-Signature": "sha1=" + hmac.new(secret.encode(), raw, hashlib.sha1).hexdigest()}
+    assert hooks.verify("jira", {}, secret, sha1, raw, clock()) == "bad signature"
+
+
+def test_verify_linear_checks_signature_then_timestamp(clock):
+    raw = _linear_body(clock)
+    assert hooks.verify("linear", {}, SECRET, _linear(raw), raw, clock()) is None
+    assert hooks.verify("linear", {}, SECRET, _linear(raw, secret="x"), raw, clock()) == "bad signature"
+    assert hooks.verify("linear", {}, SECRET, _linear(raw), raw, clock() + timedelta(seconds=61)) \
+        == "stale or missing timestamp"
+    assert hooks.verify("linear", {}, SECRET, _linear(raw, secret="x"), raw, clock() + timedelta(seconds=61)) \
+        == "bad signature"
+    assert hooks.verify("linear", {}, SECRET, _linear(b"nope"), b"nope", clock()) == "stale or missing timestamp"
+
+
+def test_jira_and_linear_event_and_key():
+    assert hooks.event_of("jira", {}, {"webhookEvent": "jira:issue_updated"}) == "jira:issue_updated"
+    assert hooks.delivery_key("jira", {}, {"X-Atlassian-Webhook-Identifier": "j9"}, {}) == "j9"
+    assert hooks.event_of("linear", {"Linear-Event": "Comment"}, {"type": "Issue"}) == "Issue"
+    assert hooks.event_of("linear", {"Linear-Event": "Comment"}, {}) == "Comment"
+    assert hooks.delivery_key("linear", {}, {"Linear-Delivery": "u-1"}, {}) == "u-1"
+
+
+@pytest.mark.parametrize("source,payload,sender", [
+    ("github", {"repository": {"id": 12}, "installation": {"id": 3}}, "github:installation:3"),
+    ("github", {"repository": {"id": 12}}, "github:repo:12"),
+    ("github", {"repository": {"id": True}}, None),
+    ("jira", {"issue": {"self": "https://Acme.atlassian.net/rest/api/2/issue/1"}}, "jira:https://acme.atlassian.net"),
+    ("jira", {"comment": {"self": "https://b.atlassian.net/rest/api/2/comment/1"}}, "jira:https://b.atlassian.net"),
+    ("jira", {"issue": {"self": "javascript:alert(1)"}}, None),
+    ("jira", {"issue": {"self": "https://api.atlassian.com/ex/jira/c0ffee-1/rest/api/2/issue/1"}},
+     "jira:cloud:c0ffee-1"),
+    ("linear", {"organizationId": "o-1"}, "linear:org:o-1"),
+    ("slack", {"team_id": "T1"}, "slack:team:T1"),
+    ("slack", {"team": {"id": "T2"}}, "slack:team:T2"),
+    ("generic", {"team_id": "T1", "repository": {"id": 1}}, None),
+    ("github", ["not", "a", "dict"], None),
+])
+def test_sender_of(source, payload, sender):
+    assert hooks.sender_of(source, payload) == sender
+
+
+def test_jira_delivery_queues_a_job(sqlite_engine, lead, world):
+    hook = _hook(lead, world, "jira")
+    _rule(lead, hook, world.wf, events=["jira:issue_updated"], inputs={"key": "$.issue.key"})
+    raw = _body({"webhookEvent": "jira:issue_updated",
+                 "issue": {"key": "MEM-1", "self": "https://acme.atlassian.net/rest/api/2/issue/1"}})
+    retry = {"X-Atlassian-Webhook-Retry": "1"}
+    assert lead.client.post(_path(hook), content=raw, headers=_jira(raw)).json() == {"status": "accepted", "jobs": 1}
+    assert lead.client.post(_path(hook), content=raw, headers={**_jira(raw), **retry}).json() == {"status": "duplicate"}
+    assert _jobs(sqlite_engine)[0].inputs == {"key": "MEM-1"}
+    [first] = [d for d in _deliveries(sqlite_engine) if d.status == "accepted"]
+    assert (first.event, first.delivery_key) == ("jira:issue_updated", "j-1")
+    assert first.sender == "jira:https://acme.atlassian.net" and "x-hub-signature" not in first.headers
+
+
+def test_linear_delivery_queues_a_job_and_stale_is_rejected(sqlite_engine, lead, world, clock):
+    hook = _hook(lead, world, "linear")
+    _rule(lead, hook, world.wf, events=["Issue"], conditions=[{"path": "action", "op": "eq", "value": "create"}])
+    raw = _linear_body(clock)
+    assert lead.client.post(_path(hook), content=raw, headers=_linear(raw)).json() == {"status": "accepted", "jobs": 1}
+    delivery = _deliveries(sqlite_engine)[0]
+    assert (delivery.delivery_key, delivery.sender) == ("l-1", "linear:org:org-1")
+    assert "linear-signature" not in delivery.headers and delivery.headers["linear-event"] == "Issue"
+    clock.advance(seconds=61)
+    assert lead.client.post(_path(hook), content=raw, headers=_linear(raw, delivery="l-2")).status_code == 401
+
+
+# approval
+
+def _repo(repo=1, **fields):
+    return _body({"repository": {"id": repo, "full_name": f"acme/r{repo}"}, **fields})
+
+
+def _held(engine, hook_id):
+    return [d for d in _deliveries(engine, hook_id) if d.status == "held"]
+
+
+def _hook_row(engine, hook_id):
+    with engine.connect() as conn:
+        return conn.execute(select(webhooks).where(webhooks.c.id == hook_id)).first()
+
+
+def test_new_webhook_is_pending_and_holds_verified_deliveries(sqlite_engine, lead, admin, world, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _create(admin, world, approval="approved", forward_url="https://gw.test/hook")
+    assert hook["approval"] == "pending" and hook["pinned_senders"] is None
+    _set_secret(admin, hook)
+    _rule(lead, hook, world.wf)
+    raw = _repo()
+    response = lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    assert response.status_code == 200 and response.json() == {"status": "held"}
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == {"status": "duplicate"}
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw, secret="x")).status_code == 401
+    [held] = _held(sqlite_engine, hook["id"])
+    assert (held.reason, held.sender, held.delivery_key) == ("webhook is pending approval", "github:repo:1", "d-1")
+    assert _jobs(sqlite_engine) == [] and recorder.requests == []
+    lead.client.post(f"/api/webhooks/{hook['id']}", json={"enabled": False}, headers=lead.headers)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2")).status_code == 404
+
+
+def test_approve_pins_replays_and_forwards_once(sqlite_engine, lead, admin, world, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _create(admin, world, forward_url="https://gw.test/hook")
+    _set_secret(admin, hook)
+    _rule(lead, hook, world.wf, inputs={"repo": "$.repository.full_name"})
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2"))
+    first, second = _held(sqlite_engine, hook["id"])
+    approved = lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{first.id}/approve", json={},
+                                headers=lead.headers).json()
+    assert (approved["replayed"], approved["status"], approved["jobs"]) == (True, "accepted", 1)
+    assert approved["webhook"]["approval"] == "approved" and approved["webhook"]["pinned_senders"] == ["github:repo:1"]
+    [job] = _jobs(sqlite_engine)
+    assert job.delivery_id == first.id and job.inputs == {"repo": "acme/r1"}
+    assert [d.id for d in _held(sqlite_engine, hook["id"])] == [second.id]
+    [sent] = recorder.requests
+    assert sent.content == raw and sent.headers["x-hub-signature-256"] == _github(raw)["X-Hub-Signature-256"]
+    again = lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{first.id}/approve", json={}, headers=lead.headers)
+    assert again.status_code == 409 and len(recorder.requests) == 1
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-3")).json()["jobs"] == 1
+    assert len(_jobs(sqlite_engine)) == 2
+
+
+def test_approve_without_a_stored_payload_replays_nothing(sqlite_engine, lead, world, monkeypatch):
+    monkeypatch.setattr(hooks, "PAYLOAD_MAX", 10)
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    _rule(lead, hook, world.wf)
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    result = lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{held.id}/approve", json={},
+                              headers=lead.headers).json()
+    assert (result["replayed"], result["jobs"], result["webhook"]["pinned_senders"]) == (False, 0, ["github:repo:1"])
+    assert _jobs(sqlite_engine) == [] and _held(sqlite_engine, hook["id"]) == []
+
+
+def test_approve_and_enable_need_a_secret(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    with sqlite_engine.begin() as conn:
+        secret_store.delete_secret(conn, team_id=world.team, name=hook["secret_name"], actor_id=None)
+    refused = lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{held.id}/approve", json={},
+                               headers=lead.headers)
+    assert refused.status_code == 409 and "secret" in refused.json()["error"]
+    assert _hook_row(sqlite_engine, hook["id"]).approval == "pending"
+    base = f"/api/webhooks/{hook['id']}"
+    assert lead.client.post(base, json={"enabled": False}, headers=lead.headers).status_code == 200
+    assert lead.client.post(base, json={"enabled": True}, headers=lead.headers).status_code == 409
+    _set_secret(lead, hook)
+    assert lead.client.post(base, json={"enabled": True}, headers=lead.headers).json()["webhook"]["enabled"] is True
+
+
+def test_pinning_off_admits_any_signed_sender_and_never_pins(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf)
+    for n, raw in enumerate((_repo(1), _repo(2), _body({"n": 1}))):
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}")).json()["jobs"] == 1
+    assert _hook_row(sqlite_engine, hook["id"]).pinned_senders is None
+
+
+def test_multi_repo_webhook_pins_a_set_and_approving_adds_to_it(sqlite_engine, lead, admin, world, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _hook(admin, world, forward_url="https://gw.test/hook")
+    _approve(lead, hook, pinned_senders=["github:repo:1", "github:repo:2"])
+    _rule(lead, hook, world.wf)
+    for n in (1, 2):
+        raw = _repo(n)
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}")).json()["jobs"] == 1
+    third = _repo(3)
+    assert lead.client.post(_path(hook), content=third, headers=_github(third, delivery="d3")).json() \
+        == {"status": "held"}
+    [held] = _held(sqlite_engine, hook["id"])
+    assert held.reason == "sender github:repo:3 is not pinned" and len(recorder.requests) == 2
+    base = f"/api/webhooks/{hook['id']}/deliveries/{held.id}"
+    assert lead.client.post(f"{base}/replay", json={}, headers=lead.headers).status_code == 409
+    approved = lead.client.post(f"{base}/approve", json={}, headers=lead.headers).json()
+    assert approved["jobs"] == 1 and len(recorder.requests) == 3
+    assert approved["webhook"]["pinned_senders"] == ["github:repo:1", "github:repo:2", "github:repo:3"]
+    for n in (1, 2, 3):
+        raw = _repo(n, again=True)
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"e{n}")).json()["jobs"] == 1
+
+
+def test_replay_needs_an_approved_webhook_and_a_matching_held_delivery(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    _rule(lead, hook, world.wf)
+    for n in range(2):
+        raw = _repo(1, n=n)
+        lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}"))
+    first, second = _held(sqlite_engine, hook["id"])
+    base = f"/api/webhooks/{hook['id']}/deliveries"
+    pending = lead.client.post(f"{base}/{second.id}/replay", json={}, headers=lead.headers)
+    assert pending.status_code == 409 and "Approve" in pending.json()["error"]
+    lead.client.post(f"{base}/{first.id}/approve", json={}, headers=lead.headers)
+    replayed = lead.client.post(f"{base}/{second.id}/replay", json={}, headers=lead.headers).json()
+    assert (replayed["replayed"], replayed["status"], replayed["jobs"]) == (True, "accepted", 1)
+    assert lead.client.post(f"{base}/{second.id}/replay", json={}, headers=lead.headers).status_code == 409
+    assert lead.client.post(f"{base}/nope/replay", json={}, headers=lead.headers).status_code == 404
+    assert len(_jobs(sqlite_engine)) == 2
+
+
+def test_reject_deletes_the_webhook_and_its_secret(sqlite_engine, keyring, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    assert lead.client.post(f"/api/webhooks/{hook['id']}/reject", json={}, headers=lead.headers).json() == {"ok": True}
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(webhooks)).all() == []
+        assert conn.execute(select(webhook_deliveries)).all() == []
+        assert secret_store.list_secrets(conn, world.team) == []
+        actions = [r.action for r in conn.execute(select(audit.c.action).where(audit.c.action.like("webhook.%")))]
+    assert actions[-1] == "webhook.reject" and "webhook.delete" not in actions
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).status_code == 404
+
+
+def test_reject_keeps_a_shared_or_instance_secret(sqlite_engine, keyring, lead, world):
+    shared = _create(lead, world, secret_name="SHARED")
+    _create(lead, world, "slack", secret_name="SHARED")
+    _set_secret(lead, shared)
+    lead.client.post(f"/api/webhooks/{shared['id']}/reject", json={}, headers=lead.headers)
+    instance = _create(lead, world, "jira", secret_name="INSTANCE_ONE")
+    with sqlite_engine.begin() as conn:
+        secret_store.set_secret(conn, keyring, team_id=None, name="INSTANCE_ONE", value="v", actor_id=None)
+    lead.client.post(f"/api/webhooks/{instance['id']}/reject", json={}, headers=lead.headers)
+    with sqlite_engine.connect() as conn:
+        assert [s["name"] for s in secret_store.list_secrets(conn, world.team)] == ["SHARED"]
+        assert [s["name"] for s in secret_store.list_secrets(conn, None)] == ["INSTANCE_ONE"]
+
+
+def test_approve_replay_and_reject_need_a_lead_with_step_up(app, sqlite_engine, keyring, clock, world, lead):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    paths = [f"/api/webhooks/{hook['id']}/deliveries/{held.id}/{action}" for action in ("approve", "replay", "dismiss")]
+    paths.append(f"/api/webhooks/{hook['id']}/reject")
+    no_step_up = _as(app, sqlite_engine, keyring, clock, world.users["lead"], step_up=False)
+    assert [app.post(p, json={}, headers=no_step_up).status_code for p in paths] == [403] * 4
+    for role in ("contributor", "viewer"):
+        headers = _as(app, sqlite_engine, keyring, clock, world.users[role])
+        assert [app.post(p, json={}, headers=headers).status_code for p in paths] == [403] * 4
+    other = _as(app, sqlite_engine, keyring, clock, world.users["other_lead"])
+    assert [app.post(p, json={}, headers=other).status_code for p in paths] == [404] * 4
+    assert _hook_row(sqlite_engine, hook["id"]).approval == "pending" and _held(sqlite_engine, hook["id"])
+
+
+def test_approval_writes_are_audited(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    for n in range(2):
+        raw = _repo(1, n=n)
+        lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}"))
+    first, second = _held(sqlite_engine, hook["id"])
+    base = f"/api/webhooks/{hook['id']}/deliveries"
+    lead.client.post(f"{base}/{first.id}/approve", json={}, headers=lead.headers)
+    lead.client.post(f"{base}/{second.id}/replay", json={}, headers=lead.headers)
+    with sqlite_engine.connect() as conn:
+        rows = conn.execute(select(audit.c.action, audit.c.detail).where(audit.c.action.in_(
+            ["webhook.approve", "webhook.replay"]))).all()
+    assert [r.action for r in rows] == ["webhook.approve", "webhook.replay"]
+    assert rows[0].detail["pinned_senders"] == ["github:repo:1"] and rows[1].detail["delivery_id"] == second.id
+
+
+# review fixes
+
+def test_pending_or_mismatched_deliveries_are_never_forwarded(sqlite_engine, lead, admin, world, clock, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _create(admin, world, forward_url="https://gw.test/hook")
+    _set_secret(admin, hook)
+    ping = _repo(1)
+    assert lead.client.post(_path(hook), content=ping, headers=_github(ping, event="ping")).json() == {"status": "pong"}
+    bad = b"not json"
+    assert lead.client.post(_path(hook), content=bad, headers=_github(bad, delivery="d-2")).status_code == 400
+    slack = _create(admin, world, "slack", forward_url="https://gw.test/slack")
+    _set_secret(admin, slack)
+    challenge = _body({"type": "url_verification", "challenge": "c1"})
+    assert lead.client.post(_path(slack), content=challenge, headers=_slack(challenge, clock)).text == "c1"
+    assert recorder.requests == []
+    _approve(lead, hook, pinned_senders=["github:repo:1"])
+    other = _repo(2)
+    lead.client.post(_path(hook), content=other, headers=_github(other, event="ping", delivery="d-3"))
+    lead.client.post(_path(hook), content=bad, headers=_github(bad, delivery="d-4"))
+    assert recorder.requests == []
+    lead.client.post(_path(hook), content=ping, headers=_github(ping, event="ping", delivery="d-5"))
+    assert len(recorder.requests) == 1
+
+
+def test_concurrent_approvals_of_one_delivery_queue_and_forward_once(sqlite_engine, lead, admin, world, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _create(admin, world, forward_url="https://gw.test/hook")
+    _set_secret(admin, hook)
+    _rule(lead, hook, world.wf)
+    raw = _repo()
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    monkeypatch.setattr(hooks, "held_delivery", lambda conn, hook, delivery_id: held)
+    url = f"/api/webhooks/{hook['id']}/deliveries/{held.id}/approve"
+    assert lead.client.post(url, json={}, headers=lead.headers).status_code == 200
+    late = lead.client.post(url, json={}, headers=lead.headers)
+    assert late.status_code == 409 and "held" in late.json()["error"]
+    assert len(_jobs(sqlite_engine)) == 1 and len(recorder.requests) == 1
+
+
+def test_approve_needs_a_sender_unless_generic(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    raw = _body({"n": 1})
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    refused = lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{held.id}/approve", json={},
+                               headers=lead.headers)
+    assert refused.status_code == 409 and refused.json()["error"] == "This delivery has no sender to pin."
+    generic = _create(lead, world, "generic", generic_auth="bearer")
+    _set_secret(lead, generic)
+    lead.client.post(_path(generic), content=raw, headers={"Authorization": f"Bearer {SECRET}"})
+    [held] = _held(sqlite_engine, generic["id"])
+    approved = lead.client.post(f"/api/webhooks/{generic['id']}/deliveries/{held.id}/approve", json={},
+                                headers=lead.headers).json()
+    assert approved["webhook"]["approval"] == "approved" and approved["webhook"]["pinned_senders"] is None
+
+
+def test_approve_and_replay_refuse_a_disabled_webhook(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    for n in range(2):
+        raw = _repo(1, n=n)
+        lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}"))
+    first, second = _held(sqlite_engine, hook["id"])
+    base = f"/api/webhooks/{hook['id']}/deliveries"
+    lead.client.post(f"{base}/{first.id}/approve", json={}, headers=lead.headers)
+    lead.client.post(f"/api/webhooks/{hook['id']}", json={"enabled": False}, headers=lead.headers)
+    for action in ("approve", "replay"):
+        refused = lead.client.post(f"{base}/{second.id}/{action}", json={}, headers=lead.headers)
+        assert refused.status_code == 409 and "Enable" in refused.json()["error"]
+    assert [d.id for d in _held(sqlite_engine, hook["id"])] == [second.id]
+
+
+def test_reject_is_only_for_pending_and_dismiss_only_for_approved(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _approve(lead, hook, pinned_senders=["github:repo:1"])
+    raw = _repo(2)
+    lead.client.post(_path(hook), content=raw, headers=_github(raw))
+    [held] = _held(sqlite_engine, hook["id"])
+    refused = lead.client.post(f"/api/webhooks/{hook['id']}/reject", json={}, headers=lead.headers)
+    assert refused.status_code == 409 and _hook_row(sqlite_engine, hook["id"]) is not None
+    base = f"/api/webhooks/{hook['id']}/deliveries/{held.id}"
+    assert lead.client.post(f"{base}/dismiss", json={}, headers=lead.headers).json() == {"ok": True}
+    [row] = _deliveries(sqlite_engine, hook["id"])
+    assert (row.status, row.reason) == ("ignored", "dismissed") and _jobs(sqlite_engine) == []
+    assert lead.client.post(f"{base}/dismiss", json={}, headers=lead.headers).status_code == 409
+    pending = _create(lead, world, "slack", secret_name="SLACK_ONE")
+    _set_secret(lead, pending)
+    slack_raw = _body({"type": "event_callback", "team_id": "T1", "event_id": "E1", "event": {"type": "message"}})
+    lead.client.post(_path(pending), content=slack_raw, headers=_slack(slack_raw, lead.client.app.state.server.now))
+    [slack_held] = _held(sqlite_engine, pending["id"])
+    dismissed = lead.client.post(f"/api/webhooks/{pending['id']}/deliveries/{slack_held.id}/dismiss", json={},
+                                 headers=lead.headers)
+    assert dismissed.status_code == 409
+    with sqlite_engine.connect() as conn:
+        [entry] = conn.execute(select(audit.c.detail).where(audit.c.action == "webhook.dismiss")).all()
+    assert entry.detail["sender"] == "github:repo:2"
+
+
+def test_reject_keeps_a_secret_a_rule_hands_to_runs(sqlite_engine, lead, world):
+    other = _hook(lead, world, "slack")
+    _rule(lead, other, world.wf, secrets=["GH_SECRET"])
+    hook = _create(lead, world, secret_name="GH_SECRET")
+    _set_secret(lead, hook)
+    lead.client.post(f"/api/webhooks/{hook['id']}/reject", json={}, headers=lead.headers)
+    with sqlite_engine.connect() as conn:
+        assert _hook_row(sqlite_engine, hook["id"]) is None
+        assert "GH_SECRET" in [s["name"] for s in secret_store.list_secrets(conn, world.team)]
+
+
+@pytest.mark.parametrize("source,cfg", [
+    ("github", {}), ("jira", {}), ("slack", {}), ("generic", {"generic_auth": "hmac"}),
+    ("generic", {"generic_auth": "hmac", "generic_signature_header": "X-Ci-Sig"}),
+    ("generic", {"generic_auth": "bearer"}),
+])
+def test_signed_headers_pass_the_sources_own_check(source, cfg, clock):
+    raw = b'{"a":1}'
+    headers = hooks.signed_headers(source, cfg, SECRET, {"content-type": "application/json"}, raw, clock())
+    assert hooks.verify(source, cfg, SECRET, dict(headers), raw, clock()) is None
+    assert ("content-type", "application/json") in headers
+
+
+def test_signed_headers_leave_linear_unsigned_and_drop_stale_signatures(clock):
+    stored = {"content-type": "application/json", "x-hub-signature-256": "sha256=old"}
+    assert hooks.signed_headers("linear", {}, SECRET, stored, b"{}", clock()) == [("content-type", "application/json")]
+    assert hooks.signed_headers("github", {}, None, stored, b"{}", clock()) == [("content-type", "application/json")]
+
+
+def test_replayed_slack_forward_is_signed_with_a_fresh_timestamp(sqlite_engine, keyring, lead, admin, world, clock,
+                                                                monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _create(admin, world, "slack", forward_url="https://gw.test/slack")
+    _set_secret(admin, hook)
+    raw = _body({"type": "event_callback", "team_id": "T1", "event_id": "E1", "event": {"type": "message"}})
+    lead.client.post(_path(hook), content=raw, headers=_slack(raw, clock))
+    [held] = _held(sqlite_engine, hook["id"])
+    clock.advance(seconds=600)
+    headers = _as(lead.client, sqlite_engine, keyring, clock, world.users["lead"])
+    lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{held.id}/approve", json={}, headers=headers)
+    [sent] = recorder.requests
+    assert hooks.verify("slack", {}, SECRET, dict(sent.headers), sent.content, clock()) is None
+    with sqlite_engine.connect() as conn:
+        stored = conn.execute(select(webhook_deliveries.c.headers)).scalar()
+    assert SECRET not in json.dumps(stored) and "x-slack-signature" not in stored
+
+
+# sender pinning
+
+def test_an_unpinned_approved_webhook_forwards_every_signed_sender(sqlite_engine, lead, admin, world, monkeypatch):
+    recorder = _Recorder()
+    _patch_httpx(monkeypatch, recorder)
+    hook = _hook(admin, world, forward_url="https://gw.test/hook")
+    for n in (1, 2):
+        raw = _repo(n)
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d{n}")).json()["status"] \
+            == "ignored"
+    assert len(recorder.requests) == 2 and _held(sqlite_engine, hook["id"]) == []
+
+
+def _post_from(lead, hook, *repos):
+    for n in repos:
+        raw = _repo(n)
+        lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"r{n}"))
+
+
+def test_turning_pinning_on_takes_the_previewed_senders(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _post_from(lead, hook, 2, 1, 2)
+    base = f"/api/webhooks/{hook['id']}/pinning"
+    preview = lead.client.get(base).json()["senders"]
+    assert preview == ["github:repo:1", "github:repo:2"]
+    stale = lead.client.post(base, json={"senders": ["github:repo:1"]}, headers=lead.headers)
+    assert stale.status_code == 409 and "changed" in stale.json()["error"]
+    on = lead.client.post(base, json={"senders": preview}, headers=lead.headers).json()["webhook"]
+    assert on["pinned_senders"] == preview
+    assert lead.client.post(base, json={"senders": preview}, headers=lead.headers).status_code == 409
+    _post_from(lead, hook, 3)
+    assert [d.sender for d in _held(sqlite_engine, hook["id"])] == ["github:repo:3"]
+
+
+def test_preview_leaves_out_held_and_dismissed_senders(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _post_from(lead, hook, 1)
+    lead.client.post(f"/api/webhooks/{hook['id']}/pinning", json={"senders": ["github:repo:1"]}, headers=lead.headers)
+    _post_from(lead, hook, 2, 3)
+    held = {d.sender: d for d in _held(sqlite_engine, hook["id"])}
+    lead.client.post(f"/api/webhooks/{hook['id']}/deliveries/{held['github:repo:2'].id}/dismiss", json={},
+                     headers=lead.headers)
+    lead.client.post(f"/api/webhooks/{hook['id']}/pinning/off", json={}, headers=lead.headers)
+    assert lead.client.get(f"/api/webhooks/{hook['id']}/pinning").json()["senders"] == ["github:repo:1"]
+
+
+def test_turning_pinning_on_needs_a_sender_and_a_pinnable_webhook(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    empty = lead.client.post(f"/api/webhooks/{hook['id']}/pinning", json={"senders": []}, headers=lead.headers)
+    assert empty.status_code == 409 and "No delivery" in empty.json()["error"]
+    generic = _hook(lead, world, "generic", generic_auth="bearer")
+    refused = lead.client.post(f"/api/webhooks/{generic['id']}/pinning", json={"senders": []}, headers=lead.headers)
+    assert refused.status_code == 409 and "Generic" in refused.json()["error"]
+    pending = _create(lead, world, "slack")
+    refused = lead.client.post(f"/api/webhooks/{pending['id']}/pinning/off", json={}, headers=lead.headers)
+    assert refused.status_code == 409 and "Approve" in refused.json()["error"]
+
+
+def test_remove_one_pinned_sender_but_never_the_last(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _approve(lead, hook, pinned_senders=["github:repo:1", "github:repo:2"])
+    base = f"/api/webhooks/{hook['id']}/pinning"
+    removed = lead.client.post(f"{base}/remove", json={"sender": "github:repo:1"}, headers=lead.headers).json()
+    assert removed["webhook"]["pinned_senders"] == ["github:repo:2"]
+    assert lead.client.post(f"{base}/remove", json={"sender": "github:repo:9"}, headers=lead.headers).status_code \
+        == 404
+    last = lead.client.post(f"{base}/remove", json={"sender": "github:repo:2"}, headers=lead.headers)
+    assert last.status_code == 409 and "Turn sender pinning off" in last.json()["error"]
+    off = lead.client.post(f"{base}/off", json={}, headers=lead.headers).json()["webhook"]
+    assert off["pinned_senders"] is None
+    assert lead.client.post(f"{base}/off", json={}, headers=lead.headers).status_code == 409
+    with sqlite_engine.connect() as conn:
+        actions = [r.action for r in conn.execute(select(audit.c.action).where(audit.c.action.in_(
+            ["webhook.unpin", "webhook.pin_off", "webhook.pin_on"])))]
+    assert actions == ["webhook.unpin", "webhook.pin_off"]
+
+
+def test_approving_on_an_unpinned_webhook_replays_without_pinning(sqlite_engine, lead, world):
+    hook = _create(lead, world)
+    _set_secret(lead, hook)
+    _rule(lead, hook, world.wf)
+    _post_from(lead, hook, 1, 2)
+    held = {d.sender: d for d in _held(sqlite_engine, hook["id"])}
+    base = f"/api/webhooks/{hook['id']}/deliveries"
+    lead.client.post(f"{base}/{held['github:repo:1'].id}/approve", json={}, headers=lead.headers)
+    lead.client.post(f"/api/webhooks/{hook['id']}/pinning/off", json={}, headers=lead.headers)
+    approved = lead.client.post(f"{base}/{held['github:repo:2'].id}/approve", json={}, headers=lead.headers).json()
+    assert approved["jobs"] == 1 and approved["webhook"]["pinned_senders"] is None
+
+
+def test_pinning_routes_need_a_lead_with_step_up(app, sqlite_engine, keyring, clock, world, lead):
+    hook = _hook(lead, world)
+    base = f"/api/webhooks/{hook['id']}/pinning"
+    posts = [base, f"{base}/off", f"{base}/remove"]
+    no_step_up = _as(app, sqlite_engine, keyring, clock, world.users["lead"], step_up=False)
+    assert [app.post(p, json={}, headers=no_step_up).status_code for p in posts] == [403] * 3
+    assert app.get(base).status_code == 200
+    for role in ("contributor", "viewer"):
+        headers = _as(app, sqlite_engine, keyring, clock, world.users[role])
+        assert [app.post(p, json={}, headers=headers).status_code for p in posts] == [403] * 3
+        assert app.get(base).status_code == 403
+    _as(app, sqlite_engine, keyring, clock, world.users["other_lead"])
+    assert app.get(base).status_code == 404
+
+
+def test_pin_changes_read_the_current_row_not_a_stale_one(sqlite_engine, lead, world):
+    hook = _hook(lead, world)
+    _approve(lead, hook, pinned_senders=["github:repo:1", "github:repo:2"])
+    stale = _hook_row(sqlite_engine, hook["id"])
+    _approve(lead, hook, pinned_senders=["github:repo:1", "github:repo:2", "github:repo:3"])
+    with sqlite_engine.begin() as conn:
+        hooks.unpin(conn, stale, "github:repo:1", actor_id=None, now=stale.updated_at, ip=None)
+    assert _hook_row(sqlite_engine, hook["id"]).pinned_senders == ["github:repo:2", "github:repo:3"]
+
+
+def test_webhooks_migrated_from_0011_still_admit_and_forward(tmp_path, keyring, clock, monkeypatch):
+    from sqlalchemy import text
+
+    from armature.server.db import make_engine, migrate
+    url = f"sqlite:///{tmp_path / 'prod-shape.db'}"
+    migrate(url, "0011")
+    team = new_id()
+    shapes = [("gh", "github", "tok-gh", None, "http://127.0.0.1:8099/gh/pr"),
+              ("sl1", "slack", "tok-s1", None, "http://127.0.0.1:8099/slack/1"),
+              ("sl2", "slack", "tok-s2", None, "http://127.0.0.1:8099/slack/2"),
+              ("ci", "generic", "tok-ci", "bearer", "http://127.0.0.1:8099/ci/build")]
+    engine = make_engine(url)
+    try:
+        with engine.begin() as conn:
+            at = {"at": "2026-10-27 12:00:00"}
+            conn.execute(text("INSERT INTO teams (id, name, created_at) VALUES (:t, 'own', :at)"), {"t": team, **at})
+            for name, source, token, auth, forward in shapes:
+                conn.execute(text(
+                    "INSERT INTO webhooks (id, team_id, name, source, path_token, secret_name, generic_auth, "
+                    "forward_url, enabled, created_at, updated_at) VALUES (:i, :t, :n, :s, :k, :n, :a, :f, :on, :at, :at)"),
+                    {"i": new_id(), "t": team, "n": name, "s": source, "k": token, "a": auth, "f": forward,
+                     "on": True, **at})
+        migrate(url)
+        with engine.begin() as conn:
+            for name, *_ in shapes:
+                secret_store.set_secret(conn, keyring, team_id=team, name=name, value=SECRET, actor_id=None)
+    finally:
+        engine.dispose()
+    engine = make_engine(url)
+    try:
+        recorder = _Recorder()
+        _patch_httpx(monkeypatch, recorder)
+        client = make_client(engine, keyring, clock)
+        gh = _repo()
+        slack = _body({"type": "event_callback", "event_id": "E1", "team_id": "T1", "event": {"type": "message"}})
+        ci = _body({"kind": "build"})
+        sends = [("tok-gh", gh, _github(gh)), ("tok-s1", slack, _slack(slack, clock)),
+                 ("tok-s2", slack, _slack(slack, clock)),
+                 ("tok-ci", ci, {"Authorization": f"Bearer {SECRET}", "Content-Type": "application/json"})]
+        for token, raw, headers in sends:
+            response = client.post(f"/hooks/{token}", content=raw, headers=headers)
+            assert response.status_code == 200 and response.json()["status"] != "held", token
+        assert [str(r.url) for r in recorder.requests] == [f[4] for f in shapes]
+        with engine.connect() as conn:
+            assert {r.approval for r in conn.execute(select(webhooks)).all()} == {"approved"}
+            assert [d.status for d in conn.execute(select(webhook_deliveries)).all()] == ["ignored"] * 4
+    finally:
+        engine.dispose()
+
+
+def test_a_rule_without_a_key_queues_exactly_as_before(sqlite_engine, lead, world):
+    assert hooks.check_rule({}) == {"order": 0, "stop": False, "shadow": False, "dry": False, "events": [],
+                                    "conditions": [], "inputs": {}, "secrets": []}
+    hook = _hook(lead, world)
+    rule = _rule(lead, hook, world.wf, events=["pull_request"], inputs={"pr": "$.number"})
+    assert "debounce_seconds" not in rule["config"] and "concurrency" not in rule["config"]
+    for n in range(2):
+        raw = _body({"number": 7, "n": n})
+        lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"d-{n}"))
+    rows = _jobs(sqlite_engine)
+    assert [r.status for r in rows] == ["queued", "queued"]
+    assert {(r.concurrency_key, r.not_before, r.superseded_by) for r in rows} == {(None, None, None)}
+
+
+def test_a_synchronize_storm_leaves_one_job_after_ten_quiet_minutes(sqlite_engine, lead, world, clock):
+    hook = _hook(lead, world)
+    rule = _rule(lead, hook, world.wf, events=["pull_request"], key=["repository.full_name", "number"],
+                 concurrency="supersede", sticky=["full"], inputs={"pr": "$.number", "full": "$.full"})
+    assert rule["config"]["debounce_seconds"] == hooks.PR_QUIET_S
+    for n in range(10):
+        raw = _body({"action": "synchronize", "number": 7, "repository": {"full_name": "Acme/App"},
+                     **({"full": True} if n == 3 else {})})
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=f"s-{n}")).json() == {
+            "status": "accepted", "jobs": 1}
+        clock.advance(seconds=1)
+    other = _body({"action": "synchronize", "number": 8, "repository": {"full_name": "Acme/App"}})
+    lead.client.post(_path(hook), content=other, headers=_github(other, delivery="other"))
+    rows = _jobs(sqlite_engine)
+    queued = [r for r in rows if r.status == "queued"]
+    assert [r.status for r in rows].count("superseded") == 9
+    assert [r.concurrency_key for r in queued] == ["Acme/App#7", "Acme/App#8"]
+    newest = queued[0]
+    assert newest.not_before.replace(tzinfo=None) == (clock() - timedelta(seconds=1) + timedelta(minutes=10)) \
+        .replace(tzinfo=None)
+    assert newest.inputs == {"pr": 7, "full": True}
+    storm = [r for r in rows if r.concurrency_key == "Acme/App#7"]
+    assert [r.superseded_by for r in storm[:-1]] == [r.id for r in storm[1:]] and storm[-1].id == newest.id
+    listed = lead.client.get("/api/jobs").json()["jobs"]
+    assert {j["id"] for j in listed} == {r.id for r in queued}
+    assert {j["concurrency_key"] for j in listed} == {"Acme/App#7", "Acme/App#8"} and listed[0]["not_before"]
+    superseded = lead.client.get("/api/jobs?status=superseded").json()["jobs"]
+    assert len(superseded) == 9 and superseded[0]["superseded_by"] == newest.id
+
+
+@pytest.mark.parametrize("config,message", [
+    ({"concurrency": "supersede"}, "needs a key"),
+    ({"key": "number", "concurrency": "queue"}, "list of 1 to 3"),
+    ({"key": ["a", "b", "c", "d"]}, "list of 1 to 3"),
+    ({"key": ["a b"]}, "dotted path"),
+    ({"key": ["number"], "concurrency": "fifo"}, "concurrency must be"),
+    ({"key": ["number"], "debounce_seconds": 3601}, "debounce_seconds"),
+    ({"key": ["number"], "concurrency": "queue", "cancel_running": True}, "need concurrency supersede"),
+    ({"key": ["number"], "concurrency": "supersede", "sticky": ["bad-name"]}, "input names"),
+])
+def test_bad_concurrency_settings_are_refused(config, message):
+    with pytest.raises(hooks.WebhookError, match=message):
+        hooks.check_rule(config)
+
+
+def test_render_key_needs_every_path():
+    assert hooks.render_key(["repo", "n"], {"repo": "a/b", "n": 3}) == "a/b#3"
+    assert hooks.render_key(["repo", "n"], {"repo": "a/b"}) is None
+    assert hooks.render_key(["flag"], {"flag": True}) is None
+
+
+def test_the_pull_request_quiet_period_defaults_only_for_supersede():
+    events = {"events": ["pull_request"], "key": ["number"]}
+    assert hooks.check_rule({**events, "concurrency": "supersede"})["debounce_seconds"] == hooks.PR_QUIET_S
+    assert "debounce_seconds" not in hooks.check_rule({**events, "concurrency": "queue"})
+    assert "debounce_seconds" not in hooks.check_rule(events)

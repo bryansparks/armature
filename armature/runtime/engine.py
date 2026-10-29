@@ -7,9 +7,12 @@ import uuid
 import time
 from pathlib import Path
 from contextvars import ContextVar
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Callable
-from armature.spec.models import HarnessSpec, Stage
+from armature.spec.models import AgentStep, HarnessSpec, Stage
 from armature.spec.loader import load_spec
+from armature.spec.calls import BundleCallResolver, CallResolver
 from armature.spec.context import (
     MISSION_LAYER_NAME, WORK_UNIT_LAYER_NAME, EffectiveContextPolicy,
     ordered_layers, resolve_effective_policy,
@@ -19,7 +22,16 @@ from armature.runtime.context import ContextManager
 from armature.runtime.prompt import PromptAssembler
 from armature.nodes.llm import LLMNode
 from armature.nodes.script import ScriptNode
-from armature.nodes.gate import HumanGateNode
+from armature.nodes.gate import (
+    CHECKPOINT_FILE,
+    GATE_DIR_ENV,
+    GateSuspended,
+    HumanGateNode,
+    gate_digest,
+    gate_message,
+    kill_descendants,
+    write_gate,
+)
 from armature.nodes.stub import StubNode, StubOutputs
 from armature.nodes.provider_errors import classify_provider_error
 from armature.registry.registry import ToolRegistry
@@ -31,6 +43,7 @@ from armature.state.traces import TraceStore, TraceRecord
 from armature.telemetry import get_tracer
 from armature.events import Emitter, NullEmitter
 from armature.events.engine import forward_engine_event
+from armature.events.sign import read_engine_key, sign_engine
 from armature.events.env import child_env
 from armature.events.register import register_run, registration_body
 
@@ -167,6 +180,17 @@ def _apply_context_never(never: frozenset[str], context: dict[str, Any]) -> dict
     return filtered
 
 
+def _agent_role(stage: Stage, context: dict[str, Any]) -> str:
+    """What the run log groups an agent session under: its fan-out item's name, else the stage id."""
+    branch = _FAN_OUT_BRANCH.get()
+    if branch is None or branch[1] != stage.id:
+        return stage.id
+    item = context.get(stage.partition_key or "item")
+    if isinstance(item, dict):
+        item = item.get("name") or item.get("role")
+    return item if isinstance(item, str) and item else stage.id
+
+
 class Harness:
     @property
     def _on_event(self) -> Callable[[str, dict[str, Any]], None] | None:
@@ -244,6 +268,16 @@ class Harness:
         env["ARMATURE_WITH"] = json.dumps(values, default=str)
         return env, {**context, "with": values}
 
+    async def _tool_env(self, stage, adapter) -> dict[str, str]:
+        """A built-in pack step's grant to call the server's tools, for that step's child only."""
+        from armature.packs import is_builtin
+        from armature.packs.tool import TOKEN_ENV, URL_ENV, request_grant
+        url, engine = os.environ.get(URL_ENV), self._engine_key
+        if not is_builtin(adapter.pack_dir) or not url or not engine or not self._events.enabled:
+            return {}
+        tools = [adapter.name.replace("/", ".", 1)]
+        return {TOKEN_ENV: await asyncio.to_thread(request_grant, url, self._events.token, stage.id, tools, engine)}
+
     def __init__(
         self,
         spec: HarnessSpec,
@@ -256,10 +290,20 @@ class Harness:
         adapter_registry=None,
         emitter: Emitter | None = None,
         parent_step: str | None = None,
+        call_resolver: CallResolver | None = None,
+        engine_key: tuple[str, str] | None = None,
     ):
+        # A child run in this process signs with the key its parent hands it, under the root run's id. A root run
+        # reads its key first, before this process starts anything, so the pipe holding it is closed when it does.
+        if engine_key is None:
+            engine_key = read_engine_key()
+            engine_key = engine_key if parent_step is None and emitter is None else None
+        self._engine_key = engine_key
+        self._gate_digest: str | None = None
+        self._call_resolver = call_resolver if call_resolver is not None else BundleCallResolver.for_spec(spec)
         if validate:
             from armature.spec.validator import validate_spec
-            validate_spec(spec)
+            validate_spec(spec, call_resolver=self._call_resolver)
 
         self._spec = spec
         self._stubs = StubOutputs.from_env()
@@ -415,13 +459,19 @@ class Harness:
                 run_id=self._run_id,
             )
 
-        if self._spec.checkpoint:
+        # Only the run a job started pauses at a gate. A called or child workflow shares its process and env.
+        gate_dir = os.environ.get(GATE_DIR_ENV)
+        top_level = parent_step is None and emitter is None
+        self._gate_dir = Path(gate_dir) if gate_dir and top_level else None
+        self._nested_gate = bool(gate_dir) and not top_level
+        if self._spec.checkpoint or self._gate_dir is not None:
             from armature.runtime.checkpoint import CheckpointStore, SessionLock
+            checkpoint_dir = self._gate_dir or base_dir
             self._checkpoint: "CheckpointStore | None" = CheckpointStore(
-                base_dir / "checkpoint.json"
+                checkpoint_dir / CHECKPOINT_FILE
             )
             self._session_lock: "SessionLock | None" = SessionLock(
-                base_dir / "session.lock"
+                checkpoint_dir / "session.lock"
             )
         else:
             self._checkpoint = None
@@ -559,6 +609,10 @@ class Harness:
                 stage_kind = "tool_call"
             elif stage.adapter:
                 stage_kind = "script"
+            elif stage.call:
+                stage_kind = "call"
+            elif isinstance(stage.agent, AgentStep):
+                stage_kind = "agent"
             else:
                 stage_kind = "llm"
             role_label = f"{stage.role.name} ({stage.role.type.value})" if stage.role else None
@@ -581,6 +635,7 @@ class Harness:
         tracer = get_tracer()
 
         _llm_node: "LLMNode | None" = None
+        _agent_node = None
         _stage_type = "unknown"
 
         _stage_succeeded = False
@@ -626,11 +681,70 @@ class Harness:
                         node = SubagentNode(
                             stage=stage, session_dir=self._session_dir,
                             emitter=self._events, parent_step=stage.id,
+                            call_resolver=self._call_resolver, engine_key=self._engine_key,
                         )
-                        result = await node.execute(context)
-                        # Child-run spend is observed spend of this run
-                        # (design §2.3) — meter the node's accumulated total.
-                        self._total_cost_usd += getattr(node, "total_cost_usd", 0.0)
+                        try:
+                            result = await node.execute(context)
+                        finally:
+                            # Child-run spend is observed spend of this run
+                            # (design §2.3), failed attempts included.
+                            self._total_cost_usd += node.total_cost_usd
+                    elif stage.call:
+                        _stage_type = "call"
+                        from armature.nodes.call import CallNode
+                        node = CallNode(
+                            stage=stage, resolver=self._call_resolver, session_dir=self._session_dir,
+                            emitter=self._events, parent_step=stage.id, engine_key=self._engine_key,
+                        )
+                        try:
+                            result = await node.execute(context)
+                        finally:
+                            self._total_cost_usd += node.total_cost_usd
+                        self._emit("log", stage.id, event="call", workflow=stage.call.workflow,
+                                   version=node.resolved_version)
+                    elif isinstance(stage.agent, AgentStep):
+                        _stage_type = "agent"
+                        from armature.nodes.agent import AgentNode
+                        limit = self._spec.contracts.max_llm_calls
+                        if limit > 0 and self._llm_call_count >= limit:
+                            raise RuntimeError(
+                                f"max_llm_calls limit ({limit}) reached — "
+                                f"stage '{stage.id}' cannot execute"
+                            )
+                        # Reserved now so concurrent fan-out branches see it, then corrected to the sessions run.
+                        self._llm_call_count += 1
+                        _agent_node = AgentNode(
+                            stage, root=self._session_dir / "agents", step_id=stage.id,
+                            emitter=(SimpleNamespace(emit=self._emit, redact=self._events.redact)
+                                     if self._events.enabled else None),
+                            fields={"role": _agent_role(stage, context)},
+                        )
+                        try:
+                            result = await _agent_node.execute(context)
+                        finally:
+                            self._total_cost_usd += _agent_node.total_cost_usd
+                            self._llm_call_count += _agent_node.sessions - 1
+                        self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
+                        await self._record_trace(TraceRecord(
+                            run_id=self._run_id,
+                            workflow_name=self._spec.name,
+                            stage_id=stage.id,
+                            role_type="agent",
+                            model=_agent_node.model,
+                            latency_ms=(time.monotonic() - t0) * 1000,
+                            success=True,
+                            output_valid=True,
+                            spec_version=self._spec_version,
+                            policy_version=self._policy_version,
+                            context_policy=(
+                                gov.as_dict()
+                                if gov is not None and self._record_context_policy else None
+                            ),
+                            inputs={k: str(v)[:200] for k, v in context.items()},
+                            outputs={k: str(v)[:(_carry_output_cap(stage.id, self._spec))] for k, v in result.items()},
+                            inputs_provenance=dict(self._get_provenance()),
+                            active_skill_ids=list(stage.agent.skills),
+                        ))
                     elif stage.tool_call:
                         _stage_type = "tool_call"
                         from armature.nodes.tool_call import ToolCallNode
@@ -642,6 +756,7 @@ class Harness:
                         if adapter is None:
                             raise ValueError(f"Adapter '{stage.adapter}' not defined in spec")
                         script_env, script_context = self._script_inputs(stage, adapter, context)
+                        script_env.update(await self._tool_env(stage, adapter))
                         node = ScriptNode(
                             adapter=adapter, env=script_env,
                             emit=self._emit if self._events.enabled else None, step_id=stage.id,
@@ -787,12 +902,15 @@ class Harness:
                 except Exception as exc:
                     span.record_exception(exc)
                     span.set_attribute("success", False)
-                    if _stage_type in ("llm", "script"):
+                    if _stage_type in ("llm", "script", "agent"):
                         try:
                             await self._ensure_traces()
                             _fail_latency = (time.monotonic() - t0) * 1000
-                            _fail_role = stage.role.type.value if _stage_type == "llm" else "script"
-                            _fail_model = (_llm_node._resolve_model() if _llm_node else "unknown") if _stage_type == "llm" else ""
+                            _fail_role = stage.role.type.value if _stage_type == "llm" else _stage_type
+                            if _stage_type == "llm":
+                                _fail_model = _llm_node._resolve_model() if _llm_node else "unknown"
+                            else:
+                                _fail_model = _agent_node.model if _agent_node else ""
                             await self._traces.record(TraceRecord(
                                 run_id=self._run_id,
                                 workflow_name=self._spec.name,
@@ -905,7 +1023,7 @@ class Harness:
         async def _run_one(item_index: int, item: Any) -> Any:
             async with semaphore:
                 per_ctx = {**context, partition_key: item}
-                if stage.subagent_spec is not None:
+                if stage.subagent_spec is not None or stage.call is not None:
                     # Reserved context key (same convention as the loop
                     # machinery's _iteration) letting SubagentNode give each
                     # engine-fanned child a distinct session directory.
@@ -1014,14 +1132,14 @@ class Harness:
         """Execute stage with deliberate iteration (not retry-on-failure)."""
         # If the entire loop completed in a prior run, return the cached result.
         if self._checkpoint is not None and stage.id in self._checkpoint_prior:
-            if self._on_event:
-                self._on_event("stage_resumed", {"stage": stage.id})
+            self._resumed(stage, self._checkpoint_prior[stage.id], {"stage": stage.id})
             return self._checkpoint_prior[stage.id]
 
         loop_cfg = stage.loop
         var_name = loop_cfg.iteration_var
         result: Any = None
         iteration_ctx = dict(context)
+        loop_t0 = time.monotonic()
 
         for iteration_num in range(1, loop_cfg.max_iterations + 1):
             is_last = (iteration_num == loop_cfg.max_iterations)
@@ -1077,6 +1195,18 @@ class Harness:
                     self._checkpoint_write(stage.id, result)
                 return result
 
+            elapsed = time.monotonic() - loop_t0
+            if not is_last and loop_cfg.timeout_s is not None and elapsed >= loop_cfg.timeout_s:
+                reason = (f"loop.timeout_s={loop_cfg.timeout_s}s spent after {iteration_num} "
+                          f"round(s) ({elapsed:.1f}s) before until was met")
+                if isinstance(result, dict):
+                    result = {**result, "_loop_stopped": reason}
+                if self._on_event:
+                    self._on_event("loop_stopped", {
+                        "stage": stage.id, "iteration": iteration_num, "reason": reason,
+                    })
+                break
+
             if not is_last and loop_cfg.backoff_s is not None:
                 delay = min(
                     loop_cfg.backoff_s * (2 ** (iteration_num - 1)),
@@ -1101,6 +1231,33 @@ class Harness:
             return result
         from armature.runtime.truncation import truncate_result
         return truncate_result(result, limit)
+
+    def _resumed(self, stage: Stage, result: Any, event_data: dict[str, Any]) -> None:
+        """Report a stage a checkpoint answered. A run the server resumes already has its finished steps, so only
+        a gate's answer is news there."""
+        if not self._on_event:
+            return
+        if self._gate_dir is None:
+            self._on_event("stage_resumed", event_data)
+        elif stage.gate == "human":
+            self._on_event("stage_complete", {**event_data, "elapsed_s": 0, "output": result})
+
+    def _suspend_payload(self, paused: GateSuspended) -> dict[str, Any]:
+        payload = {"step_id": paused.stage.id, "key": paused.key, "digest": self._gate_digest,
+                   "ts": datetime.now(timezone.utc).isoformat(timespec="microseconds")}
+        if self._engine_key is not None:
+            run_id, key = self._engine_key
+            payload["sig"] = sign_engine(key, {"kind": "run_suspend", "run_id": run_id, **payload})
+        return payload
+
+    def _write_gate(self, paused: GateSuspended) -> None:
+        # Through JSON first, so the digest covers exactly what the host will read back.
+        request = json.loads(json.dumps({
+            "step_id": paused.stage.id, "key": paused.key, "present": paused.present,
+            "checkpoint": {**self._checkpoint_prior, **self._checkpoint_loop_iters},
+        }, default=str))
+        write_gate(self._gate_dir, request)
+        self._gate_digest = gate_digest(request)
 
     def _checkpoint_write(
         self, stage_id: str, result: Any, _loop_iteration: int | None = None
@@ -1145,11 +1302,10 @@ class Harness:
         _cp_store = self._checkpoint_loop_iters if _loop_iteration is not None else self._checkpoint_prior
 
         if self._checkpoint is not None and _cp_key in _cp_store:
-            if self._on_event:
-                event_data: dict[str, Any] = {"stage": stage.id}
-                if _loop_iteration is not None:
-                    event_data["iteration"] = _loop_iteration
-                self._on_event("stage_resumed", event_data)
+            event_data: dict[str, Any] = {"stage": stage.id}
+            if _loop_iteration is not None:
+                event_data["iteration"] = _loop_iteration
+            self._resumed(stage, _cp_store[_cp_key], event_data)
             return _cp_store[_cp_key]
 
         # Evaluate skip_if (negative gate) and condition (positive gate).
@@ -1172,6 +1328,16 @@ class Harness:
                 if self._on_event:
                     self._on_event("stage_skipped", {"stage": stage.id, "reason": "condition"})
                 return {"_skipped": True}
+
+        if stage.gate == "human" and self._stubs is None and (self._gate_dir is not None or self._nested_gate):
+            if self._nested_gate:
+                raise RuntimeError(f"Stage '{stage.id}' is a human gate in a called workflow. Only the workflow "
+                                   "a job runs can pause at one.")
+            gov = self._context_policies.get(stage.id)
+            shown = _apply_context_never(gov.never, context) if gov is not None and gov.never else context
+            if self._on_event:
+                self._on_event("stage_start", {"stage": stage.id, "kind": "gate", "role": None})
+            raise GateSuspended(stage, _cp_key, gate_message(stage, shown))
 
         if stage.partition_source is not None:
             try:
@@ -1242,13 +1408,11 @@ class Harness:
             self._emit_step_failed(stage, exc)
             raise
 
-    def _validate_inputs(self, context: dict[str, Any]) -> None:
-        for inp in self._spec.contracts.inputs:
-            name = inp.get("name")
-            if name is None:
-                continue
-            if inp.get("required", False) and (name not in context or context[name] is None):
-                raise ValueError(f"Required input '{name}' missing from context")
+    def _validate_inputs(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Coerce declared inputs in ``context`` to their types and apply defaults; raises InputError."""
+        from armature.spec.contract_io import resolve_inputs
+        context.update(resolve_inputs(self._spec.contracts.inputs, context))
+        return context
 
     def _validate_outputs(self, results: dict[str, Any]) -> None:
         for out in self._spec.contracts.outputs:
@@ -1296,7 +1460,7 @@ class Harness:
         if lifecycle:
             self._emit("run_start", workflow=self._spec.name, spec_version=self._spec_version)
         t0 = time.monotonic()
-        status, error = "failed", None
+        status, error, paused = "failed", None, None
         try:
             results = await self._run_guarded(inputs, force=force)
             status = "succeeded"
@@ -1304,11 +1468,16 @@ class Harness:
         except asyncio.CancelledError:
             status = "cancelled"
             raise
+        except GateSuspended as exc:
+            paused = exc
+            raise
         except BaseException as exc:
             error = f"{type(exc).__name__}: {exc}"
             raise
         finally:
-            if lifecycle:
+            if lifecycle and paused is not None:
+                self._emit("run_suspend", **self._suspend_payload(paused), elapsed_s=round(time.monotonic() - t0, 2))
+            elif lifecycle:
                 self._emit(
                     "run_end", status=status, error=error,
                     elapsed_s=round(time.monotonic() - t0, 2),
@@ -1322,10 +1491,17 @@ class Harness:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
-        if self._session_lock is not None:
-            with self._session_lock:
+        if self._session_lock is None:
+            return await self._run_locked(inputs, force=force)
+        with self._session_lock:
+            try:
                 return await self._run_locked(inputs, force=force)
-        return await self._run_locked(inputs, force=force)
+            except GateSuspended as paused:
+                # The checkpoint already holds every finished stage, so the request goes out after it.
+                if self._gate_dir is not None:
+                    kill_descendants()
+                    self._write_gate(paused)
+                raise
 
     async def _run_locked(
         self,

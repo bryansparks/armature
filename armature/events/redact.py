@@ -14,6 +14,7 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsk-ant-[\w-]+"),
     re.compile(r"\bABSK[A-Za-z0-9+/=]+"),
     re.compile(r"\bATATT[\w=-]+"),
+    re.compile(r"\blin_api_\w+"),
     re.compile(r"\bAKIA\w{16}"),
     re.compile(r"\b(Authorization)(:?\s*)(?:(?:Bearer|Basic|token)\s+)?\S+", re.IGNORECASE),
     re.compile(r"\b(Bearer)(\s+)\S+", re.IGNORECASE),

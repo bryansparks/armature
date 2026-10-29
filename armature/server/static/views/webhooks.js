@@ -2,15 +2,28 @@ import { api, listOf } from '../api.js';
 import { attempt, card, clear, confirmDialog, element, empty, errorBox, link, loading, pageHeader, statusChip, table, tabs, when } from '../dom.js';
 import { hashFor } from '../router.js';
 import { canManageTeam, isAdmin } from '../session.js';
+import { teamConnectionsPath } from './connections.js';
 
-export const SOURCES = { github: 'GitHub', slack: 'Slack', generic: 'Generic' };
+export const SOURCES = { github: 'GitHub', slack: 'Slack', jira: 'Jira', linear: 'Linear', generic: 'Generic' };
+const SETUP = {
+  jira: 'In Jira, open Settings, System, WebHooks, and create a webhook. Paste the URL, paste the secret into Secret, and pick the events.',
+  linear: 'In Linear, open Settings, API, Webhooks, and add a webhook with the URL. Linear makes the signing secret: paste it below under Secret.',
+};
 
 export const webhooksPath = (teamId) => `/api/teams/${encodeURIComponent(teamId)}/webhooks`;
 export const webhookPath = (webhookId) => `/api/webhooks/${encodeURIComponent(webhookId)}`;
 export const rulePath = (ruleId) => `/api/rules/${encodeURIComponent(ruleId)}`;
 export const webhookHref = (webhookId) => hashFor('webhook', [webhookId]);
 
-const DELIVERY_TONE = { accepted: 'ok', ignored: 'unknown', duplicate: 'unknown', rejected: 'bad', error: 'bad' };
+const SOURCE_KIND = { github: 'github_app', slack: 'slack', jira: 'jira', linear: 'linear' };
+
+export function connectionOptions(connections, source) {
+  return [['', 'None: a team secret'], ...connections.filter((connection) => connection.kind === SOURCE_KIND[source])
+    .map((connection) => [connection.id, `Connection ${connection.name}`])];
+}
+
+const CONCURRENCY = { none: 'Run them all', queue: 'One at a time, in order', supersede: 'One at a time, newest wins' };
+const DELIVERY_TONE = { accepted: 'ok', ignored: 'unknown', duplicate: 'unknown', rejected: 'bad', error: 'bad', held: 'warn' };
 
 export function splitList(text) {
   return String(text || '').split(',').map((item) => item.trim()).filter(Boolean);
@@ -26,7 +39,7 @@ export function prettyMapping(text) {
 }
 
 export function mappingText(config) {
-  return JSON.stringify({ conditions: config?.conditions || [], inputs: config?.inputs || {} }, null, 2);
+  return JSON.stringify({ conditions: config?.conditions || [], inputs: config?.inputs || {}, ...(config?.thread ? { thread: config.thread } : {}) }, null, 2);
 }
 
 export function ruleBody(values) {
@@ -34,12 +47,51 @@ export function ruleBody(values) {
     order: Number.parseInt(values.order, 10) || 0,
     stop: Boolean(values.stop),
     shadow: Boolean(values.shadow),
+    dry: Boolean(values.dry),
     events: splitList(values.events),
     secrets: splitList(values.secrets),
   };
   if (values.project_from?.trim()) config.project_from = values.project_from.trim();
   if (values.event_from?.trim()) config.event_from = values.event_from.trim();
+  // An imported rule keeps its import hash, so a later import can tell the rule was edited.
+  if (values.import_hash) config.import_hash = values.import_hash;
+  // A rule that only cancels keeps that flag through a save. The form has no control for it.
+  if (values.cancel_only) config.cancel_only = true;
+  const key = splitList(values.key);
+  if (key.length) config.key = key;
+  if (values.concurrency && values.concurrency !== 'none') config.concurrency = values.concurrency;
+  if (String(values.debounce_seconds ?? '').trim()) config.debounce_seconds = Number.parseInt(values.debounce_seconds, 10) || 0;
+  if (config.concurrency === 'supersede') {
+    config.cancel_running = Boolean(values.cancel_running);
+    const sticky = splitList(values.sticky);
+    if (sticky.length) config.sticky = sticky;
+  }
   return { workflow_id: values.workflow_id, enabled: Boolean(values.enabled), config, mapping: values.mapping ?? '' };
+}
+
+const SENDER_KINDS = [
+  [/^github:repo:(.+)$/, 'repository'], [/^github:installation:(.+)$/, 'installation'], [/^jira:cloud:(.+)$/, 'Jira site'],
+  [/^jira:(.+)$/, 'Jira site'], [/^linear:org:(.+)$/, 'Linear workspace'], [/^slack:team:(.+)$/, 'Slack workspace'],
+];
+
+export function senderLabel(sender) {
+  if (!sender) return 'an unknown sender';
+  for (const [pattern, kind] of SENDER_KINDS) {
+    const match = pattern.exec(sender);
+    if (match) return `${kind} ${match[1]}`;
+  }
+  return sender;
+}
+
+// Pending: approve or reject. Approved: replay what pinning admits, approve to add any other sender, or dismiss.
+// Only a generic webhook can approve a delivery with no sender, since there is nothing to pin.
+export function heldActions(webhook, delivery) {
+  if (delivery.status !== 'held') return [];
+  const pending = webhook.approval !== 'approved';
+  if (!delivery.sender && webhook.source !== 'generic') return [pending ? 'reject' : 'dismiss'];
+  if (pending) return ['approve', 'reject'];
+  const admitted = !webhook.pinned_senders || webhook.pinned_senders.includes(delivery.sender);
+  return [admitted ? 'replay' : 'approve', 'dismiss'];
 }
 
 export function conditionsSummary(conditions) {
@@ -126,18 +178,34 @@ function createForm(team, onCreated) {
   const nameInput = textInput(`${prefix}-name`, '', { required: true, maxlength: 100, placeholder: 'github-org' });
   const sourceSelect = element('select', { id: `${prefix}-source` }, Object.entries(SOURCES).map(([value, label]) => element('option', { value }, label)));
   const generic = genericFields(prefix, null, sourceSelect);
+  const setup = element('p', { class: 'note' });
+  const connectionSelect = element('select', { id: `${prefix}-connection` });
+  let connections = [];
+  const syncSetup = () => {
+    clear(setup).append(SETUP[sourceSelect.value] || '');
+    clear(connectionSelect).append(...connectionOptions(connections, sourceSelect.value).map(([value, label]) => element('option', { value }, label)));
+  };
+  sourceSelect.addEventListener('change', syncSetup);
+  syncSetup();
+  api(teamConnectionsPath(team.id)).then((payload) => {
+    connections = listOf(payload, 'connections');
+    syncSetup();
+  }).catch(() => {});
   const status = element('div', { role: 'status' });
   const createButton = element('button', { type: 'submit', class: 'primary' }, 'Create webhook');
   const form = element('form', { class: 'stacked-form' },
     element('h2', { class: 'inline' }, 'Add a webhook'),
     element('label', { class: 'stacked', for: nameInput.id }, 'Name', nameInput),
-    element('label', { class: 'stacked', for: sourceSelect.id }, 'Source', sourceSelect),
+    element('label', { class: 'stacked', for: sourceSelect.id }, 'Source', sourceSelect), setup,
+    element('label', { class: 'stacked', for: connectionSelect.id }, 'Verify deliveries with', connectionSelect),
+    element('p', { class: 'note' }, 'A new webhook holds its deliveries until you approve one.'),
     generic.root, status, element('div', { class: 'wf-actions' }, createButton));
   form.addEventListener('submit', async (submitEvent) => {
     submitEvent.preventDefault();
-    const body = { name: nameInput.value.trim(), source: sourceSelect.value, ...generic.values() };
+    const body = { name: nameInput.value.trim(), source: sourceSelect.value, ...generic.values(), ...(connectionSelect.value ? { connection_id: connectionSelect.value } : {}) };
     const created = await attempt(status, createButton, async () => {
       const made = await api(webhooksPath(team.id), { method: 'POST', body });
+      if (made.webhook.connection_id) return { webhook: made.webhook, secret: null };
       const secret = await api(`${webhookPath(made.webhook.id)}/secret`, { method: 'POST', body: {} });
       return { webhook: made.webhook, secret: secret.secret };
     });
@@ -162,7 +230,7 @@ function teamPanel(team, panel) {
     }
     clear(listSlot).append(card(hooks.length ? table(['Name', 'Source', 'Enabled', 'Last delivery'], hooks.map((webhook) => [
       link(webhookHref(webhook.id), webhook.name), SOURCES[webhook.source] || webhook.source,
-      webhook.enabled ? 'Yes' : 'No',
+      webhook.approval === 'pending' ? element('span', { class: 'state state-warn' }, 'Pending approval') : webhook.enabled ? 'Yes' : 'No',
       webhook.last_delivery ? element('span', {}, when(webhook.last_delivery.received_at), ' ', deliveryChip(webhook.last_delivery.status)) : 'Never',
     ])) : empty('This team has no webhooks yet.')));
   }
@@ -219,6 +287,12 @@ function settingsForm(webhook, onSaved) {
 }
 
 function secretSection(webhook, onSaved) {
+  if (webhook.connection_id) {
+    return card(element('h2', { class: 'inline' }, 'Secret'),
+      element('p', {}, webhook.secret_set ? 'Set' : element('span', { class: 'state state-warn' }, 'Not set'), ' on connection ', element('span', { class: 'mono' }, webhook.connection_name),
+        '. Change it on the team’s Connections tab.'),
+      webhook.source === 'slack' ? element('p', { class: 'note' }, 'Deliveries are refused until the connection is verified, so the server knows which workspace to accept.') : null);
+  }
   const status = element('div', { role: 'status' });
   const reveal = element('div');
   const generateButton = element('button', { type: 'button' }, webhook.secret_set ? 'Rotate secret' : 'Generate secret');
@@ -252,9 +326,17 @@ function ruleForm(webhook, rule, workflows, onDone, onCancel) {
   const eventFromInput = textInput(`${prefix}-event-from`, config.event_from, { placeholder: 'kind' });
   const projectInput = textInput(`${prefix}-project`, config.project_from, { placeholder: 'repository.full_name' });
   const secretsInput = textInput(`${prefix}-secrets`, (config.secrets || []).join(', '));
+  const keyInput = textInput(`${prefix}-key`, (config.key || []).join(', '), { placeholder: 'repository.full_name, number' });
+  const concurrencySelect = element('select', { id: `${prefix}-concurrency` }, Object.entries(CONCURRENCY).map(([value, label]) => element('option', { value }, label)));
+  concurrencySelect.value = config.concurrency || 'none';
+  const debounceInput = element('input', { type: 'number', id: `${prefix}-debounce`, min: 0, max: 3600, step: 1, placeholder: '600 for pull_request with a key, else 0' });
+  debounceInput.value = config.debounce_seconds === undefined ? '' : String(config.debounce_seconds);
+  const cancelRunning = checkbox(`${prefix}-cancel-running`, 'Also stop the key’s running job', config.cancel_running);
+  const stickyInput = textInput(`${prefix}-sticky`, (config.sticky || []).join(', '), { placeholder: 'full' });
   const enabled = checkbox(`${prefix}-enabled`, 'Enabled', rule ? rule.enabled : true);
   const stop = checkbox(`${prefix}-stop`, 'Stop after this rule when it matches', config.stop);
   const shadow = checkbox(`${prefix}-shadow`, 'Shadow: record the decision, queue nothing', config.shadow);
+  const dry = checkbox(`${prefix}-dry`, 'Dry: run, but record each tool call instead of sending it', config.dry);
   const mappingInput = element('textarea', { id: `${prefix}-mapping`, class: 'mono', rows: 12, spellcheck: 'false', 'aria-describedby': `${prefix}-mapping-help` });
   mappingInput.value = mappingText(config);
   mappingInput.addEventListener('blur', () => { mappingInput.value = prettyMapping(mappingInput.value); });
@@ -268,15 +350,21 @@ function ruleForm(webhook, rule, workflows, onDone, onCancel) {
     webhook.source === 'generic' ? element('label', { class: 'stacked', for: eventFromInput.id }, 'Event path in the payload (optional)', eventFromInput) : null,
     element('label', { class: 'stacked', for: projectInput.id }, 'Project from payload path (optional, matched against project repositories)', projectInput),
     element('label', { class: 'stacked', for: secretsInput.id }, 'Team secrets the run gets, comma-separated', secretsInput),
-    enabled.root, stop.root, shadow.root,
+    element('label', { class: 'stacked', for: keyInput.id }, 'Key: payload paths, comma-separated (optional)', keyInput,
+      element('span', { class: 'note' }, 'Jobs with the same key run one at a time, such as one pull request.')),
+    element('label', { class: 'stacked', for: concurrencySelect.id }, 'Jobs of one key', concurrencySelect),
+    element('label', { class: 'stacked', for: debounceInput.id }, 'Quiet period in seconds before a job starts', debounceInput),
+    cancelRunning.root, element('label', { class: 'stacked', for: stickyInput.id }, 'Inputs a newer job keeps from the one it replaces, comma-separated', stickyInput),
+    enabled.root, stop.root, shadow.root, dry.root,
     element('label', { class: 'stacked', for: mappingInput.id }, 'Conditions and inputs (YAML or JSON)', mappingInput),
-    element('p', { class: 'note', id: `${prefix}-mapping-help` }, 'conditions is a list of {path, op, value}. op is eq, ne, in, not_in, starts_with, contains, exists, or missing. starts_with and contains take text and an optional ignore_case: true. inputs maps each workflow input to "$.payload.path", "$" for the whole payload, or a literal.'),
+    element('p', { class: 'note', id: `${prefix}-mapping-help` }, 'conditions is a list of {path, op, value}. op is eq, ne, in, not_in, starts_with, contains, exists, or missing. starts_with and contains take text and an optional ignore_case: true. inputs maps each workflow input to "$.payload.path", "$" for the whole payload, or a literal. An optional thread names the thread its runs join, such as "slack:{{ event.channel }}:{{ event.thread_ts or event.ts }}".'),
     status, element('div', { class: 'wf-actions' }, saveButton, element('button', { type: 'button', onclick: onCancel }, 'Cancel')));
   form.addEventListener('submit', async (submitEvent) => {
     submitEvent.preventDefault();
     const body = ruleBody({
       workflow_id: workflowSelect.value, order: orderInput.value, events: eventsInput.value, event_from: webhook.source === 'generic' ? eventFromInput.value : '',
-      project_from: projectInput.value, secrets: secretsInput.value, enabled: enabled.input.checked, stop: stop.input.checked, shadow: shadow.input.checked, mapping: mappingInput.value,
+      project_from: projectInput.value, secrets: secretsInput.value, enabled: enabled.input.checked, stop: stop.input.checked, shadow: shadow.input.checked, dry: dry.input.checked, import_hash: config.import_hash, cancel_only: config.cancel_only, mapping: mappingInput.value,
+      key: keyInput.value, concurrency: concurrencySelect.value, debounce_seconds: debounceInput.value, cancel_running: cancelRunning.input.checked, sticky: stickyInput.value,
     });
     const path = rule ? rulePath(rule.id) : `${webhookPath(webhook.id)}/rules`;
     if (await attempt(status, saveButton, () => api(path, { method: 'POST', body }))) onDone(rule ? 'Rule saved.' : 'Rule added.');
@@ -300,7 +388,8 @@ function rulesSection(webhook, rules, workflows, onChanged) {
     });
     return [String(config.order ?? 0), rule.workflow_name || rule.workflow_id, (config.events || []).join(', ') || 'Any',
       conditionsSummary(config.conditions),
-      element('span', { class: 'chips' }, rule.enabled ? null : badge('Disabled'), config.shadow ? badge('Shadow', 'warn') : null, config.stop ? badge('Stop') : null),
+      element('span', { class: 'chips' }, rule.enabled ? null : badge('Disabled'), config.shadow ? badge('Shadow', 'warn') : null, config.dry ? badge('Dry', 'warn') : null, config.cancel_only ? badge('Cancels only') : null, config.stop ? badge('Stop') : null,
+        config.concurrency ? badge(CONCURRENCY[config.concurrency]) : null, config.debounce_seconds ? badge(`Quiet ${config.debounce_seconds}s`) : null),
       element('span', { class: 'row-actions' }, editButton, deleteButton)];
   });
   const addButton = element('button', { type: 'button', onclick: () => openForm(null) }, 'Add rule');
@@ -324,7 +413,76 @@ function decisionsTable(decisions, rules) {
   ]));
 }
 
-async function deliveryDetail(webhook, deliveryId, rules, slot) {
+function pinningSection(webhook, onChanged) {
+  if (webhook.source === 'generic' || webhook.approval !== 'approved') return null;
+  const status = element('div', { role: 'status' });
+  const post = (path, body, button) => attempt(status, button, () => api(`${webhookPath(webhook.id)}/pinning${path}`, { method: 'POST', body }));
+  if (!webhook.pinned_senders) {
+    const onButton = element('button', { type: 'button' }, 'Turn on sender pinning');
+    onButton.addEventListener('click', async () => {
+      const preview = await attempt(status, onButton, () => api(`${webhookPath(webhook.id)}/pinning`));
+      if (!preview) return;
+      if (!preview.senders.length) {
+        clear(status).append(element('p', { class: 'note' }, 'No delivery has a sender to pin yet.'));
+        return;
+      }
+      const listed = preview.senders.map(senderLabel).join(', ');
+      if (!(await confirmDialog('Turn on sender pinning?', `Only these senders are let through: ${listed}. Deliveries from anyone else are held.`, 'Turn on'))) return;
+      if (await post('', { senders: preview.senders }, onButton)) onChanged('Sender pinning is on.');
+    });
+    return element('div', {}, element('p', {}, 'Sender pinning: off. Any delivery with a valid signature is let through.'),
+      element('div', { class: 'wf-actions' }, onButton), status);
+  }
+  const offButton = element('button', { type: 'button' }, 'Turn off sender pinning');
+  offButton.addEventListener('click', async () => {
+    if (!(await confirmDialog('Turn off sender pinning?', 'Any delivery with a valid signature is let through again.', 'Turn off'))) return;
+    if (await post('/off', {}, offButton)) onChanged('Sender pinning is off.');
+  });
+  const rows = webhook.pinned_senders.map((sender) => {
+    const removeButton = element('button', { type: 'button', class: 'link-button', disabled: webhook.pinned_senders.length === 1, 'aria-label': `Remove ${senderLabel(sender)}` }, 'Remove');
+    removeButton.addEventListener('click', async () => {
+      if (!(await confirmDialog(`Remove ${senderLabel(sender)}?`, 'Its deliveries are held until you approve one again.', 'Remove'))) return;
+      if (await post('/remove', { sender }, removeButton)) onChanged('Sender removed.');
+    });
+    return [senderLabel(sender), element('span', { class: 'mono' }, sender), removeButton];
+  });
+  return element('div', {}, element('p', {}, 'Sender pinning: on. Only these senders are let through.'),
+    table(['Sender', 'Id', ''], rows), element('div', { class: 'wf-actions' }, offButton), status);
+}
+
+function heldSection(webhook, delivery, onChanged) {
+  const actions = heldActions(webhook, delivery);
+  if (!actions.length) return null;
+  const status = element('div', { role: 'status' });
+  const sender = senderLabel(delivery.sender);
+  const release = (action, button) => attempt(status, button, () => api(`${webhookPath(webhook.id)}/deliveries/${encodeURIComponent(delivery.id)}/${action}`, { method: 'POST', body: {} }));
+  const done = (released) => {
+    if (!released) return;
+    onChanged(released.replayed ? `Replayed: ${released.status}, ${released.jobs} job(s) queued.` : 'Approved. No payload was stored, so nothing was replayed.');
+  };
+  const buttons = actions.map((action) => {
+    const button = element('button', { type: 'button', class: action === 'approve' || action === 'replay' ? 'primary' : null }, { approve: 'Approve', replay: 'Replay', reject: 'Reject', dismiss: 'Dismiss' }[action]);
+    button.addEventListener('click', async () => {
+      if (action === 'approve') {
+        if (!(await confirmDialog(`Approve ${sender}?`, 'Deliveries from this sender are let through from now on, and this delivery runs through the rules now.', 'Approve'))) return;
+        done(await release('approve', button));
+      } else if (action === 'replay') {
+        done(await release('replay', button));
+      } else if (action === 'dismiss') {
+        if (await release('dismiss', button)) onChanged('Dismissed. The delivery queued nothing.');
+      } else {
+        if (!(await confirmDialog(`Reject and delete ${webhook.name}?`, 'Its URL stops working, and its rules, deliveries, and team secret are deleted.', 'Reject'))) return;
+        if (await attempt(status, button, () => api(`${webhookPath(webhook.id)}/reject`, { method: 'POST', body: {} }))) location.hash = hashFor('webhooks', [webhook.team_id]);
+      }
+    });
+    return button;
+  });
+  return element('div', { class: 'stacked-form' }, element('h4', {}, 'Held'),
+    element('p', {}, 'Sent by ', sender, delivery.sender ? element('span', { class: 'mono' }, ` (${delivery.sender})`) : null, '. Approve only a sender you recognize.'),
+    element('div', { class: 'wf-actions' }, ...buttons), status);
+}
+
+async function deliveryDetail(webhook, deliveryId, rules, slot, onChanged) {
   clear(slot).append(loading());
   let delivery;
   try {
@@ -341,20 +499,21 @@ async function deliveryDetail(webhook, deliveryId, rules, slot) {
   });
   clear(slot).append(card(element('h3', {}, `Delivery ${when(delivery.received_at)}`),
     element('p', {}, deliveryChip(delivery.status), ' ', delivery.reason || ''),
+    heldSection(webhook, delivery, onChanged),
     element('h4', {}, 'Headers'), element('pre', { class: 'setting-value' }, JSON.stringify(delivery.headers, null, 2)),
     element('h4', {}, 'Payload'), delivery.payload === null ? empty('No payload stored. Rejected deliveries and bodies over 1 MB keep none.') : element('pre', { class: 'payload' }, prettyMapping(delivery.payload)),
     element('div', { class: 'wf-actions' }, testButton), results));
 }
 
-function deliveriesSection(webhook, rules) {
+function deliveriesSection(webhook, rules, onChanged) {
   const listSlot = element('div', {}, loading());
   const detailSlot = element('div');
   const moreSlot = element('div');
   let shown = [];
   const draw = () => {
     clear(listSlot).append(shown.length ? table(['Received', 'Event', 'Status', 'Reason', 'Matched', 'Forward', ''], shown.map((delivery) => {
-      const viewButton = element('button', { type: 'button', class: 'link-button', 'aria-label': `View delivery from ${when(delivery.received_at)}` }, 'View');
-      viewButton.addEventListener('click', () => deliveryDetail(webhook, delivery.id, rules, detailSlot));
+      const viewButton = element('button', { type: 'button', class: 'link-button', 'aria-label': `View delivery from ${when(delivery.received_at)}` }, delivery.status === 'held' ? 'Review' : 'View');
+      viewButton.addEventListener('click', () => deliveryDetail(webhook, delivery.id, rules, detailSlot, onChanged));
       return [when(delivery.received_at), delivery.event || '—', deliveryChip(delivery.status), delivery.reason || '', matchedCell(delivery.matched), delivery.forward_status || '—', viewButton];
     })) : empty('No deliveries in the last two weeks.'));
   };
@@ -398,11 +557,15 @@ async function renderDetail(root, webhookId) {
     if (!(await confirmDialog(`Delete ${webhook.name}?`, 'Its URL stops working, and its rules and deliveries are deleted. Jobs it queued stay.', 'Delete'))) return;
     if (await attempt(message, deleteButton, () => api(`${webhookPath(webhook.id)}/delete`, { method: 'POST', body: {} }))) location.hash = hashFor('webhooks', [webhook.team_id]);
   });
-  root.append(crumb, pageHeader(webhook.name), message,
+  const pending = webhook.approval === 'pending'
+    ? element('p', { class: 'note', role: 'alert' }, 'Pending approval. Verified deliveries are held and queue nothing. Review a held delivery below and approve it to start queuing jobs from its sender.')
+    : null;
+  root.append(crumb, pageHeader(webhook.name), message, pending,
     card(element('p', {}, `${SOURCES[webhook.source] || webhook.source} webhook. `, webhook.enabled ? 'Enabled.' : 'Disabled: deliveries get 404.'),
+      pinningSection(webhook, rerender), SETUP[webhook.source] ? element('p', { class: 'note' }, SETUP[webhook.source]) : null,
       copyField(`webhook-url-${webhook.id}`, 'URL for the sender', webhook.url).root),
     secretSection(webhook, rerender), settingsForm(webhook, rerender), rulesSection(webhook, rules, workflows, rerender),
-    deliveriesSection(webhook, rules), element('div', { class: 'wf-actions' }, deleteButton));
+    deliveriesSection(webhook, rules, rerender), element('div', { class: 'wf-actions' }, deleteButton));
 }
 
 export async function render(root, { name, args }) {

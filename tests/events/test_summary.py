@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from armature.events import register
+from armature.events import location, register
 from armature.events.emitter import is_must_keep
 from armature.events.summary import (
     link_url,
@@ -68,6 +68,13 @@ def test_patch_keeps_only_known_and_valid_parts():
     assert summary_patch({"title": "", "verdict": True, "links": "x", "fields": []}) == {}
 
 
+def test_patch_takes_a_known_outcome_and_never_a_risk():
+    assert summary_patch({"outcome": "pr_opened", "risk": "low"}) == {"outcome": "pr_opened"}
+    assert summary_patch({"outcome": "shipped"}) == {}
+    assert summary_patch({"outcome": ["noop"]}) == {}
+    assert merge_summary({"outcome": "recommended"}, {"outcome": "pushed"}) == {"outcome": "pushed"}
+
+
 def test_merge_later_wins_and_links_dedupe_by_url():
     first = merge_summary(None, {"title": "A", "links": [{"label": "PR", "url": "https://x/1"}], "fields": {"a": "1"}})
     second = merge_summary(first, {"verdict": "approve", "fields": {"a": "2", "b": "3"},
@@ -105,6 +112,18 @@ def test_registration_body_drops_bad_values(monkeypatch, subject, ref):
     monkeypatch.setenv("ARMATURE_TRIGGER_REF", ref)
     body = register.registration_body("w", None)
     assert body["subject"] is None and body["trigger_ref"] == {}
+
+
+def test_registration_body_names_this_machine_unless_armature_location_says_otherwise(monkeypatch):
+    monkeypatch.setattr(location, "_chip", lambda: "Apple M1")
+    monkeypatch.delenv("ARMATURE_LOCATION", raising=False)
+    assert register.registration_body("w", None)["location"]["label"] == "M1 (local)"
+    monkeypatch.setenv("ARMATURE_LOCATION", '{"kind": "aws-linux", "instance": "i-0abc"}')
+    assert register.registration_body("w", None)["location"] == {"kind": "aws-linux", "label": "AWS Linux",
+                                                                 "instance": "i-0abc"}
+    for bad in ("not json", '{"kind": "gcp"}'):
+        monkeypatch.setenv("ARMATURE_LOCATION", bad)
+        assert register.registration_body("w", None)["location"]["kind"] == "local"
 
 
 def test_registration_body_without_env(monkeypatch):

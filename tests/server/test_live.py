@@ -1,4 +1,5 @@
 """Runner keys, registration, event ingest, the writer, and the live streams, on a real server."""
+import asyncio
 import os
 import stat
 import threading
@@ -227,7 +228,9 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
     summary = detail["run"]
     assert set(summary) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "trigger_kind",
                             "started_at", "finished_at", "cost_usd", "input_tokens", "output_tokens", "rerun_of",
-                            "cancelled_by", "error", "subject", "summary", "last_seq", "dry_run", "kind", "trigger"}
+                            "cancelled_by", "error", "subject", "thread", "summary", "last_seq", "dry_run", "kind",
+                            "links", "trigger", "outcome", "outcome_source", "risk", "risk_reasons",
+                            "head_sha", "location"}
     assert summary["dry_run"] is False and summary["kind"] == "review"
     assert (summary["status"], summary["error"], summary["workflow"], summary["triggered_by"]) == \
         ("failed", "build broke", "pr-review", "octocat")
@@ -398,7 +401,8 @@ def test_runs_stream_is_scoped(live, world):
         assert {r["id"] for r in rows} == {run["run_id"]}
         assert [r["status"] for r in rows] == ["running", "succeeded"]
         assert set(rows[0]) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "started_at",
-                                "finished_at", "cost_usd", "subject", "title", "verdict", "trigger"}
+                                "finished_at", "cost_usd", "subject", "thread", "title", "verdict", "trigger",
+                                "links", "outcome", "risk", "location"}
         theirs_frames = theirs.until(lambda f: any(x.get("event") == "run" for x in f))
         assert [f["data"]["id"] for f in theirs_frames if f.get("event") == "run"] == [other_run["run_id"]]
 
@@ -592,6 +596,113 @@ def test_summary_events_merge_into_the_run(live, world):
     assert stored == {**expected, "title": "Fix the crash, again"}
 
 
+def test_outcome_reaches_the_run_and_its_list_row_but_a_runner_never_sets_risk(live, world):
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"], line("summary", None, outcome="recommended", risk="low"))
+    post(http, run["token"], line("summary", None, outcome="pushed", fields={"risk": "low"}))
+    live.flush()
+    with live.engine.connect() as conn:
+        stored = conn.execute(select(runs.c.outcome, runs.c.risk, runs.c.risk_reasons)
+                              .where(runs.c.id == run["run_id"])).first()
+    assert (stored.outcome, stored.risk, stored.risk_reasons) == ("pushed", None, None)
+    viewer = live.client(world["users"]["viewer"])
+    detail = viewer.get(f"/api/runs/{run['run_id']}").json()["run"]
+    assert (detail["outcome"], detail["risk"]) == ("pushed", None)
+    listed = viewer.get("/api/runs").json()["runs"]
+    assert [(r["outcome"], r["risk"]) for r in listed] == [("pushed", None)]
+
+
+def test_a_server_outcome_is_never_replaced_by_a_runner_summary(live, world):
+    from armature.server.writer import server_outcome
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"], line("summary", None, outcome="approved"))
+    live.flush()
+    with live.engine.begin() as conn:
+        assert conn.execute(select(runs.c.outcome_source).where(runs.c.id == run["run_id"])).scalar() == "runner"
+        server_outcome(conn, run["run_id"], "blocked")
+    post(http, run["token"], line("summary", None, outcome="approved", title="Still trying"))
+    live.flush()
+    with live.engine.connect() as conn:
+        stored = conn.execute(select(runs.c.outcome, runs.c.outcome_source, runs.c.summary)
+                              .where(runs.c.id == run["run_id"])).first()
+    assert (stored.outcome, stored.outcome_source) == ("blocked", "server")
+    assert stored.summary == {"outcome": "approved", "title": "Still trying"}
+    with pytest.raises(ValueError), live.engine.begin() as conn:
+        server_outcome(conn, run["run_id"], "shipped")
+
+
+def test_a_server_outcome_reaches_open_run_pages_and_the_live_summary(live, world):
+    from armature.server.live import run_key
+    from armature.server.writer import server_outcome
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"], line("summary", None, title="Review"))
+    live.flush()
+    sub = live.call(_subscribe(live.hub, run_key(run["run_id"])))
+    with live.engine.begin() as conn:
+        server_outcome(conn, run["run_id"], "blocked")
+        conn.execute(update(runs).where(runs.c.id == run["run_id"]).values(risk="high"))
+    live.hub.run_changed(run["run_id"])
+    frame = live.call(asyncio.wait_for(sub.queue.get(), 5)).frame
+    assert '"outcome":"blocked"' in frame and '"risk":"high"' in frame
+    post(http, run["token"], line("summary", None, outcome="approved"))
+    live.flush()
+    summary = live.hub.summary(run["run_id"])
+    assert (summary["outcome"], summary["outcome_source"], summary["risk"]) == ("blocked", "server", "high")
+
+
+def test_server_findings_join_a_live_run_as_its_own_finding_events(live, world):
+    from armature.server.db.schema import findings
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"], line("log", None, text="hi"))
+    live.flush()
+    live.hub.server_findings(run["run_id"], "decisions", [{"claim": "kept", "decision": "block", "reason": "r"}])
+    deadline = time.monotonic() + 5
+    while not live.hub.writer.pending(run["run_id"], 0) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    live.flush()
+    kinds = [(e.kind, e.step_id) for e in _stored(live.engine, run["run_id"])]
+    assert ("finding", "decisions") in kinds
+    with live.engine.connect() as conn:
+        row = conn.execute(select(findings).where(findings.c.run_id == run["run_id"])).one()
+    assert (row.decision, row.reason, row.step_id) == ("block", "r", "decisions")
+
+
+def test_server_findings_for_a_run_that_left_the_hub_are_still_stored(live, world):
+    from armature.server.db.schema import findings
+    run = register(live.client(), world["key"])
+    live.hub._loop.call_soon_threadsafe(live.hub._server_findings, run["run_id"], "decisions",
+                                        [{"claim": "kept", "decision": "suggest", "reason": "r"}])
+    deadline = time.monotonic() + 5
+    found = None
+    while found is None and time.monotonic() < deadline:
+        with live.engine.connect() as conn:
+            found = conn.execute(select(findings).where(findings.c.run_id == run["run_id"])).first()
+        time.sleep(0.02)
+    assert found is not None and (found.decision, found.step_id) == ("suggest", "decisions")
+
+
+def test_findings_keep_the_leads_decision(live, world):
+    http = live.client()
+    run = register(http, world["key"])
+    sha = "a" * 40
+    post(http, run["token"],
+         line("finding", "team_lead", path="a.py", body="kept", decision="fixed", raised_by=["security", 7, ""],
+              fix_sha=sha, reason="r"),
+         line("finding", "team_lead", path="b.py", body="old", disposition="drop_rebutted"),
+         line("finding", "team_lead", path="c.py", body="bad", decision="maybe", fix_sha="HEAD"))
+    live.flush()
+    with live.engine.connect() as conn:
+        rows = {r.path: r for r in conn.execute(select(findings).where(findings.c.run_id == run["run_id"]))}
+    assert (rows["a.py"].decision, rows["a.py"].raised_by, rows["a.py"].fix_sha, rows["a.py"].reason) == \
+        ("fixed", ["security"], sha, "r")
+    assert rows["b.py"].decision == "drop"
+    assert (rows["c.py"].decision, rows["c.py"].fix_sha, rows["c.py"].raised_by) == (None, None, None)
+
+
 def test_summary_is_redacted(live, world, keyring):
     with live.engine.begin() as conn:
         secret_store.set_secret(conn, keyring, team_id=world["team"], name="GH_TOKEN", value="hunter2-secret",
@@ -623,6 +734,59 @@ def test_run_list_filters_by_subject_and_shows_the_summary(live, world):
     assert viewer.get("/api/runs", params={"subject": "x" * 192}).status_code == 400
 
 
+def test_pull_request_runs_join_the_issue_thread_by_title_or_link(live, world):
+    http = live.client()
+    dev = register(http, world["key"], workflow="development", subject="MEM-5")
+    review = register(http, world["key"], workflow="code-review", subject="acme/app#9")
+    titled = register(http, world["key"], workflow="code-review", subject="acme/app#10")
+    elsewhere = register(http, world["other_key"], workflow="code-review", subject="acme/app#9")
+    post(http, titled["token"], line("summary", None, title="[MEM-6] Tidy"))
+    post(http, review["token"], line("summary", None, title="No prefix here"))
+    viewer = live.client(world["users"]["viewer"])
+    assert viewer.get(f"/api/runs/{titled['run_id']}").json()["run"]["thread"] == "MEM-6"
+    post(http, dev["token"], line("summary", None, links=[
+        {"label": "Pull request", "url": "https://github.com/acme/app/pull/9"}]))
+    assert viewer.get(f"/api/runs/{review['run_id']}").json()["run"]["thread"] == "MEM-5"
+    live.flush()
+    fix = register(http, world["key"], workflow="pr-fix", subject="acme/app#9")
+    with live.engine.connect() as conn:
+        threads = dict(conn.execute(select(runs.c.id, runs.c.thread)).all())
+    assert {name: threads[run["run_id"]] for name, run in
+            (("dev", dev), ("review", review), ("titled", titled), ("elsewhere", elsewhere), ("fix", fix))} == \
+        {"dev": "MEM-5", "review": "MEM-5", "titled": "MEM-6", "elsewhere": None, "fix": "MEM-5"}
+    grouped = viewer.get("/api/runs", params={"group": True}).json()["runs"]
+    assert {(r["thread"], r["group_size"]) for r in grouped} == {("MEM-5", 3), ("MEM-6", 1)}
+
+
+def test_a_pull_request_opened_after_its_issue_run_linked_it_joins_that_thread(live, world):
+    http = live.client()
+    dev = register(http, world["key"], workflow="development", subject="MEM-7")
+    post(http, dev["token"], line("summary", None, links=[
+        {"label": "Pull request", "url": "https://github.com/acme/app/pull/12"}]))
+    live.flush()
+    review = register(http, world["key"], workflow="code-review", subject="acme/app#12")
+    near_miss = register(http, world["key"], workflow="code-review", subject="acme/app#1")
+    longer = register(http, world["key"], workflow="code-review", subject="acme/app#123")
+    elsewhere = register(http, world["other_key"], workflow="code-review", subject="acme/app#12")
+    with live.engine.connect() as conn:
+        threads = dict(conn.execute(select(runs.c.id, runs.c.thread)).all())
+    assert [threads[run["run_id"]] for run in (review, near_miss, longer, elsewhere)] == ["MEM-7", None, None, None]
+
+
+def test_a_titled_run_brings_its_pull_requests_other_runs_into_the_thread(live, world):
+    http = live.client()
+    first = register(http, world["key"], workflow="code-review", subject="acme/app#20")
+    second = register(http, world["key"], workflow="pr-fix", subject="acme/app#20")
+    post(http, first["token"], line("step_start", "x"))
+    post(http, second["token"], line("summary", None, title="[MEM-8] Tidy"))
+    viewer = live.client(world["users"]["viewer"])
+    assert viewer.get(f"/api/runs/{first['run_id']}").json()["run"]["thread"] == "MEM-8"
+    live.flush()
+    with live.engine.connect() as conn:
+        threads = dict(conn.execute(select(runs.c.id, runs.c.thread)).all())
+    assert (threads[first["run_id"]], threads[second["run_id"]]) == ("MEM-8", "MEM-8")
+
+
 def test_run_list_filters_by_workflows_and_hides_hidden_ones(live, world, monkeypatch):
     from armature.server import display
     http = live.client()
@@ -643,3 +807,37 @@ def test_run_list_filters_by_workflows_and_hides_hidden_ones(live, world, monkey
     assert names(include_hidden="1") == ["code-review", "digest", "jira-work"]
     assert names(workflows="digest") == ["digest"]
     assert names(workflow="digest") == ["digest"]
+
+
+def test_ops_events_locate_a_running_run_and_a_stated_location_wins(live, world):
+    http = live.client()
+    viewer = live.client(world["users"]["viewer"])
+    run = register(http, world["key"], location={"kind": "local", "chip": "Apple M1", "machine": "arm64"})
+
+    def where():
+        return viewer.get(f"/api/runs/{run['run_id']}").json()["run"]["location"]
+
+    assert where()["label"] == "M1 (local)"
+    post(http, run["token"], line("log", "validate", message="building fs-eng/android-tree#7 on aws-mac: ./gradlew"))
+    assert where() == {"kind": "aws-mac", "label": "AWS macOS"}
+    post(http, run["token"], line("step_end", "implement", output={"placement": {"where": "m1"}}),
+         line("step_end", "refine", output={"placement": {"where": "aws-session", "instance": "i-0c35"}}))
+    assert where()["kind"] == "aws-mac"
+    post(http, run["token"], line("summary", None, location={"kind": "aws-linux", "instance": "i-0c35"}))
+    assert where() == {"kind": "aws-linux", "label": "AWS Linux", "instance": "i-0c35"}
+    live.flush()
+    listed = viewer.get("/api/runs").json()["runs"]
+    assert [r["location"]["label"] for r in listed if r["id"] == run["run_id"]] == ["AWS Linux"]
+
+    other = register(http, world["key"])
+    post(http, other["token"],
+         line("step_end", "implement", output={"placement": {"where": "aws-session", "launched": False}}),
+         line("step_end", "build", output={"placement": {"where": "aws-session", "instance": "i-0abc",
+                                                         "instance_type": "m7i.large", "market": "spot"}}))
+    live.flush()
+    with live.engine.connect() as conn:
+        stored = dict(conn.execute(select(runs.c.id, runs.c.location)
+                                   .where(runs.c.id.in_([run["run_id"], other["run_id"]]))).all())
+    assert stored[run["run_id"]] == {"kind": "aws-linux", "label": "AWS Linux", "instance": "i-0c35"}
+    assert stored[other["run_id"]] == {"kind": "aws-linux", "label": "AWS Linux", "instance": "i-0abc",
+                                       "instance_type": "m7i.large"}

@@ -1,19 +1,17 @@
 """The response fields the browser code reads, pinned against what the routes return."""
 import hashlib
 import hmac
-import json
 import re
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import insert, select
 
-from armature.server import llm
+from armature.server import conversations, llm
 from armature.server import secrets as secret_store
 from armature.server.db import new_id
-from armature.server.db.schema import findings, providers, run_artifacts, runs, workflows
+from armature.server.db.schema import findings, jobs, providers, run_artifacts, runs, workflows
 from tests.server.app_support import (
     ORIGIN,
     Clock,
@@ -38,17 +36,21 @@ READS = [
     ("session.js", "current", "session", {"user", "memberships", "sso"}),
     ("login.js", "sessionPayload", "session", {"user", "csrf", "auth"}),
     ("views/runs.js", "run", "run", {"cost_usd", "finished_at", "started_at", "status", "triggered_by", "workflow",
-                                     "subject", "title", "verdict", "pr", "outcome", "trigger"}),
+                                     "subject", "thread", "title", "verdict", "pr", "outcome", "trigger",
+                                     "group_size", "links"}),
     ("views/runs.js", "trigger", "run_trigger", {"label", "detail"}),
     ("views/runs.js", "page", "runs", {"next_before"}),
     ("tail.js", "detail", "run_detail", {"run", "steps"}),
     ("tail.js", "run", "run_detail_run", {"status", "started_at", "finished_at", "last_seq"}),
     ("views/secrets.js", "secret", "secret", {"name", "set", "updated_at", "updated_by"}),
-    ("views/teams.js", "projectRecord", "project", {"name", "platform", "team_id", "id"}),
+    ("views/projects.js", "projectRecord", "project",
+     {"name", "platform", "team_id", "id", "repo", "default_branch", "connection_id", "role"}),
+    ("views/projects.js", "project", "project_row", {"id", "name", "team_name", "repo", "default_branch"}),
     ("views/teams.js", "project", "project", {"name", "platform", "id"}),
     ("views/teams.js", "team", "team", {"id", "name"}),
     ("views/runnerkeys.js", "key", "runner_key", {"id", "name", "created_at", "created_by", "last_used_at"}),
     ("views/runnerkeys.js", "created", "create_runner_key", {"key"}),
+    ("views/run.js", "run", "run_detail_run", {"subject", "thread", "links", "summary"}),
     ("views/run.js", "artifact", "artifact", {"media_type", "content", "size", "created_at", "step_id"}),
     ("views/overview.js", "overview", "overview", {"running", "alerts", "recent", "reviews_today",
                                                    "reevaluations_today", "timezone"}),
@@ -61,8 +63,8 @@ READS = [
     ("views/subject.js", "page", "subjects", {"next_before"}),
     ("views/subject.js", "detail", "subject", {"subject", "title", "status", "latest_verdict", "repo", "links", "runs",
                                                "findings"}),
-    ("views/subject.js", "run", "subject_run", {"id", "kind", "workflow", "workflow_label", "status", "started_at",
-                                                "verdict", "mode", "head", "cost_usd", "artifacts", "fix", "merge",
+    ("views/subject.js", "run", "subject_run", {"id", "subject", "kind", "workflow", "workflow_label", "status",
+                                                "started_at", "verdict", "mode", "head", "artifacts", "fix", "merge",
                                                 "fields"}),
     ("views/subject.js", "finding", "subject_finding", {"finding_key", "title", "path", "line",
                                                         "current_disposition", "history"}),
@@ -70,11 +72,13 @@ READS = [
     ("views/webhooks.js", "webhook", "webhook", {"id", "team_id", "name", "source", "url", "enabled", "secret_set",
                                                  "secret_name", "forward_url", "generic_auth",
                                                  "generic_signature_header", "generic_delivery_header",
-                                                 "last_delivery"}),
+                                                 "last_delivery", "approval", "pinned_senders"}),
     ("views/webhooks.js", "rule", "webhook_rule", {"id", "workflow_id", "workflow_name", "enabled", "config"}),
     ("views/webhooks.js", "workflow", "webhook_workflow", {"id", "name", "scope_kind"}),
     ("views/webhooks.js", "delivery", "delivery", {"id", "received_at", "event", "status", "reason", "matched",
-                                                   "forward_status", "headers", "payload"}),
+                                                   "forward_status", "headers", "payload", "sender"}),
+    ("views/webhooks.js", "released", "approve", {"replayed", "status", "jobs"}),
+    ("views/webhooks.js", "preview", "pinning_preview", {"senders"}),
     ("views/webhooks.js", "entry", "delivery_match", {"workflow_name", "workflow_id", "shadow", "run_id",
                                                       "job_status"}),
     ("views/webhooks.js", "decision", "decision", {"trigger_id", "matched", "reason", "inputs"}),
@@ -87,6 +91,10 @@ READS = [
     ("assistant.js", "step", "summary_step", {"id", "label", "kind", "what", "after", "fan_out", "output", "optional",
                                               "retry"}),
     ("assistant.js", "starter", "started_by", {"webhook", "events", "shadow", "enabled"}),
+    ("conversation.js", "conversation", "conversation", {"working", "messages", "state", "draft", "owner_id",
+                                                         "kind"}),
+    ("conversation.js", "message", "conversation_message", {"role", "seq", "author", "text", "created_at", "error"}),
+    ("conversation.js", "started", "assist_started", {"conversation", "seq"}),
 ]
 
 DESCRIBED = """name: described
@@ -101,17 +109,19 @@ def _read_fields(source: str, variable: str) -> set[str]:
     return set(re.findall(rf"\b{variable}\??\.([a-z_]+)\b", source))
 
 
-class _Model:
-    def __call__(self, **kwargs):
-        content = json.dumps({"body": DESCRIBED.replace("Ask for", "Wait for"), "explanation": "Reworded it."})
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
-                               usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1), _hidden_params={})
+def _drafted(engine, clock, conversation_id):
+    """The draft a turn's decide step leaves, as the assistant panels read it."""
+    with engine.begin() as conn:
+        conv = conversations.get(conn, conversation_id)
+        job = conn.execute(select(jobs).where(jobs.c.id == conv.active_job_id)).one()
+        conversations.decide(conn, conv, job, {"action": "draft", "reply": "Reworded it.",
+                                               "body": DESCRIBED.replace("Ask for", "Wait for")}, clock())
 
 
 @pytest.fixture
 def responses(sqlite_engine, keyring, monkeypatch):
     clock = Clock()
-    monkeypatch.setattr(llm, "litellm_completion", _Model())
+    monkeypatch.setattr(llm, "litellm_completion", None)
     with sqlite_engine.begin() as conn:
         side = _side(conn, "own", clock)
         secret_store.set_secret(conn, keyring, team_id=side.team, name="K", value="v", actor_id=None)
@@ -148,27 +158,35 @@ def responses(sqlite_engine, keyring, monkeypatch):
         workflow_id = conn.execute(select(workflows.c.id).where(workflows.c.team_id == side.team)).scalar()
     client.post(f"/api/webhooks/{hook['id']}/rules", json={"workflow_id": workflow_id, "config": {}},
                 headers=mutation(csrf))
-    raw = b'{"n": 1}'
+    raw = b'{"n": 1, "repository": {"id": 1}}'
     client.post(hook["url"].removeprefix(ORIGIN), content=raw, headers={
         "X-Hub-Signature-256": "sha256=" + hmac.new(b"s", raw, hashlib.sha256).hexdigest(), "X-GitHub-Event": "push"})
-    hook_detail = client.get(f"/api/webhooks/{hook['id']}").json()
     delivery_id = client.get(f"/api/webhooks/{hook['id']}/deliveries").json()["deliveries"][0]["id"]
+    approved = client.post(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}/approve", json={},
+                           headers=mutation(csrf)).json()
+    hook_detail = client.get(f"/api/webhooks/{hook['id']}").json()
     delivery = client.get(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}").json()["delivery"]
     decisions = client.post(f"/api/webhooks/{hook['id']}/deliveries/{delivery_id}/test", json={},
                             headers=mutation(csrf)).json()["decisions"]
-    described = client.post("/api/workflows", json={"name": "described", "scope_kind": "team", "scope_id": side.team,
+    described = client.post("/api/workflows", json={"name": "described", "scope_kind": "project", "scope_id": side.project,
                                                     "body": DESCRIBED}, headers=mutation(csrf)).json()["workflow"]
     client.post(f"/api/webhooks/{hook['id']}/rules", json={"workflow_id": described["id"], "config": {}},
                 headers=mutation(csrf))
     workflow_detail = client.get(f"/api/workflows/{described['id']}").json()
-    proposal = client.post("/api/assist", json={"workflow_id": described["id"], "base_version": 1,
-                                                "instruction": "Reword it."}, headers=mutation(csrf)).json()
+    started = client.post("/api/assist", json={"workflow_id": described["id"], "base_version": 1,
+                                               "instruction": "Reword it."}, headers=mutation(csrf)).json()
+    _drafted(sqlite_engine, clock, started["conversation"]["id"])
+    conversation = client.get(f"/api/conversations/{started['conversation']['id']}").json()["conversation"]
+    proposal = conversation["draft"]
     return {
         "workflow_detail": workflow_detail,
         "workflow_summary": workflow_detail["summary"],
         "summary_step": workflow_detail["summary"]["steps"][0],
         "started_by": workflow_detail["started_by"][0],
         "assist": proposal,
+        "assist_started": started,
+        "conversation": conversation,
+        "conversation_message": conversation["messages"][0],
         "assist_changes": proposal["changes"],
         "inspect": guest.post("/api/invite/inspect", json={"token": token},
                               headers={"Origin": ORIGIN, "X-CSRF-Token": guest_csrf}).json(),
@@ -178,13 +196,14 @@ def responses(sqlite_engine, keyring, monkeypatch):
         "membership": next(u for u in users if u["memberships"])["memberships"][0],
         "lookup": client.get("/api/users/lookup", params={"q": "bea"}).json()["users"][0],
         "session": client.get("/api/session").json(),
-        "run": client.get("/api/runs").json()["runs"][0],
+        "run": client.get("/api/runs", params={"group": True}).json()["runs"][0],
         "runs": client.get("/api/runs").json(),
         "run_trigger": client.get("/api/runs").json()["runs"][0]["trigger"],
         "run_detail": client.get(f"/api/runs/{run_id}").json(),
         "run_detail_run": client.get(f"/api/runs/{run_id}").json()["run"],
         "secret": client.get(f"/api/teams/{side.team}/secrets").json()["secrets"][0],
         "project": client.get(f"/api/projects/{side.project}").json()["project"],
+        "project_row": client.get("/api/projects").json()["projects"][0],
         "team": client.get("/api/teams").json()["teams"][0],
         "create_runner_key": created_key,
         "runner_key": client.get("/api/runner-keys").json()["runner_keys"][0],
@@ -201,6 +220,8 @@ def responses(sqlite_engine, keyring, monkeypatch):
         "webhook_rule": hook_detail["rules"][0],
         "webhook_workflow": hook_detail["workflows"][0],
         "delivery": delivery,
+        "approve": approved,
+        "pinning_preview": client.get(f"/api/webhooks/{hook['id']}/pinning").json(),
         "delivery_match": delivery["matched"][0],
         "decision": decisions[0],
     }

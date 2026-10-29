@@ -1,0 +1,295 @@
+{
+  "description": "Someone with only read access comments /armature fix on an Android pull request. Prepare declines on the permission check, every later stage passes the decline on, and nothing is posted, so the bot cannot be made to speak.",
+  "source": "github",
+  "env": {},
+  "files": {
+    "config/teams.json": {
+      "teams": [
+        {
+          "id": "mobile",
+          "name": "Mobile",
+          "auto_fix": false,
+          "repos": [
+            {
+              "slug": "fs-eng/mobile-ios",
+              "platform": "ios",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            },
+            {
+              "slug": "fs-eng/android-tree",
+              "platform": "android",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "dev"
+              ]
+            },
+            {
+              "slug": "fs-eng/mobile-api-nodejs",
+              "platform": "backend",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "product-prototype",
+          "name": "Product Prototype",
+          "auto_fix": false,
+          "repos": []
+        }
+      ]
+    },
+    "config/roles.json": {
+      "base_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git blame:*)",
+        "Bash(cd:*)",
+        "Bash(ls:*)",
+        "Bash(wc:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git rev-list:*)",
+        "Bash(git cat-file:*)"
+      ],
+      "roles": [
+        {
+          "name": "simplicity",
+          "prompt": "prompts/simplicity.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "correctness",
+          "prompt": "prompts/correctness.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:m3.material.io)",
+            "mcp__jira__jira_get_issue",
+            "mcp__jira__jira_search"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          },
+          "mcp_inherit": [
+            "jira"
+          ]
+        },
+        {
+          "name": "security",
+          "prompt": "prompts/security.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "performance",
+          "prompt": "prompts/performance.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {}
+        },
+        {
+          "name": "beauty",
+          "prompt": "prompts/beauty.md",
+          "platforms": [
+            "ios",
+            "android"
+          ]
+        },
+        {
+          "name": "test_adequacy",
+          "prompt": "prompts/test_adequacy.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "concurrency",
+          "prompt": "prompts/concurrency.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {},
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          }
+        },
+        {
+          "name": "conventions",
+          "prompt": "prompts/conventions.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "prompt": "prompts/compatibility.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        }
+      ]
+    },
+    "state/pr-fix-queue/job.json": {
+      "repo": "fs-eng/android-tree",
+      "number": 4907,
+      "platform": "android",
+      "requester": "mrasmussen-contractor",
+      "comment_id": 3271145,
+      "scope": "pr",
+      "mode": "request"
+    },
+    "config/validate.json": {
+      "commands": {
+        "fs-eng/android-tree": "./validate.sh --quick --base {base}"
+      }
+    }
+  },
+  "repos": {
+    "state/repos/fs-eng_android-tree": {
+      "base": "dev",
+      "branch": "MEMTEMDIS-4602-memories-empty-state",
+      "remote": "fs-eng/android-tree",
+      "files": {
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt": "package org.familysearch.tree.memories\n\nclass MemoriesViewModel(private val repo: MemoriesRepository) {\n    fun load(personId: String) = repo.memories(personId)\n}\n",
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesRepository.kt": "package org.familysearch.tree.memories\n\ninterface MemoriesRepository {\n    fun memories(personId: String): List<Memory>\n}\n"
+      },
+      "commits": [
+        {
+          "message": "MEMTEMDIS-4602 Show an empty state when a person has no memories",
+          "files": {
+            "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt": "package org.familysearch.tree.memories\n\nclass MemoriesViewModel(private val repo: MemoriesRepository) {\n    private var cache: Map<String, List<Memory>> = emptyMap()\n\n    fun load(personId: String): List<Memory> =\n        cache[personId] ?: repo.memories(personId).also { cache = cache + (personId to it) }\n\n    fun signedOut() {\n        cache = emptyMap()\n    }\n}\n"
+          }
+        }
+      ]
+    }
+  },
+  "context": {
+    "job_file": "{{home}}/state/pr-fix-queue/job.json"
+  },
+  "fakes": {
+    "gh": [
+      {
+        "match": "^api repos/fs-eng/android-tree/collaborators/mrasmussen-contractor/permission --jq .permission",
+        "stdout": "read\n"
+      }
+    ]
+  },
+  "stubs": {},
+  "ops": {
+    "effects": [
+      {
+        "tool": "gh",
+        "args": [
+          "api",
+          "repos/fs-eng/android-tree/collaborators/mrasmussen-contractor/permission",
+          "--jq",
+          ".permission"
+        ]
+      }
+    ],
+    "result": {
+      "outcome": "declined",
+      "detail": "mrasmussen-contractor has 'read' permission, not write",
+      "commit": ""
+    },
+    "sessions": [],
+    "outputs": {
+      "prepare": {
+        "reviewed": false,
+        "notify": false,
+        "reason": "mrasmussen-contractor has 'read' permission, not write",
+        "repo": "fs-eng/android-tree",
+        "number": 4907,
+        "comment_id": 3271145,
+        "reply_to": ""
+      },
+      "fix": {
+        "ran": false,
+        "applied": [],
+        "skipped": []
+      },
+      "review": {
+        "ran": false,
+        "converged": false,
+        "outcome": "declined",
+        "summary": "declined",
+        "rounds": 0,
+        "result": {
+          "ran": false,
+          "applied": [],
+          "skipped": []
+        }
+      },
+      "push": {
+        "outcome": "declined",
+        "detail": "mrasmussen-contractor has 'read' permission, not write",
+        "commit": ""
+      }
+    }
+  }
+}

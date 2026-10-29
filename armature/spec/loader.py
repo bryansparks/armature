@@ -1,3 +1,4 @@
+import copy
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -6,6 +7,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 from pydantic import ValidationError
 from ruamel.yaml import YAML, YAMLError
 from armature.runtime.templating import text_env
+from armature.spec.contract_io import is_typed, resolve_inputs
 from armature.spec.models import CompiledAgent, HarnessSpec, SkillDef, ToolSafetyRule
 
 _log = logging.getLogger(__name__)
@@ -81,8 +83,111 @@ def _load_stored(raw: str, vars: dict | None) -> Any:
                 "never in a comment, key, or YAML syntax"
             )
     if vars:
-        _render_string_scalars(data, _template_env(), vars)
+        _render_scalars_once(data, vars)
     return data
+
+
+def _declared_inputs(raw: str, render: str) -> list[dict]:
+    """The spec's contracts.inputs entries, read before any input renders into it; [] when unreadable."""
+    try:
+        text = raw if render == "scalars" else _template_env().from_string(raw).render()
+        data = YAML(typ="safe").load(text)
+    except Exception:
+        return []
+    contracts = data.get("contracts") if isinstance(data, dict) else None
+    inputs = contracts.get("inputs") if isinstance(contracts, dict) else None
+    return [i for i in inputs if isinstance(i, dict)] if isinstance(inputs, list) else []
+
+
+def _preparse(raw: str) -> Any:
+    """The spec tree before any input renders into it: the raw YAML when it parses, else None."""
+    try:
+        return YAML(typ="safe").load(raw)
+    except Exception:
+        return None
+
+
+def _input_free_tree(raw: str) -> Any:
+    """A text spec rendered with no inputs and parsed, or None when either step fails."""
+    try:
+        return YAML(typ="safe").load(_template_env().from_string(raw).render())
+    except Exception:
+        return None
+
+
+def _input_free_call_targets(raw: str) -> list[tuple] | None:
+    """Call targets of a text spec rendered with no inputs, to tell whether an input chooses one."""
+    tree = _input_free_tree(raw)
+    return _call_targets(tree) if tree is not None else None
+
+
+def _stage_maps(data: Any) -> list[dict]:
+    stages = data.get("stages") if isinstance(data, dict) else None
+    return [s for s in stages if isinstance(s, dict)] if isinstance(stages, list) else []
+
+
+def _call_targets(data: Any) -> list[tuple]:
+    return [(s.get("id"), s["call"].get("workflow"), s["call"].get("version"))
+            for s in _stage_maps(data) if isinstance(s.get("call"), dict)]
+
+
+def _reject_templated_call_targets(data: Any) -> None:
+    for stage_id, workflow, version in _call_targets(data):
+        if any(isinstance(v, str) and any(m in v for m in _MARKERS) for v in (workflow, version)):
+            raise ValueError(
+                f"CALL_INVALID_WORKFLOW: stage '{stage_id}' call target holds a template; "
+                "a call names a fixed workflow and version"
+            )
+
+
+def _with_blocks(data: Any) -> dict[Any, Any]:
+    """Each stage's with: block and each agent: mapping, which only the run-time render may render."""
+    blocks = {}
+    for s in _stage_maps(data):
+        if "with" in s:
+            blocks[(s.get("id"), "with")] = copy.deepcopy(s["with"])
+        if isinstance(s.get("agent"), dict):
+            blocks[(s.get("id"), "agent")] = copy.deepcopy(s["agent"])
+    return blocks
+
+
+def _restore_with_blocks(data: Any, blocks: dict[Any, Any]) -> None:
+    for stage in _stage_maps(data):
+        for (stage_id, key), block in blocks.items():
+            if stage.get("id") == stage_id:
+                stage[key] = copy.deepcopy(block)
+
+
+def _adapter_maps(data: Any) -> dict[Any, dict]:
+    adapters = data.get("adapters") if isinstance(data, dict) else None
+    return {k: a for k, a in adapters.items() if isinstance(a, dict)} if isinstance(adapters, dict) else {}
+
+
+def _adapter_cmds(data: Any) -> dict[Any, Any]:
+    return {name: a.get("cmd") for name, a in _adapter_maps(data).items()}
+
+
+_RUNTIME_RENDERED = ("skip_if", "condition", "partition_source", "present")
+
+
+def _render_scalars_once(data: Any, vars: dict) -> None:
+    """Render vars into string scalars, except the fields the run time renders, so an input renders once."""
+    spots = []
+    for s in _stage_maps(data):
+        on_fail = s.get("on_fail")
+        spots += [(s, key) for key in _RUNTIME_RENDERED]
+        spots += [(s.get("role"), "description"), (s.get("tool_call"), "args"), (s.get("loop"), "until"),
+                  (on_fail.get("loop") if isinstance(on_fail, dict) else None, "until")]
+    contracts = data.get("contracts") if isinstance(data, dict) else None
+    outputs = contracts.get("outputs") if isinstance(contracts, dict) else None
+    spots += [(o, "from") for o in outputs] if isinstance(outputs, list) else []
+    spots += [(a, "cmd") for a in _adapter_maps(data).values()]
+    held = [(m, key, m[key]) for m, key in spots if isinstance(m, dict) and key in m]
+    for mapping, key, _ in held:
+        mapping[key] = None
+    _render_string_scalars(data, _template_env(), vars)
+    for mapping, key, value in held:
+        mapping[key] = value
 
 
 def load_spec(path: Path | str, vars: dict | None = None, *,
@@ -101,6 +206,19 @@ def load_spec(path: Path | str, vars: dict | None = None, *,
     if render is None:
         render = "scalars" if raw.split("\n", 1)[0].rstrip("\r") == STORED_WORKFLOW_HEADER else "text"
 
+    decls = _declared_inputs(raw, render) if "inputs" in raw else []
+    if any(is_typed(d) for d in decls):
+        vars = resolve_inputs(decls, vars or {}, enforce_required=False, scalars_only=True)
+
+    pre = _preparse(raw)
+    _reject_templated_call_targets(pre)
+    before = _call_targets(pre) if pre is not None else (
+        _input_free_call_targets(raw) if render == "text" and "call:" in raw else None)
+    free = _input_free_tree(raw) if render == "text" and vars else None
+    if render == "text" and vars and free is None and "cmd" in raw:
+        raise ValueError("ADAPTER_CMD_INPUT: the spec does not parse with inputs left out, "
+                         "so its adapter cmds cannot be checked for inputs")
+
     if render == "scalars":
         data = _load_stored(raw, vars)
     else:
@@ -110,11 +228,23 @@ def load_spec(path: Path | str, vars: dict | None = None, *,
         yaml.preserve_quotes = True
         data = yaml.load(raw)
 
+    if vars:
+        # Input values render into the spec once at load; a with: renders at run
+        # time instead, so an input holding "{{ ... }}" is never rendered twice.
+        if pre is not None:
+            _restore_with_blocks(data, _with_blocks(pre))
+        if before is not None and _call_targets(data) != before:
+            raise ValueError("CALL_INVALID_WORKFLOW: a call target may not depend on inputs")
+        if free is not None and _adapter_cmds(data) != _adapter_cmds(free):
+            raise ValueError("ADAPTER_CMD_INPUT: an adapter or its cmd may not depend on inputs; "
+                             "read values from ARMATURE_WITH or ARMATURE_CONTEXT instead")
+
     spec = HarnessSpec.model_validate(data)
     _resolve_pack_adapters(spec)
     _resolve_context_layers(spec, path.parent)
     _resolve_agent_references(spec, path.parent)
     _resolve_subagent_specs(spec, path.parent)
+    spec._source_dir = str(path.parent.resolve())
     return spec
 
 
@@ -162,34 +292,41 @@ def load_child_spec(path: Path | str, vars: dict | None = None) -> HarnessSpec:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Spec not found: {path}")
+    return load_child_spec_text(path.read_text(encoding="utf-8"), path.parent, path.name, vars)
 
-    raw = path.read_text(encoding="utf-8")
+
+def load_child_spec_text(raw: str, base_dir: Path, label: str, vars: dict | None = None) -> HarnessSpec:
+    """load_child_spec for spec text already in hand, such as a called workflow from a call bundle."""
     yaml = YAML()
     yaml.preserve_quotes = True
     try:
         data = yaml.load(raw)
     except YAMLError as exc:
         raise ValueError(
-            f"child spec '{path.name}' does not parse with templates inert — "
+            f"child spec '{label}' does not parse with templates inert — "
             f"carried context must not be able to alter YAML structure; "
             f"rewrite the spec so it is valid YAML before rendering: {exc}"
         ) from exc
 
+    _reject_templated_call_targets(data)
     if vars:
-        _render_string_scalars(data, _template_env(), vars)
+        blocks = _with_blocks(data)
+        _render_scalars_once(data, vars)
+        _restore_with_blocks(data, blocks)
 
     try:
         spec = HarnessSpec.model_validate(data)
     except ValidationError as exc:
         raise ValueError(
-            f"child spec '{path.name}' is invalid with templates inert — "
+            f"child spec '{label}' is invalid with templates inert — "
             f"structural templating from carried context is not supported for "
             f"child specs (render values inside string fields instead): {exc}"
         ) from exc
     _resolve_pack_adapters(spec)
-    _resolve_context_layers(spec, path.parent)
-    _resolve_agent_references(spec, path.parent)
-    _resolve_subagent_specs(spec, path.parent)
+    _resolve_context_layers(spec, base_dir)
+    _resolve_agent_references(spec, base_dir)
+    _resolve_subagent_specs(spec, base_dir)
+    spec._source_dir = str(Path(base_dir).resolve())
     return spec
 
 
@@ -336,7 +473,7 @@ def _resolve_agent_references(spec: HarnessSpec, base_dir: Path) -> None:
         compiled[agent_id] = CompiledAgent.model_validate(data)
 
     for stage in spec.stages:
-        if stage.agent is None:
+        if not isinstance(stage.agent, str):
             continue
         if stage.agent not in compiled:
             raise ValueError(

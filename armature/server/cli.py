@@ -1,4 +1,5 @@
-"""`armature server` commands: init, migrate, create-admin, run, export, pack, and runs."""
+"""`armature server` commands: init, migrate, create-admin, run, export, pack, runs, backfill-locations, and
+import-ops."""
 from __future__ import annotations
 
 import getpass
@@ -68,9 +69,13 @@ def _create_admin(cfg, username: str | None) -> None:
     try:
         try:
             with engine.begin() as conn:
-                admin = create_admin(conn, keyring, username=username, password=password)
+                admin = create_admin(conn, keyring, username=username, password=password,
+                                     require_totp=cfg.require_totp)
         except ValueError as exc:
             _fail(str(exc))
+        if admin.otpauth_uri is None:
+            typer.echo(f"Created admin {username}.")
+            return
         typer.echo(f"Created admin {username}. Add this to an authenticator app now. It is not shown again:")
         typer.echo(admin.otpauth_uri)
         confirmed = False
@@ -130,51 +135,31 @@ def init(
     no_admin: bool = typer.Option(False, "--no-admin", help="Skip creating the first admin"),
 ):
     """Write a config if missing, create the master key, migrate, and create the first admin."""
-    import os
-
+    from pydantic import ValidationError
     from sqlalchemy.engine import make_url
 
-    from armature.server.config import (
-        ENV_PREFIX,
-        ServerConfig,
-        config_path,
-        write_config,
-    )
-    from armature.server.crypto import write_key_file
-    from armature.server.db import make_engine, migrate
+    from armature.server.config import ENV_PREFIX, config_path
+    from armature.server.crypto import MasterKeyError
+    from armature.server.setup import SetupError, prepare
 
     path = (config or config_path()).expanduser()
-    if not path.exists():
-        values = {}
-        if database_url and make_url(database_url).password:
-            typer.echo(f"Warning: --database-url holds a password, which shell history and ps can show. "
-                       f"Set {ENV_PREFIX}DATABASE_URL instead.", err=True)
-        database_url = database_url or os.environ.get(ENV_PREFIX + "DATABASE_URL")
-        if database_url:
-            values["database_url"] = database_url
-        if key_file:
-            values["master_key"] = f"file:{key_file.expanduser()}"
-        write_config(ServerConfig(**values), path)
-        typer.echo(f"Wrote {path}")
-    cfg = _load(path)
-    migrate(cfg.database_url)
-    typer.echo("Database is at the latest schema.")
-    from armature.server.users import has_admin, has_sealed_values
-    engine = make_engine(cfg.database_url)
+    if not path.exists() and database_url and make_url(database_url).password:
+        typer.echo(f"Warning: --database-url holds a password, which shell history and ps can show. "
+                   f"Set {ENV_PREFIX}DATABASE_URL instead.", err=True)
     try:
-        with engine.connect() as conn:
-            sealed, exists = has_sealed_values(conn), has_admin(conn)
-    finally:
-        engine.dispose()
-    scheme, _, rest = cfg.master_key.partition(":")
-    key_path = Path(rest).expanduser()
-    if scheme == "file" and not os.path.lexists(key_path):
-        if sealed:
-            _fail(f"Master key file {key_path} is missing, but the database holds values sealed with a master key. "
-                  "Restore the key file from backup. A new key could never open them.")
-        write_key_file(key_path)
-        typer.echo(f"Generated master key {key_path} (mode 0600). Back it up: without it no secret can be read.")
-    _keyring(cfg)
+        prepared = prepare(path, database_url=database_url, key_file=key_file)
+    except (ValidationError, ValueError) as exc:
+        _fail(f"Invalid server config: {exc}")
+    except SetupError as exc:
+        _fail(str(exc))
+    except (MasterKeyError, NotImplementedError) as exc:
+        _fail(f"Master key unavailable: {exc}")
+    if prepared.wrote_config:
+        typer.echo(f"Wrote {path}")
+    typer.echo("Database is at the latest schema.")
+    if prepared.new_key:
+        typer.echo(f"Generated master key {prepared.new_key} (mode 0600). Back it up: without it no secret can be read.")
+    cfg, exists = prepared.cfg, prepared.has_admin
     if no_admin:
         return
     if exists:
@@ -201,19 +186,72 @@ def create_admin_cmd(
     _create_admin(_load(config), username)
 
 
+def _interactive() -> bool:
+    import sys
+    return sys.stdin.isatty()
+
+
+def _serve_setup(path: Path, cfg):
+    """Serve the setup page on loopback until an admin exists. Returns the config to serve next, or None when done."""
+    import secrets
+
+    import uvicorn
+
+    from armature.server.app import create_app
+    from armature.server.app.routes_setup import SETUP_HOST, Swappable, can_swap, create_setup_app, setup_origin
+    from armature.server.crypto import keyring_from_source
+    from armature.server.db import make_engine
+
+    # A service manager's log is no place for a link that makes an admin.
+    if not _interactive():
+        _fail("No admin exists yet. Run `armature server run` in a terminal to set up.")
+    origin = setup_origin(cfg)
+    token = secrets.token_urlsafe(32)
+    after: dict = {}
+
+    async def finish(ready) -> bool:
+        if can_swap(ready, origin):
+            await holder.swap(create_app(ready, make_engine(ready.database_url), keyring_from_source(ready.master_key)))
+            return True
+        after["cfg"] = ready
+        server.should_exit = True
+        return False
+
+    holder = Swappable(create_setup_app(path, origin=origin, token=token, finish=finish, base_path=cfg.base_path))
+    server = uvicorn.Server(uvicorn.Config(holder, host=SETUP_HOST, port=cfg.port, workers=1, proxy_headers=False,
+                                           server_header=False, log_level="warning", timeout_graceful_shutdown=5))
+    typer.echo("Armature needs a first admin. Open this link on this computer to set it up. It works once:", err=True)
+    typer.echo(f"  {origin}{cfg.base_path}/setup#{token}", err=True)
+    server.run()
+    return after.get("cfg")
+
+
 @server_app.command("run")
 def run(config: Path | None = ConfigOption):
-    """Serve the API and the browser UI. Refuses to start without an admin or a working master key."""
+    """Serve the API and the browser UI. With no admin yet, serve the setup page on loopback first."""
     from sqlalchemy.exc import SQLAlchemyError
 
+    from armature.server.config import config_path
     from armature.server.db import make_engine
+    from armature.server.setup import needs_setup
     from armature.server.users import has_admin
-    cfg = _load(config)
+    path = (config or config_path()).expanduser()
+    cfg = _load(path)
+    try:
+        setup = needs_setup(cfg)
+    except SQLAlchemyError as exc:
+        _fail(f"Database unavailable ({exc.__class__.__name__}). Check database_url in {path}.")
+    if setup and cfg.require_totp:
+        _fail("No admin exists. Run `armature server create-admin` first.")
+    if setup:
+        cfg = _serve_setup(path, cfg)
+        if cfg is None:
+            return
     keyring = _keyring(cfg)
     engine = make_engine(cfg.database_url)
     try:
         with engine.connect() as conn:
-            exists = has_admin(conn)
+            exists = has_admin(conn, cfg.require_totp)
     except SQLAlchemyError as exc:
         engine.dispose()
         _fail(f"Database unavailable or not migrated ({exc.__class__.__name__}). Run `armature server migrate`.")
@@ -250,6 +288,23 @@ def export_cmd(
     finally:
         engine.dispose()
     typer.echo(f"Exported {len(manifest['objects'])} definitions and {len(manifest['files'])} files to {dest}.")
+
+
+@server_app.command("backfill-locations")
+def backfill_locations_cmd(config: Path | None = ConfigOption):
+    """Record where each run without a location executed, from its job and step outputs. Safe to rerun."""
+    from armature.server.db import make_engine
+    from armature.server.locations import backfill
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        counts = backfill(engine)
+    finally:
+        engine.dispose()
+    total = sum(counts.values())
+    detail = ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()))
+    typer.echo(f"Located {total} run{'' if total == 1 else 's'}{f' ({detail})' if detail else ''}.")
 
 
 @pack_app.command("install")
@@ -346,3 +401,98 @@ def runs_relink(
         engine.dispose()
     verb = "Would link" if dry_run else "Linked"
     typer.echo(f"{verb} {count} run{'' if count == 1 else 's'} of {old_name} to {row.name} ({where}).")
+
+
+@server_app.command("import-ops")
+def import_ops_cmd(
+    workflow: str = typer.Option(..., "--workflow", help="The armature-ops workflow, such as pr-merged"),
+    project: str = typer.Option(..., "--project", help="The project as team/project, or its repository"),
+    config: Path | None = ConfigOption,
+    dry: bool = typer.Option(False, "--dry", help="Validate and show the changes, then roll them back"),
+    force: bool = typer.Option(False, "--force", help="Overwrite rows edited since the last import"),
+):
+    """Upsert an armature-ops workflow, its documents, and its webhook rules into a project. Never deletes."""
+    from armature.server import defs
+    from armature.server.db import make_engine, utcnow
+    from armature.server.migrate_ops import MigrateError, import_ops, resolve_project
+    from armature.server.webhooks import WebhookError
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.connect() as conn, conn.begin() as tx:
+            try:
+                team_id, project_id = resolve_project(conn, project)
+                changes, notes = import_ops(conn, workflow, team_id=team_id, project_id=project_id, now=utcnow(),
+                                            catalog=defs.load_catalog(cfg.packs_dir), force=force)
+            except (MigrateError, WebhookError) as exc:
+                _fail(f"Import refused, nothing changed: {exc}")
+            except defs.DefError as exc:
+                found = (exc.extra.get("validation") or {}).get("errors") or []
+                _fail("Import refused, nothing changed: " + "; ".join(
+                    [exc.message, *(f"{e.get('path') or 'workflow'}: {e['message']}" for e in found)]))
+            if dry:
+                tx.rollback()
+    finally:
+        engine.dispose()
+    for change in changes:
+        typer.echo(("Dry run, rolled back: " if dry else "") + change.line())
+    for note in notes:
+        typer.echo(f"Next: {note}")
+
+
+env_app = typer.Typer(name="env", help="Build images for AWS environment types (needs armature\\[server])",
+                      no_args_is_help=True)
+
+
+@env_app.command("build")
+def env_build(
+    type_name: str = typer.Argument(..., help="The environment type, as named on the AWS page"),
+    base_installs: Path = typer.Option(..., "--base-installs", exists=True, dir_okay=False,
+                                       help="JSON of the installs every image gets: Claude Code, Codex, armature"),
+    var_file: list[Path] = typer.Option([], "--var-file", exists=True, dir_okay=False,
+                                        help="A Packer var file for values the AWS connection lacks. Repeat for each"),
+    constraints: Path | None = typer.Option(None, "--constraints", exists=True, dir_okay=False,
+                                            help="A pip constraints file with hashes for the armature wheel"),
+    key_file: Path | None = typer.Option(None, "--key-file", exists=True, dir_okay=False,
+                                         help="ec2-mac only: the VM's private key"),
+    vm_name: str | None = typer.Option(None, "--vm-name", help="ec2-mac only: the VM to build (default: the type)"),
+    prefix: str = typer.Option("armature-platform", "--prefix", help="The stacks' Prefix parameter"),
+    deploy_dir: Path = typer.Option(None, "--deploy-dir", help="deploy/aws in a checkout (default: this one's)"),
+    config: Path | None = ConfigOption,
+):
+    """Bake an environment type's image with its installs: an AMI with Packer, or a Tart VM for ec2-mac."""
+    import subprocess
+    import tempfile
+
+    from sqlalchemy import select
+
+    from armature.server import envbuild
+    from armature.server.db import make_engine
+    from armature.server.db.schema import aws_connections, environment_types
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.connect() as conn:
+            kind = conn.execute(select(environment_types).where(environment_types.c.name == type_name)).first()
+            connection = conn.execute(select(aws_connections).order_by(aws_connections.c.created_at)).first()
+    finally:
+        engine.dispose()
+    if kind is None:
+        _fail(f"No environment type named {type_name}.")
+    with tempfile.TemporaryDirectory(prefix="armature-env-build-") as scratch:
+        installs = envbuild.write_installs(kind, Path(scratch))
+        try:
+            command = envbuild.command(kind, connection, installs=installs, base_installs=base_installs,
+                                       deploy_dir=deploy_dir or envbuild.DEPLOY_DIR, prefix=prefix,
+                                       var_files=var_file, constraints=constraints, key_file=key_file,
+                                       vm_name=vm_name)
+        except envbuild.BuildError as exc:
+            _fail(str(exc))
+        typer.echo(f"Building {kind.kind} image for {kind.name}: {' '.join(command[:2])} ...")
+        try:
+            result = subprocess.run(command, check=False)
+        except FileNotFoundError:
+            _fail(f"{command[0]} isn't installed.")
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)

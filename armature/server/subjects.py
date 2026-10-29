@@ -1,7 +1,6 @@
 """Subjects: every run about one pull request or issue, grouped into a list row and a history page."""
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,13 +9,13 @@ from sqlalchemy import Connection, String, and_, cast, func, or_, select
 from armature.server import display, rbac
 from armature.server.db.schema import findings, run_artifacts, runs, workflows
 from armature.server.ingest import RUN_KIND
+from armature.server.threads import PULL_SUBJECT, PULL_URL, links
 
 RUNS_MAX = 500
 FINDINGS_MAX = 2000
 SEARCH_BATCHES = 10
 HEAD_LENGTH = 12
 POSTED_LABEL = "Posted result"
-PULL_SUBJECT = re.compile(r"^(?P<repo>[^#\s]+/[^#\s]+)#(?P<number>[1-9][0-9]{0,9})$")
 
 WORKFLOW = func.coalesce(workflows.c.name, runs.c.workflow_name)
 
@@ -56,7 +55,7 @@ def make_cursor(at: datetime, subject: str) -> str:
 def _run_query(scope: rbac.Scope):
     return (select(runs.c.id, runs.c.subject, runs.c.team_id, WORKFLOW.label("workflow"), RUN_KIND.label("kind"),
                    runs.c.status, runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.summary,
-                   runs.c.trigger_ref)
+                   runs.c.trigger_ref, runs.c.outcome, runs.c.risk, runs.c.risk_reasons)
             .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
             .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
 
@@ -178,23 +177,31 @@ def list_subjects(conn: Connection, scope: rbac.Scope, team: str | None, q: str,
 
 
 def merged_links(ordered: list[Any]) -> list[dict[str, str]]:
-    """Every run's links, latest first. A url or a label already taken is skipped."""
+    """Every run's links, latest first. A url already taken is skipped, and so is a label, except on a GitHub pull
+    request link, so an issue with an Android and an iOS pull request links to both."""
     shown: list[dict[str, str]] = []
     urls: set[str] = set()
     labels: set[str] = set()
     for run in reversed(ordered):
         summary = _dict(run.summary)
-        candidates = summary.get("links") if isinstance(summary.get("links"), list) else []
+        candidates = links(run.subject, summary)
         if _text(summary.get("post_url")):
             candidates = [*candidates, {"label": POSTED_LABEL, "url": summary["post_url"]}]
         for link in candidates:
             label, url = _text(_dict(link).get("label")), _text(_dict(link).get("url"))
-            if not label or not url or not url.startswith("https://") or url in urls or label in labels:
+            if not label or not url or not url.startswith("https://") or url in urls:
+                continue
+            if label in labels and not PULL_URL.fullmatch(url):
                 continue
             urls.add(url)
             labels.add(label)
             shown.append({"label": label, "url": url})
     return shown
+
+
+def first_reason(reasons: Any) -> str | None:
+    first = reasons[0] if isinstance(reasons, list) and reasons else None
+    return _text(_dict(first).get("text"))
 
 
 def finding_history(rows: list[Any]) -> list[dict[str, Any]]:
@@ -217,10 +224,15 @@ def finding_history(rows: list[Any]) -> list[dict[str, Any]]:
 def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[str, Any] | None:
     settings = display.load(conn)
     labels = settings["workflow_labels"]
-    ordered = conn.execute(_run_query(scope).where(runs.c.subject == subject)
-                           .order_by(runs.c.started_at, runs.c.id).limit(RUNS_MAX)).all()
+    # A thread's page lists every run in it, so an issue's page shows the runs on its pull requests too.
+    # The newest RUNS_MAX, so a long thread never hides its latest result.
+    ordered = conn.execute(_run_query(scope).where(or_(runs.c.subject == subject, runs.c.thread == subject))
+                           .order_by(runs.c.started_at.desc(), runs.c.id.desc()).limit(RUNS_MAX)).all()[::-1]
     if not ordered:
         return None
+    # The page's own state comes from its own subject's runs, so a merged pull request never marks its issue merged.
+    own = ([run for run in ordered if run.subject == subject]
+           or [run for run in ordered if run.kind != "merge"] or ordered)
     run_ids = [run.id for run in ordered]
     artifacts: dict[str, list[str]] = {}
     for row in conn.execute(select(run_artifacts.c.run_id, run_artifacts.c.name)
@@ -232,14 +244,14 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
         .select_from(findings.join(runs, runs.c.id == findings.c.run_id))
         .where(findings.c.run_id.in_(run_ids))
         .order_by(runs.c.started_at, findings.c.run_id, findings.c.id).limit(FINDINGS_MAX)).all()
-    repo, number = _repo_number(subject, ordered)
+    repo, number = _repo_number(subject, own)
     show_cost = settings["show_cost"]
 
     def row(run: Any) -> dict[str, Any]:
         summary, ref = _dict(run.summary), _dict(run.trigger_ref)
         head = _text(ref.get("head"))
         return {
-            "id": run.id, "workflow": run.workflow,
+            "id": run.id, "subject": run.subject, "workflow": run.workflow,
             "workflow_label": _text(_dict(labels.get(run.workflow)).get("label")) or run.workflow,
             "kind": run.kind, "status": run.status, "started_at": run.started_at,
             "finished_at": run.finished_at, "cost_usd": _cost(run.cost_usd) if show_cost else None,
@@ -247,11 +259,14 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
             "mode": _text(ref.get("mode")), "head": head[:HEAD_LENGTH] if head else None,
             "fields": _scalars(summary.get("fields")), "fix": _scalars(ref.get("fix")),
             "merge": _scalars(ref.get("merge")), "artifacts": artifacts.get(run.id, []),
+            "outcome": run.outcome, "risk": run.risk, "risk_reason": first_reason(run.risk_reasons),
         }
 
     return {
-        "subject": subject, "title": _latest(ordered, "title"), "status": status_of(ordered),
-        "latest_verdict": _latest(ordered, "verdict"), "repo": repo, "number": number,
+        "subject": subject, "title": _latest(own, "title"), "status": status_of(own),
+        "latest_verdict": _latest(own, "verdict"),
+        "latest_outcome": next((run.outcome for run in reversed(own) if run.outcome), None),
+        "risk": own[-1].risk, "repo": repo, "number": number,
         "links": merged_links(ordered), "runs": [row(run) for run in ordered],
         "findings": finding_history(finding_rows),
     }

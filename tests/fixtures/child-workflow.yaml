@@ -6,7 +6,7 @@ adapters:
   greet:
     name: greet
     type: script
-    cmd: "echo 'child says: {{greeting}}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\"ARMATURE_CONTEXT\"]); print(\"child says:\", c.get(\"greeting\", \"\"))'"
 
 stages:
   - id: respond

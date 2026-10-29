@@ -18,6 +18,8 @@ def get_status(request: Request, session: Session = Depends(signed_in)) -> dict[
     if not session.user.is_admin:
         raise ApiError(403, "Only an admin can see the host's status.")
     hook = getattr(request.app.state, "status", None)
+    environments = request.app.state.environments.snapshot()
     if hook is None:
-        return {"configured": False, "markdown": None, "updated_at": None, "error": None}
-    return hook.snapshot()
+        return {"configured": False, "markdown": None, "updated_at": None, "error": None,
+                "environments": environments}
+    return {**hook.snapshot(), "environments": environments}

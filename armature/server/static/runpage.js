@@ -1,5 +1,4 @@
 // The run page's tabs, progress strip, and output text, kept free of the DOM so the node tests can drive them.
-import { branchText } from './feed.js';
 
 export const OUTPUT_TAB = 'output';
 export const LOG_TAB = 'log';
@@ -31,16 +30,23 @@ export function activeTab(requested, names) {
   return names.length ? tabIdFor(names[0]) : LOG_TAB;
 }
 
+const STAGE_WORDS = { resolve: 'Reading the pull request', reviews: 'Reviewing', team_lead: 'Team lead deciding', post: 'Posting the review',
+  implement: 'Writing the change', apply: 'Applying the fixes', verify: 'Checking the change' };
+const BRANCH_NOUNS = { reviews: 'specialists' };
+
+const stageWords = (stepId) => STAGE_WORDS[stepId] || String(stepId || 'step').replace(/[_-]+/g, ' ').replace(/^./, (first) => first.toUpperCase());
+
+// What the run is doing now in plain words: "Reviewing: 1 of 4 specialists done".
 export function progress(steps) {
   const top = (steps || []).filter((step) => !step.parent_step);
   const done = top.filter((step) => DONE.has(step.status)).length;
   const failed = (steps || []).filter((step) => step.status === 'failed').length;
   const running = top.filter((step) => step.status === 'running').map((step) => {
-    const branches = branchText(step);
-    return branches ? `${step.step_id} (${branches})` : step.step_id;
+    const finished = step.branches_done?.length || 0;
+    if (step.branch_total) return `${stageWords(step.step_id)}: ${finished} of ${step.branch_total} ${BRANCH_NOUNS[step.step_id] || 'parts'} done`;
+    return finished ? `${stageWords(step.step_id)}: ${finished} done` : stageWords(step.step_id);
   });
-  const parts = [top.length ? `${done}/${top.length} steps done` : 'No steps yet'];
-  if (running.length) parts.push(`running ${running.join(', ')}`);
+  const parts = running.length ? [...running] : [top.length ? `${done} of ${top.length} steps done` : 'Starting'];
   if (failed) parts.push(`${failed} failed`);
   return { done, total: top.length, failed, running, text: parts.join(' · ') };
 }
@@ -101,4 +107,16 @@ export function byteSize(bytes) {
 
 export function downloadType(mediaType) {
   return `${mediaType || 'text/plain'};charset=utf-8`;
+}
+
+const CANCELABLE = new Set(['queued', 'provisioning', 'claimed', 'running', 'suspended']);
+const CANCEL_ROLES = new Set(['team_lead', 'project_lead', 'contributor']);
+
+// Whether to offer Cancel on a run the job queue started. The server checks the role again.
+export function canCancel(job, run, session) {
+  if (!job || job.cancel_requested_at || !CANCELABLE.has(job.status) || !session?.user) return false;
+  if (session.user.is_admin) return true;
+  return (session.memberships ?? []).some((membership) => CANCEL_ROLES.has(membership.role)
+    && ((membership.scope_kind === 'team' && membership.scope_id === run?.team_id)
+      || (membership.scope_kind === 'project' && membership.scope_id === run?.project_id)));
 }

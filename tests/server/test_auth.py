@@ -28,7 +28,7 @@ def client(sqlite_engine, keyring, clock):
 def test_signed_out_session_shape(client):
     body = client.get("/api/session").json()
     assert body["user"] is None and body["memberships"] == [] and body["sso"] is False
-    assert body["auth"] == {"password": True, "oidc": False}
+    assert body["auth"] == {"password": True, "oidc": False, "totp": True}
     assert isinstance(body["csrf"], str) and len(body["csrf"]) == 64
 
 

@@ -453,3 +453,37 @@ def test_child_spec_rendered_subagent_ref_stamps_path(tmp_path):
     spec = load_child_spec(p, vars={"child_ref": "children/child.yaml"})
     assert spec.stages[0].subagent_spec == "children/child.yaml"
     assert spec.stages[0].subagent_spec_path == str(grandchild.resolve())
+
+
+TYPED = """name: typed
+contracts:
+  inputs:
+    - {name: dry_run, type: boolean, default: false}
+    - {name: limit, type: integer}
+mission: "{% if dry_run %}DRY{% else %}LIVE{% endif %} {{ limit }}"
+stages:
+  - id: s
+    gate: human
+"""
+
+
+def test_typed_inputs_coerce_before_load_time_render(tmp_path):
+    path = tmp_path / "typed.yaml"
+    path.write_text(TYPED)
+    assert load_spec(path, vars={"dry_run": "false", "limit": "3"}).mission == "LIVE 3"
+    assert load_spec(path, vars={"dry_run": "true"}).mission.startswith("DRY")
+    assert load_spec(path).mission.startswith("LIVE")
+
+
+def test_typed_input_bad_value_fails_at_load(tmp_path):
+    from armature.spec.contract_io import InputError
+    path = tmp_path / "typed.yaml"
+    path.write_text(TYPED)
+    with pytest.raises(InputError, match="Input 'limit' must be an integer"):
+        load_spec(path, vars={"limit": "lots"})
+
+
+def test_untyped_inputs_render_strings_as_before(tmp_path):
+    path = tmp_path / "plain.yaml"
+    path.write_text(TYPED.replace(", type: boolean, default: false", "").replace(", type: integer", ""))
+    assert load_spec(path, vars={"dry_run": "false"}).mission.startswith("DRY")

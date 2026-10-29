@@ -169,7 +169,7 @@ packs/github-review/
 
 `pack.yaml` declares each adapter's `cmd`, parameters (a JSON Schema),
 outputs, timeout, and which secrets it needs. Install refuses a `cmd` that
-contains `{{`, and an install or upgrade needs an admin with a fresh step-up,
+contains `{{`, and an install or upgrade needs an admin (with a fresh step-up when TOTP is on),
 is pinned to a commit or wheel hash, and is audited. The UI builds the step form from
 that schema. Only admins install or upgrade packs, because a pack is code.
 Project leads compose workflows from installed adapters and edit prompts and
@@ -218,8 +218,9 @@ Sign-in supports two methods, and an instance enables either or both:
 
 - **OIDC** with Okta or any compliant provider through Authlib. A group claim
   maps to roles, such as `armature-admins` to admin.
-- **Password and TOTP**, ported from the dashboard: scrypt, RFC 6238 with
-  replay protection, step-up for sensitive changes, and rate limits.
+- **Password**, ported from the dashboard: scrypt and rate limits. TOTP
+  (RFC 6238 with replay protection) and step-up for sensitive changes are
+  off by default, and `require_totp: true` turns them on.
 
 OIDC uses the authorization code flow with PKCE, and checks `state`,
 `nonce`, issuer, audience, and the JWKS algorithm. Accounts link on (`iss`,
@@ -234,8 +235,8 @@ an origin check plus a CSRF token on every mutation, and per-IP and per-user
 throttles. One FastAPI dependency per route enforces the role and loads the
 object to check its team or project, never trusting an id in the body. The
 same check covers live streams, exports, re-runs, cancels, and the assistant.
-Changes to packs, providers, secrets, users, and sign-in settings need
-step-up.
+With `require_totp: true`, changes to packs, providers, secrets, users, and
+sign-in settings need step-up.
 
 ## Secrets
 

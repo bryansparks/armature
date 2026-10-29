@@ -524,7 +524,7 @@ description: Minimal end-to-end test workflow using only script adapters
   echo_message:
     name: echo_message
     type: script
-    cmd: "echo 'received: {{{{message}}}}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\\"ARMATURE_CONTEXT\\"]); print(\\"received:\\", c.get(\\"message\\", \\"\\"))'"
   check_exit:
     name: check_exit
     type: script
@@ -881,3 +881,29 @@ def test_tune_command_exits_on_error(tmp_path):
     assert result.exit_code == 1, result.output
     assert "Tune error" in result.output
     assert "kaboom" in result.output
+
+
+def test_armature_run_is_undumpable_on_linux(monkeypatch):
+    import ctypes
+    from armature import cli
+    calls = []
+
+    class Libc:
+        def prctl(self, *args):
+            calls.append(args)
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **kw: Libc())
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    cli._undumpable()
+    assert calls == []
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    cli._undumpable()
+    assert calls == [(cli.PR_SET_DUMPABLE, 0, 0, 0, 0)]
+
+
+def test_run_turns_dumping_off_first(monkeypatch, tmp_path):
+    from armature import cli
+    called = []
+    monkeypatch.setattr(cli, "_undumpable", lambda: called.append(True))
+    result = runner.invoke(app, ["run", str(tmp_path / "missing.yml")])
+    assert result.exit_code == 1 and called == [True]

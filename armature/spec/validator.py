@@ -6,10 +6,17 @@ Call `validate_spec(spec)` and handle the returned list of `SpecError`.
 from __future__ import annotations
 import re
 from dataclasses import dataclass, field
-from armature.spec.models import CLOSURE_REASONS, HarnessSpec, OutputMode
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+from armature.spec.models import (
+    CAPABILITY, CLOSURE_REASONS, CONTEXT_FILE_NAME, ROLE_KEY, SKILL_NAME, AgentStep, HarnessSpec, OutputMode,
+)
 from armature.spec.context import (
     MISSION_LAYER_NAME, WORK_UNIT_LAYER_NAME, floor_never, resolve_effective_policy, runtime_context_keys,
 )
+
+if TYPE_CHECKING:
+    from armature.spec.calls import CallResolver
 
 _PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -20,6 +27,7 @@ class SpecError:
     message: str     # human-readable description
     stage_id: str | None = None
     severity: str = "error"  # "error" or "warning"
+    path: list | None = None  # where in the spec, when the issue is not a stage's
 
 
 class SpecValidationError(ValueError):
@@ -40,8 +48,8 @@ def _with_errors(spec: HarnessSpec) -> list[SpecError]:
 
     errors: list[SpecError] = []
     for stage in spec.stages:
-        if stage.with_ is not None and stage.adapter is None:
-            errors.append(SpecError(code="INVALID_WITH", message="with: needs an adapter", stage_id=stage.id))
+        if stage.with_ is not None and stage.adapter is None and stage.call is None:
+            errors.append(SpecError(code="INVALID_WITH", message="with: needs an adapter or a call", stage_id=stage.id))
             continue
         for where, text in template_strings(stage.with_ or {}):
             for message in lint_template(text):
@@ -53,11 +61,193 @@ def _with_errors(spec: HarnessSpec) -> list[SpecError]:
     return errors
 
 
-def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
+_CMD_NAMES = frozenset({"run_id"})
+
+
+def _adapter_cmd_errors(spec: HarnessSpec) -> list[SpecError]:
+    from jinja2 import meta
+    from jinja2.exceptions import TemplateSyntaxError
+    from armature.runtime.templating import text_env
+
+    errors: list[SpecError] = []
+    for name, adapter in spec.adapters.items():
+        if adapter.pack_dir is not None or not adapter.cmd or "{" not in adapter.cmd:
+            continue
+        try:
+            used = meta.find_undeclared_variables(text_env().parse(adapter.cmd))
+        except TemplateSyntaxError:
+            continue
+        for ref in sorted(used - _CMD_NAMES):
+            errors.append(SpecError(
+                code="ADAPTER_CMD_INPUT",
+                message=f"adapter '{name}' cmd renders '{ref}' into a shell command; "
+                        "read it from ARMATURE_WITH or ARMATURE_CONTEXT instead",
+                path=["adapters", name, "cmd"],
+            ))
+    return errors
+
+
+def _call_errors(spec: HarnessSpec, resolver: "CallResolver | None") -> list[SpecError]:
+    """call: stages: well-formed refs, no self-call, and with a resolver, inputs that match each callee."""
+    from armature.spec.calls import call_graph, load_callee, valid_workflow_name
+    from armature.spec.contract_io import InputError, coerce
+    from armature.packs.params import is_template
+
+    errors: list[SpecError] = []
+    call_stages = [s for s in spec.stages if s.call is not None]
+    for stage in call_stages:
+        ref = stage.call
+        others = [f for f in ("role", "tool_call", "adapter", "gate", "subagent_spec")
+                  if getattr(stage, f) is not None]
+        if others:
+            errors.append(SpecError(
+                code="CALL_CONFLICTING_EXECUTION",
+                message=f"call: cannot be combined with {', '.join(others)}",
+                stage_id=stage.id,
+            ))
+        if any(m in ref.workflow for m in ("{{", "{%", "{#")):
+            errors.append(SpecError(
+                code="CALL_INVALID_WORKFLOW",
+                message="call.workflow holds a template; a call names a fixed workflow",
+                stage_id=stage.id,
+            ))
+        elif not valid_workflow_name(ref.workflow):
+            errors.append(SpecError(
+                code="CALL_INVALID_WORKFLOW",
+                message=f"call.workflow '{ref.workflow}' is not a valid workflow name",
+                stage_id=stage.id,
+            ))
+        if ref.version is not None and ref.version < 1:
+            errors.append(SpecError(
+                code="CALL_INVALID_VERSION",
+                message=f"call.version must be >= 1, got {ref.version}",
+                stage_id=stage.id,
+            ))
+        if ref.workflow == spec.name:
+            errors.append(SpecError(
+                code="CALL_SELF",
+                message=f"workflow '{spec.name}' calls itself",
+                stage_id=stage.id,
+            ))
+    if resolver is None or not call_stages:
+        return errors
+
+    _, graph_errors = call_graph(spec, resolver)
+    errors.extend(graph_errors)
+    for stage in call_stages:
+        try:
+            callee = load_callee(resolver.resolve(stage.call.workflow, stage.call.version))
+        except Exception:
+            continue  # call_graph already reported it
+        decls = {d["name"]: d for d in callee.contracts.inputs if "name" in d}
+        given = stage.with_ or {}
+        for key in sorted(set(given) - set(decls)):
+            errors.append(SpecError(
+                code="CALL_UNKNOWN_INPUT",
+                message=f"with: '{key}' is not an input of workflow '{stage.call.workflow}' "
+                        f"(declared: {sorted(decls)})",
+                stage_id=stage.id,
+            ))
+        for name, decl in decls.items():
+            if name not in given:
+                if decl.get("required", False) and decl.get("default") is None:
+                    errors.append(SpecError(
+                        code="CALL_MISSING_INPUT",
+                        message=f"workflow '{stage.call.workflow}' requires input '{name}' in with:",
+                        stage_id=stage.id,
+                    ))
+                continue
+            value = given[name]
+            if is_template(value):
+                continue
+            try:
+                coerce(decl.get("type"), value, f"with: '{name}'")
+            except InputError as exc:
+                errors.append(SpecError(code="CALL_INPUT_TYPE", message=str(exc), stage_id=stage.id))
+    return errors
+
+
+def _agent_errors(spec: HarnessSpec, skill_names: Iterable[str] | None) -> list[SpecError]:
+    """agent: stages: only prompt, context_files, and ref may hold templates, and a read session keeps read tools."""
+    from armature.nodes.harness import READ_TOOLS
+    from armature.spec.template_lint import lint_template
+
+    known = None if skill_names is None else set(skill_names)
+    errors: list[SpecError] = []
+
+    def add(stage_id: str, code: str, message: str, severity: str = "error") -> None:
+        errors.append(SpecError(code=code, message=message, stage_id=stage_id, severity=severity))
+
+    for stage in spec.stages:
+        agent = stage.agent
+        if not isinstance(agent, AgentStep):
+            continue
+        others = [f for f in ("role", "tool_call", "adapter", "gate", "subagent_spec", "call")
+                  if getattr(stage, f) is not None]
+        if others:
+            add(stage.id, "AGENT_CONFLICTING_EXECUTION", f"agent: cannot be combined with {', '.join(others)}")
+        fixed = [("agent.model", agent.model), *([("agent.role", agent.role)] if agent.role is not None else [])]
+        repo_skills = agent.repo_skills if isinstance(agent.repo_skills, list) else []
+        fixed += [(f"agent.{name}", item) for name in ("skills", "allowed_tools", "disallowed_tools", "repo_rules")
+                  for item in getattr(agent, name) or []]
+        fixed += [("agent.repo_skills", item) for item in repo_skills]
+        for where, value in fixed:
+            if any(m in value for m in ("{{", "{%", "{#")):
+                add(stage.id, "AGENT_TEMPLATE", f"{where} holds a template; only prompt, context_files, and ref may")
+        if agent.role is not None and not ROLE_KEY.fullmatch(agent.role):
+            add(stage.id, "AGENT_ROLE_NAME", f"role '{agent.role}' is not a valid role document key")
+        for name in agent.skills:
+            if not SKILL_NAME.fullmatch(name):
+                add(stage.id, "AGENT_SKILL_NAME", f"skill '{name}' is not a valid skill name")
+            elif known is not None and name not in known:
+                add(stage.id, "AGENT_UNKNOWN_SKILL", f"skill '{name}' is not defined")
+        for name in repo_skills:
+            if not SKILL_NAME.fullmatch(name):
+                add(stage.id, "AGENT_SKILL_NAME", f"repo skill '{name}' is not a valid skill name")
+            elif name in agent.skills:
+                add(stage.id, "AGENT_SKILL_SHADOWED",
+                    f"skill '{name}' is in both skills and repo_skills; the database skill wins", "warning")
+        for pattern in agent.repo_rules:
+            if not pattern or pattern.startswith(("/", "~")) or ".." in pattern.split("/"):
+                add(stage.id, "AGENT_REPO_RULE", f"repo rule '{pattern}' must be a path inside the repo")
+        for name, text in agent.context_files.items():
+            if not CONTEXT_FILE_NAME.fullmatch(name):
+                add(stage.id, "AGENT_CONTEXT_FILE",
+                    f"context file name '{name}' must match {CONTEXT_FILE_NAME.pattern}")
+            for message in lint_template(text):
+                add(stage.id, "UNSAFE_TEMPLATE", f"agent.context_files.{name}: {message}")
+        for message in lint_template(agent.prompt):
+            add(stage.id, "UNSAFE_TEMPLATE", f"agent.prompt: {message}")
+        for message in lint_template(agent.ref or ""):
+            add(stage.id, "UNSAFE_TEMPLATE", f"agent.ref: {message}")
+        if agent.access == "read" and agent.allowed_tools is not None:
+            wider = sorted(set(agent.allowed_tools) - set(READ_TOOLS))
+            if wider:
+                add(stage.id, "AGENT_READ_TOOLS",
+                    f"access: read allows only read tools; {', '.join(wider)} needs access: write")
+        if agent.timeout_s <= 0:
+            add(stage.id, "AGENT_TIMEOUT", f"agent.timeout_s must be > 0, got {agent.timeout_s}")
+        if stage.output_mode == OutputMode.GUIDED_JSON and stage.output_schema is None:
+            add(stage.id, "AGENT_SCHEMA_MISSING", "output_mode: guided_json needs an output_schema")
+        if agent.access == "write" and stage.fan_out is not None:
+            add(stage.id, "AGENT_WRITE_FAN_OUT",
+                "access: write with fan_out starts one writing session per item, each in its own worktree",
+                "warning")
+        if agent.harness == "codex":
+            add(stage.id, "AGENT_EXPERIMENTAL", "the codex harness is experimental and can't run yet", "warning")
+    return errors
+
+
+def validate_spec(spec: HarnessSpec, *, strict: bool = True,
+                  call_resolver: "CallResolver | None" = None,
+                  skill_names: Iterable[str] | None = None) -> list[SpecError]:
     """Validate a HarnessSpec and return a list of errors (empty = valid).
 
     When strict=True (default), raises SpecValidationError if any errors found.
-    When strict=False, returns the list without raising.
+    When strict=False, returns the list without raising. With ``call_resolver``,
+    each call: stage's callee is resolved and its with: checked against the
+    callee's declared inputs, and the whole call graph is checked for cycles.
+    With ``skill_names``, every skill an agent: stage names must be one of them.
     """
     errors: list[SpecError] = []
     stage_ids = {s.id for s in spec.stages}
@@ -112,6 +302,9 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             ))
 
     errors.extend(_with_errors(spec))
+    errors.extend(_adapter_cmd_errors(spec))
+    errors.extend(_call_errors(spec, call_resolver))
+    errors.extend(_agent_errors(spec, skill_names))
 
     # ── Stage has no execution type ────────────────────────────────────────
     for stage in spec.stages:
@@ -121,12 +314,13 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             stage.adapter is not None,
             stage.gate is not None,
             stage.subagent_spec is not None,
+            stage.call is not None,
             stage.agent is not None,  # resolved to role at load time; valid before resolution
         ])
         if not has_exec:
             errors.append(SpecError(
                 code="NO_EXECUTION_TYPE",
-                message="Stage has no role, tool_call, adapter, gate, subagent_spec, or agent — it will never execute",
+                message="Stage has no role, tool_call, adapter, gate, subagent_spec, call, or agent — it will never execute",
                 stage_id=stage.id,
             ))
 
@@ -286,7 +480,20 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 severity="warning",
             ))
 
+    # ── requires: names runner capabilities ───────────────────────────────
+    for capability in spec.requires:
+        if not CAPABILITY.fullmatch(capability):
+            errors.append(SpecError(
+                code="INVALID_REQUIREMENT",
+                message=(
+                    f"requires: {capability!r} is not a capability; use a name like "
+                    f"'llm', 'git', or 'platform:ios'"
+                ),
+                stage_id=None,
+            ))
+
     # ── Contract.inputs entries have required name field ──────────────────
+    from armature.spec.contract_io import declaration_errors
     for i, inp in enumerate(spec.contracts.inputs):
         if "name" not in inp:
             errors.append(SpecError(
@@ -294,9 +501,22 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
                 message=f"contracts.inputs[{i}] is missing the 'name' field",
                 stage_id=None,
             ))
+    for code, message in declaration_errors(spec.contracts.inputs, "contracts.inputs"):
+        errors.append(SpecError(code=code, message=message))
 
-    # ── Contract.outputs reference valid stage ids and have a key ─────────
+    # ── Contract.outputs: typed (name + from) or a stage id and key ───────
+    output_decls = [o for o in spec.contracts.outputs if "name" in o]
+    for code, message in declaration_errors(output_decls, "contracts.outputs"):
+        errors.append(SpecError(code=code, message=message))
+    for out in output_decls:
+        if not isinstance(out.get("from"), str) or not out["from"].strip():
+            errors.append(SpecError(
+                code="CONTRACT_OUTPUT_MISSING_FROM",
+                message=f"contracts.outputs '{out['name']}' needs a from: template over the stage results",
+            ))
     for i, out in enumerate(spec.contracts.outputs):
+        if "name" in out:
+            continue
         if "stage" not in out:
             errors.append(SpecError(
                 code="CONTRACT_OUTPUT_MISSING_STAGE",
@@ -450,6 +670,12 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True) -> list[SpecError]:
             errors.append(SpecError(
                 code="LOOP_INVALID_MAX_ITERATIONS",
                 message=f"loop.max_iterations must be >= 1, got {lc.max_iterations}",
+                stage_id=stage.id,
+            ))
+        if lc.timeout_s is not None and lc.timeout_s <= 0:
+            errors.append(SpecError(
+                code="LOOP_INVALID_TIMEOUT",
+                message=f"loop.timeout_s must be > 0, got {lc.timeout_s}",
                 stage_id=stage.id,
             ))
         if lc.until is not None:

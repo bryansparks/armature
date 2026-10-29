@@ -22,6 +22,10 @@ class MissingSecrets(KeyError):
     """A run asked for secrets that are not set."""
 
 
+class InstanceOnlySecrets(KeyError):
+    """A run that may not receive instance secrets asked for ones set only for the instance."""
+
+
 def aad(team_id: str | None, secret_id: str, name: str) -> dict[str, Any]:
     return {"team_id": team_id, "secret_id": secret_id, "name": name}
 
@@ -71,8 +75,12 @@ def delete_secret(conn: Connection, *, team_id: str | None, name: str, actor_id:
     return True
 
 
-def resolve_for_run(conn: Connection, keyring: Keyring, team_id: str, names: list[str]) -> dict[str, str]:
-    """A team's secret wins over an instance secret of the same name. Any missing name fails the call."""
+def resolve_for_run(conn: Connection, keyring: Keyring, team_id: str, names: list[str], *,
+                    instance: bool = True) -> dict[str, str]:
+    """A team's secret wins over an instance secret of the same name. Any missing name fails the call.
+
+    Without ``instance``, a name set only for the instance fails it too.
+    """
     wanted = set(names)
     if not wanted:
         return {}
@@ -86,6 +94,9 @@ def resolve_for_run(conn: Connection, keyring: Keyring, team_id: str, names: lis
     missing = wanted - chosen.keys()
     if missing:
         raise MissingSecrets(sorted(missing))
+    instance_only = sorted(name for name, r in chosen.items() if r.scope == INSTANCE_SCOPE)
+    if instance_only and not instance:
+        raise InstanceOnlySecrets(instance_only)
     # AAD comes from the scope the caller asked for, never from row columns a writer could change.
     return {name: keyring.open_(r.ciphertext, aad(None if r.scope == INSTANCE_SCOPE else team_id, r.id, name))
             for name, r in chosen.items()}

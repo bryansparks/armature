@@ -151,6 +151,23 @@ armature run my_workflow.yml --input text="Your content here..."
 
 > This spec uses Anthropic (`ANTHROPIC_API_KEY`). To run on OpenAI or a local model instead, change the `model_tiers` block — see **No API key?** above for the Ollama version.
 
+**4. Or run the server and set it up in the browser:**
+
+```bash
+git clone <this repository> && cd armature
+pip install -e ".[server]"
+armature server run
+```
+
+The first run prints a one-time setup link, such as
+`http://127.0.0.1:8098/setup#<token>`. Open it on the same computer. The page
+sets up the database and your admin account, then signs you in and walks you
+through your team's models, AWS, runners, connections, repos, and webhooks. Every step
+after the admin can be skipped and finished later from **Setup** in the menu.
+To use PostgreSQL or MySQL, paste its URL on the database screen. That URL is
+the only setting you type. See
+[docs/platform/DEPLOY.md](docs/platform/DEPLOY.md#first-run).
+
 ---
 
 ## CLI

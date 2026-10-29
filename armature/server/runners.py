@@ -18,12 +18,15 @@ from typing import Any
 
 from sqlalchemy import Connection, delete, func, insert, or_, select, update
 
+from armature.events import location
+from armature.events.sign import sign_engine
 from armature.events.summary import subject_problem, trigger_ref_problem
-from armature.server import audit
+from armature.server import audit, threads
 from armature.server.auth import valid_token
 from armature.server.crypto import Keyring
 from armature.server.db import new_id
 from armature.server.db.schema import (
+    environments,
     projects,
     run_tokens,
     runner_keys,
@@ -40,6 +43,7 @@ WORKFLOW = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,190}$")
 TRIGGER_KIND = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 SERVER_REF_KEYS = frozenset({"dry_run", "source", "import_hash"})
 ACTOR_MAX = 191
+THREAD_MAX = 191
 OPERATIONS_SLUG = "operations"
 OPERATIONS_NAME = "Operations (unassigned runs)"
 
@@ -60,6 +64,27 @@ class RunToken:
 
 def digest(keyring: Keyring, secret: str) -> str:
     return hmac.new(keyring.subkey("runners"), secret.encode("ascii", "replace"), hashlib.sha256).hexdigest()
+
+
+def engine_key(keyring: Keyring, run_id: str) -> str:
+    """The key a run's engine signs with. Only the server can derive it again, and no step of the run holds it."""
+    return hmac.new(keyring.subkey("runners"), b"engine:" + run_id.encode(), hashlib.sha256).hexdigest()
+
+
+def engine_env(keyring: Keyring, run_id: str) -> str:
+    """The run's ARMATURE_ENGINE_KEY: ``<run id>:<engine key>``."""
+    return f"{run_id}:{engine_key(keyring, run_id)}"
+
+
+def signed_suspend(keyring: Keyring, run_id: str, payload: Any) -> bool:
+    """Whether a run_suspend event was signed by the run's engine. Anything else that holds its token can't."""
+    names = ("step_id", "key", "digest", "ts", "sig")
+    fields = [payload.get(name) for name in names] if isinstance(payload, dict) else []
+    if len(fields) != len(names) or not all(isinstance(f, str) for f in fields):
+        return False
+    step_id, key, digest_, ts, sig = fields
+    signed = {"kind": "run_suspend", "run_id": run_id, "step_id": step_id, "key": key, "digest": digest_, "ts": ts}
+    return hmac.compare_digest(sign_engine(engine_key(keyring, run_id), signed), sig)
 
 
 def public_key(row: Any) -> dict[str, Any]:
@@ -104,7 +129,7 @@ def authenticate(conn: Connection, keyring: Keyring, key: str | None, now: datet
     if not key or not key.startswith(KEY_PREFIX) or not valid_token(key[len(KEY_PREFIX):]):
         return None
     row = conn.execute(select(runner_keys).where(runner_keys.c.key_hmac == digest(keyring, key))).first()
-    if row is None or row.revoked_at is not None:
+    if row is None or row.revoked_at is not None or (row.expires_at is not None and row.expires_at <= now):
         return None
     if row.last_used_at is None or now - row.last_used_at > TOUCH:
         conn.execute(update(runner_keys).where(runner_keys.c.id == row.id).values(last_used_at=now))
@@ -125,6 +150,9 @@ def _text(value: Any, what: str, limit: int, pattern: re.Pattern[str] | None = N
 def register_run(conn: Connection, keyring: Keyring, *, key: Any, body: dict[str, Any], now: datetime,
                  ip: str | None) -> tuple[dict[str, Any], str]:
     """Create a running run and mint its event token. Returns the run row and the token."""
+    if key.kind == "ephemeral" or conn.execute(select(environments.c.id)
+                                               .where(environments.c.runner_key_id == key.id)).first():
+        raise RegistrationError(403, "An environment's runner key runs only jobs the server hands it.")
     workflow = _text(body.get("workflow"), "workflow", 191, WORKFLOW)
     if workflow is None:
         raise RegistrationError(400, "workflow is required.")
@@ -137,6 +165,7 @@ def register_run(conn: Connection, keyring: Keyring, *, key: Any, body: dict[str
     subject = body.get("subject")
     if subject is not None and subject_problem(subject):
         raise RegistrationError(400, "subject is not valid.")
+    thread = _text(body.get("thread"), "thread", THREAD_MAX, threads.THREAD)
     project = _text(body.get("project"), "project", 191)
     if key.team_id is None:
         team_id, project_id = _instance_target(conn, project, now, ip)
@@ -157,7 +186,8 @@ def register_run(conn: Connection, keyring: Keyring, *, key: Any, body: dict[str
     row, token = open_run(conn, keyring, team_id=team_id, project_id=project_id, workflow_id=workflow_id,
                           workflow_name=workflow, now=now, actor=actor, trigger_kind=trigger_kind,
                           trigger_ref=_server_ref(trigger_ref), subject=subject, rerun_of=rerun_of,
-                          runner_key_id=key.id)
+                          runner_key_id=key.id, thread=thread,
+                          location=location.parse(body.get("location")))
     audit.record(conn, action="run.register", actor_id=None, team_id=team_id, target_kind="run",
                  target_id=row["id"], detail={"runner_key_id": key.id, "workflow": workflow, "actor": actor}, ip=ip)
     return row, token
@@ -198,16 +228,37 @@ def _operations_team(conn: Connection, now: datetime, ip: str | None) -> str:
 
 def open_run(conn: Connection, keyring: Keyring, *, team_id: str, project_id: str | None, workflow_id: str | None,
              workflow_name: str, now: datetime, **columns: Any) -> tuple[dict[str, Any], str]:
-    """Insert a running run and mint its event token. Returns the run row and the token."""
+    """Insert a running run and mint its event token. Returns the run row and the token.
+
+    An explicit ``thread`` column wins over the one the subject would open.
+    """
     run_id = new_id()
     row = {"id": run_id, "team_id": team_id, "project_id": project_id, "workflow_id": workflow_id,
            "workflow_name": workflow_name, "status": "running", "started_at": now, "cost_usd": 0, "input_tokens": 0,
            "output_tokens": 0, **columns}
+    row["location"] = row.get("location") or location.make(location.UNKNOWN)
+    row["thread"] = row.get("thread") or threads.opening_thread(conn, team_id, row.get("subject"), now)
     conn.execute(insert(runs).values(**row))
+    return row, _mint(conn, keyring, run_id, team_id, now)
+
+
+def reopen_run(conn: Connection, keyring: Keyring, *, run_id: str, now: datetime,
+               runner_key_id: str | None,
+               location: dict[str, Any] | None = None) -> tuple[str | None, str | None]:
+    """Mark a run waiting at a gate running again under a new event token. (None, None) when it is not waiting."""
+    row = conn.execute(select(runs.c.team_id).where(runs.c.id == run_id, runs.c.status == "waiting")).first()
+    if row is None or conn.execute(update(runs).where(runs.c.id == run_id, runs.c.status == "waiting").values(
+            status="running", finished_at=None, error=None, runner_key_id=runner_key_id,
+            **({"location": location} if location else {}))).rowcount != 1:
+        return None, None
+    return run_id, _mint(conn, keyring, run_id, row.team_id, now)
+
+
+def _mint(conn: Connection, keyring: Keyring, run_id: str, team_id: str, now: datetime) -> str:
     token = _random.token_urlsafe(32)
     conn.execute(insert(run_tokens).values(token_hmac=digest(keyring, token), run_id=run_id, team_id=team_id,
                                            expires_at=now + TOKEN_TTL))
-    return row, token
+    return token
 
 
 def lookup_token(conn: Connection, token_digest: str) -> RunToken | None:

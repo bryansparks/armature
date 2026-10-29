@@ -155,3 +155,43 @@ async def test_run_no_contracts_inputs_still_works(tmp_path):
 
     result = await harness.run({})
     assert result["s"]["done"] is True
+
+
+# ── Typed inputs ──────────────────────────────────────────────────────────
+
+def test_validate_inputs_coerces_types_and_applies_defaults(tmp_path):
+    harness = _make_harness([_stage()], Contract(inputs=[
+        {"name": "auto_fix", "type": "boolean", "default": False},
+        {"name": "limit", "type": "integer", "default": 5},
+        {"name": "items", "type": "array"},
+    ]), tmp_path)
+    ctx = harness._validate_inputs({"auto_fix": "true", "items": '["a"]'})
+    assert ctx == {"auto_fix": True, "limit": 5, "items": ["a"]}
+
+
+def test_validate_inputs_rejects_value_outside_enum(tmp_path):
+    harness = _make_harness([_stage()], Contract(inputs=[
+        {"name": "mode", "type": "string", "enum": ["fast", "slow"]},
+    ]), tmp_path)
+    with pytest.raises(ValueError, match="Input 'mode' must be one of"):
+        harness._validate_inputs({"mode": "medium"})
+
+
+async def test_run_coerces_before_skip_if_renders(tmp_path):
+    spec = HarnessSpec(
+        name="wf",
+        stages=[Stage(id="s", tool_call=ToolCallConfig(name="t"), depends_on=[],
+                      skip_if="{{ not auto_fix }}")],
+        contracts=Contract(inputs=[{"name": "auto_fix", "type": "boolean"}]),
+        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+    )
+    harness = Harness(spec=spec, session_dir=tmp_path)
+
+    async def t(args): return {"done": True}
+    harness._registry.register(ToolDescriptor(
+        name="t", description="t", permission=PermissionLevel.READ_ONLY,
+        handler=t, parameters={},
+    ))
+
+    assert (await harness.run({"auto_fix": "false"}))["s"] == {"_skipped": True}
+    assert (await harness.run({"auto_fix": "true"}))["s"]["done"] is True

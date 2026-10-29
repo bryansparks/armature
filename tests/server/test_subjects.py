@@ -181,10 +181,10 @@ def test_list_is_scoped_to_what_the_viewer_sees(engine, keyring, seeded):
 def test_run_list_rows_carry_the_pull_request_state(engine, keyring, seeded):
     rows = {r["id"]: r for r in _client(engine, keyring, seeded, "viewer").get("/api/runs").json()["runs"]}
     fix = rows[seeded["fix"]]
-    assert fix["title"] is None and fix["outcome"] == "pushed"
+    assert fix["title"] is None and (fix["outcome"], fix["fix_outcome"]) == (None, "pushed")
     assert fix["pr"] == {"title": "New title", "verdict": "Approval Recommended", "merged": True}
     issue = next(r for r in rows.values() if r["subject"] == ISSUE)
-    assert issue["pr"] is None and issue["outcome"] is None
+    assert issue["pr"] is None and issue["outcome"] is None and issue["fix_outcome"] is None
     assert FOREIGN not in {r["subject"] for r in rows.values()}
     scoped = _client(engine, keyring, seeded, "project_viewer").get("/api/runs").json()["runs"]
     assert [(r["id"], r["pr"]) for r in scoped] == [
@@ -251,6 +251,53 @@ def test_detail_has_runs_links_and_finding_history(engine, keyring, seeded):
     assert by_key["k2"]["current_disposition"] == "keep"
 
 
+def test_detail_carries_each_runs_outcome_and_risk_and_the_thread_takes_the_newest_runs_risk(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.id == seeded["first"]).values(
+            outcome="recommended", risk="high",
+            risk_reasons=[{"source": "floor", "text": "migrations and schema: db/1.sql"}, {"source": "model"}]))
+        conn.execute(update(runs).where(runs.c.id == seeded["second"]).values(outcome="approved", risk_reasons=[7]))
+    detail = _client(engine, keyring, seeded, "viewer").get(_path(PR)).json()["subject"]
+    first, fix, second, _ = detail["runs"]
+    assert (first["outcome"], first["risk"], first["risk_reason"]) == \
+        ("recommended", "high", "migrations and schema: db/1.sql")
+    assert (fix["outcome"], fix["risk"], fix["risk_reason"]) == (None, None, None)
+    assert (second["outcome"], second["risk"], second["risk_reason"]) == ("approved", None, None)
+    assert (detail["latest_outcome"], detail["risk"]) == ("approved", None)
+    with engine.begin() as conn:
+        newest = conn.execute(select(runs.c.id).where(runs.c.subject == PR)
+                              .order_by(runs.c.started_at.desc())).scalars().first()
+        conn.execute(update(runs).where(runs.c.id == newest).values(risk="medium"))
+    detail = _client(engine, keyring, seeded, "viewer").get(_path(PR)).json()["subject"]
+    assert detail["risk"] == "medium"
+
+
+def test_an_issue_page_lists_the_runs_on_its_pull_requests(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.subject.in_([PR, OTHER_PR])).values(thread=ISSUE))
+    detail = _client(engine, keyring, seeded, "viewer").get(_path(ISSUE)).json()["subject"]
+    assert [r["subject"] for r in detail["runs"]] == [PR, PR, PR, PR, OTHER_PR, ISSUE]
+    assert {f["finding_key"] for f in detail["findings"]} == {"k1", "k2"}
+    # Its state is its own run's: the pull request merged, but the issue's work failed.
+    assert (detail["status"], detail["title"], detail["repo"], detail["number"]) == ("failed", "Add the field", None, None)
+    pulls = [link["url"] for link in detail["links"] if link["label"] == "Pull request"]
+    assert pulls == ["https://github.com/acme/app/pull/13", "https://github.com/acme/app/pull/12"]
+
+
+def test_a_thread_with_no_run_of_its_own_is_never_merged_by_its_pull_request(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.subject == PR).values(thread="PROJ-9"))
+    detail = _client(engine, keyring, seeded, "viewer").get(_path("PROJ-9")).json()["subject"]
+    assert detail["status"] == "Approval Recommended" and detail["title"] == "New title"
+
+
+def test_detail_keeps_the_newest_runs_when_there_are_too_many(engine, keyring, seeded, monkeypatch):
+    monkeypatch.setattr(subjects, "RUNS_MAX", 2)
+    detail = _client(engine, keyring, seeded, "viewer").get(_path(PR)).json()["subject"]
+    assert [r["kind"] for r in detail["runs"]] == ["review", "merge"]
+    assert detail["runs"][0]["id"] == seeded["second"]
+
+
 def test_detail_is_404_without_a_visible_run(engine, keyring, seeded):
     viewer = _client(engine, keyring, seeded, "viewer")
     assert viewer.get(_path(FOREIGN)).status_code == 404
@@ -278,9 +325,28 @@ def test_merged_links_skip_unsafe_and_repeated_entries():
     class Run:
         def __init__(self, summary):
             self.summary = summary
+            self.subject = None
 
     ordered = [Run({"post_url": "https://x/old"}), Run({"links": "not a list", "post_url": "http://x/insecure"}),
                Run({"links": [{"label": "PR", "url": "https://x/pr"}, {"label": "PR", "url": "https://x/other"},
                               {"url": "https://x/no-label"}]})]
     assert subjects.merged_links(ordered) == [{"label": "PR", "url": "https://x/pr"},
                                               {"label": "Posted result", "url": "https://x/old"}]
+
+
+def test_a_thread_shared_with_another_team_never_leaks_its_runs_links_or_findings(engine, keyring, seeded):
+    with engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.subject == PR).values(thread=ISSUE))
+        rival = _run(conn, seeded["other"], "code-review", at(9), "rival/app#2", summary={
+            "title": "Rival secret", "links": [{"label": "Pull request", "url": "https://github.com/rival/app/pull/2"}]})
+        conn.execute(update(runs).where(runs.c.id == rival).values(thread=ISSUE))
+        _run(conn, seeded["other"], "dev-work", at(9, 30), ISSUE, summary={"title": "Rival issue"})
+        _finding(conn, rival, "rk", "keep", title="Rival finding")
+    for who in ("viewer", "project_viewer"):
+        detail = _client(engine, keyring, seeded, who).get(_path(ISSUE)).json()["subject"]
+        assert {r["subject"] for r in detail["runs"]} <= {PR, ISSUE}
+        assert "rival" not in str(detail).lower()
+    viewer = _client(engine, keyring, seeded, "viewer").get(_path(ISSUE)).json()["subject"]
+    assert viewer["title"] != "Rival issue" and len(viewer["runs"]) == 5
+    project = _client(engine, keyring, seeded, "project_viewer").get(_path(ISSUE)).json()["subject"]
+    assert [r["id"] for r in project["runs"]] == [seeded["first"]]

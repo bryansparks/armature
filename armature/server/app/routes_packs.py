@@ -40,6 +40,7 @@ def _pack(pack: Pack, row) -> dict[str, Any]:
         "name": pack.name,
         "version": pack.version,
         "description": pack.description,
+        "builtin": pack.builtin,
         "source": _shown_source(row),
         "pinned_ref": row.pinned_ref if row is not None else None,
         "adapters": [

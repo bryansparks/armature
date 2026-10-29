@@ -1,0 +1,106 @@
+{
+  "description": "A reproducible defect with no ticket becomes a new Defect, and the thread gets its link.",
+  "source": "slack",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "Slackbot 1.0 (+https://api.slack.com/robots)"
+  },
+  "env": {
+    "SLACK_INTAKE_CHANNEL": "C07MOBINTAKE",
+    "JIRA_PROJECT": "MEMTEMDIS",
+    "JIRA_SERVER": "https://familysearch.atlassian.net"
+  },
+  "payload": {
+    "token": "verification-token-unused",
+    "team_id": "T024BE7LD",
+    "api_app_id": "A07INTAKE1",
+    "type": "event_callback",
+    "event_id": "Ev071761675401",
+    "event_time": 1761675401,
+    "event": {
+      "type": "message",
+      "channel": "C07MOBINTAKE",
+      "channel_type": "channel",
+      "user": "U04KXN2QJ7M",
+      "text": "On Android 6.14 beta the Memories tab is blank after you sign out and back in. Kill the app and it comes back.",
+      "ts": "1761675401.204519",
+      "event_ts": "1761675401.204519"
+    }
+  },
+  "stubs": {
+    "classify": {
+      "intent": "create",
+      "confidence": 0.92,
+      "summary": "Fix blank Memories tab after signing out and back in on Android",
+      "description": "On Android 6.14 beta, the Memories tab is blank after signing out and signing back in. Force-quitting the app restores it.\n\nOriginal message:\n> On Android 6.14 beta the Memories tab is blank after you sign out and back in. Kill the app and it comes back.",
+      "issue_type": "Defect",
+      "issue_key": ""
+    }
+  },
+  "fakes": {
+    "jira": [
+      {
+        "match": "^issue create",
+        "stdout": "✓ Issue created\nhttps://familysearch.atlassian.net/browse/MEMTEMDIS-4801\n"
+      }
+    ]
+  },
+  "ops": {
+    "effects": [
+      {
+        "vendor": "jira",
+        "op": "create",
+        "project": "MEMTEMDIS",
+        "type": "Defect",
+        "summary": "Fix blank Memories tab after signing out and back in on Android",
+        "body": "On Android 6.14 beta, the Memories tab is blank after signing out and signing back in. Force-quitting the app restores it.\n\nOriginal message:\n> On Android 6.14 beta the Memories tab is blank after you sign out and back in. Kill the app and it comes back."
+      },
+      {
+        "vendor": "slack",
+        "op": "post",
+        "channel": "C07MOBINTAKE",
+        "text": "https://familysearch.atlassian.net/browse/MEMTEMDIS-4801",
+        "thread_ts": "1761675401.204519"
+      }
+    ],
+    "result": {
+      "posted": true,
+      "channel": "C07MOBINTAKE",
+      "ts": "1700000000.000100"
+    },
+    "sessions": [
+      {
+        "stage": "classify",
+        "kind": "role",
+        "role": "Intake",
+        "type": "judge",
+        "output_mode": "guided_json",
+        "prompt": "Decide what this Slack message should do in Jira.\n\nintent is \"create\" only when the message describes a specific piece of\nwork or a reproducible defect that does not already have a ticket.\n\nissue_type is \"Defect\" for something broken, \"Enhancement\" for an\nimprovement to existing behavior, and \"Task\" for everything else.\nintent is \"comment\" only when the message names an existing issue key\nand adds information to it. Everything else, including questions,\nopinions, status updates, and jokes, is \"ignore\".\n\nsummary is one line under 100 characters, written as a task.\ndescription restates the message as a ticket body and quotes the\noriginal text. Never invent detail the message does not contain.\n\nconfidence is how sure you are the author wanted a ticket, not how well\nyou understood the words.\n\nMessage from U04KXN2QJ7M:\nOn Android 6.14 beta the Memories tab is blank after you sign out and back in. Kill the app and it comes back."
+      }
+    ],
+    "outputs": {
+      "classify": {
+        "intent": "create",
+        "confidence": 0.92,
+        "summary": "Fix blank Memories tab after signing out and back in on Android",
+        "description": "On Android 6.14 beta, the Memories tab is blank after signing out and signing back in. Force-quitting the app restores it.\n\nOriginal message:\n> On Android 6.14 beta the Memories tab is blank after you sign out and back in. Kill the app and it comes back.",
+        "issue_type": "Defect",
+        "issue_key": ""
+      },
+      "created": {
+        "action": "create",
+        "issue": "MEMTEMDIS-4801",
+        "url": "https://familysearch.atlassian.net/browse/MEMTEMDIS-4801",
+        "summary": "Fix blank Memories tab after signing out and back in on Android"
+      },
+      "reply": {
+        "text": "https://familysearch.atlassian.net/browse/MEMTEMDIS-4801"
+      },
+      "notify": {
+        "posted": true,
+        "channel": "C07MOBINTAKE",
+        "ts": "1700000000.000100"
+      }
+    }
+  }
+}

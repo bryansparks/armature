@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="armature-base" content="">
+<title>Set up Armature</title>
+<link rel="icon" href="data:,">
+<script src="static/theme.js"></script>
+<link rel="stylesheet" href="static/style.css">
+<script type="module" src="static/setup.js"></script>
+</head>
+<body>
+<main class="login-wrap setup-wrap">
+  <h1>Set up Armature</h1>
+  <ol class="setup-steps" aria-label="Setup steps">
+    <li id="step-database">Database</li>
+    <li id="step-admin">First admin</li>
+  </ol>
+  <p class="sub" id="intro">Loading…</p>
+
+  <section id="database" hidden aria-labelledby="database-title">
+    <h2 id="database-title" tabindex="-1">Where should Armature keep its data?</h2>
+    <div id="database-configured" hidden>
+      <p id="database-configured-text"></p>
+      <button type="button" id="database-continue">Continue</button>
+    </div>
+    <div id="database-choices">
+      <button type="button" id="use-sqlite">Use the built-in database</button>
+      <p class="help">A file on this computer. Best for one person or a small team.</p>
+      <details>
+        <summary>Use PostgreSQL or MySQL instead</summary>
+        <form id="database-form" novalidate>
+          <label>Database URL <input id="database-url" name="url" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" required></label>
+          <p class="help">Such as postgresql+psycopg://user:password@host/armature. It is saved in the config file, readable only by you.</p>
+          <div class="setup-actions">
+            <button type="button" id="database-test" class="secondary">Test connection</button>
+            <button type="submit">Use this database</button>
+          </div>
+        </form>
+      </details>
+    </div>
+  </section>
+
+  <section id="key" hidden aria-labelledby="key-title">
+    <h2 id="key-title" tabindex="-1">Back up your master key</h2>
+    <p>Armature locks every saved secret with this file. Without it, no secret can be read.</p>
+    <p><code id="key-file"></code></p>
+    <p class="help">Copy it somewhere safe, such as a password manager.</p>
+    <button type="button" id="key-continue">I backed it up</button>
+  </section>
+
+  <section id="admin" hidden aria-labelledby="admin-title">
+    <h2 id="admin-title" tabindex="-1">Create the first admin</h2>
+    <form id="admin-form" novalidate>
+      <label>Username <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+      <label>Password <input id="password" name="password" type="password" autocomplete="new-password" required></label>
+      <p class="help" id="password-help">At least 12 characters.</p>
+      <label>Repeat password <input id="password-again" name="password-again" type="password" autocomplete="new-password" required></label>
+      <button type="submit">Create admin</button>
+    </form>
+  </section>
+
+  <section id="done" hidden aria-labelledby="done-title">
+    <h2 id="done-title" tabindex="-1">Setup is done</h2>
+    <p id="done-text"></p>
+  </section>
+
+  <div class="ok" id="ok" role="status" aria-live="polite"></div>
+  <div class="err" id="err" role="alert" aria-live="assertive"></div>
+  <div class="appearance" data-theme-toggle></div>
+</main>
+</body>
+</html>

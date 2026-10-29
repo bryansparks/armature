@@ -1,11 +1,12 @@
 import { api, ApiError, setCsrf, url } from './api.js';
-import { returnHash, signInNotice, ssoLoginPath } from './session.js';
+import { returnHash, signInIntro, signInNotice, ssoLoginPath } from './session.js';
 
 const form = document.getElementById('login');
 const intro = document.getElementById('intro');
 const errorMessage = document.getElementById('err');
 const sso = document.getElementById('sso');
-const back = returnHash(location.search);
+const totpField = document.getElementById('totp-field');
+const back = returnHash(location.search, location.hash);
 
 document.getElementById('sso-button').addEventListener('click', () => location.assign(url(ssoLoginPath(back))));
 
@@ -15,7 +16,9 @@ form.addEventListener('submit', async (submitEvent) => {
   submitButton.disabled = true;
   errorMessage.textContent = '';
   try {
-    await api('/api/login', { method: 'POST', body: { username: form.username.value, password: form.password.value, totp: form.totp.value.replace(/\s+/g, '') } });
+    const body = { username: form.username.value, password: form.password.value };
+    if (!totpField.hidden) body.totp = form.totp.value.replace(/\s+/g, '');
+    await api('/api/login', { method: 'POST', body });
     location.replace(url('/') + back);
   } catch (err) {
     form.password.value = '';
@@ -45,11 +48,9 @@ async function start() {
   form.hidden = !methods.password;
   sso.hidden = !methods.oidc;
   document.getElementById('sso-or').hidden = !(methods.password && methods.oidc);
-  if (methods.password) {
-    intro.textContent = 'Sign in with your username and password, plus your authenticator code once you have set one up.';
-    form.username.focus();
-  } else if (methods.oidc) intro.textContent = 'Sign in with your organization account.';
-  else intro.textContent = 'No sign-in method is enabled on this server.';
+  totpField.hidden = !methods.totp;
+  intro.textContent = signInIntro(methods);
+  if (methods.password) form.username.focus();
 }
 
 errorMessage.textContent = signInNotice(location.search);

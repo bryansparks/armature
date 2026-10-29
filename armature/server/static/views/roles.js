@@ -5,8 +5,8 @@ import { mayCreate } from '../scopes.js';
 import { currentSession } from '../session.js';
 import { detailPage, DOCUMENT, KIND_LABEL, newPage, scopeText, teamNames } from './definition.js';
 
-const KINDS = [{ id: 'role', label: 'Roles' }, { id: 'prompt', label: 'Prompts' }, { id: 'mission', label: 'Missions' }];
-const EMPTY = { role: 'No roles yet.', prompt: 'No prompts yet.', mission: 'No missions yet.' };
+const KINDS = [{ id: 'role', label: 'Roles' }, { id: 'prompt', label: 'Prompts' }, { id: 'mission', label: 'Missions' }, { id: 'skill', label: 'Skills' }];
+const EMPTY = { role: 'No roles yet.', prompt: 'No prompts yet.', mission: 'No missions yet.', skill: 'No skills yet.' };
 
 async function list(root, kindArg) {
   const kind = KINDS.some((candidate) => candidate.id === kindArg) ? kindArg : KINDS[0].id;

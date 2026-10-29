@@ -119,9 +119,12 @@ async function displayCard(onSaved) {
 
 export async function render(root, { query }) {
   root.append(pageHeader('Settings'));
-  root.append(element('p', { class: 'note' }, 'Instance and team settings, stored as JSON. Secrets do not belong here. Keep them on the Secrets page.'));
+  root.append(element('p', { class: 'note' }, 'Instance, team, and project settings, stored as JSON. A project’s env. settings win over its team’s. Secrets do not belong here. Keep them on the Secrets page.'));
   const teams = await api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []);
-  const scopes = [[INSTANCE, 'Instance'], ...teams.map((team) => [String(team.id), team.name])];
+  const projectLists = await Promise.all(teams.map((team) => api(`/api/teams/${encodeURIComponent(team.id)}/projects`)
+    .then((payload) => listOf(payload, 'projects')).catch(() => [])));
+  const scopes = [[INSTANCE, 'Instance'], ...teams.flatMap((team, index) => [[String(team.id), team.name],
+    ...projectLists[index].map((project) => [String(project.id), `${team.name} / ${project.name}`])])];
   const scopeName = (scope) => scopes.find(([id]) => id === scopeParam(scope))?.[1] || scope;
   const filter = query.get('scope') || '';
   const filterSelect = element('select', { id: 'settings-scope' }, element('option', { value: '' }, 'All scopes'), scopes.map(([id, label]) => element('option', { value: id }, label)));

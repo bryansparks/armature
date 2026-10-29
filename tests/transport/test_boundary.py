@@ -56,3 +56,37 @@ def test_transport_package_and_extras_exist():
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     assert 'cloud = [' in pyproject, "cloud extra not declared in pyproject.toml"
     assert 'cloud-dev = [' in pyproject, "cloud-dev extra not declared in pyproject.toml"
+
+def _imports(py: Path) -> list[str]:
+    names = []
+    for node in ast.walk(ast.parse(py.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names.extend(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.append(node.module)
+    return names
+
+
+def test_the_provisioner_seam_imports_no_aws_sdk():
+    banned = [n for n in _imports(PKG / "transport" / "provision.py") if n.split(".")[0] in BANNED]
+    assert not banned, f"provision.py imports {banned}"
+
+
+def test_the_server_reaches_ec2_only_through_the_provider_loader():
+    offenders = []
+    for py in (PKG / "server").rglob("*.py"):
+        if any(n == "armature.transport.ec2" for n in _imports(py)):
+            offenders.append(str(py.relative_to(REPO)))
+        elif "armature.transport.ec2" in py.read_text(encoding="utf-8") and py.name != "provider_loader.py":
+            offenders.append(str(py.relative_to(REPO)))
+    assert not offenders, "the server names armature.transport.ec2 outside provider_loader: " + ", ".join(offenders)
+
+
+def test_starting_the_server_app_never_imports_boto3():
+    import os
+    import subprocess
+    code = ("import sys, armature.server.app, armature.server.environments; "
+            "sys.exit(1 if 'boto3' in sys.modules or 'armature.transport.ec2' in sys.modules else 0)")
+    result = subprocess.run([sys.executable, "-c", code], env=dict(os.environ, PYTHONPATH=str(REPO)),
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr

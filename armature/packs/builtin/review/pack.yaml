@@ -1,0 +1,81 @@
+name: review
+version: 1.0.0
+description: >-
+  The server's side of a code review through the team's GitHub App connection. The server reads the diff and the
+  head commit from GitHub and the run's own record, so a step can't rate or mark a commit it didn't review.
+adapters:
+  risk:
+    description: >-
+      Rate the diff of a pull request, or of branch against base, as the higher of the server's path floors and
+      the given level, and record it on the run. A level never goes down. expect_head is the commit the sessions
+      reviewed, and a head that moved since is refused. Returns the level, its reasons, the head, and the
+      specialist panel that level runs.
+    cmd: armature tool review.risk
+    params:
+      type: object
+      required: [repo, level, expect_head]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        branch: {type: string, pattern: '^[A-Za-z0-9._/-]{1,200}$'}
+        base: {type: string, pattern: '^[A-Za-z0-9._/-]{1,200}$'}
+        level: {enum: [low, medium, high]}
+        expect_head: {type: string, pattern: '^[0-9a-f]{40}$'}
+        reasons: {type: array, items: {type: string}, maxItems: 20}
+        connection: {type: string}
+  marked:
+    description: Whether the pull request's current head already carries a valid Armature review mark.
+    cmd: armature tool review.marked
+    params:
+      type: object
+      required: [repo, number]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        connection: {type: string}
+  mark:
+    description: >-
+      Mark the head this run reviewed with the Armature review check. Only a head whose review this run posted as
+      an approval is marked.
+    cmd: armature tool review.mark
+    writes: true
+    params:
+      type: object
+      required: [repo, number]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        connection: {type: string}
+  decisions:
+    description: >-
+      Record the team lead's decisions on this run as findings, each with its decision and reason. With fixed, each
+      is one of this run's findings that its approved push fixed, at the commit the server approved.
+    cmd: armature tool review.decisions
+    writes: true
+    params:
+      type: object
+      required: [repo, decisions]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        decisions: {type: array, items: {type: object}, maxItems: 200}
+        fixed: {type: boolean}
+        connection: {type: string}
+  pushable:
+    description: >-
+      Whether this run may push to the pull request now: an open pull request from the same repository, an
+      allowed author, and low or medium recorded risk. Ask before making a fix.
+    cmd: armature tool review.pushable
+    params:
+      type: object
+      required: [repo, number, branch]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        branch: {type: string, pattern: '^[A-Za-z0-9._/-]{1,200}$'}
+        connection: {type: string}

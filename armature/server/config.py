@@ -113,6 +113,14 @@ class DryRunConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_active: int = Field(default=8, ge=0)
+    memory_mb: int = Field(default=2048, ge=256)
+
+
+class RunnerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Caps each run's address space on Linux; 0 turns it off, and macOS ignores it.
+    memory_mb: int = Field(default=8192, ge=0)
 
 
 class ServerConfig(BaseModel):
@@ -130,6 +138,7 @@ class ServerConfig(BaseModel):
     master_key: str = Field(default_factory=lambda: f"file:{Path('~/.armature/master.key').expanduser()}")
     oidc: OIDCConfig | None = None
     password_login: bool = True
+    require_totp: bool = False
     events_socket: str = "~/.armature/server-events.sock"
     lost_after_minutes: int = Field(default=30, ge=1)
     sse_per_user: int = Field(default=8, ge=1)
@@ -138,6 +147,7 @@ class ServerConfig(BaseModel):
     export_on_change: ExportConfig | None = None
     assist: AssistConfig = Field(default_factory=AssistConfig)
     dry_run: DryRunConfig = Field(default_factory=DryRunConfig)
+    runner: RunnerConfig = Field(default_factory=RunnerConfig)
     actions: list[ActionConfig] = Field(default_factory=list)
     status: StatusConfig | None = None
 
@@ -196,7 +206,7 @@ def load_config(path: Path | str | None = None, env: Mapping[str, str] | None = 
             raise ValueError(f"{p} must hold a mapping")
         data = dict(loaded or {})
     for name in ServerConfig.model_fields:
-        if name in ("oidc", "export_on_change", "assist", "dry_run", "actions", "status"):
+        if name in ("oidc", "export_on_change", "assist", "dry_run", "runner", "actions", "status"):
             continue
         value = env.get(ENV_PREFIX + name.upper())
         if value is not None:

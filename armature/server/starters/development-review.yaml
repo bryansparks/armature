@@ -1,0 +1,84 @@
+name: development-review
+version: "1.0"
+description: "What a development job runs once its branch is pushed: rate the branch, hold a high-risk change for a person's approval, open the pull request, and review and mark it."
+
+contracts:
+  inputs:
+    - {name: repo, type: string, required: true}    # the repository's https URL, which agent sessions clone
+    - {name: slug, type: string, required: true}    # owner/name, for the GitHub tools
+    - {name: ref, type: string, required: true}     # the pushed branch, which the sessions review
+    - {name: base, type: string, required: true}
+    - {name: title, type: string, required: true}
+    - {name: body, type: string, default: ""}
+    - {name: auto_fix, type: boolean, default: false}
+  outputs:
+    - {name: approved, type: boolean, from: "{{ approval.approved }}"}
+    - {name: number, type: integer, from: "{{ open.number }}"}
+    - {name: url, type: string, from: "{{ open.url }}"}
+    - {name: risk, type: string, from: "{{ review.risk or risk.level }}"}
+    - {name: verdict, type: string, from: "{{ review.verdict }}"}
+  max_llm_calls: 5
+  timeout_hours: 4
+
+stages:
+  - id: rate
+    agent:
+      model: review
+      prompt: |
+        Rate the risk of merging branch {{ ref }} of {{ slug }} into {{ base }}, checked out here, with the
+        risk-rubric skill.
+      skills: [risk-rubric]
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [level, reasons]
+      properties:
+        level: {enum: [low, medium, high]}
+        reasons: {type: array, items: {type: string}}
+    depends_on: []
+
+  - id: risk
+    adapter: review/risk
+    with:
+      repo: "{{ slug }}"
+      branch: "{{ ref }}"
+      base: "{{ base }}"
+      level: "{{ rate.level }}"
+      reasons: "{{ rate.reasons }}"
+      expect_head: "{{ rate.commit }}"
+    depends_on: [rate]
+
+  # Anything but low or medium risk, a missing level included, needs a person's approval before the pull request. A gate pauses only in the workflow a job runs, so
+  # run this one as the job's workflow, or copy these stages into it, rather than calling it. A rejection ends the
+  # run blocked.
+  - id: approval
+    gate: human
+    condition: "{{ risk.level not in ['low', 'medium'] }}"
+    present: |
+      Branch {{ ref }} of {{ slug }} is high risk. Approve opening its pull request into {{ base }}?
+    approval:
+      min_role: project_lead
+    depends_on: [risk]
+
+  - id: open
+    skip_if: "{{ risk.level not in ['low', 'medium'] and not approval.approved }}"
+    adapter: github/open-pr
+    with:
+      repo: "{{ slug }}"
+      head: "{{ ref }}"
+      base: "{{ base }}"
+      title: "{{ title }}"
+      body: "{{ body }}"
+    depends_on: [approval]
+
+  - id: review
+    skip_if: "{{ not open.number }}"
+    call: {workflow: code-review}
+    with:
+      repo: "{{ repo }}"
+      slug: "{{ slug }}"
+      number: "{{ open.number }}"
+      ref: "{{ risk.head }}"
+      branch: "{{ ref }}"
+      auto_fix: "{{ auto_fix }}"
+    depends_on: [open]

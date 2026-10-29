@@ -69,7 +69,8 @@ export function when(timestamp) {
 const STATUS_TONE = {
   succeeded: 'ok', success: 'ok', done: 'ok', completed: 'ok',
   failed: 'bad', error: 'bad', died: 'bad', lost: 'warn',
-  running: 'running', queued: 'queued', canceled: 'unknown', cancelled: 'unknown',
+  running: 'running', queued: 'queued', canceled: 'unknown', cancelled: 'unknown', waiting: 'warn',
+  approved: 'ok', rejected: 'bad', expired: 'unknown',
 };
 
 export const statusTone = (status) => STATUS_TONE[status] || 'unknown';

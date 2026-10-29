@@ -5,9 +5,9 @@ import { parseHash } from './router.js';
 import { isSso, loginPath, navFor, setSession, ssoStepUpPath, user } from './session.js';
 
 const NAV_GROUPS = [
-  ['Work', [['overview', 'Overview', 'home'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['status', 'Status', 'pulse']]],
+  ['Work', [['overview', 'Overview', 'home'], ['gates', 'Waiting for you', 'inbox'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['projects', 'Projects', 'folder'], ['status', 'Status', 'pulse']]],
   ['Definitions', [['workflows', 'Workflows', 'flow'], ['roles', 'Roles and prompts', 'doc'], ['packs', 'Packs', 'box']]],
-  ['Manage', [['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['webhooks', 'Webhooks', 'hook'], ['settings', 'Settings', 'gear']]],
+  ['Manage', [['setup', 'Setup', 'check'], ['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['runners', 'Runners', 'server'], ['aws', 'AWS', 'cloud'], ['webhooks', 'Webhooks', 'hook'], ['triggers', 'Triggers', 'clock'], ['settings', 'Settings', 'gear']]],
   ['You', [['account', 'Account', 'person']]],
 ];
 
@@ -26,6 +26,12 @@ const ICON_PATHS = {
   gear: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',
   pulse: 'M1.5 8.5h3l2-5 3 9 2-4h3',
   hook: 'M8 1.5v7a3 3 0 1 1-3-3M8 1.5l2 2M8 1.5l-2 2',
+  clock: 'M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 4.5V8l2.5 1.5',
+  server: 'M2 2.5h12v4H2zM2 9.5h12v4H2zM4.5 4.5h.01M4.5 11.5h.01',
+  cloud: 'M4.5 12.5h7.5a2.5 2.5 0 0 0 .3-5 4 4 0 0 0-7.6-1A3 3 0 0 0 4.5 12.5z',
+  folder: 'M1.5 3.5h4.5l1.5 1.5h7v8h-13z',
+  check: 'M2.5 8.5l3.5 3.5 7.5-8',
+  inbox: 'M1.5 9.5l2-6.5h9l2 6.5v4h-13zM1.5 9.5h4l1 2h3l1-2h4',
   menu: 'M2 4h12M2 8h12M2 12h12',
   collapse: 'M10 3L5 8l5 5',
 };
@@ -44,18 +50,25 @@ function icon(name) {
 const VIEW_LOADERS = {
   overview: () => import('./views/overview.js'),
   trends: () => import('./views/trends.js'),
+  gates: () => import('./views/gates.js'),
   runs: () => import('./views/runs.js'),
   run: () => import('./views/run.js'),
   subjects: () => import('./views/subject.js'),
   subject: () => import('./views/subject.js'),
   teams: () => import('./views/teams.js'),
   team: () => import('./views/teams.js'),
-  project: () => import('./views/teams.js'),
+  projects: () => import('./views/projects.js'),
+  project: () => import('./views/projects.js'),
+  setup: () => import('./views/setup.js'),
   users: () => import('./views/users.js'),
   secrets: () => import('./views/secrets.js'),
   'runner-keys': () => import('./views/runnerkeys.js'),
+  runners: () => import('./views/runners.js'),
+  aws: () => import('./views/aws.js'),
   webhooks: () => import('./views/webhooks.js'),
   webhook: () => import('./views/webhooks.js'),
+  triggers: () => import('./views/triggers.js'),
+  trigger: () => import('./views/triggers.js'),
   workflows: () => import('./views/workflows.js'),
   workflow: () => import('./views/workflows.js'),
   'new-workflow': () => import('./views/workflows.js'),
@@ -68,7 +81,7 @@ const VIEW_LOADERS = {
   account: () => import('./views/account.js'),
 };
 
-const NAV_PARENT = { team: 'teams', project: 'teams', run: 'runs', subject: 'subjects', workflow: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks' };
+const NAV_PARENT = { team: 'teams', project: 'projects', run: 'runs', subject: 'subjects', workflow: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks', trigger: 'triggers' };
 
 let allowedViews = [];
 let renderSequence = 0;

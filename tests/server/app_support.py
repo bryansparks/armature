@@ -36,6 +36,7 @@ class Clock:
 
 def make_client(engine, keyring, clock, *, peer=("testclient", 50000), static_dir=None, oidc_transport=None,
                 worker_interval=None, **overrides) -> TestClient:
+    overrides.setdefault("require_totp", True)
     cfg = ServerConfig(database_url=str(engine.url), public_origin=overrides.pop("public_origin", ORIGIN),
                        **overrides)
     extra = {"static_dir": static_dir} if static_dir else {}

@@ -6,7 +6,7 @@ adapters:
   echo_message:
     name: echo_message
     type: script
-    cmd: "echo 'received: {{message}}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\"ARMATURE_CONTEXT\"]); print(\"received:\", c.get(\"message\", \"\"))'"
   check_exit:
     name: check_exit
     type: script

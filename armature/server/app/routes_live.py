@@ -12,11 +12,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, or_, select
 
-from armature.server import display, rbac
+from armature.server import display, rbac, threads
 from armature.server.app.deps import Granted, by_run, require, server, signed_in
 from armature.server.app.http import ApiError
 from armature.server.auth import Session, load_session
-from armature.server.db.schema import findings, run_artifacts, run_steps, runs
+from armature.server.db.schema import findings, jobs, run_artifacts, run_steps, runs
 from armature.server.ingest import TRUNCATED, list_row, load_summary
 from armature.server.live import (
     Message,
@@ -60,15 +60,19 @@ async def get_run(run_id: str, request: Request,
             steps = conn.execute(select(run_steps).where(run_steps.c.run_id == run_id)
                                  .order_by(run_steps.c.started_at, run_steps.c.step_key)).all()
             trigger_ref = conn.execute(select(runs.c.trigger_ref).where(runs.c.id == run_id)).scalar()
-            return load_summary(conn, run_id), steps, trigger_ref, display.load(conn)["show_cost"]
+            job = conn.execute(select(jobs.c.id, jobs.c.status, jobs.c.cancel_requested_at)
+                               .where(jobs.c.run_id == run_id).order_by(jobs.c.created_at.desc(), jobs.c.id)).first()
+            return (load_summary(conn, run_id), steps, trigger_ref, display.load(conn)["show_cost"],
+                    dict(job._mapping) if job else None)
 
-    stored, steps, trigger_ref, show_cost = await asyncio.to_thread(read)
+    stored, steps, trigger_ref, show_cost, job = await asyncio.to_thread(read)
     hub = _live(request)
     summary = hub.summary(run_id) or stored
     dry_run = isinstance(trigger_ref, dict) and trigger_ref.get("dry_run") is True
     cost = summary["cost_usd"] if show_cost else None
-    return {"run": {**summary, "cost_usd": cost, "last_seq": await hub.last_seq(run_id), "dry_run": dry_run},
-            "steps": [_step(r, show_cost) for r in steps]}
+    return {"run": {**summary, "cost_usd": cost, "last_seq": await hub.last_seq(run_id), "dry_run": dry_run,
+                    "links": threads.links(summary.get("subject"), summary.get("summary"))},
+            "steps": [_step(r, show_cost) for r in steps], "job": job}
 
 
 @router.get("/api/runs/{run_id}/events")
@@ -273,7 +277,8 @@ def list_findings(run_id: str, request: Request, before: str | None = None,
                                     and_(findings.c.created_at == cursor.created_at, findings.c.id < cursor.id)))
         rows = conn.execute(query.order_by(findings.c.created_at.desc(), findings.c.id.desc()).limit(limit)).all()
     listed = [{"id": r.id, "path": r.path, "line": r.line, "severity": r.severity, "title": r.title,
-               "body": r.body, "step_id": r.step_id, "created_at": r.created_at} for r in rows]
+               "body": r.body, "step_id": r.step_id, "created_at": r.created_at, "raised_by": r.raised_by,
+               "decision": r.decision, "reason": r.reason, "fix_sha": r.fix_sha} for r in rows]
     return {"findings": listed, "next_before": rows[-1].id if len(rows) == limit else None}
 
 

@@ -29,8 +29,9 @@ def test_pack_list_shows_packs_and_errors(tmp_path, monkeypatch):
     assert "duplicate pack 'hello'" in result.output
 
 
-def test_pack_list_with_nothing_installed(tmp_path, monkeypatch):
+def test_pack_list_with_nothing_installed_shows_the_builtins(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv(PACKS_PATH_ENV, raising=False)
     result = CliRunner().invoke(app, ["pack", "list"])
-    assert result.exit_code == 0 and "No packs installed." in result.output
+    assert result.exit_code == 0 and "github/post-review  (writes)" in result.output
+    assert "slack/post" in result.output and "No packs installed." not in result.output

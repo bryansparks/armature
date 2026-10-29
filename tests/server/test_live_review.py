@@ -377,7 +377,8 @@ def test_findings_route(live, world, clock):
     viewer = live.client(world["users"]["viewer"])
     first = viewer.get(f"/api/runs/{run['run_id']}/findings", params={"limit": 2}).json()
     assert [f["path"] for f in first["findings"]] == ["f2.py", "f1.py"]
-    assert set(first["findings"][0]) == {"id", "path", "line", "severity", "title", "body", "step_id", "created_at"}
+    assert set(first["findings"][0]) == {"id", "path", "line", "severity", "title", "body", "step_id", "created_at",
+                                         "raised_by", "decision", "reason", "fix_sha"}
     assert first["findings"][0]["title"] == "t2" and first["findings"][0]["step_id"] == "security"
     rest = viewer.get(f"/api/runs/{run['run_id']}/findings",
                       params={"limit": 2, "before": first["next_before"]}).json()

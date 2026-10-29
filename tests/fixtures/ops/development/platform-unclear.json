@@ -1,0 +1,571 @@
+{
+  "description": "A vague issue with no component and no platform evidence. PlatformTriage answers no code base, so approve posts in Slack that it left the issue for the next poll and declines. Every later stage passes the decline on: no worktree, no consults, no session, and publish ends declined.",
+  "source": "jira",
+  "env": {
+    "SLACK_OWNER_USER": "U04F2KQ8V3M",
+    "DEVELOPMENT_REVIEW_FAN_OUT": "1",
+    "GIT_AUTHOR_DATE": "2026-10-28T09:30:00",
+    "GIT_COMMITTER_DATE": "2026-10-28T09:30:00"
+  },
+  "files": {
+    "config/teams.json": {
+      "teams": [
+        {
+          "id": "mobile",
+          "name": "Mobile",
+          "auto_fix": false,
+          "repos": [
+            {
+              "slug": "fs-eng/mobile-ios",
+              "platform": "ios",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            },
+            {
+              "slug": "fs-eng/android-tree",
+              "platform": "android",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "dev"
+              ]
+            },
+            {
+              "slug": "fs-eng/mobile-api-nodejs",
+              "platform": "backend",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "product-prototype",
+          "name": "Product Prototype",
+          "auto_fix": false,
+          "repos": []
+        }
+      ]
+    },
+    "config/roles.json": {
+      "base_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git blame:*)",
+        "Bash(cd:*)",
+        "Bash(ls:*)",
+        "Bash(wc:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git rev-list:*)",
+        "Bash(git cat-file:*)"
+      ],
+      "roles": [
+        {
+          "name": "simplicity",
+          "prompt": "prompts/simplicity.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "correctness",
+          "prompt": "prompts/correctness.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:m3.material.io)",
+            "mcp__jira__jira_get_issue",
+            "mcp__jira__jira_search"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          },
+          "mcp_inherit": [
+            "jira"
+          ]
+        },
+        {
+          "name": "security",
+          "prompt": "prompts/security.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "performance",
+          "prompt": "prompts/performance.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {}
+        },
+        {
+          "name": "beauty",
+          "prompt": "prompts/beauty.md",
+          "platforms": [
+            "ios",
+            "android"
+          ]
+        },
+        {
+          "name": "test_adequacy",
+          "prompt": "prompts/test_adequacy.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "concurrency",
+          "prompt": "prompts/concurrency.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {},
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          }
+        },
+        {
+          "name": "conventions",
+          "prompt": "prompts/conventions.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "prompt": "prompts/compatibility.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        }
+      ]
+    },
+    "config/development.json": {
+      "//": "Per-platform settings for specs/jira-work.yml. tools is added to base_tools for the implementing session only; reviewers keep config/roles.json.",
+      "components": {
+        "Android": "android",
+        "iOS": "ios",
+        "Mobile iOS": "ios",
+        "Mobile API": "backend"
+      },
+      "base_tools": [
+        "Read",
+        "Edit",
+        "Write",
+        "Grep",
+        "Glob",
+        "Skill",
+        "TodoWrite",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+        "Bash(git blame:*)",
+        "Bash(git grep:*)",
+        "Bash(ls:*)",
+        "Bash(cd:*)",
+        "mcp__jira__jira_get_issue",
+        "mcp__jira__jira_search",
+        "Bash(grep:*)",
+        "Bash(head:*)",
+        "Bash(tail:*)",
+        "Bash(wc:*)",
+        "Bash(echo:*)"
+      ],
+      "platforms": {
+        "android": {
+          "repo": "fs-eng/android-tree",
+          "checkout": "{{home}}/state/repos/fs-eng_android-tree",
+          "base": "dev",
+          "tools": [
+            "Bash(./gradlew:*)",
+            "Bash(.claude/skills/nephi-bot/run-android.sh:*)",
+            "Bash(bash .claude/skills/nephi-bot/run-android.sh:*)",
+            "Bash(adb -s:*)",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)",
+            "WebFetch(domain:m3.material.io)"
+          ],
+          "env": {
+            "JAVA_HOME": "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+            "ANDROID_HOME": "/opt/android-sdk"
+          },
+          "//remote": "The session on AWS (JIRA_WORK_AWS). It gets base_tools without mcp__ tools, plus these. scripts/session_entry.sh sets JAVA_HOME and ANDROID_HOME to the image's paths; env here overrides them.",
+          "remote": {
+            "tools": [
+              "Bash(./gradlew:*)",
+              "WebFetch(domain:developer.android.com)",
+              "WebFetch(domain:kotlinlang.org)",
+              "WebFetch(domain:m3.material.io)"
+            ],
+            "env": {},
+            "deny_tools": [
+              "Read(//var/lib/armature-session/**)",
+              "Edit(//var/lib/armature-session/**)",
+              "Read(//home/prime/**)",
+              "Bash(git push:*)",
+              "Bash(git commit:*)",
+              "Bash(gh:*)",
+              "NotebookEdit"
+            ]
+          }
+        },
+        "ios": {
+          "repo": "fs-eng/mobile-ios",
+          "checkout": "{{home}}/state/repos/fs-eng_mobile-ios",
+          "base": "master",
+          "tools": [
+            "Bash(xcodebuild:*)",
+            "Bash(xcrun simctl:*)",
+            "Bash(./scripts/sim-signin.sh:*)",
+            "Bash(swift build:*)",
+            "Bash(swift test:*)",
+            "Bash(./test-ios.sh:*)",
+            "Bash(buildScripts/lint/install.sh:*)",
+            "Bash(buildScripts/lint/lint-changed.sh:*)",
+            "Bash(buildScripts/lint/fix-changed.sh:*)",
+            "Bash(xcrun xcresulttool:*)"
+          ],
+          "env": {},
+          "//remote": "The session in a VM on an EC2 Mac host (JIRA_WORK_IOS_AWS). It gets base_tools without mcp__ tools, plus these. The checkout is /Users/admin/armature/src, and the host writes Bedrock credentials under /Users/admin/armature/aws.",
+          "remote": {
+            "tools": [
+              "Bash(xcodebuild:*)",
+              "Bash(xcrun simctl:*)",
+              "Bash(xcrun xcresulttool:*)",
+              "Bash(swift build:*)",
+              "Bash(swift test:*)",
+              "Bash(./test-ios.sh:*)",
+              "Bash(buildScripts/lint/install.sh:*)",
+              "Bash(buildScripts/lint/lint-changed.sh:*)",
+              "Bash(buildScripts/lint/fix-changed.sh:*)"
+            ],
+            "env": {},
+            "deny_tools": [
+              "Read(//Users/admin/armature/aws/**)",
+              "Edit(//Users/admin/armature/aws/**)",
+              "Read(//Users/admin/armature/in/**)",
+              "Edit(//Users/admin/armature/in/**)",
+              "Read(~/.ssh/**)",
+              "Bash(git push:*)",
+              "Bash(git commit:*)",
+              "Bash(gh:*)",
+              "NotebookEdit"
+            ]
+          },
+          "lint": {
+            "fix": "buildScripts/lint/install.sh >/dev/null && buildScripts/lint/fix-changed.sh",
+            "check": "buildScripts/lint/lint-changed.sh"
+          }
+        }
+      },
+      "//deny": "Denied on top of the allowlist. File tools would otherwise read anywhere, and the ticket text driving the session is written by other people.",
+      "deny_tools": [
+        "Read(/{{home}}/**)",
+        "Read(~/.claude.json)",
+        "Read(~/.claude/**)",
+        "Read(~/.config/**)",
+        "Read(~/.aws/**)",
+        "Read(~/.ssh/**)",
+        "Read(~/.netrc)",
+        "Read(~/.gradle/gradle.properties)",
+        "Edit(/{{home}}/**)",
+        "Bash(git push:*)",
+        "Bash(git commit:*)",
+        "Bash(gh:*)",
+        "NotebookEdit"
+      ]
+    },
+    "config/validate.json": {
+      "commands": {
+        "fs-eng/android-tree": "./validate.sh --quick --base {base}",
+        "fs-eng/mobile-ios": "./validate.sh --quick --base {base}"
+      }
+    },
+    "config/workers.json": {
+      "region": "us-east-1",
+      "stack": "armature-workers",
+      "session": {}
+    },
+    ".claude.json": {
+      "mcpServers": {
+        "jira": {
+          "command": "uvx",
+          "args": [
+            "mcp-atlassian"
+          ],
+          "env": {
+            "JIRA_URL": "https://familysearch.atlassian.net"
+          }
+        }
+      }
+    },
+    "state/jira-queue/job.json": {
+      "issue": "MEMTEMDIS-4641",
+      "queued_at": 1793180600
+    }
+  },
+  "repos": {},
+  "context": {
+    "job_file": "{{home}}/state/jira-queue/job.json"
+  },
+  "fakes": {
+    "curl": [
+      {
+        "match": "rest/api/3/myself",
+        "stdout": {
+          "accountId": "557058:4f1c2d3e-8a9b-4c7d-9e1f-2a3b4c5d6e7f",
+          "displayName": "Stephan Heilner",
+          "emailAddress": "stephanh@familysearch.org",
+          "active": true,
+          "timeZone": "America/Denver"
+        }
+      },
+      {
+        "match": "/2/issue/MEMTEMDIS-4641\\?fields=",
+        "stdout": {
+          "id": "1204587",
+          "key": "MEMTEMDIS-4641",
+          "self": "https://familysearch.atlassian.net/rest/api/2/issue/1204587",
+          "fields": {
+            "summary": "Memories feels slow for big families",
+            "description": "From the October member feedback digest: several members say memories take a long time to show up for people with large families. No device, app version, or screen given.",
+            "issuetype": {
+              "id": "10001",
+              "name": "Story",
+              "subtask": false
+            },
+            "status": {
+              "name": "To Do",
+              "statusCategory": {
+                "id": 2,
+                "key": "new",
+                "name": "To Do"
+              }
+            },
+            "assignee": {
+              "accountId": "557058:4f1c2d3e-8a9b-4c7d-9e1f-2a3b4c5d6e7f",
+              "displayName": "Stephan Heilner",
+              "active": true
+            },
+            "components": [],
+            "labels": [
+              "member-feedback"
+            ],
+            "customfield_10020": [
+              {
+                "id": 18422,
+                "name": "MEMTEMDIS Sprint 2026.22",
+                "state": "active",
+                "boardId": 1312,
+                "startDate": "2026-10-21T15:00:00.000Z",
+                "endDate": "2026-11-04T15:00:00.000Z"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "stubs": {
+    "platform": {
+      "platforms": [],
+      "reason": "no component, screen, or API is named, and the slowness could be in either app or the API"
+    },
+    "brief": {
+      "feasible": false,
+      "reason": "setup declined",
+      "anchor": "",
+      "brief": ""
+    }
+  },
+  "ops": {
+    "effects": [
+      {
+        "tool": "curl",
+        "args": [
+          "-sfS",
+          "--max-time",
+          "30",
+          "-u",
+          "fake:fake",
+          "https://example.atlassian.net/rest/api/3/myself"
+        ]
+      },
+      {
+        "tool": "curl",
+        "args": [
+          "-sfS",
+          "--max-time",
+          "30",
+          "-u",
+          "fake:fake",
+          "https://example.atlassian.net/rest/api/3/../2/issue/MEMTEMDIS-4641?fields=summary,description,issuetype,status,assignee,components,labels,customfield_10020"
+        ]
+      },
+      {
+        "vendor": "slack",
+        "op": "post",
+        "channel": "U04F2KQ8V3M",
+        "text": "*<https://example.atlassian.net/browse/MEMTEMDIS-4641|MEMTEMDIS-4641>* was assigned to you: Memories feels slow for big families\nStory, To Do, MEMTEMDIS Sprint 2026.22\nCould not tell which code base this needs (no component, screen, or API is named, and the slowness could be in either app or the API), so I left it. I'll try again on the next poll.",
+        "unfurl_links": false
+      }
+    ],
+    "result": {
+      "outcome": "declined",
+      "detail": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API",
+      "pr_url": ""
+    },
+    "sessions": [
+      {
+        "stage": "platform",
+        "kind": "role",
+        "role": "PlatformTriage",
+        "type": "worker",
+        "output_mode": "guided_json",
+        "prompt": "Decide which code bases this Jira issue needs a change in: the Android\napp (android), the iOS app (ios), and the mobile-api-nodejs backend\nboth apps call (backend). One issue can need more than one, such as a\nnew API field that both apps display.\n\nIf prepare.ready is false, answer an empty list with the reason\n\"not ready\".\n\nprepare.component_platforms lists the platforms the issue's Jira\ncomponents name. Treat it as strong evidence: include each of them\nunless the text plainly says that part needs no change.\n\nOtherwise judge from the summary, description, and labels. Platform\nnames, Kotlin, Compose, Gradle, Swift, SwiftUI, Xcode, or a screen\nthat exists in only one app are evidence for an app. An endpoint,\nresponse field, API route, service call, Node, TypeScript, or \"the\nAPI\" or \"the backend\" is evidence for backend. Include a platform only\nwhen its code must change, not because it is mentioned. Work starts\nwithout a person confirming, so when the evidence is weak, pick the\nlikelier code base anyway and say so in the reason. Answer an empty\nlist only when prepare.ready is false. List the code base that has to\nchange first, such as backend before the apps that use what it adds.\nGive the deciding evidence as the reason, in under 20 words.\n\n{'issue': 'MEMTEMDIS-4641', 'summary': 'Memories feels slow for big families', 'description': 'From the October member feedback digest: several members say memories take a long time to show up for people with large families. No device, app version, or screen given.', 'type': 'Story', 'status': 'To Do', 'components': [], 'labels': ['member-feedback'], 'component_platforms': [], 'platform': '', 'thread_ts': '', 'requeued': False, 'sprint': 'MEMTEMDIS Sprint 2026.22', 'url': 'https://example.atlassian.net/browse/MEMTEMDIS-4641', 'ready': True}"
+      },
+      {
+        "stage": "brief",
+        "kind": "role",
+        "role": "TechLead",
+        "type": "judge",
+        "output_mode": "guided_json",
+        "prompt": "You are the tech lead. Specialists in simplicity, correctness,\nsecurity, performance, beauty, test adequacy, concurrency, and\nconventions each read this Jira issue and the code it concerns, and\nadvised independently on how to implement it. None saw the others.\n\nIf setup.ready is false, set feasible to false, give its reason, and\nleave the rest empty.\n\nWrite the brief the implementing engineer works from. You are not a\nsummarizer.\n\nFirst, the anchor: one sentence of the form \"<one user-visible thing>\nis true, which needs a change in <roughly where>\". One thing, no \"and\".\nIf the specialists' reading of the issue shows it is too vague, too\nbroad, or needs a product decision to anchor, set feasible to false and\ngive the reason in one sentence the engineer can act on.\n\nThen the brief, in Markdown, in this order:\n- Reuse: every existing function, component, extension, token, or\n  pattern the change should call instead of new code, by file and\n  symbol. This is the most important section.\n- Where: the files and symbols the change most likely touches.\n- Constraints: the advice that survives, merged across specialists,\n  one line each, naming who backed it.\n- Decided: each conflict between specialists, which side you took,\n  whom you overruled, and why. Prefer the simpler change when the\n  tradeoff is close.\n- Out of scope: adjacent problems the specialists raised, one line\n  each, not to be fixed here.\n\nDrop speculative, hedged, or taste-only advice. A specialist being\nconfident is not evidence. Keep the brief under 60 lines.\n\nAdvice:\n[]"
+      }
+    ],
+    "outputs": {
+      "prepare": {
+        "issue": "MEMTEMDIS-4641",
+        "summary": "Memories feels slow for big families",
+        "description": "From the October member feedback digest: several members say memories take a long time to show up for people with large families. No device, app version, or screen given.",
+        "type": "Story",
+        "status": "To Do",
+        "components": [],
+        "labels": [
+          "member-feedback"
+        ],
+        "component_platforms": [],
+        "platform": "",
+        "thread_ts": "",
+        "requeued": false,
+        "sprint": "MEMTEMDIS Sprint 2026.22",
+        "url": "https://example.atlassian.net/browse/MEMTEMDIS-4641",
+        "ready": true
+      },
+      "platform": {
+        "platforms": [],
+        "reason": "no component, screen, or API is named, and the slowness could be in either app or the API"
+      },
+      "approve": {
+        "approved": false,
+        "platform": "",
+        "platforms": [],
+        "siblings": [],
+        "reason": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API",
+        "thread_ts": "1700000000.000100"
+      },
+      "setup": {
+        "ready": false,
+        "reason": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API",
+        "issue": "MEMTEMDIS-4641",
+        "id": "MEMTEMDIS-4641",
+        "kind": "jira",
+        "thread_ts": "1700000000.000100"
+      },
+      "consult_assignments": {
+        "jobs": [],
+        "count": 0,
+        "reason": "setup declined"
+      },
+      "consults": [],
+      "brief": {
+        "feasible": false,
+        "reason": "setup declined",
+        "anchor": "",
+        "brief": ""
+      },
+      "implement": {
+        "ran": false,
+        "outcome": "declined",
+        "summary": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API"
+      },
+      "review": {
+        "ran": false,
+        "converged": false,
+        "outcome": "declined",
+        "summary": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API",
+        "rounds": 0,
+        "result": {
+          "ran": false,
+          "outcome": "declined",
+          "summary": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API"
+        }
+      },
+      "publish": {
+        "outcome": "declined",
+        "detail": "platform unclear: no component, screen, or API is named, and the slowness could be in either app or the API",
+        "pr_url": ""
+      }
+    }
+  }
+}

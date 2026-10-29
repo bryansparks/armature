@@ -1,4 +1,5 @@
 import { api, ApiError, listOf } from './api.js';
+import { askAssistant } from './conversation.js';
 import { card, clear, confirmDialog, element, errorBox, loading, money, when } from './dom.js';
 import { diffView } from './diff.js';
 import { issueList, issueText } from './editor.js';
@@ -32,7 +33,7 @@ export function resultSummary(result) {
   const errors = validation.errors || [];
   const tries = result?.attempts > 1 ? ` after ${result.attempts} tries` : '';
   return {
-    cost: `Cost ${money(result?.cost_usd ?? 0, 4)}${tries}`,
+    cost: result?.cost_usd === undefined ? '' : `Cost ${money(result.cost_usd, 4)}${tries}`,
     valid: Boolean(validation.ok),
     status: validation.ok ? 'The proposal validates.' : `The proposal has ${errors.length} ${errors.length === 1 ? 'error' : 'errors'}. You can still accept it and fix them.`,
   };
@@ -123,7 +124,9 @@ export function assistantPanel({ kind, record, getBody, setBody }) {
     askButton.disabled = true;
     clear(result).append(loading());
     try {
-      showResult(await api('/api/assist', { method: 'POST', body }), askedBody);
+      const answer = await askAssistant(body);
+      if (answer?.proposal) showResult(answer.proposal, askedBody);
+      else clear(result).append(element('p', { class: 'pre-line' }, answer?.reply || 'No answer.'));
     } catch (err) {
       clear(result).append(errorBox(err));
     } finally {
@@ -345,6 +348,7 @@ export function describePanel({ idPrefix, label, placeholder, fields = null, req
   const proposalSlot = element('div');
   let history = [];
   let current = null;
+  let conversationId = null;
   let sequence = 0;
   let timer = null;
   let busy = [];
@@ -362,6 +366,7 @@ export function describePanel({ idPrefix, label, placeholder, fields = null, req
     settle();
     history = [];
     current = null;
+    conversationId = null;
     clear(proposalSlot);
     clear(working);
   }
@@ -381,12 +386,17 @@ export function describePanel({ idPrefix, label, placeholder, fields = null, req
     for (const button of busy) button.disabled = true;
     cancelButton.hidden = false;
     try {
-      const proposal = await api('/api/assist', { method: 'POST', body });
-      if (mine !== sequence) return;
-      history = pushHistory(refining ? history : [], text, proposal.explanation);
-      current = proposal;
+      const answer = await askAssistant(body, { conversationId: refining ? conversationId : null });
+      if (mine !== sequence || !answer) return;
+      conversationId = answer.conversation.id;
+      if (!answer.proposal) {
+        clear(working).append(element('p', { class: 'pre-line proposal-explanation' }, answer.reply || 'No answer.'));
+        return;
+      }
+      history = pushHistory(refining ? history : [], text, answer.proposal.explanation);
+      current = answer.proposal;
       clear(working);
-      showProposal(proposal);
+      showProposal(answer.proposal);
     } catch (err) {
       if (mine === sequence) clear(working).append(errorBox(err));
     } finally {
@@ -430,7 +440,7 @@ export function describePanel({ idPrefix, label, placeholder, fields = null, req
     clear(proposalSlot).append(card(
       element('h2', { class: 'inline' }, "Claude's proposal"),
       element('p', { class: 'pre-line proposal-explanation' }, proposal.explanation || 'No explanation given.'),
-      element('p', { class: outcome.valid ? 'note' : 'note bad' }, outcome.status, ' ', outcome.cost, '.', provider),
+      element('p', { class: outcome.valid ? 'note' : 'note bad' }, outcome.status, outcome.cost ? ` ${outcome.cost}.` : '', provider),
       issuesView(proposal.validation),
       proposal.summary ? element('section', { class: 'proposal-steps', 'aria-label': 'Steps after the change' }, summaryParts(proposal.summary, { changes: proposal.changes, heading: 'Steps after the change' })) : null,
       disclosure,
@@ -442,7 +452,8 @@ export function describePanel({ idPrefix, label, placeholder, fields = null, req
     proposalSlot.querySelector('h2')?.focus();
   }
 
-  const send = () => ask(instruction.value, false, [sendButton]);
+  // After a question from Claude, the next message answers it in the same conversation.
+  const send = () => ask(instruction.value, Boolean(conversationId && !current), [sendButton]);
   sendButton.addEventListener('click', send);
   instruction.addEventListener('keydown', (keyEvent) => {
     if (keyEvent.key === 'Enter' && (keyEvent.metaKey || keyEvent.ctrlKey)) send();

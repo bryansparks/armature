@@ -1,0 +1,60 @@
+{
+  "type": "object",
+  "required": ["verdict", "summary", "comments", "decisions"],
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {"type": "string", "enum": ["approve", "comment"]},
+    "summary": {"type": "string"},
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim", "raised_by", "decision", "reason", "disposition"],
+        "properties": {
+          "claim": {"type": "string"},
+          "raised_by": {"type": "array", "items": {"type": "string"}},
+          "decision": {"type": "string", "enum": ["block", "suggest", "drop"]},
+          "reason": {"type": "string"},
+          "overruled": {"type": "string"},
+          "finding_id": {"type": "string"},
+          "disposition": {"type": "string", "enum": ["keep", "drop_rebutted", "resolved"]},
+          "discussion_basis": {"type": "string"}
+        }
+      }
+    },
+    "comment_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["comment_ref", "verdict", "reason"],
+        "properties": {
+          "comment_ref": {"type": "string", "pattern": "^(thread|review|issue)-[0-9]+$"},
+          "verdict": {"type": "string", "enum": ["valid", "invalid", "not_actionable"]},
+          "reason": {"type": "string"},
+          "basis": {"type": "string"}
+        }
+      }
+    },
+    "comments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "line", "severity", "blocking", "body", "claim"],
+        "properties": {
+          "claim": {"type": "string"},
+          "raised_by": {"type": "array", "items": {"type": "string"}},
+          "finding_id": {"type": "string"},
+          "path": {"type": "string"},
+          "line": {"type": "integer", "minimum": 1},
+          "start_line": {"type": "integer", "minimum": 1},
+          "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+          "blocking": {"type": "boolean"},
+          "body": {"type": "string"},
+          "suggestion": {"type": "string"},
+          "fix": {"type": "string"},
+          "verified": {"type": "string"}
+        }
+      }
+    }
+  }
+}

@@ -26,7 +26,7 @@ from armature.spec.models import HarnessSpec
 from armature.spec.validator import SpecError
 
 ALLOWED_FILTERS = frozenset({"default", "length", "lower", "upper", "trim", "int", "string", "tojson"})
-ALLOWED_PRIVATE_NAMES = frozenset({"_result"})
+ALLOWED_PRIVATE_NAMES = frozenset({"_result", "_iteration"})
 
 _ALLOWED_NODES = (
     nodes.Template,

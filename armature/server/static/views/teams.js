@@ -1,30 +1,47 @@
 import { api, listOf } from '../api.js';
-import { attempt, card, clear, element, empty, errorBox, link, loading, meta, pageHeader, table, tabs } from '../dom.js';
+import { attempt, card, clear, element, empty, errorBox, link, loading, pageHeader, table, tabs } from '../dom.js';
 import { hashFor } from '../router.js';
 import { scopeKey } from '../scopes.js';
 import { canManageTeam, isAdmin } from '../session.js';
+import { connectionsCard, teamConnectionsPath } from './connections.js';
 import { teamNames } from './definition.js';
 import { providersSection } from './providers.js';
 import { runnerKeysSection } from './runnerkeys.js';
 import { workflowTable } from './workflows.js';
 
 const PLATFORMS = ['ios', 'android', 'backend', 'dotnet'];
+export const ENVIRONMENT_TYPES_PATH = '/api/environment-types';
+
+export const environmentTypePath = (projectId) => `/api/projects/${encodeURIComponent(projectId)}/environment-type`;
+
+export function environmentTypeOptions(types, currentId) {
+  return [['', 'None: jobs wait for a runner'], ...types.filter((type) => type.enabled || type.id === currentId)
+    .map((type) => [type.id, `${type.name} (${type.kind})${type.enabled ? '' : ', disabled'}`])];
+}
+
+function environmentTypeSelect(id, types, currentId) {
+  const select = element('select', { id }, environmentTypeOptions(types, currentId).map(([value, label]) => element('option', { value }, label)));
+  select.value = currentId || '';
+  return select;
+}
 
 export const teamPageHref = (teamId) => hashFor('team', [teamId]);
 
 export const newWorkflowHref = (teamId) => hashFor('new-workflow', [], { scope: scopeKey({ scope_kind: 'team', scope_id: teamId }) });
 
-function addProjectForm(team, reload) {
+function addProjectForm(team, types, reload) {
   const nameInput = element('input', { type: 'text', id: `project-name-${team.id}`, required: true, maxlength: 100, autocapitalize: 'none', spellcheck: 'false', placeholder: 'mobile-ios' });
   const platformInput = element('input', { type: 'text', id: `project-platform-${team.id}`, required: true, maxlength: 32, list: 'platforms', autocapitalize: 'none', spellcheck: 'false' });
+  const typeSelect = environmentTypeSelect(`project-environment-${team.id}`, types, null);
   const addButton = element('button', { type: 'submit' }, 'Add project');
   const status = element('div', { role: 'status' });
   const form = element('form', { class: 'wf-actions' },
-    element('label', { for: nameInput.id }, 'Project'), nameInput, element('label', { for: platformInput.id }, 'Platform'), platformInput, addButton);
+    element('label', { for: nameInput.id }, 'Project'), nameInput, element('label', { for: platformInput.id }, 'Platform'), platformInput,
+    types.length ? [element('label', { for: typeSelect.id }, 'Environment'), typeSelect] : null, addButton);
   form.addEventListener('submit', async (submitEvent) => {
     submitEvent.preventDefault();
     const added = await attempt(status, addButton, () => api(`/api/teams/${encodeURIComponent(team.id)}/projects`, {
-      method: 'POST', body: { name: nameInput.value.trim(), platform: platformInput.value.trim() },
+      method: 'POST', body: { name: nameInput.value.trim(), platform: platformInput.value.trim(), environment_type_id: typeSelect.value || null },
     }));
     if (added) reload();
   });
@@ -66,13 +83,17 @@ async function list(root) {
 }
 
 async function projectsTab(panel, team) {
-  const projects = listOf(await api(`/api/teams/${encodeURIComponent(team.id)}/projects`), 'projects');
+  const [projects, types] = await Promise.all([
+    api(`/api/teams/${encodeURIComponent(team.id)}/projects`).then((payload) => listOf(payload, 'projects')),
+    api(ENVIRONMENT_TYPES_PATH).then((payload) => listOf(payload, 'types')).catch(() => []),
+  ]);
+  const typeNames = new Map(types.map((type) => [type.id, type.name]));
   const canManage = canManageTeam(team.id);
   clear(panel).append(card(
-    projects.length ? table(['Project', 'Platform'], projects.map((project) => [
-      link(hashFor('project', [project.id]), project.name), project.platform || '—',
+    projects.length ? table(['Project', 'Platform', 'Environment'], projects.map((project) => [
+      link(hashFor('project', [project.id]), project.name), project.platform || '—', typeNames.get(project.environment_type_id) || '—',
     ])) : empty('No projects yet.'),
-    canManage ? addProjectForm(team, () => showTab(panel, team, 'projects')) : null,
+    canManage ? addProjectForm(team, types, () => showTab(panel, team, 'projects')) : null,
   ));
 }
 
@@ -104,6 +125,7 @@ async function showTab(panel, team, active) {
     if (active === 'workflows') await workflowsTab(panel, team);
     else if (active === 'providers') await providersTab(panel, team);
     else if (active === 'runners') clear(panel).append(card(runnerKeysSection(team.id, { heading: null })));
+    else if (active === 'connections') clear(panel).append(connectionsCard({ listPath: teamConnectionsPath(team.id), canManage: canManageTeam(team.id), prefix: `connections-${team.id}` }));
     else await projectsTab(panel, team);
   } catch (err) {
     clear(panel).append(errorBox(err));
@@ -124,7 +146,7 @@ async function detail(root, teamId, requestedTab) {
     return;
   }
   const sections = [{ id: 'projects', label: 'Projects' }, { id: 'workflows', label: 'Workflows' }, { id: 'providers', label: 'Model providers' },
-    ...(canManageTeam(team.id) ? [{ id: 'runners', label: 'Runner keys' }] : [])];
+    { id: 'connections', label: 'Connections' }, ...(canManageTeam(team.id) ? [{ id: 'runners', label: 'Runner keys' }] : [])];
   const active = sections.some((tab) => tab.id === requestedTab) ? requestedTab : 'projects';
   const { tablist, panel } = tabs(teamPageHref(team.id), sections, active, { label: 'Team sections' });
   panel.append(loading());
@@ -132,22 +154,7 @@ async function detail(root, teamId, requestedTab) {
   await showTab(panel, team, active);
 }
 
-async function project(root, projectId) {
-  let detail;
-  try {
-    detail = await api(`/api/projects/${encodeURIComponent(projectId)}`);
-  } catch (err) {
-    root.append(pageHeader('Project'), errorBox(err));
-    return;
-  }
-  const projectRecord = detail?.project ?? detail;
-  root.append(element('p', { class: 'crumb' }, link(hashFor('teams'), 'Teams')), pageHeader(projectRecord.name || 'Project'));
-  root.append(meta(projectRecord.platform ? `Platform ${projectRecord.platform}` : null));
-  root.append(card(element('p', {}, link(hashFor('runs', [], { team: projectRecord.team_id, project: projectRecord.id }), 'See this project’s runs'))));
-}
-
 export async function render(root, { name, args }) {
-  if (name === 'project' && args[0]) return project(root, args[0]);
   if (name === 'team' && args[0]) return detail(root, args[0], args[1]);
   return list(root);
 }

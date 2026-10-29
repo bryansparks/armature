@@ -29,8 +29,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, Engine, func, select
+from sqlalchemy import Connection, Engine, func, insert, select, update
 
+from armature.events import location
 from armature.events.emitter import (
     MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_PARTS,
@@ -38,11 +39,19 @@ from armature.events.emitter import (
 )
 from armature.events.redact import REDACTED, redact_text
 from armature.events.summary import merge_summary, summary_patch
-from armature.server import runners, trigger
+from armature.server import runners, threads, trigger
 from armature.server import secrets as secret_store
 from armature.server.auth import valid_token
 from armature.server.crypto import Keyring
-from armature.server.db.schema import run_events, runs, secrets, workflows
+from armature.server.db import new_id
+from armature.server.db.schema import (
+    FINDING_DECISIONS,
+    findings,
+    run_events,
+    runs,
+    secrets,
+    workflows,
+)
 from armature.server.live import LocalBroker, event_message, summary_message
 from armature.server.writer import EventWriter, StepChange, step_key, sweep_lost
 
@@ -69,7 +78,12 @@ TS_SKEW = timedelta(days=1)
 MIN_SECRET = 4
 KIND = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 EID = re.compile(r"^([A-Za-z0-9_-]{1,64}):(\d{1,18})$")
+SHA = re.compile(r"^[0-9a-f]{40}$")
+MAX_RAISED_BY = 20
 RUNNER_KEY = re.compile(r"\bark_[\w-]{40,}")
+# Tool grants and vendor token shapes, should a step ever print one.
+TOKEN_SHAPES = re.compile(r"\b(?:atg_[\w.-]{20,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|xox[abeoprs]-[\w-]{10,}"
+                          r"|xapp-[\w-]{10,}|lin_api_\w{20,})")
 SURROGATE = re.compile("[\ud800-\udfff]")
 STRIPPED = ("run_id", "team_id", "token", "eid")
 STEP_STATUS = {"step_start": "running", "step_end": "succeeded", "step_failed": "failed",
@@ -86,6 +100,9 @@ MAX_ARTIFACTS_PER_RUN = 50
 MAX_ARTIFACT_BYTES_PER_RUN = 16 * 1024 * 1024
 
 ACCEPTED, REJECTED, DUPLICATE = "accepted", "rejected", "duplicate"
+# A run paused at a gate. Its job resumes it later on the same run.
+WAITING = "waiting"
+ENDS = ("run_end", "run_suspend")
 
 
 def _iso(value: datetime) -> str:
@@ -137,7 +154,7 @@ def shallow(value: Any, limit: int = MAX_DEPTH) -> bool:
 
 
 def _scrub(text: str, secret_values: tuple[str, ...]) -> str:
-    return RUNNER_KEY.sub(REDACTED, redact_text(text, secret_values))
+    return TOKEN_SHAPES.sub(REDACTED, RUNNER_KEY.sub(REDACTED, redact_text(text, secret_values)))
 
 
 def redact(value: Any, secret_values: tuple[str, ...]) -> Any:
@@ -251,16 +268,19 @@ def parse_eid(value: Any) -> tuple[str, int] | None:
 
 
 def about(subject: str | None, reported: Any) -> dict[str, Any]:
-    """A run list row's subject, title, and verdict, the last two from the run's reported summary."""
+    """A run list row's subject, title, verdict, and links, the last three from the run's reported summary."""
     reported = reported if isinstance(reported, dict) else {}
-    return {"subject": subject, "title": reported.get("title"), "verdict": reported.get("verdict")}
+    return {"subject": subject, "title": reported.get("title"), "verdict": reported.get("verdict"),
+            "links": threads.links(subject, reported)}
 
 
 def list_row(summary: dict[str, Any]) -> dict[str, Any]:
     """The fields a row of ``GET /api/runs`` has."""
     return {**{k: summary[k] for k in ("id", "team_id", "project_id", "workflow", "status", "triggered_by",
                                        "started_at", "finished_at", "cost_usd")},
-            **about(summary.get("subject"), summary.get("summary")), "trigger": summary.get("trigger")}
+            **about(summary.get("subject"), summary.get("summary")), "thread": summary.get("thread"),
+            "outcome": summary.get("outcome"), "risk": summary.get("risk"), "trigger": summary.get("trigger"),
+            "location": summary.get("location")}
 
 
 def run_columns() -> list:
@@ -268,7 +288,9 @@ def run_columns() -> list:
             func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), RUN_KIND.label("kind"),
             runs.c.status, func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.trigger_kind,
             runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.input_tokens, runs.c.output_tokens,
-            runs.c.rerun_of, runs.c.cancelled_by, runs.c.error, runs.c.subject, runs.c.summary]
+            runs.c.rerun_of, runs.c.cancelled_by, runs.c.error, runs.c.subject, runs.c.thread, runs.c.summary,
+            runs.c.outcome, runs.c.outcome_source, runs.c.risk, runs.c.risk_reasons, runs.c.head_sha,
+            runs.c.location]
 
 
 def run_query():
@@ -311,6 +333,46 @@ class RateLimit:
         ok = allowance >= 1
         _remember(self._buckets, key, (allowance - 1 if ok else allowance, now), self.size)
         return ok
+
+
+def finding_row(project_id: str | None, step_id: str | None, now: datetime, payload: dict[str, Any]) -> dict[str, Any]:
+    """The findings row a ``finding`` event makes."""
+    path = _text(payload.get("path"), 4096)
+    body = _text(payload.get("body") or payload.get("message") or payload.get("claim"), 60_000)
+    line = payload.get("line")
+    line = line if isinstance(line, int) and not isinstance(line, bool) and 0 <= line < 2 ** 31 else None
+    key = _text(payload.get("finding_key") or payload.get("id"), 64)
+    if key is None:
+        key = hashlib.sha256(f"{path}|{line}|{body}".encode()).hexdigest()[:64]
+    disposition = _text(payload.get("disposition"), 32)
+    decision = payload.get("decision")
+    if decision not in FINDING_DECISIONS:
+        decision = "drop" if disposition in ("drop_rebutted", "resolved") else None
+    raised_by = payload.get("raised_by") if isinstance(payload.get("raised_by"), list) else []
+    raised_by = [r for r in (_text(r, 64) for r in raised_by[:MAX_RAISED_BY]) if r]
+    fix_sha = payload.get("fix_sha")
+    return {"project_id": project_id, "finding_key": key, "path": path, "line": line,
+            "severity": _text(payload.get("severity"), 16), "disposition": disposition,
+            "title": _text(payload.get("title"), 2000), "body": body, "step_id": step_id, "created_at": now,
+            "raised_by": raised_by or None, "decision": decision, "reason": _text(payload.get("reason"), 2000),
+            "fix_sha": fix_sha if isinstance(fix_sha, str) and SHA.fullmatch(fix_sha) else None}
+
+
+def store_findings(engine: Engine, keyring: Keyring, run_id: str, step_id: str, payloads: list[dict[str, Any]],
+                   now: datetime) -> None:
+    """The findings rows of ``payloads``, redacted as ingest redacts, for a run no live hub holds."""
+    with engine.begin() as conn:
+        row = conn.execute(select(runs.c.team_id, runs.c.project_id).where(runs.c.id == run_id)).first()
+        if row is None or not payloads:
+            return
+        hidden = _longest_first(team_secret_values(conn, keyring, row.team_id))
+        conn.execute(insert(findings), [{"id": new_id(), "run_id": run_id,
+                                         **finding_row(row.project_id, step_id, now, utf8(redact(p, hidden)))}
+                                        for p in payloads])
+
+
+# The run fields only server code writes, which a live run's in-memory summary takes from the row.
+SERVER_FIELDS = ("outcome", "outcome_source", "risk", "risk_reasons", "head_sha")
 
 
 class LiveHub:
@@ -489,7 +551,7 @@ class LiveHub:
         eid = parse_eid(event.get("eid"))
         if state.duplicate(eid):
             return DUPLICATE
-        if kind != "run_end" and (state.seq >= MAX_EVENTS_PER_RUN or not state.allow()):
+        if kind not in ENDS and (state.seq >= MAX_EVENTS_PER_RUN or not state.allow()):
             state.rejected += 1
             return REJECTED
         now = self.clock()
@@ -655,12 +717,17 @@ class LiveHub:
             summary["output_tokens"] = (summary["output_tokens"] or 0) + tokens_out
             changed = changed or bool(cost or tokens_in or tokens_out)
         elif kind == "finding":
-            change.findings.append(self._finding(state, step_id, now, payload))
+            change.findings.append(finding_row(state.project_id, step_id, now, payload))
         elif kind == "summary":
             patch = summary_patch(payload)
+            if summary.get("outcome_source") == "server":
+                patch.pop("outcome", None)
             if patch:
                 change.summary = merge_summary(change.summary, patch)
                 summary["summary"] = merge_summary(summary.get("summary"), patch)
+                if "outcome" in patch:
+                    summary["outcome"] = patch["outcome"]
+                self._join_thread(state)
                 changed = immediate = True
         elif kind == "run_end":
             status = run_status(payload.get("status"))
@@ -668,8 +735,27 @@ class LiveHub:
             change.end = (status, now, error)
             summary.update(status=status, finished_at=now, error=error)
             changed = immediate = True
+        elif kind == "run_suspend" and runners.signed_suspend(self.keyring, state.run_id, payload):
+            # Live only. The run's row turns waiting when its gate opens, so a pause with no gate never sticks.
+            summary.update(status=WAITING, finished_at=None, error=None)
+            changed = immediate = True
+        if self._locate(summary, change, kind, payload):
+            changed = immediate = True
         if changed:
             self._publish_summary(state, immediate)
+
+    @staticmethod
+    def _locate(summary: dict[str, Any], change: Any, kind: str, payload: dict[str, Any]) -> bool:
+        """Record where the run executed: a summary's stated location, or a higher-ranked one an event reveals."""
+        found = location.parse(payload.get("location")) if kind == "summary" else None
+        if found is None:
+            found = location.from_event(kind, payload)
+            if not location.better(summary.get("location"), found):
+                return False
+        if found == summary.get("location"):
+            return False
+        change.location = summary["location"] = found
+        return True
 
     def _step(self, state: RunState, step: StepChange, key: str, kind: str, ts: datetime, parent: str | None,
               payload: dict[str, Any]) -> None:
@@ -705,21 +791,23 @@ class LiveHub:
         if "output" in payload:
             step.output, step.has_output = step_output(payload), True
 
-    def _finding(self, state: RunState, step_id: str | None, now: datetime, payload: dict[str, Any]) -> dict[str, Any]:
-        path = _text(payload.get("path"), 4096)
-        body = _text(payload.get("body") or payload.get("message") or payload.get("claim"), 60_000)
-        line = payload.get("line")
-        line = line if isinstance(line, int) and not isinstance(line, bool) and 0 <= line < 2 ** 31 else None
-        key = _text(payload.get("finding_key") or payload.get("id"), 64)
-        if key is None:
-            key = hashlib.sha256(f"{path}|{line}|{body}".encode()).hexdigest()[:64]
-        return {"project_id": state.project_id, "finding_key": key, "path": path, "line": line,
-                "severity": _text(payload.get("severity"), 16), "disposition": _text(payload.get("disposition"), 32),
-                "title": _text(payload.get("title"), 2000), "body": body, "step_id": step_id, "created_at": now}
-
     # Run summaries.
 
+    def _join_thread(self, state: RunState) -> None:
+        """Mirror what the writer's thread update does to this run and the team's other live runs."""
+        thread, joined = threads.joining(state.summary.get("subject"), state.summary["summary"])
+        if thread is None:
+            return
+        state.summary["thread"] = state.summary.get("thread") or thread
+        for other in self._runs.values():
+            if (other is not state and other.team_id == state.team_id and other.summary.get("thread") is None
+                    and other.summary.get("subject") in joined):
+                other.summary["thread"] = thread
+                self._publish_summary(other, True)
+
     def run_started(self, summary: dict[str, Any]) -> None:
+        # A run resumed from a gate starts again under a new token, so its paused state is forgotten.
+        self._runs.pop(summary["id"], None)
         if self.running:
             self.broker.publish(summary_message(summary, list_row(summary)))
 
@@ -737,6 +825,45 @@ class LiveHub:
             state.summary_timer = None
         state.published = time.monotonic()
         self.broker.publish(summary_message(dict(state.summary), list_row(state.summary)))
+
+    def run_changed(self, run_id: str) -> None:
+        """Publish the risk and outcome server code just wrote for a run. Safe to call from any thread."""
+        if not self.running or self._loop is None:
+            return
+        with self.engine.connect() as conn:
+            stored = load_summary(conn, run_id)
+        if stored is not None:
+            self._loop.call_soon_threadsafe(self._server_wrote, stored)
+
+    def server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]]) -> None:
+        """Record findings server code decided as the run's own ``finding`` events. Safe to call from any thread.
+
+        A run the hub holds takes them as if its runner sent them, so open pages see them. Any other run gets the
+        findings rows only.
+        """
+        if self.running and self._loop is not None and run_id in self._runs:
+            self._loop.call_soon_threadsafe(self._server_findings, run_id, step_id, payloads)
+            return
+        store_findings(self.engine, self.keyring, run_id, step_id, payloads, self.clock())
+
+    def _server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]]) -> None:
+        state = self._runs.get(run_id)
+        now = self.clock()
+        if state is None:
+            # The run left the hub after the call was handed over, so its rows are written off the loop instead.
+            self._loop.run_in_executor(None, store_findings, self.engine, self.keyring, run_id, step_id, payloads,
+                                       now)
+            return
+        for payload in payloads:
+            self._accept(state, "finding", step_id, now, now, utf8(redact(payload, state.secrets)))
+
+    def _server_wrote(self, stored: dict[str, Any]) -> None:
+        state = self._runs.get(stored["id"])
+        if state is None:
+            self.broker.publish(summary_message(stored, list_row(stored)))
+            return
+        state.summary.update({k: stored[k] for k in SERVER_FIELDS})
+        self._publish_now(state)
 
     def summary(self, run_id: str) -> dict[str, Any] | None:
         state = self._runs.get(run_id)
@@ -823,6 +950,31 @@ class LiveHub:
                     and not self.writer.max_seq(run_id)):
                 del self._runs[run_id]
         return lost
+
+    async def end_run(self, run_id: str, status: str, error: str | None = None) -> bool:
+        """End a run the server stopped itself, such as by a cancel action. Returns whether it changed."""
+        await self.writer.flush()
+        now = self.clock()
+
+        def end(conn: Connection) -> bool:
+            changed = conn.execute(update(runs).where(runs.c.id == run_id, runs.c.status.in_(("running", "lost")))
+                                   .values(status=status, finished_at=now, error=error)).rowcount == 1
+            if changed:
+                runners.revoke_tokens(conn, [run_id])
+            return changed
+
+        if not await self.writer.run_in_writer(end):
+            return False
+        summary = await asyncio.to_thread(self._read, lambda conn: load_summary(conn, run_id))
+        if summary is None:
+            return True
+        state = self._runs.get(run_id)
+        if state is None:
+            self.broker.publish(summary_message(summary, list_row(summary)))
+        else:
+            state.summary.update(status=summary["status"], finished_at=summary["finished_at"], error=error)
+            self._publish_now(state)
+        return True
 
     async def _sweeper(self) -> None:
         while True:

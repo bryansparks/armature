@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  The AWS identity an Armature server uses to run environments for one install:
+  a host manager role it assumes with an external id, an optional IAM user for
+  static access keys, and the session role it mints per-job model credentials
+  from. Every write is held to resources tagged with this install.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z][a-z0-9-]{1,19}$"
+  InstallId:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9-]{1,11}$"
+  TagProject:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*$"
+    Description: Value of the project tag. Never armature, which belongs to armature-ops.
+  Owner:
+    Type: String
+    MinLength: 1
+  Council:
+    Type: String
+    MinLength: 1
+  FinopsTeam:
+    Type: String
+    MinLength: 1
+  ExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    AllowedPattern: "^[A-Za-z0-9+=,.@:/-]+$"
+    Description: Shared secret the server sends when it assumes either role. Paste the same value on the AWS settings page.
+  TrustedPrincipalArn:
+    Type: String
+    Default: ""
+    Description: >-
+      IAM principal the server runs as, which may assume the host manager role.
+      Empty trusts any principal in this account that holds sts:AssumeRole on it and knows the external id.
+  CreateAccessUser:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Creates an IAM user with the same policy, for a server that can only hold static access keys.
+  AllowHostAllocation:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Lets Armature admins allocate and release Mac Dedicated Hosts, which bill a 24 hour minimum each.
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets the server may launch into, one or more per zone.
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: SecurityGroupId output of stack.yaml.
+  LaunchTemplateIds:
+    Type: CommaDelimitedList
+    Description: LaunchTemplateIds of stack.yaml, plus MacLaunchTemplateId of mac-host.yaml when it exists.
+  AllowedInstanceTypes:
+    Type: CommaDelimitedList
+    Description: Every EC2 instance type the server may launch, across all environment types, such as m7i.large,mac-m4.metal.
+  InstanceRoleArns:
+    Type: CommaDelimitedList
+    Description: WorkerRoleArn of stack.yaml, plus MacHostRoleArn of mac-host.yaml when it exists.
+  BucketName:
+    Type: String
+    MinLength: 3
+    Description: BucketName output of stack.yaml.
+  SessionModelArns:
+    Type: CommaDelimitedList
+    Description: Bedrock inference profile and foundation model ARNs a job's model credentials may invoke.
+  SessionEgressCidrs:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >-
+      Optional NAT egress addresses. When set, model credentials work only from these.
+      Leave empty when workers reach Bedrock through a VPC endpoint.
+
+Rules:
+  ProjectIsNotArmatureOps:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TagProject, armature]]
+        AssertDescription: TagProject can't be armature, which armature-ops owns.
+
+Conditions:
+  AllowHostAllocation: !Equals [!Ref AllowHostAllocation, "true"]
+  CreateAccessUser: !Equals [!Ref CreateAccessUser, "true"]
+  HasTrustedPrincipal: !Not [!Equals [!Ref TrustedPrincipalArn, ""]]
+  HasEgressCidrs: !Not [!Equals [!Join ["", !Ref SessionEgressCidrs], ""]]
+
+Resources:
+  HostManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-${InstallId}-host-manager
+      Path: /
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !If
+                - HasTrustedPrincipal
+                - !Ref TrustedPrincipalArn
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  AccessUser:
+    Type: AWS::IAM::User
+    Condition: CreateAccessUser
+    Properties:
+      UserName: !Sub ${Prefix}-${InstallId}-server
+      Path: /
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  HostManagerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${Prefix}-${InstallId}-host-manager
+      Roles: [!Ref HostManagerRole]
+      Users: !If [CreateAccessUser, [!Ref AccessUser], !Ref AWS::NoValue]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Read
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeInstanceTypeOfferings
+              - ec2:DescribeHosts
+              - ec2:DescribeLaunchTemplates
+              - ec2:DescribeLaunchTemplateVersions
+              - ec2:DescribeImages
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeVpcs
+              - ssm:DescribeInstanceInformation
+              - ssm:GetCommandInvocation
+            Resource: "*"
+          - Sid: Stacks
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackResources
+            Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${Prefix}-${InstallId}-*/*
+          # Every instance launches tagged with this install, from its own templates, so terminate and commands can be held to it.
+          # The server always passes TagSpecifications, so aws:RequestTag holds.
+          - Sid: LaunchTaggedInstances
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: !Ref TagProject
+                aws:RequestTag/armature-install: !Ref InstallId
+                ec2:MetadataHttpTokens: required
+                ec2:InstanceType: !Ref AllowedInstanceTypes
+              ArnLike:
+                ec2:LaunchTemplate: !Split
+                  - ","
+                  - !Join
+                    - ""
+                    - - "arn:*:ec2:*:*:launch-template/"
+                      - !Join [",arn:*:ec2:*:*:launch-template/", !Ref LaunchTemplateIds]
+          - Sid: LaunchTaggedResources
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
+            Condition:
+              StringEquals:
+                aws:RequestTag/project: !Ref TagProject
+                aws:RequestTag/armature-install: !Ref InstallId
+          # Mac instances launch only onto this install's own hosts.
+          - Sid: LaunchOntoOwnHosts
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:dedicated-host/*
+            Condition:
+              StringEquals:
+                ec2:ResourceTag/project: !Ref TagProject
+                ec2:ResourceTag/armature-install: !Ref InstallId
+          - Sid: LaunchFromImages
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}::image/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${SecurityGroupId}
+          # A Join delimiter can't hold the partition or account, and these ids are unique anyway.
+          - Sid: LaunchIntoSubnets
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Split
+              - ","
+              - !Join
+                - ""
+                - - "arn:*:ec2:*:*:subnet/"
+                  - !Join [",arn:*:ec2:*:*:subnet/", !Ref SubnetIds]
+          - Sid: LaunchFromTemplates
+            Effect: Allow
+            Action: ec2:RunInstances
+            Resource: !Split
+              - ","
+              - !Join
+                - ""
+                - - "arn:*:ec2:*:*:launch-template/"
+                  - !Join [",arn:*:ec2:*:*:launch-template/", !Ref LaunchTemplateIds]
+          - Sid: TagAtLaunch
+            Effect: Allow
+            Action: ec2:CreateTags
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*
+              - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:spot-instances-request/*
+            Condition:
+              StringEquals:
+                ec2:CreateAction: RunInstances
+                aws:RequestTag/project: !Ref TagProject
+                aws:RequestTag/armature-install: !Ref InstallId
+          - Sid: TerminateTagged
+            Effect: Allow
+            Action: ec2:TerminateInstances
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/project: !Ref TagProject
+                aws:ResourceTag/armature-install: !Ref InstallId
+          - Sid: PassInstanceRoles
+            Effect: Allow
+            Action: iam:PassRole
+            Resource: !Ref InstanceRoleArns
+            Condition:
+              StringEquals:
+                iam:PassedToService: ec2.amazonaws.com
+          - Sid: CommandTagged
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/*
+            Condition:
+              StringEquals:
+                ssm:resourceTag/project: !Ref TagProject
+                ssm:resourceTag/armature-install: !Ref InstallId
+          - Sid: CommandDocument
+            Effect: Allow
+            Action: ssm:SendCommand
+            Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+          - Sid: MintModelCredentials
+            Effect: Allow
+            Action: sts:AssumeRole
+            Resource: !GetAtt SessionRole.Arn
+          - Sid: InstallObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}/${InstallId}/*
+          - Sid: InstallListing
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${BucketName}
+            Condition:
+              StringLike:
+                s3:prefix: !Sub ${InstallId}/*
+          - !If
+            - AllowHostAllocation
+            - Sid: AllocateTaggedHosts
+              Effect: Allow
+              Action: ec2:AllocateHosts
+              Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:dedicated-host/*
+              Condition:
+                StringEquals:
+                  aws:RequestTag/project: !Ref TagProject
+                  aws:RequestTag/armature-install: !Ref InstallId
+            - !Ref AWS::NoValue
+          - !If
+            - AllowHostAllocation
+            - Sid: TagAtAllocate
+              Effect: Allow
+              Action: ec2:CreateTags
+              Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:dedicated-host/*
+              Condition:
+                StringEquals:
+                  ec2:CreateAction: AllocateHosts
+                  aws:RequestTag/project: !Ref TagProject
+                  aws:RequestTag/armature-install: !Ref InstallId
+            - !Ref AWS::NoValue
+          - !If
+            - AllowHostAllocation
+            - Sid: ReleaseTaggedHosts
+              Effect: Allow
+              Action: ec2:ReleaseHosts
+              Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:dedicated-host/*
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/project: !Ref TagProject
+                  aws:ResourceTag/armature-install: !Ref InstallId
+            - !Ref AWS::NoValue
+
+  # A job's model credentials. The server assumes this role per job with a
+  # session policy and an hour's lifetime, and hands the result to the job.
+  SessionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-${InstallId}-session
+      Path: /
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt HostManagerRole.Arn
+                - !If [CreateAccessUser, !GetAtt AccessUser.Arn, !Ref AWS::NoValue]
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: !Sub ${Prefix}-${InstallId}-session
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeModels
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:GetInferenceProfile
+                Resource: !Ref SessionModelArns
+              - Sid: ListProfiles
+                Effect: Allow
+                Action: bedrock:ListInferenceProfiles
+                Resource: "*"
+              - !If
+                - HasEgressCidrs
+                - Sid: OnlyFromTheWorkers
+                  Effect: Deny
+                  Action: bedrock:*
+                  Resource: "*"
+                  Condition:
+                    NotIpAddress:
+                      aws:SourceIp: !Ref SessionEgressCidrs
+                - !Ref AWS::NoValue
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+Outputs:
+  HostManagerRoleArn:
+    Value: !GetAtt HostManagerRole.Arn
+  SessionRoleArn:
+    Value: !GetAtt SessionRole.Arn
+  AllowHostAllocation:
+    Value: !Ref AllowHostAllocation
+  AccessUserName:
+    Condition: CreateAccessUser
+    Value: !Ref AccessUser

@@ -118,6 +118,10 @@ If no document has `requires_escalation: true`, the entire stage — including i
 
 `skip_if` is evaluated before any LLM call, so skipped stages have zero cost and zero latency.
 
+`skip_if` renders against the full cumulative context: runtime inputs and the output of every stage that has completed, as the `document_reviews` example shows. A skip doesn't propagate. A stage that depends on a skipped stage still runs unless its own `skip_if` checks `{{ upstream._skipped }}`.
+
+Declare flag inputs with `type: boolean` in `contracts.inputs`. The engine then coerces `--input dry_run=false` to the boolean `false` before `skip_if` renders, so `{{ dry_run }}` and `{{ not dry_run }}` mean what they say. An untyped input stays the string `"false"`, which `{{ not dry_run }}` treats as truthy.
+
 ---
 
 ## `condition` — positive conditional gate
@@ -259,6 +263,7 @@ class IterationConfig(BaseModel):
     iteration_var: str = "_iteration"
     backoff_s: float | None = None
     backoff_max_s: float = 60.0
+    timeout_s: float | None = None
 ```
 
 ### Field reference
@@ -271,6 +276,7 @@ class IterationConfig(BaseModel):
 | `iteration_var` | `str` | `"_iteration"` | Name of the context variable injected into each iteration. Override when a stage already uses `_iteration` for something else. |
 | `backoff_s` | `float \| null` | `null` | Seconds to wait between iterations. Doubles each time, capped at `backoff_max_s`. Use for rate-limited external services or pacing. |
 | `backoff_max_s` | `float` | `60.0` | Upper bound on per-iteration backoff delay. |
+| `timeout_s` | `float \| null` | `null` | Wall-clock budget in seconds across all iterations, checked after each one. When spent before `until` is met, the loop stops and returns the last result. |
 
 ### The `_iteration` context variable
 
@@ -564,6 +570,40 @@ The default injection key is `_iteration`. If that name collides with something 
 
 In this configuration, each planned iteration can itself retry up to 2 times on failure before the overall loop advances. If iteration 2 fails twice, the stage itself fails (not just that iteration). A `fail_as_value: true` on the stage will catch that at the workflow level.
 
+### `timeout_s` — budget across rounds
+
+`max_iterations` caps the number of rounds. `timeout_s` caps their total time. The engine checks the budget after each round, so a round in progress always finishes. When the budget is spent and `until` is still unmet, the loop stops, emits a `loop_stopped` event, and returns the last round's result with a `_loop_stopped` key that gives the reason:
+
+```yaml
+  - id: fix
+    call: {workflow: pr-fix}
+    with:
+      attempt: "{{ _iteration.num }}"
+    loop:
+      max_iterations: 5
+      until: "{{ passed }}"
+      timeout_s: 1800
+    depends_on: [triage]
+```
+
+```python
+{"passed": False, "_loop_stopped": "loop.timeout_s=1800s spent after 3 round(s) (1912.4s) before until was met"}
+```
+
+A spent budget isn't a failure. Downstream stages read `{{ fix._loop_stopped }}` to tell a timeout from a pass. To fail hard on a deadline instead, use the stage-level `timeout_s`, which cancels the round in progress.
+
+### Looping a call
+
+`loop` works on a `call:` stage like any other stage. Each round runs the called workflow as a fresh child run. `until` reads the callee's typed outputs directly, because the call's result is exactly those outputs. `_iteration` is in the caller's context, so `with:` templates can pass the round number or a carried value into the callee:
+
+```yaml
+    with:
+      attempt: "{{ _iteration.num }}"
+      prior_findings: "{{ findings | default('') }}"
+```
+
+Each round's child run gets its own session directory, `stage_<id>/iter_<n>/child_0`.
+
 ### Trace events
 
 Iteration activity appears in the run trace as `loop_iteration` events — distinct from the `retry_attempt` events emitted by `on_fail.loop`. This makes it straightforward to distinguish planned iteration from error-driven retry in dashboards and post-run analysis.
@@ -576,6 +616,8 @@ Iteration activity appears in the run trace as `loop_iteration` events — disti
 | `iteration` | Current iteration number (1-based) |
 | `max` | `max_iterations` value |
 | `until_met` | `true` if the loop stopped because `until` became truthy; `false` if it ran to `max_iterations` |
+
+A loop that spends its `timeout_s` also emits `loop_stopped` with `stage`, `iteration`, and `reason`.
 
 ### Comparison: `loop` vs `on_fail.loop`
 

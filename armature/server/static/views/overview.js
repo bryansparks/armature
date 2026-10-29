@@ -3,10 +3,25 @@ import { ago, card, clear, duration, element, empty, errorBox, link, loading, mo
 import { hours, loadDisplay, workflowLabel } from '../display.js';
 import { every, subscribe } from '../live.js';
 import { hashFor } from '../router.js';
+import { isAdmin } from '../session.js';
+import { runStatus } from './runs.js';
 
 const POLL_MS = 15000;
 const REFRESH_AFTER_MS = 3000;
 const ALERT_TONE = { failed: 'warn', lost: 'warn', credential: 'bad' };
+
+async function setupBanner(slot) {
+  const { loadSnapshot, setupProgress, showBanner } = await import('./setup.js');
+  const snapshot = await loadSnapshot().catch(() => null);
+  if (!snapshot || !showBanner(snapshot)) return;
+  const { count, total } = setupProgress(snapshot);
+  slot.append(element('div', { class: 'banner' }, link(hashFor('setup'), `Finish setup (${count} of ${total} done)`)));
+}
+
+function outcomeCell(run) {
+  const status = runStatus(run, null);
+  return element('span', { class: `state state-${status.tone}` }, status.text);
+}
 
 export function teamPicker(teams, selected, onPick) {
   if (teams.length < 2) return null;
@@ -28,29 +43,26 @@ function elapsed(run) {
   return duration(secondsBetween(run.started_at, run.finished_at));
 }
 
-// A link to the run, or with ``open`` a button that calls it. ``details`` replaces the started and by lines.
-export function runningCard(run, display, { open = null, color = null, details = null } = {}) {
+// A link to the run. ``details`` replaces the started and by lines.
+export function runningCard(run, display, { color = null, details = null } = {}) {
   const parts = [
     element('span', { class: 'running-name' }, color ? element('span', { class: `swatch sw-${color}`, 'aria-hidden': 'true' }) : null, workflowLabel(display, run.workflow)),
     statusChip(run.status),
     details ?? [element('span', { class: 'muted' }, `Started ${ago(run.started_at)}`), run.triggered_by ? element('span', { class: 'muted' }, `by ${run.triggered_by}`) : null],
   ];
-  if (!open) return element('a', { class: 'running-run', href: hashFor('run', [run.id]) }, parts);
-  return element('button', { type: 'button', class: 'running-run', 'data-run-id': String(run.id), onclick: open }, parts);
+  return element('a', { class: 'running-run', href: hashFor('run', [run.id]) }, parts);
 }
 
 const DISMISSED_KEY = 'armature.dismissed-alerts';
 
 export const alertKey = (alert) => `${alert.kind}:${alert.workflow || ''}`;
 
-// A dismissal holds only while the alert's latest run is the same, so a new failure brings it back.
 export function visibleAlerts(alerts, dismissed) {
-  return alerts.filter((alert) => !alert.run_id || dismissed[alertKey(alert)] !== alert.run_id);
+  return alerts.filter((alert) => !Object.hasOwn(dismissed, alertKey(alert)));
 }
 
-export function keptDismissals(alerts, dismissed) {
-  const live = new Set(alerts.map(alertKey));
-  return Object.fromEntries(Object.entries(dismissed).filter(([key]) => live.has(key)));
+export function hiddenAlerts(alerts, dismissed) {
+  return alerts.filter((alert) => Object.hasOwn(dismissed, alertKey(alert)));
 }
 
 function loadDismissed() {
@@ -69,10 +81,8 @@ function saveDismissed(dismissed) {
 }
 
 function alertBanner(alert, onDismiss) {
-  const dismiss = alert.run_id
-    ? element('button', { type: 'button', class: 'banner-dismiss', 'aria-label': `Dismiss: ${alert.message}`, title: 'Dismiss' }, '×')
-    : null;
-  dismiss?.addEventListener('click', () => onDismiss(alert));
+  const dismiss = element('button', { type: 'button', class: 'banner-dismiss', 'aria-label': `Dismiss: ${alert.message}`, title: 'Dismiss' }, '×');
+  dismiss.addEventListener('click', () => onDismiss(alert));
   return element('div', { class: `banner ${ALERT_TONE[alert.kind] || 'warn'}`, role: alert.kind === 'credential' ? 'alert' : null },
     element('span', {}, alert.message, alert.run_id ? [' ', link(hashFor('run', [alert.run_id]), 'Open the latest run')] : null),
     dismiss);
@@ -86,7 +96,9 @@ export async function render(root, { query, signal }) {
   const alertArea = element('div', { class: 'alerts' });
   const runningBand = element('div', { class: 'running-band', 'aria-live': 'polite' });
   const body = element('div', {}, loading());
-  root.append(alertArea, element('h2', {}, 'Running now'), runningBand, body);
+  const setupSlot = element('div');
+  root.append(setupSlot, alertArea, element('h2', {}, 'Running now'), runningBand, body);
+  if (isAdmin()) setupBanner(setupSlot);
 
   const scope = new URLSearchParams(team ? { team } : {});
   const path = `/api/overview?${scope}`;
@@ -100,13 +112,23 @@ export async function render(root, { query, signal }) {
     running.clear();
     for (const run of overview.running) running.set(String(run.id), run);
     drawRunning();
-    let dismissed = keptDismissals(overview.alerts, loadDismissed());
-    saveDismissed(dismissed);
-    const drawAlerts = () => clear(alertArea).append(...visibleAlerts(overview.alerts, dismissed).map((alert) => alertBanner(alert, (gone) => {
-      dismissed = { ...dismissed, [alertKey(gone)]: gone.run_id };
-      saveDismissed(dismissed);
-      drawAlerts();
-    })));
+    let dismissed = loadDismissed();
+    const drawAlerts = () => {
+      const hidden = hiddenAlerts(overview.alerts, dismissed);
+      const restore = hidden.length
+        ? element('button', { type: 'button', class: 'link-button' }, `Show ${hidden.length} dismissed`)
+        : null;
+      restore?.addEventListener('click', () => {
+        dismissed = Object.fromEntries(Object.entries(dismissed).filter(([key]) => !hidden.some((alert) => alertKey(alert) === key)));
+        saveDismissed(dismissed);
+        drawAlerts();
+      });
+      clear(alertArea).append(...visibleAlerts(overview.alerts, dismissed).map((alert) => alertBanner(alert, (gone) => {
+        dismissed = { ...dismissed, [alertKey(gone)]: true };
+        saveDismissed(dismissed);
+        drawAlerts();
+      })), ...(restore ? [restore] : []));
+    };
     drawAlerts();
     const { counts, spend, time } = overview;
     const figures = [
@@ -125,7 +147,7 @@ export async function render(root, { query, signal }) {
     const headers = ['Started', 'Workflow', 'Status', ['Time', 'num'], ...(display.show_cost ? [['Cost', 'num']] : [])];
     const recentRows = overview.recent.map((run) => [
       element('span', { title: run.started_at || null }, when(run.started_at)), link(hashFor('run', [run.id]), workflowLabel(display, run.workflow)),
-      statusChip(run.status), elapsed(run), ...(display.show_cost ? [money(run.cost_usd)] : []),
+      outcomeCell(run), elapsed(run), ...(display.show_cost ? [money(run.cost_usd)] : []),
     ]);
     clear(body).append(
       element('h2', {}, 'Today'), element('div', { class: 'figures' }, figures),

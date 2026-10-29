@@ -3,6 +3,8 @@ import asyncio
 from collections import defaultdict, deque
 from typing import Callable, Any
 
+from armature.nodes.gate import GateSuspended
+
 
 def topological_order(deps: dict[str, list[str]]) -> list[str]:
     adjacency: dict[str, list[str]] = defaultdict(list)
@@ -74,11 +76,18 @@ class DAGExecutor:
                     "DAG deadlock — all remaining stages have unresolvable dependencies"
                 )
 
-            # Run this wave concurrently; raise immediately on first failure
+            # Run this wave concurrently; raise immediately on first failure.
+            # A gate's pause waits for the rest of its wave, so the run stops between stages.
             async def _run_one(sid: str) -> tuple[str, Any]:
-                return sid, await self._handlers[sid](results)
+                try:
+                    return sid, await self._handlers[sid](results)
+                except GateSuspended as stopped:
+                    return sid, stopped
 
             wave_results = await asyncio.gather(*[_run_one(sid) for sid in wave])
+            paused = [r for _, r in wave_results if isinstance(r, GateSuspended)]
+            if paused:
+                raise paused[0]
 
             for sid, result in wave_results:
                 results[sid] = result

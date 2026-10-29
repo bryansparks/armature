@@ -10,7 +10,7 @@ import { creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
 import { canManageTeam, currentSession, isAdmin } from '../session.js';
 import { stepsPanel } from './steps.js';
 
-export const KIND_LABEL = { role: 'Role', prompt: 'Prompt', mission: 'Mission' };
+export const KIND_LABEL = { role: 'Role', prompt: 'Prompt', mission: 'Mission', skill: 'Skill' };
 export const WORKFLOW_KIND_LABEL = { review: 'Review', fix: 'Fix', merge: 'Merge', port: 'Port', work: 'Work', other: 'Other' };
 
 const ROLE_STARTER = `---
@@ -27,6 +27,13 @@ You are the reviewer for ...
 
 const NOTE_STARTER = `---
 name: new-prompt
+---
+
+`;
+
+const SKILL_STARTER = `---
+name: new-skill
+description: When an agent step should use this skill.
 ---
 
 `;
@@ -49,7 +56,7 @@ export const DOCUMENT = {
   base: '/api/documents', route: 'document', idField: 'document_id', format: 'Markdown', liveValidate: false, frontMatter: true,
   record: (payload) => payload?.document, title: (record) => record.key || record.name, noun: (kind) => (KIND_LABEL[kind] || 'document').toLowerCase(),
   kindLabel: (record) => KIND_LABEL[record.kind] || record.kind, listHash: (record) => hashFor('roles', [record.kind || 'role']),
-  listLabel: 'All roles and prompts', starter: (kind) => (kind === 'role' ? ROLE_STARTER : NOTE_STARTER.replace('new-prompt', `new-${kind || 'prompt'}`)),
+  listLabel: 'All roles and prompts', starter: (kind) => (kind === 'role' ? ROLE_STARTER : kind === 'skill' ? SKILL_STARTER : NOTE_STARTER.replace('new-prompt', `new-${kind || 'prompt'}`)),
 };
 
 const itemPath = (config, id, tail = '') => `${config.base}/${encodeURIComponent(id)}${tail}`;
@@ -336,19 +343,24 @@ function scopeDialog(title, consequence, verb, scopes, nameLabel, nameValue) {
 }
 
 function forkButton(config, record, status) {
-  const button = element('button', { type: 'button' }, 'Customize for…');
+  const toProject = config === WORKFLOW;
+  const button = element('button', { type: 'button' }, toProject ? 'Copy to project…' : 'Customize for…');
   button.addEventListener('click', async () => {
     clear(status);
     button.disabled = true;
-    const scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record)));
+    const scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record))
+      && (!toProject || scope.scope_kind === 'project'));
     button.disabled = false;
     if (!scopes.length) {
-      status.append(errorBox({ message: 'You do not lead a team or project to copy this into.' }));
+      status.append(errorBox({ message: toProject ? 'You do not lead another project to copy this into.' : 'You do not lead a team or project to copy this into.' }));
       return;
     }
     const noun = config.noun(record.kind);
-    const choice = await scopeDialog(`Customize ${config.title(record)}`, `This makes your own copy of the ${noun}. Runs in that team or project use the copy, and this one stays as it is.`,
-      'Make a copy', scopes, 'Name of the copy', config.title(record));
+    const choice = toProject
+      ? await scopeDialog(`Copy ${config.title(record)} to a project`, 'This copies the workflow, and every workflow it calls, into the project. This one stays as it is.',
+        'Copy', scopes, 'Name of the copy', config.title(record))
+      : await scopeDialog(`Customize ${config.title(record)}`, `This makes your own copy of the ${noun}. Runs in that team or project use the copy, and this one stays as it is.`,
+        'Make a copy', scopes, 'Name of the copy', config.title(record));
     if (!choice?.scope) return;
     button.disabled = true;
     try {
@@ -546,7 +558,7 @@ export async function detailPage(root, config, id, mode) {
   const versionText = element('span', {}, `Version ${record.current_version}`);
   const actions = element('div', { class: 'wf-actions' });
   if (editable && !editing && !config.describe) actions.append(link(hashFor(config.route, [record.id, 'edit']), 'Edit', { class: 'btn' }));
-  if (canFork && !editable) actions.append(forkButton(config, record, status));
+  if (canFork && (!editable || config === WORKFLOW)) actions.append(forkButton(config, record, status));
   if (editable) actions.append(deleteButton(config, record, status));
   const kindText = config.kindLabel(record) ? element('span', {}, config.kindLabel(record)) : null;
   root.append(pageHeader(config.title(record)), meta(kindText, scopeText(record, names), versionText,
@@ -582,9 +594,9 @@ export async function detailPage(root, config, id, mode) {
 export async function newPage(root, config, kind, wantedScope) {
   const noun = config.noun(kind);
   root.append(pageHeader(`New ${noun}`));
-  const scopes = await loadScopes();
+  const scopes = (await loadScopes()).filter((scope) => config !== WORKFLOW || scope.scope_kind === 'project');
   if (!scopes.length) {
-    root.append(card(empty(`You can add a ${noun} only to a team or project you lead.`)));
+    root.append(card(empty(config === WORKFLOW ? 'You can add a workflow only to a project you lead.' : `You can add a ${noun} only to a team or project you lead.`)));
     return;
   }
   const status = element('div', { role: 'status' });

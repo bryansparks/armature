@@ -1,0 +1,34 @@
+{
+  "description": "An iOS TestFlight build with multi-line notes holding an ampersand.",
+  "source": "generic",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/ci"
+  },
+  "env": {
+    "SLACK_BUILD_CHANNEL": "C04BUILDS9Z"
+  },
+  "payload": {
+    "app": "FamilySearch Tree",
+    "version": "6.14.0",
+    "build": "4127",
+    "track": "TestFlight",
+    "notes": "Fixes the crash opening a source with no citation.\nMemories & photos load faster.",
+    "url": "https://testflight.apple.com/join/Qx7aBc12"
+  },
+  "ops": {
+    "effects": [
+      {
+        "vendor": "slack",
+        "op": "post",
+        "channel": "C04BUILDS9Z",
+        "text": ":rocket: *FamilySearch Tree* 6.14.0 (4127) is on TestFlight\n\nFixes the crash opening a source with no citation.\nMemories & photos load faster.\n\nhttps://testflight.apple.com/join/Qx7aBc12"
+      }
+    ],
+    "result": {
+      "posted": true,
+      "channel": "C04BUILDS9Z",
+      "ts": "1700000000.000100"
+    }
+  }
+}

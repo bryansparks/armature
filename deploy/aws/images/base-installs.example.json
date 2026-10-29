@@ -1,0 +1,20 @@
+[
+  {
+    "name": "claude",
+    "version": "<claude code version>",
+    "url": "https://<release host>/claude-code/<version>/linux-x64/claude",
+    "sha256": "<sha256 of that file>"
+  },
+  {
+    "name": "codex",
+    "version": "<codex version>",
+    "url": "https://github.com/openai/codex/releases/download/rust-v<version>/codex-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "<sha256 of that file>"
+  },
+  {
+    "name": "armature",
+    "version": "<armature version>",
+    "url": "https://<your artifact host>/armature_agents-<version>-py3-none-any.whl",
+    "sha256": "<sha256 of that file>"
+  }
+]

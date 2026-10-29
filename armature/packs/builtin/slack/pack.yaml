@@ -1,0 +1,34 @@
+name: slack
+version: 1.0.0
+description: Slack through the team's Slack connection. Calls run on the server, so no step holds the bot token.
+adapters:
+  post:
+    description: >-
+      Post text to a channel, or in a thread with thread_ts. Link previews are off unless unfurl is true.
+      Returns the channel and the message's ts.
+    cmd: armature tool slack.post
+    writes: true
+    params:
+      type: object
+      required: [channel, text]
+      additionalProperties: false
+      properties:
+        channel: {type: string, pattern: '^[A-Za-z0-9#_.-]{1,80}$'}
+        text: {type: string, minLength: 1}
+        thread_ts: {type: string, pattern: '^[0-9]{1,12}\.[0-9]{1,8}$'}
+        reply_broadcast: {type: boolean}
+        unfurl: {type: boolean}
+        connection: {type: string}
+  update:
+    description: Replace the text of a message the bot posted.
+    cmd: armature tool slack.update
+    writes: true
+    params:
+      type: object
+      required: [channel, ts, text]
+      additionalProperties: false
+      properties:
+        channel: {type: string, pattern: '^[A-Za-z0-9#_.-]{1,80}$'}
+        ts: {type: string, pattern: '^[0-9]{1,12}\.[0-9]{1,8}$'}
+        text: {type: string, minLength: 1}
+        connection: {type: string}

@@ -1,0 +1,400 @@
+{
+  "description": "A mobile-ios pull request by an engineer who is not in ios-port.json's authors. prepare declines without posting to Slack, and every later stage passes the decline on: no worktree, no session, no pull request.",
+  "source": "github",
+  "env": {
+    "IOS_PORT_AWS": "0",
+    "AWS_WORKER_FALLBACK": "1",
+    "SLACK_OWNER_USER": "U04F2KX9B7Q",
+    "GIT_AUTHOR_DATE": "2026-10-28 09:30:00 -0600",
+    "GIT_COMMITTER_DATE": "2026-10-28 09:30:00 -0600"
+  },
+  "files": {
+    ".gitconfig": "[user]\n\tname = Stephan Heilner\n\temail = armature@armature-ops.invalid\n",
+    ".claude.json": {
+      "mcpServers": {
+        "jira": {
+          "command": "uvx",
+          "args": [
+            "mcp-atlassian"
+          ],
+          "env": {
+            "JIRA_URL": "https://example.atlassian.net"
+          }
+        }
+      }
+    },
+    "config/ios-port.json": {
+      "//": "Ports a designer's iOS pull request to Android. Read per request by the gateway and per run by the scripts, so edits need no restart.",
+      "source": "fs-eng/mobile-ios",
+      "target": "android",
+      "//authors": "GitHub logins whose new pull requests in source are ported. Matching is case-insensitive.",
+      "authors": [
+        "RyanPlumb"
+      ],
+      "screenshot_branch": "armature-screenshots",
+      "max_source_files": 60
+    },
+    "config/development.json": {
+      "//": "Per-platform settings for specs/jira-work.yml. tools is added to base_tools for the implementing session only; reviewers keep config/roles.json.",
+      "components": {
+        "Android": "android",
+        "iOS": "ios",
+        "Mobile iOS": "ios",
+        "Mobile API": "backend"
+      },
+      "base_tools": [
+        "Read",
+        "Edit",
+        "Write",
+        "Grep",
+        "Glob",
+        "Skill",
+        "TodoWrite",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+        "Bash(git blame:*)",
+        "Bash(git grep:*)",
+        "Bash(ls:*)",
+        "Bash(cd:*)",
+        "mcp__jira__jira_get_issue",
+        "mcp__jira__jira_search",
+        "Bash(grep:*)",
+        "Bash(head:*)",
+        "Bash(tail:*)",
+        "Bash(wc:*)",
+        "Bash(echo:*)"
+      ],
+      "platforms": {
+        "android": {
+          "repo": "fs-eng/android-tree",
+          "checkout": "{{home}}/android-tree",
+          "base": "dev",
+          "tools": [
+            "Bash(./gradlew:*)",
+            "Bash(.claude/skills/nephi-bot/run-android.sh:*)",
+            "Bash(bash .claude/skills/nephi-bot/run-android.sh:*)",
+            "Bash(adb -s:*)",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)",
+            "WebFetch(domain:m3.material.io)"
+          ],
+          "env": {
+            "JAVA_HOME": "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home",
+            "ANDROID_HOME": "/opt/android-sdk"
+          },
+          "//remote": "The session on AWS (JIRA_WORK_AWS). It gets base_tools without mcp__ tools, plus these. scripts/session_entry.sh sets JAVA_HOME and ANDROID_HOME to the image's paths; env here overrides them.",
+          "remote": {
+            "tools": [
+              "Bash(./gradlew:*)",
+              "WebFetch(domain:developer.android.com)",
+              "WebFetch(domain:kotlinlang.org)",
+              "WebFetch(domain:m3.material.io)"
+            ],
+            "env": {},
+            "deny_tools": [
+              "Read(//var/lib/armature-session/**)",
+              "Edit(//var/lib/armature-session/**)",
+              "Read(//home/prime/**)",
+              "Bash(git push:*)",
+              "Bash(git commit:*)",
+              "Bash(gh:*)",
+              "NotebookEdit"
+            ]
+          }
+        }
+      },
+      "//deny": "Denied on top of the allowlist. File tools would otherwise read anywhere, and the ticket text driving the session is written by other people.",
+      "deny_tools": [
+        "Read(//srv/armature-ops/**)",
+        "Read(~/.claude.json)",
+        "Read(~/.claude/**)",
+        "Read(~/.config/**)",
+        "Read(~/.aws/**)",
+        "Read(~/.ssh/**)",
+        "Read(~/.netrc)",
+        "Read(~/.gradle/gradle.properties)",
+        "Edit(//srv/armature-ops/**)",
+        "Bash(git push:*)",
+        "Bash(git commit:*)",
+        "Bash(gh:*)",
+        "NotebookEdit"
+      ]
+    },
+    "config/roles.json": {
+      "base_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git blame:*)",
+        "Bash(cd:*)",
+        "Bash(ls:*)",
+        "Bash(wc:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git rev-list:*)",
+        "Bash(git cat-file:*)"
+      ],
+      "roles": [
+        {
+          "name": "simplicity",
+          "prompt": "prompts/simplicity.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "correctness",
+          "prompt": "prompts/correctness.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:m3.material.io)",
+            "mcp__jira__jira_get_issue",
+            "mcp__jira__jira_search"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          },
+          "mcp_inherit": [
+            "jira"
+          ]
+        },
+        {
+          "name": "security",
+          "prompt": "prompts/security.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "performance",
+          "prompt": "prompts/performance.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {}
+        },
+        {
+          "name": "beauty",
+          "prompt": "prompts/beauty.md",
+          "platforms": [
+            "ios",
+            "android"
+          ]
+        },
+        {
+          "name": "test_adequacy",
+          "prompt": "prompts/test_adequacy.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "concurrency",
+          "prompt": "prompts/concurrency.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {},
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          }
+        },
+        {
+          "name": "conventions",
+          "prompt": "prompts/conventions.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "prompt": "prompts/compatibility.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        }
+      ]
+    },
+    "state/port-queue/fs-eng_mobile-ios-8862.json": {
+      "repo": "fs-eng/mobile-ios",
+      "number": 8862,
+      "queued_at": 1761665400.0
+    }
+  },
+  "repos": {
+    "android-tree": {
+      "base": "dev",
+      "remote": "fs-eng/android-tree",
+      "files": {
+        ".gitignore": "/.claude/worktrees/\n/local.properties\nbuild/\n.gradle/\n",
+        "ui-templex/src/main/java/org/familysearch/mobile/tree/ui/templex/reservations/ReservationCard.kt": "package org.familysearch.mobile.tree.ui.templex.reservations\n\nimport androidx.compose.foundation.layout.Arrangement\nimport androidx.compose.foundation.layout.Column\nimport androidx.compose.foundation.layout.padding\nimport androidx.compose.material3.Card\nimport androidx.compose.material3.MaterialTheme\nimport androidx.compose.material3.Text\nimport androidx.compose.material3.TextButton\nimport androidx.compose.runtime.Composable\nimport androidx.compose.ui.Modifier\nimport androidx.compose.ui.res.stringResource\nimport org.familysearch.mobile.tree.ui.templex.R\nimport org.familysearch.mobile.tree.ui.templex.components.StatusPill\nimport org.familysearch.mobile.tree.ui.templex.theme.TempleSpacing\n\n@Composable\nfun ReservationCard(reservation: ReservationUi, onCancel: () -> Unit, modifier: Modifier = Modifier) {\n    Card(modifier = modifier) {\n        Column(\n            modifier = Modifier.padding(TempleSpacing.large),\n            verticalArrangement = Arrangement.spacedBy(TempleSpacing.small),\n        ) {\n            Text(reservation.ordinanceName, style = MaterialTheme.typography.titleMedium)\n            Text(\n                reservation.templeName,\n                style = MaterialTheme.typography.bodyMedium,\n                color = MaterialTheme.colorScheme.onSurfaceVariant,\n            )\n            Text(\n                reservation.startsAtLabel,\n                style = MaterialTheme.typography.bodyMedium,\n                color = MaterialTheme.colorScheme.onSurfaceVariant,\n            )\n            StatusPill(reservation.status)\n            TextButton(onClick = onCancel) {\n                Text(stringResource(R.string.templex_reservation_cancel), color = MaterialTheme.colorScheme.error)\n            }\n        }\n    }\n}\n",
+        "ui-templex/src/main/java/org/familysearch/mobile/tree/ui/templex/components/StatusPill.kt": "package org.familysearch.mobile.tree.ui.templex.components\n\nimport androidx.compose.foundation.layout.padding\nimport androidx.compose.material3.MaterialTheme\nimport androidx.compose.material3.Surface\nimport androidx.compose.material3.Text\nimport androidx.compose.runtime.Composable\nimport androidx.compose.ui.Modifier\nimport androidx.compose.ui.res.stringResource\nimport org.familysearch.mobile.tree.ui.templex.reservations.ReservationStatus\nimport org.familysearch.mobile.tree.ui.templex.theme.TempleSpacing\n\n@Composable\nfun StatusPill(status: ReservationStatus, modifier: Modifier = Modifier) {\n    Surface(modifier = modifier, shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.primary) {\n        Text(\n            stringResource(status.title),\n            modifier = Modifier.padding(horizontal = TempleSpacing.small, vertical = TempleSpacing.xxsmall),\n            style = MaterialTheme.typography.labelMedium,\n            color = MaterialTheme.colorScheme.onPrimary,\n        )\n    }\n}\n",
+        "ui-templex/src/main/java/org/familysearch/mobile/tree/ui/templex/theme/TempleSpacing.kt": "package org.familysearch.mobile.tree.ui.templex.theme\n\nimport androidx.compose.ui.unit.dp\n\nobject TempleSpacing {\n    val xxsmall = 2.dp\n    val xsmall = 4.dp\n    val small = 8.dp\n    val medium = 12.dp\n    val large = 16.dp\n}\n",
+        "ui-templex/src/main/res/values/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    <string name=\"templex_reservation_title\">Reservation</string>\n    <string name=\"templex_reservation_cancel\">Cancel Reservation</string>\n</resources>\n",
+        ".claude/skills/nephi-bot/SKILL.md": "---\nname: nephi-bot\ndescription: Per-issue agent for android-tree.\n---\n\nWork one issue end to end in its worktree.\n"
+      }
+    }
+  },
+  "context": {
+    "job_file": "{{home}}/state/port-queue/fs-eng_mobile-ios-8862.json"
+  },
+  "fakes": {
+    "gh": [
+      {
+        "match": "^pr view 8862 --repo fs-eng/mobile-ios --json number,title,url,state,isDraft",
+        "stdout": {
+          "number": 8862,
+          "title": "TEMPLE-2219 Fix the reservation list's VoiceOver order",
+          "url": "https://github.com/fs-eng/mobile-ios/pull/8862",
+          "state": "OPEN",
+          "isDraft": false,
+          "isCrossRepository": false,
+          "author": {
+            "id": "MDQ6VXNlcjU4MzIxOTA3",
+            "is_bot": false,
+            "login": "kjensen-fs",
+            "name": "Kara Jensen"
+          },
+          "headRefName": "TEMPLE-2219-voiceover-order",
+          "headRefOid": "5f0c2e9a41d7b38c6e1f2a9d0b4c7e3f8a6d1b29",
+          "baseRefOid": "c81d4b7e2f9a0356d1e8b4c2a7f90e3d6b5a1c48"
+        }
+      }
+    ]
+  },
+  "stubs": {
+    "decide": {
+      "summary": "Nothing was implemented, so nothing changes.",
+      "changes": [],
+      "conflicts": []
+    }
+  },
+  "ops": {
+    "effects": [
+      {
+        "tool": "gh",
+        "args": [
+          "pr",
+          "view",
+          "8862",
+          "--repo",
+          "fs-eng/mobile-ios",
+          "--json",
+          "number,title,url,state,isDraft,isCrossRepository,author,headRefName,headRefOid,baseRefOid"
+        ]
+      }
+    ],
+    "result": {
+      "posted": false,
+      "count": 0,
+      "comment": "",
+      "reason": "no pull request: declined"
+    },
+    "sessions": [
+      {
+        "stage": "decide",
+        "kind": "role",
+        "role": "TechLead",
+        "type": "judge",
+        "output_mode": "guided_json",
+        "prompt": "You are the tech lead. An engineer ported a designer's iOS pull\nrequest to the Android app, and specialists reviewed the Android diff\nindependently. Decide what changes before the pull request opens.\n\nIf implement.outcome is not \"implemented\", return no changes.\n\nThe anchor is a hard boundary: Android should show users what the iOS\nchange shows them, expressed the way the Android codebase and Material\n3 already express it. Keep a finding only if fixing it makes the port\nmore faithful to the iOS change, more correct, a better use of the\ntheme's tokens and existing composables, or simpler. Drop anything that\ngrows the change past the iOS change, anything speculative or hedged,\nand anything a linter catches. A hardcoded color, dimension, or string\nwhere the theme or resources have one is a real finding. Merge\nduplicates: several specialists on one line is one decision and the\nstrongest reason to act.\n\nReconcile conflicts explicitly: pick a side, name whom you overruled,\nand say why. Prefer the simpler change when the tradeoff is close.\n\nFor each change give the file, what to do in one sentence, and who\nbacked it. Deciding that nothing changes is a real outcome.\n\nAnchor:\n\n\nEngineer's report:\n{'ran': False, 'outcome': 'declined', 'summary': 'kjensen-fs is not a ported author'}\n\nReviews:\n[]"
+      }
+    ],
+    "outputs": {
+      "prepare": {
+        "ready": false,
+        "approved": false,
+        "reason": "kjensen-fs is not a ported author",
+        "thread_ts": ""
+      },
+      "setup": {
+        "ready": false,
+        "reason": "kjensen-fs is not a ported author",
+        "issue": "",
+        "id": "",
+        "kind": "jira",
+        "thread_ts": ""
+      },
+      "source": {
+        "feasible": false,
+        "reason": "kjensen-fs is not a ported author",
+        "anchor": "",
+        "brief": ""
+      },
+      "implement": {
+        "ran": false,
+        "outcome": "declined",
+        "summary": "kjensen-fs is not a ported author"
+      },
+      "review_assignments": {
+        "jobs": [],
+        "count": 0,
+        "reason": "setup declined"
+      },
+      "reviews": [],
+      "decide": {
+        "summary": "Nothing was implemented, so nothing changes.",
+        "changes": [],
+        "conflicts": []
+      },
+      "refine": {
+        "ran": false,
+        "outcome": "declined",
+        "summary": "kjensen-fs is not a ported author"
+      },
+      "publish": {
+        "outcome": "declined",
+        "detail": "kjensen-fs is not a ported author",
+        "pr_url": ""
+      },
+      "screens": {
+        "posted": false,
+        "count": 0,
+        "comment": "",
+        "reason": "no pull request: declined"
+      }
+    }
+  }
+}

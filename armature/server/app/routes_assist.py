@@ -1,4 +1,5 @@
-"""The authoring assistant. It proposes a body and never saves one."""
+"""The authoring assistant. A request goes to a workflow-assistant conversation, which drafts a body and never
+saves one. The server calls no model."""
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, StrictInt
 
-from armature.server import assist, defs, llm, rbac
+from armature.server import assist, defs, rbac
 from armature.server.app.deps import server, signed_in
 from armature.server.app.http import ApiError, client_ip
 from armature.server.auth import AuthError, Session
@@ -27,6 +28,7 @@ class AssistBody(BaseModel):
     draft: str | None = None
     instruction: str
     history: list[Any] | None = None
+    conversation_id: str | None = None
     name: str | None = None
     scope_kind: str | None = None
     scope_id: str | None = None
@@ -45,13 +47,12 @@ async def post_assist(payload: AssistBody, request: Request, session: Session = 
     def ask() -> dict[str, Any]:
         with srv.engine.connect() as conn:
             access = rbac.load_access(conn, session.user_id, bool(session.user.is_admin))
-        return assist.run(srv.engine, srv.keyring, access=access, user_id=session.user_id,
-                          payload=fields, catalog=defs.load_catalog(srv.cfg.packs_dir),
-                          now=srv.now(), ip=client_ip(request), team_daily_limit=srv.cfg.assist.team_daily_limit)
+        return assist.ask(srv.engine, access=access, user_id=session.user_id, payload=fields, now=srv.now(),
+                          ip=client_ip(request), team_daily_limit=srv.cfg.assist.team_daily_limit)
 
     try:
         return await asyncio.to_thread(ask)
-    except (assist.AssistError, llm.LLMError) as exc:
+    except assist.AssistError as exc:
         raise ApiError(exc.status, exc.message) from exc
     except AuthError as exc:
         raise ApiError(exc.status, exc.message, exc.headers) from exc

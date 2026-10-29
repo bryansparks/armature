@@ -51,6 +51,8 @@ def test_each_rule_in_order(sqlite_engine):
             _run(conn, world, trigger_kind="pr", trigger_ref={"repo": "acme/app", "number": 7}, actor="ci-runner"):
                 ("Pull request", "acme/app#7"),
             _run(conn, world, trigger_kind="jira", trigger_ref={"issue": "PROJ-1"}): ("Jira", "PROJ-1"),
+            _run(conn, world, trigger_kind="linear", trigger_ref={"issue": "ENG-2"}): ("Linear", "ENG-2"),
+            _run(conn, world, trigger_kind="schedule", trigger_ref={"cron": "30 6 * * *"}): ("Schedule", "30 6 * * *"),
             _run(conn, world, trigger_kind="cron", actor="ci-runner"): ("Schedule", None),
             _run(conn, world, trigger_kind="slack", actor="bea"): ("Slack", "bea"),
             _run(conn, world, trigger_kind="cli", actor="bea"): ("Command line", "bea"),

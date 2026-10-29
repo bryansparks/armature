@@ -1,5 +1,5 @@
 // The run feed's state, kept free of the DOM so the node tests can drive it.
-import { money, statusText } from './dom.js';
+import { duration, money, statusText } from './dom.js';
 
 export const NODE_CAP = 2000;
 export const TERMINAL = new Set(['succeeded', 'failed', 'canceled', 'lost']);
@@ -319,15 +319,20 @@ export function describe(item, { showCost = true } = {}) {
     step_failed: () => ['bad', 'Step', `Failed${payload.error ? `: ${oneLine(payload.error)}` : ''}`],
     step_skipped: () => ['muted', 'Step', `Skipped${payload.reason ? `: ${oneLine(payload.reason)}` : ''}`],
     retry: () => ['warn', 'Retry', `Attempt ${payload.attempt ?? '?'}`],
-    log: () => ['muted', 'Log', oneLine(payload.message ?? JSON.stringify(payload), 400)],
+    log: () => [payload.level === 'error' ? 'bad' : 'muted', typeof payload.role === 'string' && payload.role ? payload.role : 'Log', oneLine(payload.message ?? JSON.stringify(payload), 400)],
     cost: () => ['muted', showCost ? 'Cost' : 'Usage', costText(payload, showCost)],
-    finding: () => [payload.severity === 'high' || payload.severity === 'critical' ? 'bad' : 'warn', statusText(String(payload.severity || 'finding')),
+    finding: () => [payload.blocking === true || payload.severity === 'high' || payload.severity === 'critical' ? 'bad' : 'warn',
+      payload.blocking === true ? 'Blocking' : statusText(String(payload.severity || 'finding')),
       `${oneLine(payload.title || 'Finding')}${payload.path ? ` at ${payload.path}${payload.line ? `:${payload.line}` : ''}` : ''}`],
     session_start: () => ['muted', 'Session', `Started${payload.model ? ` on ${payload.model}` : ''}`],
     session_end: () => [payload.is_error ? 'bad' : 'muted', 'Session', `Ended${payload.status ? ` (${payload.status})` : ''}`],
     error: () => ['bad', 'Error', oneLine(payload.message ?? JSON.stringify(payload), 400)],
     dropped: () => ['warn', 'Skipped', `${count(payload.count)} updates skipped`],
+    progress: () => (typeof payload.elapsed_s === 'number' && Object.keys(payload).every((key) => key === 'elapsed_s' || key === 'stage')
+      ? ['muted', 'Still running', duration(payload.elapsed_s)] : ['muted', 'progress', oneLine(JSON.stringify(payload))]),
     tool_result: () => [payload.is_error ? 'bad' : 'muted', payload.tool || 'Result', oneLine(payload.content)],
+    summary: () => ['muted', 'Reported', [payload.verdict ? `outcome ${payload.verdict}` : null, payload.title ? `title "${oneLine(payload.title, 120)}"` : null,
+      Array.isArray(payload.links) && payload.links.length ? `${payload.links.length === 1 ? 'a link' : `${payload.links.length} links`}` : null].filter(Boolean).join(', ') || 'a summary'],
   };
   const [tone, label, text] = (lines[item.kind] || (() => ['muted', item.kind, oneLine(JSON.stringify(payload))]))();
   return { tone, label, text: payload.truncated ? `${text} (truncated)` : text };

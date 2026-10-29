@@ -56,6 +56,9 @@ def fake(tmp_path):
     return Fake
 
 
+UNCONFIGURED = {"configured": False, "message": "AWS not configured", "paused_until": None, "waiting": 0,
+                "reasons": []}
+
 def _hook(engine, keyring, clock, fake, **cfg):
     return StatusHook(engine, keyring, StatusConfig(command=list(fake.command), **cfg), clock=clock)
 
@@ -135,7 +138,8 @@ def test_route_answers_while_the_command_runs(engine, keyring, clock, fake):
         started = time.monotonic()
         body = client.get("/api/status").json()
         assert time.monotonic() - started < 2
-    assert body == {"configured": True, "markdown": None, "updated_at": None, "error": None}
+    assert body == {"configured": True, "markdown": None, "updated_at": None, "error": None,
+                    "environments": UNCONFIGURED}
 
 
 def test_route_is_for_admins_and_reports_unconfigured(engine, keyring, clock):
@@ -149,7 +153,8 @@ def test_route_is_for_admins_and_reports_unconfigured(engine, keyring, clock):
     sign_in_as(client, engine, keyring, clock, admin, step_up=False)
     response = client.get("/api/status")
     assert response.status_code == 200
-    assert response.json() == {"configured": False, "markdown": None, "updated_at": None, "error": None}
+    assert response.json() == {"configured": False, "markdown": None, "updated_at": None, "error": None,
+                               "environments": UNCONFIGURED}
 
 
 def test_route_hides_configured_status_from_team_roles(engine, keyring, clock, fake):

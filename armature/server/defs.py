@@ -40,9 +40,10 @@ from ruamel.yaml.events import (
 from sqlalchemy import Connection, Table, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from armature.packs import BUILTIN_PACKS
 from armature.packs.params import with_error_paths
 from armature.runtime.templating import text_env
-from armature.server import audit, display, packs, rbac
+from armature.server import audit, calls, display, packs, rbac, risk
 from armature.server import secrets as secret_store
 from armature.server.db import new_id
 from armature.server.db.schema import (
@@ -50,6 +51,8 @@ from armature.server.db.schema import (
     INSTANCE_SCOPE,
     PROVIDER_KINDS,
     WORKFLOW_KINDS,
+    conversation_messages,
+    conversations,
     documents,
     jobs,
     projects,
@@ -59,16 +62,21 @@ from armature.server.db.schema import (
     secrets,
     settings,
     teams,
+    trigger_polls,
+    trigger_seen,
+    trigger_state,
     triggers,
     users,
     versions,
     workflows,
 )
-from armature.spec.models import HarnessSpec
+from armature.spec.calls import CallResolver
+from armature.spec.models import SKILL_NAME, HarnessSpec
 from armature.spec.template_lint import lint_tree
 from armature.spec.validator import validate_spec
 
 BODY_MAX = 256 * 1024
+SKILL_MAX = 64 * 1024
 NOTE_MAX = 2000
 WORKFLOW_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 DOCUMENT_KEY = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")
@@ -86,6 +94,8 @@ TEMPLATE_MARKER = re.compile(r"\{\{|\{%|\{#")
 GUARDED_FRONT_MATTER = {"tools": "tools_allowlist", "mcp_servers": "mcp_allowlist", "mcp_inherit": "mcp_allowlist"}
 # The loader fills these from a pack; one written into a stored workflow would point a step at any directory.
 RUNTIME_ADAPTER_FIELDS = ("pack_dir", "params")
+# Only a built-in pack runs a built-in tool, so a workflow's own adapter may neither take its name nor its command.
+BUILTIN_CMD = re.compile(r"\barmature\s+tool\b")
 # validate_spec expects the loader to have merged pack adapters in, so _pack_refs checks these against the catalog.
 # Its UNSAFE_TEMPLATE findings are skipped too, because _lint covers every string and knows the saved version.
 PACK_REF_CODES = ("UNDEFINED_ADAPTER", "UNKNOWN_PACK_ADAPTER")
@@ -103,6 +113,7 @@ REGION = re.compile(r"^[a-z]{2}(-[a-z]+)+-\d{1,2}$")
 API_BASE = re.compile(r"^https?://[^\s/?#]+(/[^\s?#]*)?$")
 CONFIG_KEY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SECRET_WORDS = ("key", "apikey", "token", "secret", "password", "credential")
+ENV_PREFIX = "env."
 SETTING_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,190}$")
 # Shared address space covers cloud metadata endpoints that is_private misses.
 INTERNAL_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"),)
@@ -466,15 +477,6 @@ def _frozen_rule(validation: Validation, data: Any, previous: Any) -> None:
                            "fields other than pack adapter wiring.", path=f"stages[{stage_id}]")
 
 
-def _templated_commands(validation: Validation, data: Any) -> None:
-    adapters = data.get("adapters")
-    for name, adapter in (adapters.items() if isinstance(adapters, dict) else ()):
-        cmd = adapter.get("cmd") if isinstance(adapter, dict) else None
-        if isinstance(cmd, str) and ("{{" in cmd or "{%" in cmd):
-            validation.at(data, "error", "TEMPLATED_COMMAND", f"Only an admin can save a workflow whose adapter "
-                          f"{name} renders its command from a template.", ["adapters", name, "cmd"])
-
-
 def _markers_outside_values(validation: Validation, body: str) -> None:
     """The loader renders the raw text, so a marker in a comment or a key is live too."""
     spans = scan_yaml(body).value_spans
@@ -523,6 +525,11 @@ def _stored_adapter_fields(validation: Validation, data: Any) -> None:
                 validation.at(data, "error", "RUNTIME_FIELD",
                               f"adapters.{name}.{key} is set only from an installed pack, never in a workflow.",
                               ["adapters", name, key])
+        cmd = adapter.get("cmd") if isinstance(adapter, dict) else None
+        pack, slash, _ = str(name).partition("/")
+        if (slash and pack in BUILTIN_PACKS) or (isinstance(cmd, str) and BUILTIN_CMD.search(cmd)):
+            validation.at(data, "error", "RESERVED_ADAPTER", f"adapters.{name} would stand in for a built-in "
+                          "tool. Name the built-in pack's adapter in a step instead.", ["adapters", name])
 
 
 def _lint(validation: Validation, data: Any, previous: Any) -> None:
@@ -557,8 +564,13 @@ def _pack_refs(validation: Validation, data: Any, catalog: Any) -> None:
                 validation.at(data, "error", "INVALID_PARAMS", message, ["stages", i, "with", *where])
 
 
-def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catalog: Any = None) -> Validation:
-    """Parse, schema-check, validate, lint, check pack references, and, for a non-admin, the field allowlist."""
+# The server only parses spec templates; rendering one in-process would let a template exhaust the server.
+def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catalog: Any = None,
+                      call_resolver: CallResolver | None = None) -> Validation:
+    """Parse, schema-check, validate, lint, check pack references, and, for a non-admin, the field allowlist.
+
+    With ``call_resolver``, each ``call:`` step must resolve to a callee whose inputs it matches.
+    """
     validation = Validation()
     if _too_big(body, validation):
         return validation
@@ -576,7 +588,13 @@ def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catal
             validation.at(data, "error", "SCHEMA", f"{join_path(err['loc']) or 'workflow'}: {err['msg']}",
                           list(err["loc"]))
     if spec is not None:
-        for issue in validate_spec(spec, strict=False):
+        if call_resolver is not None:
+            _, graph = calls.closure(call_resolver, [(s.id, s.call.workflow, s.call.version)
+                                                     for s in spec.stages if s.call is not None], spec.name)
+            if any(issue.code == calls.TOO_LARGE for issue in graph):
+                validation.add("error", calls.TOO_LARGE, next(i.message for i in graph if i.code == calls.TOO_LARGE))
+                call_resolver = None
+        for issue in validate_spec(spec, strict=False, call_resolver=call_resolver):
             if issue.code == "UNSAFE_TEMPLATE":
                 continue
             index = _stage_index(data, issue.stage_id)
@@ -584,7 +602,7 @@ def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catal
                     and "/" in str(data["stages"][index].get("adapter", "")):
                 continue
             validation.at(data, issue.severity, issue.code, issue.message,
-                          ["stages", index] if index is not None else [])
+                          issue.path or (["stages", index] if index is not None else []))
     previous = _quiet_load(previous_body)
     _markers_outside_values(validation, body)
     _constant_templates(validation, data)
@@ -592,7 +610,6 @@ def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catal
     _lint(validation, data, previous)
     _pack_refs(validation, data, catalog)
     if not _is_admin(actor):
-        _templated_commands(validation, data)
         _frozen_rule(validation, data, previous)
     return validation
 
@@ -618,13 +635,33 @@ def _allowlist(catalog: Any, name: str) -> set[str]:
     return set(method()) if callable(method) else set()
 
 
+def _check_skill(validation: Validation, data: Any, body: str, key: str | None) -> None:
+    """A skill is a Claude Code SKILL.md: front matter with a name, which is its key, and a description."""
+    if len(body.encode("utf-8")) > SKILL_MAX:
+        validation.add("error", "TOO_LARGE", f"A skill is at most {SKILL_MAX // 1024} KB.")
+    data = data if isinstance(data, dict) else {}
+    name, description = data.get("name"), data.get("description")
+    if not isinstance(name, str) or not SKILL_NAME.fullmatch(name):
+        validation.add("error", "SKILL_NAME", "A skill needs a name in its front matter: lowercase letters, digits, "
+                       "and hyphens, at most 64.", line=1, col=1)
+    elif key is not None and name != key:
+        validation.add("error", "SKILL_NAME", f"A skill's name must match its key, {key}.", line=1, col=1)
+    if not isinstance(description, str) or not description.strip():
+        validation.add("error", "SKILL_DESCRIPTION", "A skill needs a description in its front matter.",
+                       line=1, col=1)
+
+
 def validate_document(kind: str, body: str, *, actor: Any, previous_body: str | None,
-                      catalog: Any = None) -> Validation:
+                      catalog: Any = None, key: str | None = None) -> Validation:
     validation = Validation()
     if kind not in DOCUMENT_KINDS:
         validation.add("error", "KIND", f"kind must be one of {', '.join(DOCUMENT_KINDS)}.")
         return validation
     if _too_big(body, validation):
+        return validation
+    # A role rides in every job bundle that names it, as a skill does, so it has the same cap.
+    if kind == "role" and len(body.encode("utf-8")) > SKILL_MAX:
+        validation.add("error", "TOO_LARGE", f"A role is at most {SKILL_MAX // 1024} KB.")
         return validation
     text, unclosed = front_matter(body)
     if unclosed:
@@ -642,6 +679,8 @@ def validate_document(kind: str, body: str, *, actor: Any, previous_body: str | 
         name = data.get("name") if isinstance(data, dict) else None
         if not isinstance(name, str) or not name.strip():
             validation.add("error", "ROLE_NAME", "A role needs a name in its front matter.", line=1, col=1)
+    if kind == "skill":
+        _check_skill(validation, data, body, key)
     if not isinstance(data, dict):
         return validation
     for key in GUARDED_FRONT_MATTER:
@@ -789,11 +828,28 @@ def _check_workflow_kind(value: Any) -> str:
     return value
 
 
+def _writes_code(body: str) -> bool:
+    data = _quiet_load(body)
+    stages = data.get("stages") if isinstance(data, dict) else None
+    return isinstance(stages, list) and any(
+        isinstance(s, dict) and isinstance(s.get("agent"), dict) and s["agent"].get("access") == "write"
+        for s in stages)
+
+
 def _validate(kind: Kind, body: str, *, access: rbac.Access, previous_body: str | None, doc_kind: str | None,
-              catalog: Any) -> Validation:
-    if kind is WORKFLOW:
-        return validate_workflow(body, actor=access, previous_body=previous_body, catalog=catalog)
-    return validate_document(doc_kind or "", body, actor=access, previous_body=previous_body, catalog=catalog)
+              catalog: Any, conn: Connection | None = None, scope: DefScope | None = None,
+              key: str | None = None) -> Validation:
+    if kind is not WORKFLOW:
+        return validate_document(doc_kind or "", body, actor=access, previous_body=previous_body, catalog=catalog,
+                                 key=key)
+    resolver = calls.DbCallResolver(conn, scope.scope) if conn is not None and scope is not None else None
+    validation = validate_workflow(body, actor=access, previous_body=previous_body, catalog=catalog,
+                                   call_resolver=resolver)
+    target = scope.target if scope is not None else rbac.INSTANCE
+    if _writes_code(body) and not (access.is_admin or rbac.at_least(rbac.role_for(access, target), "project_lead")):
+        validation.add("error", "AGENT_WRITE_ROLE", "Only a project lead or higher can save an agent step with "
+                       "access: write.")
+    return validation
 
 
 def get_row(conn: Connection, kind: Kind, object_id: str) -> Any | None:
@@ -898,6 +954,18 @@ def _insert(conn: Connection, kind: Kind, scope: DefScope, name: str, row_kind: 
     return row_id
 
 
+def _check_project(scope: DefScope) -> None:
+    if scope.kind != "project":
+        raise DefError(400, "A new workflow belongs to one project. Pick a project.")
+
+
+def _refuse_if_called(conn: Connection, row: Any, what: str) -> None:
+    found = calls.callers(conn, row.scope, row.name, exclude=row.id)
+    if found:
+        raise DefError(409, f"Can't {what} {row.name}, because {', '.join(found)} call it. Change those first.",
+                       callers=found)
+
+
 def create(conn: Connection, kind: Kind, *, access: rbac.Access, scope: DefScope, name: Any, body: Any, note: Any,
            actor_id: str, now: datetime, ip: str | None, doc_kind: str | None = None,
            catalog: Any = None) -> tuple[Any, Validation]:
@@ -906,7 +974,10 @@ def create(conn: Connection, kind: Kind, *, access: rbac.Access, scope: DefScope
     if kind is DOCUMENT and doc_kind not in DOCUMENT_KINDS:
         raise DefError(400, f"kind must be one of {', '.join(DOCUMENT_KINDS)}.")
     row_kind = doc_kind if kind is DOCUMENT else _check_workflow_kind(doc_kind)
-    validation = _validate(kind, body, access=access, previous_body=None, doc_kind=doc_kind, catalog=catalog)
+    if kind is WORKFLOW:
+        _check_project(scope)
+    validation = _validate(kind, body, access=access, previous_body=None, doc_kind=doc_kind, catalog=catalog,
+                           conn=conn, scope=scope, key=name)
     if not validation.ok:
         raise _invalid(validation)
     row_id = _insert(conn, kind, scope, name, row_kind, body, _note(kind, body, note), actor_id, now)
@@ -941,6 +1012,7 @@ def _rename(conn: Connection, row: Any, previous_body: str | None, body: str, *,
     if new is None or new == old or new == _body_name(previous_body):
         return row
     new = _check_name(WORKFLOW, new)
+    _refuse_if_called(conn, row, "rename")
     scope = row_scope(row)
     taken = DefError(409, f"A workflow named {new} already exists here.")
     if conn.execute(select(workflows.c.id).where(workflows.c.scope == scope.scope, workflows.c.name == new,
@@ -958,10 +1030,16 @@ def _rename(conn: Connection, row: Any, previous_body: str | None, body: str, *,
     return get_row(conn, WORKFLOW, row.id)
 
 
+def _refuse_built_in(row: Any) -> None:
+    if getattr(row, "built_in", False):
+        raise DefError(409, f"{row.name} ships with the server, so it can't be changed. Fork it to make your own.")
+
+
 def save(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, body: Any, note: Any, base_version: Any,
          actor_id: str, now: datetime, ip: str | None, catalog: Any = None) -> tuple[Any, Validation]:
     scope = row_scope(row)
     authorize_write(access, scope)
+    _refuse_built_in(row)
     body = _check_body(body)
     if not isinstance(base_version, int) or isinstance(base_version, bool):
         raise DefError(400, "base_version must be an integer.")
@@ -969,7 +1047,8 @@ def save(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, body: A
         raise DefError(409, "conflict", current_version=row.current_version)
     previous = body_of(conn, kind, row.id, row.current_version)
     validation = _validate(kind, body, access=access, previous_body=previous,
-                           doc_kind=_doc_kind(kind, row), catalog=catalog)
+                           doc_kind=_doc_kind(kind, row), catalog=catalog, conn=conn, scope=scope,
+                           key=getattr(row, kind.name_col))
     if not validation.ok:
         raise _invalid(validation)
     if kind is WORKFLOW:
@@ -989,21 +1068,73 @@ def fork(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, dest: D
     body = body_of(conn, kind, row.id, row.current_version)
     if body is None:
         raise DefError(409, f"This {kind.object_kind} has no saved version to fork.")
+    if kind is WORKFLOW:
+        _check_project(dest)
+        body = _with_name(body, name)
     validation = _validate(kind, body, access=access, previous_body=body, doc_kind=_doc_kind(kind, row),
-                           catalog=catalog)
+                           catalog=catalog, scope=dest, key=name)
     if not validation.ok:
         raise _invalid(validation)
+    callees = _callees(conn, row, body) if kind is WORKFLOW else []
+    if callees:
+        conflicts = sorted({callee.name for callee, _ in callees if callee.name == name
+                            or _name_taken(conn, kind, dest, callee.name, None)}
+                           | ({name} if _name_taken(conn, kind, dest, name, None) else set()))
+        if conflicts:
+            raise DefError(409, f"The destination already has {', '.join(conflicts)}. Rename or remove "
+                                "those first.", conflicts=conflicts)
     note = _note(kind, body, f"Forked from {source.kind} {getattr(row, kind.name_col)} version {row.current_version}.")
     row_id = _insert(conn, kind, dest, name, row.kind, body, note, actor_id, now)
     _audit(conn, kind, "fork", row_id, dest, actor_id, ip, name=name, source_id=row.id,
            source_version=row.current_version)
+    for callee, text in callees:
+        copied = _insert(conn, kind, dest, callee.name, callee.kind, text,
+                         _note(kind, text, f"Copied with {name} from {source.kind} {callee.name} version "
+                                           f"{callee.current_version}."), actor_id, now)
+        _audit(conn, kind, "fork", copied, dest, actor_id, ip, name=callee.name, source_id=callee.id,
+               source_version=callee.current_version)
+    if callees:
+        for text in [body, *(text for _, text in callees)]:
+            copied = _validate(kind, text, access=access, previous_body=text, doc_kind=None, catalog=catalog,
+                               conn=conn, scope=dest)
+            if not copied.ok:
+                raise DefError(422, "The copy doesn't validate in the destination. Copying starts each called "
+                                    "workflow over at version 1, so a call that names a later version no longer "
+                                    "resolves.", validation=copied.to_dict())
     return get_row(conn, kind, row_id)
+
+
+TOP_NAME = re.compile(r"^name:[ \t]*.*$", re.MULTILINE)
+
+
+def _with_name(body: str, name: str) -> str:
+    """The body with its top-level ``name:`` set to ``name``, so the copy's row and body agree."""
+    if _body_name(body) in (None, name):
+        return body
+    return TOP_NAME.sub(f"name: {name}", body, count=1)
+
+
+def _callees(conn: Connection, row: Any, body: str) -> list[tuple[Any, str]]:
+    """Each workflow ``body`` reaches through ``call:`` in the row's scope, with its current version's body."""
+    found, errors = calls.closure(calls.DbCallResolver(conn, row.scope), calls.body_refs(body), row.name)
+    if errors:
+        validation = Validation()
+        for issue in errors:
+            validation.add("error", issue.code, issue.message)
+        raise _invalid(validation)
+    out = []
+    for callee in sorted({c.workflow for c in found}):
+        source = conn.execute(select(workflows).where(workflows.c.scope == row.scope,
+                                                      workflows.c.name == callee)).one()
+        out.append((source, body_of(conn, WORKFLOW, source.id, source.current_version)))
+    return out
 
 
 def rollback(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, version: Any, note: Any,
              actor_id: str, now: datetime, ip: str | None, catalog: Any = None, base_version: int | None = None) -> Any:
     scope = row_scope(row)
     authorize_write(access, scope)
+    _refuse_built_in(row)
     if not isinstance(version, int) or isinstance(version, bool):
         raise DefError(400, "version must be an integer.")
     if base_version is not None and base_version != row.current_version:
@@ -1013,7 +1144,7 @@ def rollback(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, ver
         raise DefError(404, "No such version.")
     previous = body_of(conn, kind, row.id, row.current_version)
     validation = _validate(kind, body, access=access, previous_body=previous, doc_kind=_doc_kind(kind, row),
-                           catalog=catalog)
+                           catalog=catalog, conn=conn, scope=scope, key=getattr(row, kind.name_col))
     if not validation.ok:
         raise _invalid(validation)
     if kind is WORKFLOW:
@@ -1029,10 +1160,19 @@ def remove(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, actor
     """Delete the definition. Its versions stay, as history, and past runs keep their workflow name."""
     scope = row_scope(row)
     authorize_write(access, scope)
+    _refuse_built_in(row)
     if kind is WORKFLOW:
+        _refuse_if_called(conn, row, "delete")
+        if conn.execute(select(conversations.c.id).where(conversations.c.workflow_id == row.id,
+                                                         conversations.c.active_job_id.is_not(None))
+                        .limit(1)).first() is not None:
+            raise DefError(409, "A conversation with this workflow has a turn running.")
         if conn.execute(select(jobs.c.id).where(jobs.c.workflow_id == row.id, jobs.c.status.in_(ACTIVE_JOBS))
                         .limit(1)).first() is not None:
             raise DefError(409, "This workflow has queued or running jobs.")
+        held = select(conversations.c.id).where(conversations.c.workflow_id == row.id)
+        conn.execute(delete(conversation_messages).where(conversation_messages.c.conversation_id.in_(held)))
+        conn.execute(delete(conversations).where(conversations.c.workflow_id == row.id))
         conn.execute(delete(jobs).where(jobs.c.workflow_id == row.id))
         detach_triggers(conn, select(triggers.c.id).where(triggers.c.workflow_id == row.id))
         conn.execute(delete(triggers).where(triggers.c.workflow_id == row.id))
@@ -1043,8 +1183,10 @@ def remove(conn: Connection, kind: Kind, row: Any, *, access: rbac.Access, actor
 
 
 def detach_triggers(conn: Connection, trigger_ids: Any) -> None:
-    """Unlink jobs from triggers about to be deleted. A job outlives the rule that queued it."""
+    """Unlink jobs from triggers about to be deleted, and drop their poll state. A job outlives the rule that queued it."""
     conn.execute(update(jobs).where(jobs.c.trigger_id.in_(trigger_ids.scalar_subquery())).values(trigger_id=None))
+    for table in (trigger_polls, trigger_seen, trigger_state):
+        conn.execute(delete(table).where(table.c.trigger_id.in_(trigger_ids.scalar_subquery())))
 
 
 def set_kind(conn: Connection, row: Any, kind: Any, *, access: rbac.Access, actor_id: str, now: datetime,
@@ -1052,6 +1194,7 @@ def set_kind(conn: Connection, row: Any, kind: Any, *, access: rbac.Access, acto
     """Change what a workflow's runs count as. Its versions stay as they are."""
     scope = row_scope(row)
     authorize_write(access, scope)
+    _refuse_built_in(row)
     kind = _check_workflow_kind(kind)
     if kind != row.kind:
         conn.execute(update(workflows).where(workflows.c.id == row.id).values(kind=kind, updated_at=now))
@@ -1193,10 +1336,26 @@ def listing(conn: Connection, kind: Kind, access: rbac.Access, *, team: str | No
 
 
 def provider_target(conn: Connection, provider_id: str) -> rbac.Target:
-    team_id = conn.execute(select(providers.c.team_id).where(providers.c.id == provider_id)).scalar()
-    if team_id is None:
+    row = conn.execute(select(providers.c.team_id, providers.c.project_id).where(providers.c.id == provider_id)).first()
+    if row is None:
         raise rbac.NotFound("No such provider.")
-    return rbac.Target(team_id=team_id)
+    return rbac.Target(team_id=row.team_id, project_id=row.project_id)
+
+
+def resolve_alias(conn: Connection, alias: str, team_id: str | None, project_id: str | None) -> tuple[Any, str] | None:
+    """The provider that maps ``alias``, from the project's, then the team's, then the instance's, and its model id.
+
+    Within one scope the oldest provider wins. The scopes come from the caller's own ids, so an alias never
+    reaches another team's or project's provider.
+    """
+    for scope in (s for s in (project_id, team_id, INSTANCE_SCOPE) if s is not None):
+        rows = conn.execute(select(providers).where(providers.c.scope == scope)
+                            .order_by(providers.c.created_at, providers.c.id)).all()
+        for row in rows:
+            model = (row.aliases or {}).get(alias)
+            if isinstance(model, str) and model:
+                return row, model
+    return None
 
 
 def resolve_host(host: str) -> list[str]:
@@ -1229,7 +1388,9 @@ def _check_public_api_base(url: str) -> None:
 
 
 def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any, *, is_admin: bool = False,
-                   previous: dict | None = None) -> tuple[dict, dict]:
+                   previous: dict | None = None, may_name_secret: bool = True) -> tuple[dict, dict]:
+    """Check a provider's fields. ``may_name_secret`` is False for a project lead, who can't hand a team secret
+    to a provider they control."""
     if kind not in PROVIDER_KINDS:
         raise DefError(400, f"kind must be one of {', '.join(PROVIDER_KINDS)}.")
     config = {} if config is None else config
@@ -1257,6 +1418,8 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
     if config.get("credential_scope") == "instance" and not is_admin \
             and (previous or {}).get("credential_scope") != "instance":
         raise DefError(403, "Only an admin can point a provider at an instance secret.")
+    if not may_name_secret and secret and secret != (previous or {}).get("credential_secret"):
+        raise DefError(403, "Only a team lead or an admin can point a provider at a team secret.")
     for key in REQUIRED_CONFIG.get(kind, ()):
         if config.get(key) in (None, ""):
             raise DefError(400, f"A {kind} provider needs {key}.")
@@ -1302,27 +1465,29 @@ def provider_credential(conn: Connection, keyring: Any, row: Any) -> str | None:
 
 
 def provider_public(row: Any) -> dict[str, Any]:
-    return {"id": row.id, "team_id": row.team_id, "kind": row.kind, "config": row.config or {},
+    return {"id": row.id, "team_id": row.team_id, "project_id": row.project_id, "kind": row.kind,
+            "config": row.config or {},
             "aliases": row.aliases or {}, "created_at": row.created_at, "updated_at": row.updated_at}
 
 
-def create_provider(conn: Connection, *, team_id: str, body: dict[str, Any], actor_id: str, now: datetime,
-                    ip: str | None, is_admin: bool = False) -> Any:
+def create_provider(conn: Connection, *, scope: DefScope, body: dict[str, Any], actor_id: str, now: datetime,
+                    ip: str | None, is_admin: bool = False, may_name_secret: bool = True) -> Any:
     config, aliases = check_provider(body.get("kind"), body.get("config"), body.get("aliases"),
-                                     body.get("credential_secret"), is_admin=is_admin)
-    if conn.execute(select(providers.c.id).where(providers.c.team_id == team_id,
+                                     body.get("credential_secret"), is_admin=is_admin, may_name_secret=may_name_secret)
+    if conn.execute(select(providers.c.id).where(providers.c.scope == scope.scope,
                                                  providers.c.kind == body["kind"])).first() is not None:
-        raise DefError(409, f"This team already has a {body['kind']} provider.")
+        raise DefError(409, f"This {scope.kind} already has a {body['kind']} provider.")
     provider_id = new_id()
-    conn.execute(insert(providers).values(id=provider_id, team_id=team_id, kind=body["kind"], config=config,
-                                          aliases=aliases, created_at=now, updated_at=now))
-    audit.record(conn, action="provider.create", actor_id=actor_id, team_id=team_id, target_kind="provider",
-                 target_id=provider_id, detail={"kind": body["kind"], "aliases": sorted(aliases)}, ip=ip)
+    conn.execute(insert(providers).values(id=provider_id, kind=body["kind"], config=config, aliases=aliases,
+                                          created_at=now, updated_at=now, **scope.columns()))
+    audit.record(conn, action="provider.create", actor_id=actor_id, team_id=scope.team_id, target_kind="provider",
+                 target_id=provider_id, detail={"kind": body["kind"], "aliases": sorted(aliases),
+                                                "scope": scope.scope}, ip=ip)
     return conn.execute(select(providers).where(providers.c.id == provider_id)).one()
 
 
 def update_provider(conn: Connection, *, provider_id: str, body: dict[str, Any], actor_id: str, now: datetime,
-                    ip: str | None, is_admin: bool = False) -> Any:
+                    ip: str | None, is_admin: bool = False, may_name_secret: bool = True) -> Any:
     row = conn.execute(select(providers).where(providers.c.id == provider_id)).first()
     if row is None:
         raise DefError(404, "No such provider.")
@@ -1330,10 +1495,14 @@ def update_provider(conn: Connection, *, provider_id: str, body: dict[str, Any],
     if kind != row.kind:
         raise DefError(400, "A provider's kind can't change. Add a provider of the new kind instead.")
     config, aliases = check_provider(kind, body.get("config", row.config), body.get("aliases", row.aliases),
-                                     body.get("credential_secret"), is_admin=is_admin, previous=row.config or {})
+                                     body.get("credential_secret"), is_admin=is_admin, previous=row.config or {},
+                                     may_name_secret=may_name_secret)
     if not is_admin and (row.config or {}).get("credential_scope") == "instance" and config != (row.config or {}):
         raise DefError(403, "This provider uses an instance secret, so only an admin can change its credential, "
                             "region, or api_base. You can edit its aliases.")
+    if not may_name_secret and (row.config or {}).get("credential_secret") and config != (row.config or {}):
+        raise DefError(403, "This provider uses a team secret, so only a team lead or an admin can change its "
+                            "credential, region, or api_base. You can edit its aliases.")
     conn.execute(update(providers).where(providers.c.id == provider_id)
                  .values(config=config, aliases=aliases, updated_at=now))
     audit.record(conn, action="provider.update", actor_id=actor_id, team_id=row.team_id, target_kind="provider",
@@ -1350,16 +1519,19 @@ def delete_provider(conn: Connection, *, provider_id: str, actor_id: str, ip: st
                  target_id=provider_id, detail={"kind": row.kind}, ip=ip)
 
 
-def setting_scope(conn: Connection, scope: Any) -> str | None:
-    """The team id a settings scope names, or None for the instance."""
+def setting_scope(conn: Connection, scope: Any) -> DefScope:
+    """The instance, team, or project a settings scope names."""
     if scope in INSTANCE_IDS:
-        return None
+        return INSTANCE
     if not isinstance(scope, str):
-        raise DefError(400, "scope is 'instance' or a team id.")
-    try:
-        return rbac.team_target(conn, scope).team_id
-    except rbac.NotFound as exc:
-        raise DefError(404, str(exc)) from exc
+        raise DefError(400, "scope is 'instance', a team id, or a project id.")
+    for kind in ("team", "project"):
+        try:
+            target = rbac.scope_target(conn, kind, scope)
+        except rbac.NotFound:
+            continue
+        return DefScope(kind, target.team_id, target.project_id)
+    raise DefError(404, "No such team or project.")
 
 
 def check_setting_key(key: Any) -> str:
@@ -1371,17 +1543,27 @@ def check_setting_key(key: Any) -> str:
 
 
 def put_setting(conn: Connection, *, team_id: str | None, key: Any, value: Any, actor_id: str, now: datetime,
-                ip: str | None) -> dict[str, Any]:
+                ip: str | None, project_id: str | None = None) -> dict[str, Any]:
     key = check_setting_key(key)
+    if key.lower().startswith(ENV_PREFIX) and not key.startswith(ENV_PREFIX):
+        raise DefError(422, f"Write {key} as {ENV_PREFIX}{key[len(ENV_PREFIX):]}. The env. prefix is lowercase.")
     if key.startswith(display.PREFIX):
+        if project_id is not None:
+            raise DefError(400, "Display settings belong to the instance or a team, not a project.")
         try:
             value = display.check(key, value, team_id)
         except display.Invalid as exc:
             raise DefError(400, str(exc)) from exc
-    scope = scope_of(team_id)
+    if key in risk.SETTINGS:
+        try:
+            value = risk.check_setting(key, value)
+        except risk.Invalid as exc:
+            raise DefError(400, str(exc)) from exc
+    scope = project_id or scope_of(team_id)
     where = (settings.c.scope == scope, settings.c.key == key)
     exists = conn.execute(select(settings.c.key).where(*where)).first() is not None
-    values = {"value": value, "team_id": team_id, "scope": scope, "updated_at": now, "updated_by": actor_id}
+    values = {"value": value, "team_id": team_id, "project_id": project_id, "scope": scope, "updated_at": now,
+              "updated_by": actor_id}
     if exists:
         conn.execute(update(settings).where(*where).values(**values))
     else:
@@ -1391,10 +1573,11 @@ def put_setting(conn: Connection, *, team_id: str | None, key: Any, value: Any, 
     return {"key": key, "value": value, "scope": scope}
 
 
-def delete_setting(conn: Connection, *, team_id: str | None, key: Any, actor_id: str, ip: str | None) -> None:
+def delete_setting(conn: Connection, *, team_id: str | None, key: Any, actor_id: str, ip: str | None,
+                   project_id: str | None = None) -> None:
     if not isinstance(key, str):
         raise DefError(400, "key is required.")
-    scope = scope_of(team_id)
+    scope = project_id or scope_of(team_id)
     result = conn.execute(delete(settings).where(settings.c.scope == scope, settings.c.key == key))
     if result.rowcount != 1:
         raise DefError(404, "No such setting.")

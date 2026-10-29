@@ -1,0 +1,13 @@
+[Unit]
+Description=Reject instance metadata traffic from the Armature job, git, and agent users
+DefaultDependencies=no
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for u in armature-job armature-git armature-agent; do /usr/sbin/iptables -w -C OUTPUT -d 169.254.169.254 -m owner --uid-owner "$u" -j REJECT 2>/dev/null || /usr/sbin/iptables -w -I OUTPUT -d 169.254.169.254 -m owner --uid-owner "$u" -j REJECT; done'
+
+[Install]
+WantedBy=multi-user.target

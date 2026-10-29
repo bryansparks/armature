@@ -78,7 +78,7 @@ function aliasEditor(initialRows, idPrefix) {
   };
 }
 
-function providerForm(team, provider, secretNames, onDone, onCancel) {
+function providerForm(team, provider, secretNames, onDone, onCancel, createPath) {
   const idPrefix = `provider-${team.id}-${provider?.id || 'new'}`;
   const kindSelect = element('select', { id: `${idPrefix}-kind`, disabled: Boolean(provider) },
     Object.entries(PROVIDER_KINDS).map(([kind, entry]) => element('option', { value: kind }, entry.label)));
@@ -110,7 +110,7 @@ function providerForm(team, provider, secretNames, onDone, onCancel) {
     element('div', { class: 'stacked-form' },
       element('label', { class: 'stacked', for: kindSelect.id }, 'Kind', kindSelect), fieldSlot,
       element('label', { class: 'stacked', for: secretSelect.id }, 'Credential secret', secretSelect,
-        element('span', { class: 'note' }, names.length ? 'The secret holds the key. Its value never shows here.' : 'This team has no secrets yet. Add one on the Secrets page.'))),
+        element('span', { class: 'note' }, names.length ? 'The secret holds the key. Its value never shows here. It is one of the team’s secrets.' : 'This team has no secrets yet. Add one on the Secrets page.'))),
     aliases.root, status, element('div', { class: 'wf-actions' }, saveButton, cancelButton));
   form.addEventListener('submit', async (submitEvent) => {
     submitEvent.preventDefault();
@@ -120,7 +120,7 @@ function providerForm(team, provider, secretNames, onDone, onCancel) {
       status.append(element('div', { class: 'error-box', role: 'alert' }, error));
       return;
     }
-    const path = provider ? `/api/providers/${encodeURIComponent(provider.id)}` : `/api/teams/${encodeURIComponent(team.id)}/providers`;
+    const path = provider ? `/api/providers/${encodeURIComponent(provider.id)}` : createPath || `/api/teams/${encodeURIComponent(team.id)}/providers`;
     if (await attempt(status, saveButton, () => api(path, { method: 'POST', body }))) onDone();
   });
   requestAnimationFrame(() => (provider ? secretSelect : kindSelect).focus());
@@ -140,11 +140,11 @@ function aliasesCell(aliases) {
 }
 
 // Config holds only names, such as the secret a provider reads. The secret's value never reaches the page.
-export function providersSection(team, providers, { canManage, secretNames = [], reload, heading = 'Model providers' }) {
+export function providersSection(team, providers, { canManage, secretNames = [], reload, heading = 'Model providers', createPath = null }) {
   if (!providers.length && !canManage) return null;
   const formSlot = element('div');
   const status = element('div', { role: 'status' });
-  const openForm = (provider) => clear(formSlot).append(providerForm(team, provider, secretNames, reload, () => clear(formSlot)));
+  const openForm = (provider) => clear(formSlot).append(providerForm(team, provider, secretNames, reload, () => clear(formSlot), createPath));
   const headers = ['Provider', 'Region or URL', 'Credential', 'Aliases', ...(canManage ? [''] : [])];
   const rows = providers.map((provider) => {
     const row = [kindLabel(provider.kind), provider.config?.region || provider.config?.api_base || '—', credentialCell(provider), aliasesCell(provider.aliases)];

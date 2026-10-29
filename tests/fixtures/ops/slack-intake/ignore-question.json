@@ -1,0 +1,72 @@
+{
+  "description": "A question is ignored: no Jira call and no reply.",
+  "source": "slack",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "Slackbot 1.0 (+https://api.slack.com/robots)"
+  },
+  "env": {
+    "SLACK_INTAKE_CHANNEL": "C07MOBINTAKE",
+    "JIRA_PROJECT": "MEMTEMDIS",
+    "JIRA_SERVER": "https://familysearch.atlassian.net"
+  },
+  "payload": {
+    "token": "verification-token-unused",
+    "team_id": "T024BE7LD",
+    "api_app_id": "A07INTAKE1",
+    "type": "event_callback",
+    "event_id": "Ev071761676544",
+    "event_time": 1761676544,
+    "event": {
+      "type": "message",
+      "channel": "C07MOBINTAKE",
+      "channel_type": "channel",
+      "user": "U04KXN2QJ7M",
+      "text": "Does anyone know when the 6.14 beta goes out to Play?",
+      "ts": "1761676544.000400",
+      "event_ts": "1761676544.000400"
+    }
+  },
+  "stubs": {
+    "classify": {
+      "intent": "ignore",
+      "confidence": 0.95,
+      "summary": "",
+      "description": "",
+      "issue_type": "Task",
+      "issue_key": ""
+    }
+  },
+  "fakes": {},
+  "ops": {
+    "effects": [],
+    "result": {
+      "intent": "ignore",
+      "confidence": 0.95,
+      "summary": "",
+      "description": "",
+      "issue_type": "Task",
+      "issue_key": ""
+    },
+    "sessions": [
+      {
+        "stage": "classify",
+        "kind": "role",
+        "role": "Intake",
+        "type": "judge",
+        "output_mode": "guided_json",
+        "prompt": "Decide what this Slack message should do in Jira.\n\nintent is \"create\" only when the message describes a specific piece of\nwork or a reproducible defect that does not already have a ticket.\n\nissue_type is \"Defect\" for something broken, \"Enhancement\" for an\nimprovement to existing behavior, and \"Task\" for everything else.\nintent is \"comment\" only when the message names an existing issue key\nand adds information to it. Everything else, including questions,\nopinions, status updates, and jokes, is \"ignore\".\n\nsummary is one line under 100 characters, written as a task.\ndescription restates the message as a ticket body and quotes the\noriginal text. Never invent detail the message does not contain.\n\nconfidence is how sure you are the author wanted a ticket, not how well\nyou understood the words.\n\nMessage from U04KXN2QJ7M:\nDoes anyone know when the 6.14 beta goes out to Play?"
+      }
+    ],
+    "outputs": {
+      "classify": {
+        "intent": "ignore",
+        "confidence": 0.95,
+        "summary": "",
+        "description": "",
+        "issue_type": "Task",
+        "issue_key": ""
+      }
+    }
+  }
+}

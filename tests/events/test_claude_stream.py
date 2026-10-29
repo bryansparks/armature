@@ -220,3 +220,24 @@ def test_light_entry_point_matches_and_skips_the_engine():
         assert probe.stdout.split() == ["False", "False"]
     finally:
         reader.close()
+
+
+def test_cli_stream_claude_fields_ride_on_every_event():
+    reader = DatagramReader()
+    try:
+        env = {**os.environ, "ARMATURE_EVENTS": reader.endpoint, "ARMATURE_EVENTS_TOKEN": "t"}
+        raw = FIXTURE.read_bytes()
+        proc = _cli(["--stream-claude", "--step", "reviews", "--field", "role=security"], raw, env)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == raw
+        events = reader.wait_for(9)
+        assert all(e["payload"]["role"] == "security" for e in events)
+    finally:
+        reader.close()
+
+
+def test_parser_payload_wins_over_fields():
+    recorder = Recorder()
+    parser = ClaudeStreamParser(recorder, "s", {"role": "beauty", "model": "ignored"})
+    parser.feed('{"type":"system","subtype":"init","session_id":"s","model":"m"}')
+    assert recorder.events == [("session_start", "s", {"role": "beauty", "model": "m", "session_id": "s"})]
