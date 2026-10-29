@@ -27,6 +27,25 @@ stages:
       number: "{{ number }}"
     depends_on: []
 
+  # What the sessions read as files: the pull request, its changed lines, its discussion, Armature's findings, and
+  # the first Jira issue its title or branch names.
+  - id: context
+    skip_if: "{{ marked.valid }}"
+    adapter: review/context
+    fail_as_value: true
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+    depends_on: [marked]
+
+  - id: jira
+    skip_if: "{{ marked.valid or not context.jira_keys }}"
+    adapter: jira/get-issue
+    fail_as_value: true
+    with:
+      issue: "{{ context.jira_keys[0] }}"
+    depends_on: [context]
+
   - id: rate
     skip_if: "{{ marked.valid }}"
     agent:
@@ -66,7 +85,12 @@ stages:
       role: simplicity
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -85,7 +109,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: correctness
     skip_if: "{{ marked.valid or 'correctness' not in risk.panel }}"
@@ -95,7 +119,12 @@ stages:
       role: correctness
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -114,7 +143,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: security
     skip_if: "{{ marked.valid or 'security' not in risk.panel }}"
@@ -124,7 +153,12 @@ stages:
       role: security
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -143,7 +177,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: performance
     skip_if: "{{ marked.valid or 'performance' not in risk.panel }}"
@@ -153,7 +187,12 @@ stages:
       role: performance
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -172,7 +211,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: beauty
     skip_if: "{{ marked.valid or 'beauty' not in risk.panel }}"
@@ -182,7 +221,12 @@ stages:
       role: beauty
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -201,7 +245,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: test_adequacy
     skip_if: "{{ marked.valid or 'test_adequacy' not in risk.panel }}"
@@ -211,7 +255,12 @@ stages:
       role: test_adequacy
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -230,7 +279,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: concurrency
     skip_if: "{{ marked.valid or 'concurrency' not in risk.panel }}"
@@ -240,7 +289,12 @@ stages:
       role: concurrency
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -259,7 +313,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: conventions
     skip_if: "{{ marked.valid or 'conventions' not in risk.panel }}"
@@ -269,7 +323,12 @@ stages:
       role: conventions
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -288,7 +347,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   - id: compatibility
     skip_if: "{{ marked.valid or 'compatibility' not in risk.panel }}"
@@ -298,7 +357,12 @@ stages:
       role: compatibility
       prompt: |
         Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
-        request changes.
+        request changes. pr.md holds its title, branch, and description, files.json every changed file with the
+        new-file line ranges a comment can land on, and jira.md its Jira issue.
+      context_files:
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object
@@ -317,7 +381,7 @@ stages:
               claim: {type: string}
               body: {type: string}
               suggestion: {type: string}
-    depends_on: [risk]
+    depends_on: [risk, jira]
 
   # The lead checks each finding in the code and decides what blocks the merge.
   - id: team_lead
@@ -326,19 +390,20 @@ stages:
       model: review
       role: team_lead
       prompt: |
-        Lead the review of pull request #{{ number }} of {{ slug }}, checked out here. Each specialist's review is in
-        the context file named for its role. A skipped specialist didn't run. Check each finding in the code, then
-        decide it: block, suggest, or drop, with a one-line reason. Approve only when nothing blocks.
+        Lead the review of pull request #{{ number }} of {{ slug }}, checked out here. The specialists' reviews are
+        in reviews.md by role, and a skipped specialist didn't run. Check each finding in the code, then decide it:
+        block, suggest, or drop, with a one-line reason. Approve only when nothing blocks.
       context_files:
-        simplicity: "{{ simplicity }}"
-        correctness: "{{ correctness }}"
-        security: "{{ security }}"
-        performance: "{{ performance }}"
-        beauty: "{{ beauty }}"
-        test_adequacy: "{{ test_adequacy }}"
-        concurrency: "{{ concurrency }}"
-        conventions: "{{ conventions }}"
-        compatibility: "{{ compatibility }}"
+        reviews: >-
+          {{ {'simplicity': simplicity, 'correctness': correctness, 'security': security, 'performance': performance,
+          'beauty': beauty, 'test_adequacy': test_adequacy, 'concurrency': concurrency, 'conventions': conventions,
+          'compatibility': compatibility} | tojson(indent=2) }}
+        verify.json: '{"ran": false, "reason": "This workflow has no build step, so nothing was built or linted."}'
+        pr: "{{ context.pr }}"
+        files.json: "{{ context.files | default([]) | tojson }}"
+        findings: "{{ context.findings }}"
+        discussion: "{{ context.discussion }}"
+        jira: "{{ jira | tojson if jira.found else 'No Jira issue: the title and branch name none, or it could not be read.' }}"
     output_mode: guided_json
     output_schema:
       type: object

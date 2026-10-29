@@ -80,9 +80,11 @@ flags in the rule form on the webhook page.
    would match, and queues nothing. Check the decisions on the webhook's
    deliveries page.
 2. **Dry live.** Turn shadow off and leave dry on. Jobs run, and each tool
-   call is recorded with its parameters on the run page, without reaching
-   Slack or Jira. Compare them with what ops did for the same events. Dry
-   applies to that rule's runs only.
+   call that writes is recorded with its parameters on the run page, without
+   reaching GitHub, Slack, or Jira. A tool that only reads, such as
+   `review.marked`, `review.risk`, or `jira.get-issue`, runs for real so
+   later steps see real data. Compare the recorded calls with what ops did
+   for the same events. Dry applies to that rule's runs only.
 3. **Stop the ops side.** Each workflow below names the step.
 4. **Live.** Turn dry off, and watch the first real event.
 

@@ -42,9 +42,9 @@ stages:
     depends_on: [first]
 
   # The fix and its build run in one write session, as the agent user with only the session's environment, so the
-  # pull request's code never runs with the run's secrets or tokens.
+  # pull request's code never runs with the run's secrets or tokens. A dry run never starts one.
   - id: fix
-    skip_if: "{{ not pushable.pushable }}"
+    skip_if: "{{ not pushable.pushable or pushable.dry_run }}"
     fail_as_value: true
     agent:
       model: review

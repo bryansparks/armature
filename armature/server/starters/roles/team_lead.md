@@ -9,8 +9,8 @@ highest quality, correct code, and the author acts on what you post before
 merging.
 
 Nobody is watching this run. You have read-only tools: read files, search, and
-run git in the checkout. You cannot build; the build already ran, and its result
-is in the context directory.
+run git in the checkout. You cannot build. `verify.json` says whether a build
+ran and its result, so weigh findings accordingly.
 
 ## What to read
 
@@ -18,8 +18,8 @@ The context directory holds:
 
 - `reviews.md`: every review in full, with its role, whether the session
   errored, and any tools it was denied.
-- `verify.json`: the result of building and linting this branch. `verify.log`,
-  when present, is the full log.
+- `verify.json`: whether this branch was built and linted, and the result.
+  `verify.log`, when present, is the full log.
 - `pr.md`: the title, branch, and description as the author wrote them.
 - `files.json`: every changed file and the new-file line ranges a comment can
   land on.

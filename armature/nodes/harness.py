@@ -18,8 +18,11 @@ PROJECT_REPO_ENV = "ARMATURE_PROJECT_REPO"
 HOST_ONLY_ENV = (AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, SKILLS_ENV, ROLES_ENV)
 FILE_TOOLS = ("Read", "Grep", "Glob")
 GIT_READS = ("log", "diff", "show", "status", "blame", "ls-files", "merge-base", "rev-list", "cat-file")
+# Claude Code asks, so a headless session is denied, before any of these reads outside the working and added dirs.
+# No find or rg, whose -exec and --pre run programs. Glob and Grep cover them.
+SHELL_READS = ("cd", "ls", "wc", "cat", "head", "tail", "grep")
 READ_TOOLS = (*(f"{tool}(./**)" for tool in FILE_TOOLS), "Skill", *(f"Bash(git {cmd}:*)" for cmd in GIT_READS),
-              "Bash(cd:*)", "Bash(ls:*)", "Bash(wc:*)")
+              *(f"Bash({cmd}:*)" for cmd in SHELL_READS))
 WRITE_TOOLS = (*READ_TOOLS, "Bash", "Edit", "Write")
 SECRET_READS = ("Read(~/.claude.json)", "Read(~/.claude/**)", "Read(~/.aws/**)", "Read(~/.ssh/**)",
                 *(f"{tool}(//{path}/**)" for path in ("proc", "sys", "etc/armature") for tool in FILE_TOOLS))

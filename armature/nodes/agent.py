@@ -687,7 +687,7 @@ class AgentNode:
                 ctx = session / "ctx"
                 ctx.mkdir(mode=0o700)
                 for name, text in files.items():
-                    (ctx / f"{name}.md").write_text(text, encoding="utf-8")
+                    (ctx / (name if name.endswith(".json") else f"{name}.md")).write_text(text, encoding="utf-8")
                 self._share_tree(ctx, writable=False)
                 add_dirs.append(ctx)
                 prompt += CONTEXT_NOTE.format(ctx=ctx)
