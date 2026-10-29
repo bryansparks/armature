@@ -119,7 +119,7 @@ class DryRunConfig(BaseModel):
 class RunnerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Caps each run's address space on Linux; 0 turns it off, and macOS ignores it.
+    # Caps each run's address space on Linux. 0 turns it off, and macOS ignores it.
     memory_mb: int = Field(default=8192, ge=0)
 
 

@@ -76,7 +76,7 @@ class DAGExecutor:
                     "DAG deadlock — all remaining stages have unresolvable dependencies"
                 )
 
-            # Run this wave concurrently; raise immediately on first failure.
+            # Run this wave concurrently, and raise on the first failure.
             # A gate's pause waits for the rest of its wave, so the run stops between stages.
             async def _run_one(sid: str) -> tuple[str, Any]:
                 try:

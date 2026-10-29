@@ -229,8 +229,7 @@ def load_spec(path: Path | str, vars: dict | None = None, *,
         data = yaml.load(raw)
 
     if vars:
-        # Input values render into the spec once at load; a with: renders at run
-        # time instead, so an input holding "{{ ... }}" is never rendered twice.
+        # A with: renders at run time, not here, so an input holding "{{ ... }}" never renders twice.
         if pre is not None:
             _restore_with_blocks(data, _with_blocks(pre))
         if before is not None and _call_targets(data) != before:

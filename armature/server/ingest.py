@@ -102,7 +102,6 @@ MAX_ARTIFACT_BYTES_PER_RUN = 16 * 1024 * 1024
 ACCEPTED, REJECTED, DUPLICATE = "accepted", "rejected", "duplicate"
 # A run paused at a gate. Its job resumes it later on the same run.
 WAITING = "waiting"
-ENDS = ("run_end", "run_suspend")
 
 
 def _iso(value: datetime) -> str:
@@ -551,7 +550,10 @@ class LiveHub:
         eid = parse_eid(event.get("eid"))
         if state.duplicate(eid):
             return DUPLICATE
-        if kind not in ENDS and (state.seq >= MAX_EVENTS_PER_RUN or not state.allow()):
+        # Any step holds the run token, so only a run_suspend the engine signed skips the run's limits.
+        ends = kind == "run_end" or (kind == "run_suspend"
+                                     and runners.signed_suspend(self.keyring, state.run_id, payload))
+        if not ends and (state.seq >= MAX_EVENTS_PER_RUN or not state.allow()):
             state.rejected += 1
             return REJECTED
         now = self.clock()

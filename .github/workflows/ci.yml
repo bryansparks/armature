@@ -25,7 +25,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev,service]"
+        run: pip install -e ".[dev,service,server]"
 
       - name: Core is import-clean without the cloud extra
         run: python -c "import sys, armature; assert not any('armature.transport' in m for m in sys.modules); assert 'boto3' not in sys.modules, 'core pulled boto3'"
@@ -50,7 +50,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev,service,cloud,cloud-dev]"
+        run: pip install -e ".[dev,service,server,cloud,cloud-dev]"
 
       - name: Run transport tests
         run: python -m pytest tests/transport/ --tb=short -q

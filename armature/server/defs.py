@@ -564,7 +564,7 @@ def _pack_refs(validation: Validation, data: Any, catalog: Any) -> None:
                 validation.at(data, "error", "INVALID_PARAMS", message, ["stages", i, "with", *where])
 
 
-# The server only parses spec templates; rendering one in-process would let a template exhaust the server.
+# The server only parses spec templates, since rendering one in-process could exhaust the server.
 def validate_workflow(body: str, *, actor: Any, previous_body: str | None, catalog: Any = None,
                       call_resolver: CallResolver | None = None) -> Validation:
     """Parse, schema-check, validate, lint, check pack references, and, for a non-admin, the field allowlist.

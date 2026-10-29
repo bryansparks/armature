@@ -871,7 +871,9 @@ def admitted_senders(conn: Connection, hook: Any) -> list[str]:
     rows = conn.execute(select(webhook_deliveries.c.sender).distinct().where(
         webhook_deliveries.c.webhook_id == hook.id, webhook_deliveries.c.sender.is_not(None),
         webhook_deliveries.c.status.in_(("accepted", "ignored")),
-        or_(webhook_deliveries.c.reason.is_(None), webhook_deliveries.c.reason != DISMISSED))).scalars()
+        # A held click is marked ignored at once, but its sender was never admitted.
+        or_(webhook_deliveries.c.reason.is_(None),
+            webhook_deliveries.c.reason.not_in((DISMISSED, CLICK_NOT_REPLAYED))))).scalars()
     return sorted(rows)
 
 

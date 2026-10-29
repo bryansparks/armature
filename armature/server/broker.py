@@ -44,6 +44,7 @@ from armature.server.crypto import Keyring, SealError
 from armature.server.db import new_id
 from armature.server.db.schema import (
     INSTANCE_SCOPE,
+    environments,
     github_installations,
     jobs,
     projects,
@@ -196,12 +197,14 @@ def _same_user_runner(conn: Connection, job: Any) -> bool:
     """Whether the runner holding ``job`` said at hello that its agent sessions run as its own user.
 
     Only a runner on an instance key counts, since only an admin mints one and a team lead could mint a team key.
+    An environment's key has no team either, but enrollment mints it for any team's job, so it doesn't count.
     """
     if job.runner_id is None or job.status not in worker.HELD:
         return False
+    enrolled = select(environments.c.id).where(environments.c.runner_key_id == runner_keys.c.id).exists()
     platform = conn.execute(select(runner_rows.c.platform).join(
         runner_keys, runner_keys.c.id == runner_rows.c.runner_key_id).where(
-        runner_rows.c.id == job.runner_id, runner_keys.c.team_id.is_(None))).scalar()
+        runner_rows.c.id == job.runner_id, runner_keys.c.team_id.is_(None), ~enrolled)).scalar()
     return isinstance(platform, dict) and platform.get("same_user") is True
 
 

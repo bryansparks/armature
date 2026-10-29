@@ -611,5 +611,5 @@ class HarnessSpec(BaseModel):
     # work_unit: render the mission context layer from the injected work record
     # (design §4) — slice 2 wires the runtime; the grammar lands here
     mission_source: Literal["static", "work_unit"] = "static"
-    # Directory of the file the loader read this spec from; the default call bundle lives under it.
+    # Directory of the file the loader read this spec from, which holds the default call bundle.
     _source_dir: str | None = PrivateAttr(default=None)
