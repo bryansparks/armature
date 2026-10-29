@@ -260,7 +260,7 @@ def test_settings_and_secrets_never_replace_the_hosts_path_home_or_packs(world, 
                              hub, clock=world.clock, work_dir=tmp_path / "work")
     with world.engine.begin() as conn:
         _, _, env = embedded._prepare(conn, job, "/bin/armature", tmp_path / "job")
-    assert env["PATH"] == "/usr/bin" and env["HOME"] == "/home/runner"
+    assert env["PATH"] == "/bin:/usr/bin" and env["HOME"] == "/home/runner"
     assert env["ARMATURE_PACKS_PATH"].split(":")[-1] == "/srv/p"
 
 

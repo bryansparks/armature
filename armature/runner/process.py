@@ -49,7 +49,8 @@ def armature_binary() -> str | None:
 def job_path(binary: str | None) -> str:
     """The host's PATH with the running armature's directory first, so a step's `armature tool` finds it."""
     host = os.environ.get("PATH", "/usr/bin:/bin")
-    return f"{os.path.dirname(binary)}:{host}" if binary else host
+    folder = os.path.dirname(binary) if binary else ""
+    return f"{folder}:{host}" if folder else host
 
 
 # macOS refuses to lower RLIMIT_AS or RLIMIT_DATA from unlimited, so a memory cap applies on Linux only.

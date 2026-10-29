@@ -572,6 +572,7 @@ def test_a_job_finds_the_running_armature_first_on_its_path(monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     assert job_path("/opt/venv/bin/armature") == "/opt/venv/bin:/usr/bin:/bin"
     assert job_path(None) == "/usr/bin:/bin"
+    assert job_path("armature") == "/usr/bin:/bin"
 
 
 def test_same_user_advertises_agent_sessions_and_warns(tmp_path, monkeypatch):
