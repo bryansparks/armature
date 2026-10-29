@@ -50,3 +50,15 @@ report-full.png
 
 # Standalone site — hosted on armature.now, not GitHub Pages
 site/
+
+# Local harness-comparison notes
+DEEPSEEK-ARMATURE-COMPARISON.md
+QM-ARMATURE-COMPARISON.md
+
+# Local design docs (working, not for public repo)
+CONTEXT-GOVERNANCE-DESIGN.md
+
+# Local artifacts (third-party PDFs, scratch experiments)
+armature-governance-evaluation-brief.pdf
+registry-layer-reference-sheet.pdf
+tmp-cc/
