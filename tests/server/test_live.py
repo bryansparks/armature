@@ -228,6 +228,7 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
     summary = detail["run"]
     assert set(summary) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "trigger_kind",
                             "started_at", "finished_at", "cost_usd", "input_tokens", "output_tokens", "rerun_of",
+                            "rerun", "can_rerun",
                             "cancelled_by", "error", "subject", "thread", "summary", "last_seq", "dry_run", "kind",
                             "links", "trigger", "outcome", "outcome_source", "risk", "risk_reasons",
                             "head_sha", "location"}
