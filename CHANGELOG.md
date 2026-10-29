@@ -8,6 +8,86 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-29
+
+### Added
+
+- **Workflow packs.** A step can name an installed pack's script as
+  `adapter: <pack>/<adapter>` with parameters under `with:`. A pack is a
+  directory with a `pack.yaml` that declares each adapter's `cmd`, a JSON
+  Schema for its parameters, outputs, timeout, whether it writes, and the
+  secrets it needs. Packs load from `ARMATURE_PACKS_PATH` and then
+  `~/.armature/packs`, and the first pack under a name wins. A `cmd` with
+  `{{` or `{%` is refused, and `$PACK_DIR` reaches the script through its
+  environment. `with:` is checked against the schema when the workflow is
+  validated (`INVALID_WITH`, with the field path) and again after it renders,
+  may hold only lint-safe references, and reaches the script as
+  `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]`, never in the command. An
+  unknown pack adapter is `UNKNOWN_PACK_ADAPTER`. `armature pack validate`
+  and `armature pack list` inspect packs, `armature server pack install` and
+  `remove` manage the server's `packs_dir` with an audit row, refusing a git
+  install not pinned to a full commit sha and a downgrade without `--force`,
+  and `GET /api/packs` lists every adapter with its parameter schema.
+  `jsonschema` is now a core dependency. See `examples/packs/hello/`.
+- **Authoring assistant and test runs.** The workflow and document edit
+  pages have an "Ask the assistant" panel. Asking about a new object is
+  API-only, through `POST /api/assist` with a `team_id`. The request sends
+  the current body and the instruction, fenced as data, with the workflow
+  schema or the role rules, the installed packs, and a non-admin's field
+  allowlist, to the team's provider through an alias (`lead` by default). The
+  answer is validated with the user's own permissions, retried once with its
+  errors, and returned with a diff and its cost. Nothing is saved until the
+  user accepts it into the editor and saves. Only an editor of the object, or
+  a creator in its team, may ask: 30 times an hour, two at a time, and at
+  most `assist.team_daily_limit` (300) times a day per team. Every request is
+  audited, failures included. Calls cap output at 8192 tokens. A keyless
+  OpenAI-compatible or Ollama provider gets a placeholder key, and one a
+  non-admin saved has its `api_base` checked again before each call. A
+  `claude-subscription` provider runs `claude -p` with an empty environment,
+  its own home, no tools, no MCP servers, and at most two turns. A workflow's
+  page starts a test run (`POST /api/workflows/{id}/test`, contributor and
+  up, two at a time per user and `dry_run.max_active` (8) per server) that
+  replays a past run's step outputs, plus any you give, through the new
+  engine stub mode. With `ARMATURE_STUB_OUTPUTS` set, every step returns its
+  recorded output and no subprocess, tool module, file read, or model call
+  happens. A step with none fails with `STUB_MISSING` unless
+  `ARMATURE_STUB_DEFAULT=empty`, and gates approve. The run streams live and
+  shows a "Dry run" badge. A step's `step_end` event now carries its output,
+  and the server stores it in `run_steps.output`, as a list of branch outputs
+  for a fan-out step and marked `_truncated` when the event was cut to fit.
+  `GET /api/runs` takes `workflow=<name>` and `with_outputs=1`.
+
+### Changed
+
+- **Authenticator codes are optional.** The server signs people in with a
+  username and password, invites skip authenticator enrollment, and no
+  change asks for step-up. Set `require_totp: true` in `server.yaml` to turn
+  codes and step-up back on. Users who already enrolled keep their
+  authenticator.
+
+### Fixed
+
+- **Script adapters no longer block the event loop** — they run as asyncio
+  subprocesses, so fan-out branches and independent stages overlap instead of
+  running one at a time. A script that times out or is cancelled has its whole
+  process group killed.
+
+### Security
+
+- **Templates render in Jinja2's immutable sandbox.** Every `skip_if`,
+  `condition`, `partition_source`, loop `until`, gate message, tool argument,
+  role description, adapter `cmd`, and load-time spec variable now renders
+  through `armature.runtime.templating`. A template can no longer reach
+  Python internals: an unsafe attribute such as `''.__class__` renders as
+  undefined, and calling one, or a method that mutates a value, raises
+  `SecurityError`. The new `armature.spec.template_lint` (`lint_template`,
+  `lint_tree`, `lint_spec`, and `armature validate --strict-templates`)
+  limits every string in a spec further to references, comparisons, and a
+  few formatting filters.
+
+## [0.8.0] - 2026-10-29
+
+
 ### Added
 
 - **Workflow renames.** Change `name:` in the editor and save, and the
@@ -262,58 +342,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `armature run` also saves the full result to
   `~/.armature/runs/<run_id>/result.json`, so every run keeps its untruncated
   stage outputs instead of only the latest run per workflow.
-- **Workflow packs.** A step can name an installed pack's script as
-  `adapter: <pack>/<adapter>` with parameters under `with:`. A pack is a
-  directory with a `pack.yaml` that declares each adapter's `cmd`, a JSON
-  Schema for its parameters, outputs, timeout, whether it writes, and the
-  secrets it needs. Packs load from `ARMATURE_PACKS_PATH` and then
-  `~/.armature/packs`, and the first pack under a name wins. A `cmd` with
-  `{{` or `{%` is refused, and `$PACK_DIR` reaches the script through its
-  environment. `with:` is checked against the schema when the workflow is
-  validated (`INVALID_WITH`, with the field path) and again after it renders,
-  may hold only lint-safe references, and reaches the script as
-  `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]`, never in the command. An
-  unknown pack adapter is `UNKNOWN_PACK_ADAPTER`. `armature pack validate`
-  and `armature pack list` inspect packs, `armature server pack install` and
-  `remove` manage the server's `packs_dir` with an audit row, refusing a git
-  install not pinned to a full commit sha and a downgrade without `--force`,
-  and `GET /api/packs` lists every adapter with its parameter schema.
-  `jsonschema` is now a core dependency. See `examples/packs/hello/`.
-- **Authoring assistant and test runs.** The workflow and document edit
-  pages have an "Ask the assistant" panel. Asking about a new object is
-  API-only, through `POST /api/assist` with a `team_id`. The request sends
-  the current body and the instruction, fenced as data, with the workflow
-  schema or the role rules, the installed packs, and a non-admin's field
-  allowlist, to the team's provider through an alias (`lead` by default). The
-  answer is validated with the user's own permissions, retried once with its
-  errors, and returned with a diff and its cost. Nothing is saved until the
-  user accepts it into the editor and saves. Only an editor of the object, or
-  a creator in its team, may ask: 30 times an hour, two at a time, and at
-  most `assist.team_daily_limit` (300) times a day per team. Every request is
-  audited, failures included. Calls cap output at 8192 tokens. A keyless
-  OpenAI-compatible or Ollama provider gets a placeholder key, and one a
-  non-admin saved has its `api_base` checked again before each call. A
-  `claude-subscription` provider runs `claude -p` with an empty environment,
-  its own home, no tools, no MCP servers, and at most two turns. A workflow's
-  page starts a test run (`POST /api/workflows/{id}/test`, contributor and
-  up, two at a time per user and `dry_run.max_active` (8) per server) that
-  replays a past run's step outputs, plus any you give, through the new
-  engine stub mode. With `ARMATURE_STUB_OUTPUTS` set, every step returns its
-  recorded output and no subprocess, tool module, file read, or model call
-  happens. A step with none fails with `STUB_MISSING` unless
-  `ARMATURE_STUB_DEFAULT=empty`, and gates approve. The run streams live and
-  shows a "Dry run" badge. A step's `step_end` event now carries its output,
-  and the server stores it in `run_steps.output`, as a list of branch outputs
-  for a fan-out step and marked `_truncated` when the event was cut to fit.
-  `GET /api/runs` takes `workflow=<name>` and `with_outputs=1`.
 
 ### Changed
 
-- **Authenticator codes are optional.** The server signs people in with a
-  username and password, invites skip authenticator enrollment, and no
-  change asks for step-up. Set `require_totp: true` in `server.yaml` to turn
-  codes and step-up back on. Users who already enrolled keep their
-  authenticator.
 - **Cost display setting covers runs.** With cost turned off in display
   settings, the runs list, run page, pull request pages, and live log show no
   cost, and `GET /api/runs` and `GET /api/runs/{id}` send `cost_usd` as null.
@@ -337,23 +368,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `~/.armature/last/<workflow>.json` is written atomically (temp file plus
   rename), so concurrent runs of the same workflow can no longer leave a
   corrupt file.
-- **Script adapters no longer block the event loop** — they run as asyncio
-  subprocesses, so fan-out branches and independent stages overlap instead of
-  running one at a time. A script that times out or is cancelled has its whole
-  process group killed.
-
-### Security
-
-- **Templates render in Jinja2's immutable sandbox.** Every `skip_if`,
-  `condition`, `partition_source`, loop `until`, gate message, tool argument,
-  role description, adapter `cmd`, and load-time spec variable now renders
-  through `armature.runtime.templating`. A template can no longer reach
-  Python internals: an unsafe attribute such as `''.__class__` renders as
-  undefined, and calling one, or a method that mutates a value, raises
-  `SecurityError`. The new `armature.spec.template_lint` (`lint_template`,
-  `lint_tree`, `lint_spec`, and `armature validate --strict-templates`)
-  limits every string in a spec further to references, comparisons, and a
-  few formatting filters.
 
 ## [0.7.0] - 2026-10-05
 
