@@ -796,20 +796,20 @@ def test_0025_adds_job_dry_run_defaulting_off_and_downgrade_drops_it(db_url):
 
 
 
-def test_0026_adds_job_rerun_of_and_downgrade_drops_it(db_url):
+def test_0026_adds_job_rerun_columns_and_downgrade_drops_them(db_url):
     from alembic import command
 
     from armature.server.db import alembic_config
     migrate(db_url)
     engine = make_engine(db_url)
     try:
-        assert "rerun_of" in {c["name"] for c in inspect(engine).get_columns("jobs")}
+        assert {"rerun_of", "requested_by"} <= {c["name"] for c in inspect(engine).get_columns("jobs")}
     finally:
         engine.dispose()
     command.downgrade(alembic_config(db_url), "0022")
     engine = make_engine(db_url)
     try:
-        assert "rerun_of" not in {c["name"] for c in inspect(engine).get_columns("jobs")}
+        assert not {"rerun_of", "requested_by"} & {c["name"] for c in inspect(engine).get_columns("jobs")}
     finally:
         engine.dispose()
 

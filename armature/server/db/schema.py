@@ -500,6 +500,8 @@ jobs = Table(
     Column("superseded_by", String(36)),
     # No foreign key, as with superseded_by: the run this job reruns, copied to the run it opens.
     Column("rerun_of", String(36), index=True),
+    # The user who asked for the rerun, recorded as the run's triggered_by.
+    Column("requested_by", String(36)),
     Index(None, "status", "created_at"),
     # The backfill and a run's page find a run's jobs by run.
     Index(None, "run_id"),

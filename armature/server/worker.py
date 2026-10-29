@@ -183,7 +183,8 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
               now: datetime, trigger_id: str | None = None, delivery_id: str | None = None,
               thread: str | None = None, resume: tuple[str, Any] | None = None, dry_run: bool = False,
               key: str | None = None, not_before: datetime | None = None, supersede: bool = False,
-              cancel_running: bool = False, sticky: Iterable[str] = (), rerun_of: str | None = None) -> str:
+              cancel_running: bool = False, sticky: Iterable[str] = (), rerun_of: str | None = None,
+              requested_by: str | None = None) -> str:
     """Queue a workflow job at the workflow's current version, with its callees pinned. Returns the job id.
 
     ``resume`` is a gate id and the job that paused there: the new job continues that job's run, at the version,
@@ -192,7 +193,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
     Jobs of the workflow with the same ``key`` run one at a time. With ``supersede`` the new job replaces the key's
     queued ones and keeps any ``sticky`` input one of them set. With ``cancel_running`` it also asks the key's
     running job to stop. A job with ``not_before`` waits until then to be claimed. The run a job with ``rerun_of``
-    opens links back to that run.
+    opens links back to that run, with its trigger, and names ``requested_by`` as who triggered it.
     """
     if resume is not None:
         gate_id, paused = resume
@@ -219,7 +220,8 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
     conn.execute(insert(jobs).values(id=job_id, team_id=team_id, project_id=project_id, workflow_id=workflow_id,
                                      inputs=inputs, status="queued", attempts=0, trigger_id=trigger_id,
                                      delivery_id=delivery_id, thread=thread, created_at=now, concurrency_key=key,
-                                     not_before=not_before, rerun_of=rerun_of, **pinned))
+                                     not_before=not_before, rerun_of=rerun_of, requested_by=requested_by,
+                                     **pinned))
     if older:
         conn.execute(update(jobs).where(jobs.c.id.in_([row.id for row in older]), jobs.c.status == "queued")
                      .values(status="superseded", superseded_by=job_id, finished_at=now, error=SUPERSEDED))
@@ -508,6 +510,16 @@ def _trigger_ref(conn: Connection, job: Any, trigger: Any) -> tuple[str, dict[st
                                                         ("trigger_id", job.trigger_id)) if value is not None}
 
 
+def _rerun_ref(conn: Connection, job: Any) -> tuple[str, dict[str, Any]] | None:
+    """A rerun starts as the run it reruns did, since the trigger's seen keys still point at that run's job."""
+    if job.rerun_of is None:
+        return None
+    row = conn.execute(select(runs.c.trigger_kind, runs.c.trigger_ref).where(runs.c.id == job.rerun_of)).first()
+    if row is None or row.trigger_kind is None or not isinstance(row.trigger_ref, dict):
+        return None
+    return row.trigger_kind, {k: v for k, v in row.trigger_ref.items() if k != "dry_run"}
+
+
 def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime, lease: timedelta,
                  events: str, runner_key_id: str | None = None, instance_secrets: bool = True,
                  location: dict[str, Any] | None = None) -> Bundle:
@@ -571,12 +583,12 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
         if run_id is None:
             raise JobError("The run this job resumes is no longer waiting at a gate.")
     else:
-        trigger_kind, trigger_ref = _trigger_ref(conn, job, trigger)
+        trigger_kind, trigger_ref = _rerun_ref(conn, job) or _trigger_ref(conn, job, trigger)
         if job.dry_run:
             trigger_ref["dry_run"] = True
         run_row, token = runners.open_run(conn, keyring, team_id=job.team_id, project_id=job.project_id,
                                           workflow_id=workflow.id, workflow_name=workflow.name, now=now,
-                                          workflow_version=job.workflow_version, triggered_by=None, actor=None,
+                                          workflow_version=job.workflow_version, triggered_by=job.requested_by, actor=None,
                                           trigger_kind=trigger_kind, trigger_ref=trigger_ref,
                                           runner_key_id=runner_key_id, thread=job.thread, location=location,
                                           rerun_of=job.rerun_of)

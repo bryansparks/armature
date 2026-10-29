@@ -37,12 +37,15 @@ def world(sqlite_engine, clock):
     return {"team": team, "other": other, "project": project, "workflow": workflow, "rule": rule}
 
 
-def _finished(engine, clock, world, *, status="failed", job_status="failed", summary=None, with_job=True, **job):
+def _finished(engine, clock, world, *, status="failed", job_status="failed", summary=None, with_job=True,
+              trigger_kind="jira", trigger_ref=None, **job):
     run_id = new_id()
     with engine.begin() as conn:
         conn.execute(insert(runs).values(id=run_id, team_id=world["team"], project_id=world["project"],
                                          workflow_id=world["workflow"], workflow_version=1, status=status,
-                                         started_at=clock(), summary=summary))
+                                         started_at=clock(), summary=summary, trigger_kind=trigger_kind,
+                                         trigger_ref=trigger_ref or {"trigger_id": world["rule"], "issue": "ACME-7",
+                                                                     "dry_run": True}))
         if with_job:
             conn.execute(insert(jobs).values(**{
                 "id": new_id(), "team_id": world["team"], "project_id": world["project"],
@@ -53,8 +56,8 @@ def _finished(engine, clock, world, *, status="failed", job_status="failed", sum
     return run_id
 
 
-def _user(engine, keyring, clock, team, role):
-    user, _ = add_user(engine, keyring, clock, f"u-{role}-{new_id()[:6]}")
+def _user(engine, keyring, clock, team, role, *, user=None):
+    user = user or add_user(engine, keyring, clock, f"u-{role}-{new_id()[:6]}")[0]
     add_membership(engine, clock, user, "team", team, role)
     client = make_client(engine, keyring, clock)
     client.headers.update(mutation(sign_in_as(client, engine, keyring, clock, user)))
@@ -85,14 +88,30 @@ def test_a_contributor_reruns_a_finished_run_with_its_inputs_trigger_and_key(sql
     assert recorded.target_id == run_id and recorded.detail["job_id"] == job.id
 
 
-def test_the_rerun_job_opens_a_run_that_links_back_and_stays_dry(sqlite_engine, keyring, clock, world):
-    run_id = _finished(sqlite_engine, clock, world, dry_run=True)
-    _user(sqlite_engine, keyring, clock, world["team"], "contributor").post(f"/api/runs/{run_id}/rerun")
-    [job] = _reruns(sqlite_engine, run_id)
-    with sqlite_engine.begin() as conn:
+def _open(engine, keyring, clock, run_id):
+    [job] = _reruns(engine, run_id)
+    with engine.begin() as conn:
         bundle = worker.build_bundle(conn, keyring, job, now=clock(), lease=worker.LEASE, events="x")
-        opened = conn.execute(select(runs).where(runs.c.id == bundle.run_id)).one()
-    assert opened.rerun_of == run_id and opened.trigger_ref["dry_run"] is True and opened.thread == "acme/app#7"
+        return conn.execute(select(runs).where(runs.c.id == bundle.run_id)).one()
+
+
+def test_the_rerun_opens_a_run_that_links_back_with_the_trigger_and_who_asked(sqlite_engine, keyring, clock, world):
+    run_id = _finished(sqlite_engine, clock, world, dry_run=True)
+    user, _ = add_user(sqlite_engine, keyring, clock, "asker")
+    _user(sqlite_engine, keyring, clock, world["team"], "contributor", user=user).post(f"/api/runs/{run_id}/rerun")
+    opened = _open(sqlite_engine, keyring, clock, run_id)
+    assert opened.rerun_of == run_id and opened.thread == "acme/app#7" and opened.triggered_by == user
+    assert opened.trigger_kind == "jira"
+    assert opened.trigger_ref == {"trigger_id": world["rule"], "issue": "ACME-7", "dry_run": True}
+
+
+def test_a_live_rerun_of_a_dry_run_stays_live_and_keeps_the_pr_ref(sqlite_engine, keyring, clock, world):
+    ref = {"webhook_id": "h1", "delivery_id": "del-1", "pr": "acme/app#7", "dry_run": True}
+    run_id = _finished(sqlite_engine, clock, world, trigger_kind="webhook", trigger_ref=ref, dry_run=False)
+    _user(sqlite_engine, keyring, clock, world["team"], "contributor").post(f"/api/runs/{run_id}/rerun")
+    opened = _open(sqlite_engine, keyring, clock, run_id)
+    assert opened.trigger_kind == "webhook"
+    assert opened.trigger_ref == {"webhook_id": "h1", "delivery_id": "del-1", "pr": "acme/app#7"}
 
 
 def test_a_refused_looking_succeeded_run_can_be_rerun(sqlite_engine, keyring, clock, world):

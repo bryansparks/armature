@@ -1,4 +1,4 @@
-"""Jobs: the run a job reruns, so the run it opens links back.
+"""Jobs: the run a job reruns and who asked, so the run it opens links back and names them.
 
 Revision ID: 0026
 Revises: 0022
@@ -26,6 +26,7 @@ def upgrade() -> None:
     _sqlite_foreign_keys(False)
     with op.batch_alter_table('jobs') as batch:
         batch.add_column(sa.Column('rerun_of', sa.String(length=36), nullable=True))
+        batch.add_column(sa.Column('requested_by', sa.String(length=36), nullable=True))
         batch.create_index(batch.f('ix_jobs_rerun_of'), ['rerun_of'])
     _sqlite_foreign_keys(True)
 
@@ -34,5 +35,6 @@ def downgrade() -> None:
     _sqlite_foreign_keys(False)
     with op.batch_alter_table('jobs') as batch:
         batch.drop_index(batch.f('ix_jobs_rerun_of'))
+        batch.drop_column('requested_by')
         batch.drop_column('rerun_of')
     _sqlite_foreign_keys(True)

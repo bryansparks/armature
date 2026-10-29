@@ -80,7 +80,7 @@ def rerun(conn: Connection, run_id: str, *, actor_id: str, now: datetime, ip: st
         job_id = worker.queue_job(conn, team_id=job.team_id, project_id=job.project_id, workflow_id=job.workflow_id,
                                   inputs=job.inputs, now=now, trigger_id=job.trigger_id, delivery_id=job.delivery_id,
                                   thread=job.thread, dry_run=bool(job.dry_run), key=job.concurrency_key,
-                                  rerun_of=run_id)
+                                  rerun_of=run_id, requested_by=actor_id)
     except ValueError as exc:
         raise RerunError(409, f"A workflow it calls doesn't resolve: {exc}") from exc
     audit.record(conn, action="run.rerun", actor_id=actor_id, team_id=job.team_id, target_kind="run",
