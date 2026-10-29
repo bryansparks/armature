@@ -1,9 +1,11 @@
 """Workflow packs: versioned directories of script adapters a step names as ``pack/adapter``.
 
 A pack holds a ``pack.yaml`` and the scripts it names. The catalog searches
-each entry of ``ARMATURE_PACKS_PATH`` and then ``~/.armature/packs``. An entry
-is either one pack or a directory of packs. The first pack loaded under a name
-wins, and every later copy is listed in ``Catalog.errors``.
+the built-in packs shipped in this package, each entry of
+``ARMATURE_PACKS_PATH``, and then ``~/.armature/packs``. An entry is either
+one pack or a directory of packs. The first pack loaded under a name wins, so
+no installed pack can replace a built-in one, and every later copy is listed
+in ``Catalog.errors``.
 """
 from __future__ import annotations
 
@@ -23,6 +25,8 @@ from armature.spec.models import PACK_ADAPTER_CONTEXT, Adapter
 PACKS_PATH_ENV = "ARMATURE_PACKS_PATH"
 DEFAULT_PACKS_DIR = Path("~/.armature/packs")
 PACK_FILE = "pack.yaml"
+BUILTIN_DIR = Path(__file__).resolve().parent / "builtin"
+BUILTIN_PACKS = ("conversation", "github", "jira", "linear", "review", "slack")
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 ADAPTER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -144,6 +148,16 @@ class Pack(BaseModel):
     def ref(self, adapter: str) -> str:
         return f"{self.name}/{adapter}"
 
+    @property
+    def builtin(self) -> bool:
+        return is_builtin(self.dir)
+
+
+def is_builtin(pack_dir: Path | str | None) -> bool:
+    """Whether ``pack_dir`` is one of the packs shipped in this package."""
+    return pack_dir is not None and Path(pack_dir).resolve().parent == BUILTIN_DIR \
+        and Path(pack_dir).name in BUILTIN_PACKS
+
 
 def load_pack(directory: Path | str) -> Pack:
     """Load and validate ``<directory>/pack.yaml``. Raises ``PackError``, whose message names no path."""
@@ -226,7 +240,7 @@ def _union(lists: Iterable[list[str]]) -> list[str]:
 def search_path(env: Mapping[str, str] | None = None, default_dir: Path | str | None = None) -> list[Path]:
     env = os.environ if env is None else env
     entries = [Path(p).expanduser() for p in env.get(PACKS_PATH_ENV, "").split(os.pathsep) if p]
-    return [*entries, Path(default_dir or DEFAULT_PACKS_DIR).expanduser()]
+    return [BUILTIN_DIR, *entries, Path(default_dir or DEFAULT_PACKS_DIR).expanduser()]
 
 
 def pack_dirs(root: Path) -> list[Path]:

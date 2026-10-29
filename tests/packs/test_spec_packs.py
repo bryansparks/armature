@@ -120,7 +120,7 @@ def test_with_without_adapter_is_invalid(tmp_path):
             gate: approve
             with: {x: 1}
     """)
-    assert ("INVALID_WITH", "g", "with: needs an adapter") in _codes(spec)
+    assert ("INVALID_WITH", "g", "with: needs an adapter or a call") in _codes(spec)
 
 
 async def test_with_renders_from_step_outputs_at_run_time(tmp_path):
@@ -201,6 +201,14 @@ def test_armature_run_of_the_example_workflow(tmp_path):
     data = json.loads(out.read_text())
     assert data["greet"] == {"greeting": "Hello, World!", "pack_dir": str(HELLO)}
     assert data["pause"] == {"waited": 1}
+
+
+def test_armature_run_keeps_a_numeric_looking_name_a_string(tmp_path):
+    out = tmp_path / "result.json"
+    result = CliRunner().invoke(app, ["run", str(HELLO / "workflows" / "hello.yml"), "-i", "name=42", "-q",
+                                      "--no-cache", "-o", str(out)])
+    assert result.exit_code == 0, result.output
+    assert json.loads(out.read_text())["greet"]["greeting"] == "Hello, 42!"
 
 
 def test_armature_run_without_the_pack_fails_validation(tmp_path, monkeypatch):

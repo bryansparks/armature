@@ -1,0 +1,66 @@
+name: jira
+version: 1.0.0
+description: Jira Cloud through the team's Jira connection. Calls run on the server, so no step holds the API token.
+adapters:
+  comment:
+    description: Add a comment to an issue.
+    cmd: armature tool jira.comment
+    writes: true
+    params:
+      type: object
+      required: [issue, body]
+      additionalProperties: false
+      properties:
+        issue: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        body: {type: string, minLength: 1}
+        connection: {type: string}
+  create:
+    description: >-
+      Create an issue in the Jira project the project's jira.project setting names. Only these fields go out; the
+      summary and description are plain text. Returns the issue's key and link.
+    cmd: armature tool jira.create
+    writes: true
+    params:
+      type: object
+      required: [type, summary]
+      additionalProperties: false
+      properties:
+        type: {type: string, enum: [Task, Defect, Enhancement, Story, Bug]}
+        summary: {type: string, minLength: 1}
+        description: {type: string}
+        labels: {type: array, maxItems: 10, items: {type: string, pattern: '^[A-Za-z0-9_.-]{1,50}$'}}
+        connection: {type: string}
+  get-issue:
+    description: >-
+      Read an issue: its summary, description, status, type, components, labels, and last 50 comments, as plain text
+      a step treats as data. found is false for an issue the connection can't see.
+    cmd: armature tool jira.get-issue
+    writes: false
+    params:
+      type: object
+      required: [issue]
+      additionalProperties: false
+      properties:
+        issue: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        connection: {type: string}
+  transition:
+    description: >-
+      Move an issue to a status. The key is issue, else the first key found in key_from. With from, an issue in
+      any other status stays put, so a redelivered event never moves it backwards. A missing key, a project
+      outside projects, an issue already there, or a move the workflow won't take is data, not a failure.
+    cmd: armature tool jira.transition
+    writes: true
+    params:
+      type: object
+      required: [to]
+      additionalProperties: false
+      properties:
+        issue: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        key_from: {type: array, items: {type: string}, maxItems: 10}
+        to: {type: string, minLength: 1}
+        from: {type: string}
+        defect_to: {type: string}
+        defect_resolution: {type: string}
+        projects: {type: array, items: {type: string, pattern: '^[A-Z][A-Z0-9]+$'}}
+        comment: {type: string}
+        connection: {type: string}

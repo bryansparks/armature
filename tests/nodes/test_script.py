@@ -190,6 +190,14 @@ async def test_script_node_timeout_kills_child(tmp_path):
     assert await _wait_gone(int(pidfile.read_text()))
 
 
+async def test_script_node_kills_a_background_child_when_the_step_ends(tmp_path):
+    pidfile = tmp_path / "pid"
+    node = ScriptNode(adapter=_adapter(f"sleep 30 >/dev/null 2>&1 & echo $! > {pidfile}"))
+    result = await node.execute({})
+    assert result["exit_code"] == 0
+    assert await _wait_gone(int(pidfile.read_text()))
+
+
 async def test_script_node_cancel_kills_child(tmp_path):
     pidfile = tmp_path / "pid"
     node = ScriptNode(adapter=_adapter(_background_sleep(pidfile)))

@@ -16,10 +16,12 @@ from pydantic import BaseModel, StrictInt
 from sqlalchemy import Connection, and_, func, select
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import defs, rbac, summary, webhooks
+from armature.server import calls, defs, rbac, summary, webhooks, worker
 from armature.server.app.deps import (
     Granted,
+    by_project,
     by_team,
+    grant,
     require,
     require_step_up,
     server,
@@ -29,7 +31,6 @@ from armature.server.app.http import ApiError, client_ip
 from armature.server.auth import Session
 from armature.server.db.schema import (
     DOCUMENT_KINDS,
-    INSTANCE_SCOPE,
     providers,
     settings,
     users,
@@ -38,7 +39,6 @@ from armature.server.db.schema import (
 
 router = APIRouter()
 
-INSTANCE_NAMES = ("instance", INSTANCE_SCOPE)
 # JSON escaping can roughly double a body, so the request limit sits above the stored cap.
 DEFS_BODY_LIMIT = 2 * defs.BODY_MAX + 64 * 1024
 DEFS_PATHS = ("/api/workflows", "/api/workflows/", "/api/documents", "/api/documents/")
@@ -65,6 +65,8 @@ class ValidateBody(BaseModel):
     kind: str | None = None
     workflow_id: str | None = None
     document_id: str | None = None
+    scope_kind: str | None = None
+    scope_id: str | None = None
 
 
 class ForkBody(BaseModel):
@@ -184,17 +186,23 @@ def _validate(request: Request, session: Session, kind: defs.Kind, payload: Vali
     doc_kind = payload.kind
     with _refusals(), server(request).engine.connect() as conn:
         access = _load_access(conn, session)
-        previous = None
+        previous = scope = None
         if object_id:
             row = defs.readable_row(conn, kind, object_id, access)
             previous = defs.body_of(conn, kind, row.id, row.current_version)
             doc_kind = defs._doc_kind(kind, row) or doc_kind
-    if kind is defs.WORKFLOW:
-        validation = defs.validate_workflow(payload.body, actor=access, previous_body=previous,
-                                            catalog=_catalog(request))
-    else:
-        validation = defs.validate_document(doc_kind or "", payload.body, actor=access, previous_body=previous,
-                                            catalog=_catalog(request))
+            scope = defs.row_scope(row)
+        elif payload.scope_kind:
+            scope = defs.load_scope(conn, payload.scope_kind, payload.scope_id)
+            if not defs.can_read(access, scope):
+                raise ApiError(404, "Not found.")
+        if kind is defs.WORKFLOW:
+            resolver = calls.DbCallResolver(conn, scope.scope) if scope is not None else None
+            validation = defs.validate_workflow(payload.body, actor=access, previous_body=previous,
+                                                catalog=_catalog(request), call_resolver=resolver)
+        else:
+            validation = defs.validate_document(doc_kind or "", payload.body, actor=access, previous_body=previous,
+                                                catalog=_catalog(request))
     return {"validation": validation.to_dict()}
 
 
@@ -409,11 +417,9 @@ def delete_document(document_id: str, request: Request, session: Session = Depen
     return _delete(request, session, defs.DOCUMENT, document_id)
 
 
-@router.get("/api/teams/{team_id}/providers")
-def list_providers(request: Request, granted: Granted = Depends(require("viewer", by_team()))) -> dict[str, Any]:
-    team_id = granted.target.team_id
+def _providers(request: Request, scope: str) -> dict[str, Any]:
     with server(request).engine.connect() as conn:
-        rows = conn.execute(select(providers).where(providers.c.team_id == team_id)
+        rows = conn.execute(select(providers).where(providers.c.scope == scope)
                             .order_by(providers.c.kind, providers.c.created_at)).all()
         configured = {r.id: defs.provider_configured(conn, r) for r in rows}
     listed = []
@@ -424,64 +430,111 @@ def list_providers(request: Request, granted: Granted = Depends(require("viewer"
     return {"providers": listed}
 
 
+def _add_provider(request: Request, granted: Granted, scope: defs.DefScope, payload: dict[str, Any]) -> dict[str, Any]:
+    srv = server(request)
+    with _refusals(), srv.engine.begin() as conn:
+        row = defs.create_provider(conn, scope=scope, body=payload, actor_id=granted.user_id, now=srv.now(),
+                                   ip=client_ip(request), is_admin=granted.access.is_admin,
+                                   may_name_secret=rbac.at_least(granted.role, "team_lead"))
+    return {"provider": defs.provider_public(row)}
+
+
+@router.get("/api/teams/{team_id}/providers")
+def list_providers(request: Request, granted: Granted = Depends(require("viewer", by_team()))) -> dict[str, Any]:
+    return _providers(request, granted.target.team_id)
+
+
+@router.get("/api/projects/{project_id}/providers")
+def list_project_providers(request: Request,
+                           granted: Granted = Depends(require("viewer", by_project()))) -> dict[str, Any]:
+    return _providers(request, granted.target.project_id)
+
+
 def _by_provider(conn: Connection, params: dict[str, Any]) -> rbac.Target:
     return defs.provider_target(conn, params["provider_id"])
+
+
+# A project lead writes the project's providers. A team's providers still need a team lead.
+def _provider_writer(granted: Granted) -> None:
+    if granted.target.project_id is None and not rbac.at_least(granted.role, "team_lead"):
+        raise ApiError(403, "Not allowed.")
 
 
 @router.post("/api/teams/{team_id}/providers")
 def create_provider(request: Request, payload: dict[str, Any] = Body(...),
                     granted: Granted = Depends(require("team_lead", by_team(), step_up=True))) -> dict[str, Any]:
-    srv = server(request)
-    with _refusals(), srv.engine.begin() as conn:
-        row = defs.create_provider(conn, team_id=granted.target.team_id, body=payload, actor_id=granted.user_id,
-                                   now=srv.now(), ip=client_ip(request), is_admin=granted.access.is_admin)
-    return {"provider": defs.provider_public(row)}
+    return _add_provider(request, granted, defs.DefScope("team", granted.target.team_id), payload)
+
+
+@router.post("/api/projects/{project_id}/providers")
+def create_project_provider(request: Request, payload: dict[str, Any] = Body(...),
+                            granted: Granted = Depends(require("project_lead", by_project(), step_up=True))
+                            ) -> dict[str, Any]:
+    target = granted.target
+    return _add_provider(request, granted, defs.DefScope("project", target.team_id, target.project_id), payload)
 
 
 @router.post("/api/providers/{provider_id}")
 def update_provider(provider_id: str, request: Request, payload: dict[str, Any] = Body(...),
-                    granted: Granted = Depends(require("team_lead", _by_provider, step_up=True))) -> dict[str, Any]:
+                    granted: Granted = Depends(require("project_lead", _by_provider, step_up=True))) -> dict[str, Any]:
+    _provider_writer(granted)
     srv = server(request)
     with _refusals(), srv.engine.begin() as conn:
         row = defs.update_provider(conn, provider_id=provider_id, body=payload, actor_id=granted.user_id,
-                                   now=srv.now(), ip=client_ip(request), is_admin=granted.access.is_admin)
+                                   now=srv.now(), ip=client_ip(request), is_admin=granted.access.is_admin,
+                                   may_name_secret=rbac.at_least(granted.role, "team_lead"))
     return {"provider": defs.provider_public(row)}
 
 
 @router.post("/api/providers/{provider_id}/delete")
 def delete_provider(provider_id: str, request: Request,
-                    granted: Granted = Depends(require("team_lead", _by_provider, step_up=True))) -> dict[str, Any]:
+                    granted: Granted = Depends(require("project_lead", _by_provider, step_up=True))) -> dict[str, Any]:
+    _provider_writer(granted)
     with _refusals(), server(request).engine.begin() as conn:
         defs.delete_provider(conn, provider_id=provider_id, actor_id=granted.user_id, ip=client_ip(request))
     return {"ok": True}
 
 
+# Settings are admin-only, except that a project lead reads and writes their own project's. env.* settings become
+# the run's environment variables, so they stay admin-only at every scope.
+def _setting_scope(request: Request, session: Session, conn: Connection, value: Any,
+                   key: Any = None) -> tuple[Granted, defs.DefScope]:
+    scope = defs.setting_scope(conn, value)
+    exec_control = isinstance(key, str) and key.lower().startswith(worker.ENV_PREFIX)
+    min_role = "project_lead" if scope.kind == "project" and not exec_control else "admin"
+    return grant(server(request), session, scope.target if scope.kind == "project" else rbac.INSTANCE, min_role,
+                 conn), scope
+
+
 @router.get("/api/settings")
 def list_settings(request: Request, scope: str | None = Query(None, max_length=36),
-                  granted: Granted = Depends(require("admin"))) -> dict[str, Any]:
+                  session: Session = Depends(signed_in)) -> dict[str, Any]:
     query = select(settings.c.key, settings.c.value, settings.c.scope).order_by(settings.c.key)
-    if scope:
-        query = query.where(settings.c.scope == (INSTANCE_SCOPE if scope in INSTANCE_NAMES else scope))
-    with server(request).engine.connect() as conn:
+    with _refusals(), server(request).engine.connect() as conn:
+        _, found = _setting_scope(request, session, conn, scope or None)
+        if scope:
+            query = query.where(settings.c.scope == found.scope)
         rows = conn.execute(query).all()
     return {"settings": [{"key": r.key, "value": r.value, "scope": r.scope} for r in rows]}
 
 
 @router.post("/api/settings")
-def put_setting(payload: SettingBody, request: Request,
-                granted: Granted = Depends(require("admin", step_up=True))) -> dict[str, Any]:
+def put_setting(payload: SettingBody, request: Request, session: Session = Depends(signed_in)) -> dict[str, Any]:
     srv = server(request)
     with _refusals(), srv.engine.begin() as conn:
-        team_id = defs.setting_scope(conn, payload.scope)
-        setting = defs.put_setting(conn, team_id=team_id, key=payload.key, value=payload.value,
-                                   actor_id=granted.user_id, now=srv.now(), ip=client_ip(request))
+        granted, scope = _setting_scope(request, session, conn, payload.scope, payload.key)
+        require_step_up(request, session)
+        setting = defs.put_setting(conn, team_id=scope.team_id, project_id=scope.project_id, key=payload.key,
+                                   value=payload.value, actor_id=granted.user_id, now=srv.now(),
+                                   ip=client_ip(request))
     return {"setting": setting}
 
 
 @router.post("/api/settings/delete")
-def delete_setting(payload: SettingBody, request: Request,
-                   granted: Granted = Depends(require("admin", step_up=True))) -> dict[str, Any]:
+def delete_setting(payload: SettingBody, request: Request, session: Session = Depends(signed_in)) -> dict[str, Any]:
     with _refusals(), server(request).engine.begin() as conn:
-        team_id = defs.setting_scope(conn, payload.scope)
-        defs.delete_setting(conn, team_id=team_id, key=payload.key, actor_id=granted.user_id, ip=client_ip(request))
+        granted, scope = _setting_scope(request, session, conn, payload.scope, payload.key)
+        require_step_up(request, session)
+        defs.delete_setting(conn, team_id=scope.team_id, project_id=scope.project_id, key=payload.key,
+                            actor_id=granted.user_id, ip=client_ip(request))
     return {"ok": True}

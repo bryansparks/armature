@@ -18,7 +18,7 @@
   <form id="login" hidden novalidate>
     <label>Username <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
     <label>Password <input id="password" name="password" type="password" autocomplete="current-password" required></label>
-    <label>Authenticator code <input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>
+    <label id="totp-field" hidden>Authenticator code <input id="totp" name="totp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>
     <button type="submit">Sign in</button>
   </form>
   <div class="sso" id="sso" hidden>

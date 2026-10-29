@@ -1,0 +1,178 @@
+{
+  "description": "An android-tree pull request changes only Kotlin and adds one translatable=\"false\" string, so detect finds nothing to translate or remove, no session starts, and publish finds an empty diff.",
+  "source": "generic",
+  "env": {
+    "GIT_AUTHOR_DATE": "2026-10-28 09:30:00 -0600",
+    "GIT_COMMITTER_DATE": "2026-10-28 09:30:00 -0600"
+  },
+  "files": {
+    ".gitconfig": "[user]\n\tname = Armature\n\temail = armature@armature-ops.invalid\n",
+    "state/l10n-jobs/fs-eng_android-tree-6230.json": {
+      "repo": "fs-eng/android-tree",
+      "number": 6230,
+      "platform": "android"
+    }
+  },
+  "repos": {
+    "state/repos/fs-eng_android-tree": {
+      "base": "dev",
+      "branch": "TREE-3530-memories-row-padding",
+      "remote": "fs-eng/android-tree",
+      "files": {
+        "app/src/main/res/values/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"app_name\" translatable=\"false\">FamilySearch Tree</string>\n    <string name=\"memories_title\">Memories</string>\n    <!-- Shown on a person's Memories tab when nothing is attached to them. -->\n    <string name=\"memories_empty\">No memories yet</string>\n    <!-- Banner that pointed people to the 2024 gallery redesign. -->\n    <string name=\"memories_gallery_moved\">Memories now open in the new gallery.</string>\n    <string name=\"memories_add\">Add Memory</string>\n</resources>\n",
+        "app/src/main/java/org/familysearch/mobile/tree/memories/MemoryRowPadding.kt": "package org.familysearch.mobile.tree.memories\n\nimport androidx.compose.foundation.layout.padding\nimport androidx.compose.ui.Modifier\nimport androidx.compose.ui.unit.dp\n\nval MemoryRowPadding = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)\n",
+        "app/src/main/res/values-de/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"memories_title\">Erinnerungen</string>\n    <string name=\"memories_empty\">Noch keine Erinnerungen</string>\n    <string name=\"memories_gallery_moved\">Erinnerungen werden jetzt in der neuen Galerie geöffnet.</string>\n    <string name=\"memories_add\">Erinnerung hinzufügen</string>\n</resources>\n",
+        "app/src/main/res/values-es/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"memories_title\">Recuerdos</string>\n    <string name=\"memories_empty\">Todavía no hay recuerdos</string>\n    <string name=\"memories_gallery_moved\">Los recuerdos ahora se abren en la nueva galería.</string>\n    <string name=\"memories_add\">Agregar recuerdo</string>\n</resources>\n",
+        "app/src/main/res/values-fr/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"memories_title\">Souvenirs</string>\n    <string name=\"memories_empty\">Aucun souvenir pour l\\'instant</string>\n    <string name=\"memories_gallery_moved\">Les souvenirs s\\'ouvrent désormais dans la nouvelle galerie.</string>\n    <string name=\"memories_add\">Ajouter un souvenir</string>\n</resources>\n",
+        "app/src/main/res/values-ja/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"memories_title\">思い出</string>\n    <string name=\"memories_empty\">思い出はまだありません</string>\n    <string name=\"memories_gallery_moved\">思い出は新しいギャラリーで開くようになりました。</string>\n    <string name=\"memories_add\">思い出を追加</string>\n</resources>\n"
+      },
+      "commits": [
+        {
+          "message": "TREE-3530 Tighten memory row padding",
+          "files": {
+            "app/src/main/java/org/familysearch/mobile/tree/memories/MemoryRowPadding.kt": "package org.familysearch.mobile.tree.memories\n\nimport androidx.compose.foundation.layout.padding\nimport androidx.compose.ui.Modifier\nimport androidx.compose.ui.unit.dp\n\nval MemoryRowPadding = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)\n",
+            "app/src/main/res/values/strings.xml": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources xmlns:tools=\"http://schemas.android.com/tools\">\n    <string name=\"app_name\" translatable=\"false\">FamilySearch Tree</string>\n    <string name=\"memories_debug_tag\" translatable=\"false\">MemoriesList</string>\n    <string name=\"memories_title\">Memories</string>\n    <!-- Shown on a person's Memories tab when nothing is attached to them. -->\n    <string name=\"memories_empty\">No memories yet</string>\n    <!-- Banner that pointed people to the 2024 gallery redesign. -->\n    <string name=\"memories_gallery_moved\">Memories now open in the new gallery.</string>\n    <string name=\"memories_add\">Add Memory</string>\n</resources>\n"
+          }
+        }
+      ]
+    }
+  },
+  "context": {
+    "job_file": "{{home}}/state/l10n-jobs/fs-eng_android-tree-6230.json"
+  },
+  "fakes": {
+    "gh": [
+      {
+        "match": "^pr view 6230 --repo fs-eng/android-tree --json state,title,headRefName,headRefOid,baseRefName,isCrossRepository",
+        "stdout": {
+          "state": "OPEN",
+          "title": "TREE-3530 Tighten memory row padding",
+          "headRefName": "TREE-3530-memories-row-padding",
+          "headRefOid": "{{rev:state/repos/fs-eng_android-tree:TREE-3530-memories-row-padding}}",
+          "baseRefName": "dev",
+          "isCrossRepository": false
+        }
+      }
+    ],
+    "claude": []
+  },
+  "stubs": {},
+  "ops": {
+    "effects": [
+      {
+        "tool": "gh",
+        "args": [
+          "pr",
+          "view",
+          "6230",
+          "--repo",
+          "fs-eng/android-tree",
+          "--json",
+          "state,title,headRefName,headRefOid,baseRefName,isCrossRepository"
+        ]
+      },
+      {
+        "tool": "git",
+        "args": [
+          "-C",
+          "$OPS_HOME/state/repos/fs-eng_android-tree",
+          "fetch",
+          "--quiet",
+          "origin",
+          "dev"
+        ]
+      },
+      {
+        "tool": "git",
+        "args": [
+          "-C",
+          "$OPS_HOME/state/repos/fs-eng_android-tree",
+          "fetch",
+          "--quiet",
+          "origin",
+          "refs/pull/6230/head"
+        ]
+      }
+    ],
+    "result": {
+      "outcome": "empty",
+      "detail": "nothing to translate or remove",
+      "commit": "",
+      "mode": "draft",
+      "patch": "",
+      "branch": "",
+      "url": ""
+    },
+    "sessions": [],
+    "outputs": {
+      "prepare": {
+        "reviewed": true,
+        "reason": "",
+        "repo": "fs-eng/android-tree",
+        "platform": "android",
+        "number": 6230,
+        "branch": "TREE-3530-memories-row-padding",
+        "head": "5073838c62ba6f2057ae40176a32a5f64081e455",
+        "base_sha": "33ee8aff623cf593cb92435ab2373185db42c694",
+        "base_ref": "dev",
+        "worktree": "$OPS_HOME/state/pr-worktrees/l10n-fs-eng_android-tree-6230-5073838c62ba",
+        "git_common": "$OPS_HOME/state/repos/fs-eng_android-tree/.git",
+        "state_dir": "$OPS_HOME/state/l10n/fs-eng_android-tree-6230-5073838c62ba",
+        "title": "TREE-3530 Tighten memory row padding"
+      },
+      "detect": {
+        "reviewed": true,
+        "repo": "fs-eng/android-tree",
+        "number": 6230,
+        "platform": "android",
+        "worktree": "$OPS_HOME/state/pr-worktrees/l10n-fs-eng_android-tree-6230-5073838c62ba",
+        "git_common": "$OPS_HOME/state/repos/fs-eng_android-tree/.git",
+        "base": "33ee8aff623cf593cb92435ab2373185db42c694",
+        "head": "5073838c62ba6f2057ae40176a32a5f64081e455",
+        "targets": [],
+        "translate_files": [],
+        "changes_file": "$OPS_HOME/state/l10n/fs-eng_android-tree-6230-5073838c62ba/changes.json",
+        "nothing_to_translate": true,
+        "nothing_to_remove": true,
+        "nothing_to_do": true,
+        "jobs": []
+      },
+      "translate": [],
+      "prune": {
+        "ran": false,
+        "removed": [],
+        "still_referenced": [],
+        "files": []
+      },
+      "check": {
+        "ran": true,
+        "ok": true,
+        "problems": [],
+        "summary": "Translated 0 string(s) into 0 language(s) and removed 0.",
+        "commit_message": "",
+        "subject": "",
+        "translations_file": "$OPS_HOME/state/l10n/fs-eng_android-tree-6230-5073838c62ba/translations.json",
+        "skipped": [],
+        "failed_languages": [],
+        "counts": {
+          "translated": 0,
+          "languages": 0,
+          "removed": 0,
+          "still_referenced": 0,
+          "missing": 0,
+          "added": 0,
+          "changed": 0
+        }
+      },
+      "publish": {
+        "outcome": "empty",
+        "detail": "nothing to translate or remove",
+        "commit": "",
+        "mode": "draft",
+        "patch": "",
+        "branch": "",
+        "url": ""
+      }
+    }
+  }
+}

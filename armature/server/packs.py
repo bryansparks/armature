@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from sqlalchemy import Engine, delete, insert, select, update
 
 from armature.packs import (
+    BUILTIN_PACKS,
     NAME_RE,
     PACK_FILE,
     Catalog,
@@ -196,6 +197,8 @@ def install(engine: Engine, packs_root: Path, source: str, *, now: datetime, for
             pack = load_pack(staged)
         except PackError as exc:
             raise InstallError(str(exc)) from exc
+        if pack.name in BUILTIN_PACKS:
+            raise InstallError(f"{pack.name} is a built-in pack, so no install can replace it")
         target = packs_root / pack.name
         with engine.begin() as conn:
             row = conn.execute(select(packs).where(packs.c.name == pack.name)).first()
@@ -233,6 +236,8 @@ def remove(engine: Engine, packs_root: Path, name: str) -> str | None:
     """Delete an installed pack's files and row. Returns the version removed, if recorded."""
     if not NAME_RE.fullmatch(name):
         raise InstallError(f"pack name must match {NAME_RE.pattern}")
+    if name in BUILTIN_PACKS:
+        raise InstallError(f"{name} is a built-in pack, so it can't be removed")
     target = packs_root.expanduser() / name
     with engine.begin() as conn:
         row = conn.execute(select(packs).where(packs.c.name == name)).first()

@@ -174,15 +174,18 @@ test('run tabs put review.md first, then Output and Log, and keep reserved names
   assert.equal(activeTab(undefined, []), 'log');
 });
 
-test('the progress strip counts top-level steps and names what runs', () => {
+test('the progress strip says in plain words what the run is doing', () => {
   const steps = [
     { step_id: 'resolve', status: 'succeeded' },
     { step_id: 'reviews', status: 'running', branch_total: 9, branches_done: ['0', '1'] },
     { step_id: 'security', parent_step: 'reviews', status: 'failed' },
     { step_id: 'team_lead', status: 'queued' },
   ];
-  assert.deepEqual(progress(steps), { done: 1, total: 3, failed: 1, running: ['reviews (2/9 branches done)'], text: '1/3 steps done · running reviews (2/9 branches done) · 1 failed' });
-  assert.equal(progress([]).text, 'No steps yet');
+  assert.deepEqual(progress(steps), { done: 1, total: 3, failed: 1, running: ['Reviewing: 2 of 9 specialists done'], text: 'Reviewing: 2 of 9 specialists done · 1 failed' });
+  assert.equal(progress([{ step_id: 'team_lead', status: 'running' }, { step_id: 'build_app', status: 'running', branch_total: 2 }]).text,
+    'Team lead deciding · Build app: 0 of 2 parts done');
+  assert.equal(progress([{ step_id: 'resolve', status: 'succeeded' }, { step_id: 'post', status: 'queued' }]).text, '1 of 2 steps done');
+  assert.equal(progress([]).text, 'Starting');
 });
 
 test('outputs read as text, JSON pretty-prints, and links and sizes are vetted', () => {

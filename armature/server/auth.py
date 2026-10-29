@@ -38,6 +38,7 @@ TOTP_PERIOD = 30
 # Every name that is not a valid username shares one throttle and is never stored as typed.
 INVALID_USERNAME = "(invalid)"
 GENERIC = "Sign-in failed. Check the username, password, and code."
+GENERIC_PASSWORD = "Sign-in failed. Check the username and password."
 THROTTLED = "Too many attempts. Wait and try again."
 TOKEN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
 
@@ -252,7 +253,7 @@ class SignedIn:
 
 
 def login(engine: Engine, keyring: Keyring, *, username: Any, password: Any, code: Any, ip: str, now: datetime,
-          dummy: str, old_token: str | None = None) -> SignedIn:
+          dummy: str, old_token: str | None = None, require_totp: bool = True) -> SignedIn:
     typed = normal_username(username)
     name = typed if USERNAME.fullmatch(typed) else INVALID_USERNAME
     actor_name = None if name == INVALID_USERNAME else name
@@ -269,9 +270,9 @@ def login(engine: Engine, keyring: Keyring, *, username: Any, password: Any, cod
     stored = user.password_hash if user is not None and user.password_hash else dummy
     # A user who never confirmed an authenticator signs in only by accepting an invite.
     ok = verify_password(password, stored) and user is not None and user.password_hash is not None \
-        and user.totp_confirmed_at is not None and not user.disabled
+        and (user.totp_confirmed_at is not None or not require_totp) and not user.disabled
     with engine.begin() as conn:
-        if ok:
+        if ok and require_totp:
             step = match_totp(totp_secret(keyring, user), code, now)
             ok = step is not None and claim_totp_step(conn, user.id, step)
         finish_attempt(conn, attempt_id, ok, now)
@@ -286,7 +287,7 @@ def login(engine: Engine, keyring: Keyring, *, username: Any, password: Any, cod
             audit.record(conn, action="login", actor_id=user.id, ip=ip, target_kind="user", target_id=user.id,
                          detail={"outcome": "ok", "method": "password"})
     if not ok:
-        raise AuthError(401, GENERIC)
+        raise AuthError(401, GENERIC if require_totp else GENERIC_PASSWORD)
     return SignedIn(token=token, csrf=csrf, user_id=user.id)
 
 

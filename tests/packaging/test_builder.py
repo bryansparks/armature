@@ -105,7 +105,7 @@ adapters:
   greet:
     name: greet
     type: script
-    cmd: "echo 'child says: {{greeting}}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\\"ARMATURE_CONTEXT\\"]); print(\\"child says:\\", c.get(\\"greeting\\", \\"\\"))'"
 stages:
   - id: respond
     adapter: greet
@@ -307,3 +307,72 @@ def test_build_secrets_yaml_includes_tool_envs(tmp_path):
     sf = YAML().load((out / "secrets.yaml").read_text())
     names = {r["name"] for r in sf["required"]}
     assert {"TAVILY_API_KEY", "GITHUB_TOKEN"} <= names
+
+
+# ── call: bundling (called workflows ship as calls/<name>@<version>.yaml) ──
+
+from armature.spec.calls import BundleCallResolver, MappingCallResolver, ResolvedCall, write_call_bundle
+
+CALL_PARENT = """\
+name: call-demo
+version: "1.0"
+stages:
+  - id: review
+    call: {workflow: reviewer}
+    with: {topic: x}
+"""
+
+REVIEWER = """\
+# armature: stored-workflow
+name: reviewer
+contracts:
+  inputs: [{name: topic, type: string}]
+stages:
+  - id: inner
+    call: {workflow: linter, version: 2}
+"""
+
+LINTER = """\
+# armature: stored-workflow
+name: linter
+adapters:
+  lint: {name: lint, type: script, cmd: "echo lint-ok"}
+stages:
+  - id: lint
+    adapter: lint
+"""
+
+
+def test_build_bundles_called_workflows_recursively(tmp_path):
+    write_call_bundle(tmp_path / "calls", [
+        ResolvedCall("reviewer", 5, REVIEWER), ResolvedCall("linter", 2, LINTER),
+        ResolvedCall("unused", 1, LINTER),
+    ], {"reviewer": 5, "linter": 2, "unused": 1})
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(CALL_PARENT)
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "pkg", inputs={})
+    resolver = BundleCallResolver(pkg / "calls")
+    assert resolver.resolve("reviewer", None).text == REVIEWER
+    assert resolver.resolve("linter", 2).text == LINTER
+    assert not (pkg / "calls" / "unused@1.yaml").exists()
+    assert "calls/reviewer@5.yaml" in (pkg / "manifest.sha256").read_text(encoding="utf-8")
+
+
+def test_build_takes_an_explicit_call_resolver(tmp_path):
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(CALL_PARENT)
+    resolver = MappingCallResolver({("reviewer", 1): REVIEWER, ("linter", 2): LINTER}, {"reviewer": 1})
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "pkg", inputs={}, call_resolver=resolver)
+    assert (pkg / "calls" / "reviewer@1.yaml").is_file()
+    assert (pkg / "calls" / "linter@2.yaml").is_file()
+
+
+def test_build_rejects_unresolvable_call(tmp_path):
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(CALL_PARENT)
+    try:
+        PackageBuilder().build(spec=spec_path, out=tmp_path / "pkg", inputs={})
+    except PackageBuildError as exc:
+        assert "CALL_UNRESOLVED" in str(exc)
+    else:
+        raise AssertionError("expected build to abort on an unresolvable call")

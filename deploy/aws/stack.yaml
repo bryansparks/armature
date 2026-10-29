@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Armature platform environments: the security group, artifact bucket, worker
+  instance role, and Linux launch template for one Armature install. Workers
+  are reached only through SSM and enroll with the server on boot.
+
+Parameters:
+  Prefix:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z][a-z0-9-]{1,19}$"
+    Description: Prefix for every resource name.
+  InstallId:
+    Type: String
+    AllowedPattern: "^[a-z0-9][a-z0-9-]{1,11}$"
+    Description: The install id on the AWS settings page. Tags every resource armature-install=<id>.
+  TagProject:
+    Type: String
+    Default: armature-platform
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*$"
+    Description: Value of the project tag. Never armature, which belongs to armature-ops.
+  Owner:
+    Type: String
+    MinLength: 1
+  Council:
+    Type: String
+    MinLength: 1
+  FinopsTeam:
+    Type: String
+    MinLength: 1
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC with private subnets and a NAT gateway.
+  VolumeSize:
+    Type: Number
+    Default: 60
+    MinValue: 30
+  ResultRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+
+Rules:
+  ProjectIsNotArmatureOps:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref TagProject, armature]]
+        AssertDescription: TagProject can't be armature, which armature-ops owns.
+
+Resources:
+  WorkerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Prefix}-${InstallId}-worker
+      GroupDescription: Armature platform workers, no ingress
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: Name, Value: !Sub "${Prefix}-${InstallId}-worker" }
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${Prefix}-${InstallId}-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-results
+            Status: Enabled
+            Prefix: !Sub ${InstallId}/results/
+            ExpirationInDays: !Ref ResultRetentionDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub ${ArtifactBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Workflow code runs on the worker, so its role holds SSM and its own results.
+  # No Bedrock and no IAM: model credentials arrive per job from the session role.
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Prefix}-${InstallId}-worker
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub ${Prefix}-${InstallId}-worker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteResults
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${ArtifactBucket.Arn}/${InstallId}/results/*
+              # The managed SSM policy reads every parameter, and job code runs beside these credentials.
+              - Sid: NoParameters
+                Effect: Deny
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                  - ssm:GetParameterHistory
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+      Tags:
+        - { Key: project, Value: !Ref TagProject }
+        - { Key: armature-install, Value: !Ref InstallId }
+        - { Key: owner, Value: !Ref Owner }
+        - { Key: council, Value: !Ref Council }
+        - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+  WorkerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Prefix}-${InstallId}-worker
+      Path: /
+      Roles:
+        - !Ref WorkerRole
+
+  # No ImageId, subnet, or market: the server passes the environment type's
+  # AMI, one subnet per attempt, and Spot or on-demand. User data comes from the
+  # server too and carries only a one-time enrollment token.
+  LinuxLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${Prefix}-${InstallId}-linux
+      TagSpecifications:
+        - ResourceType: launch-template
+          Tags:
+            - { Key: project, Value: !Ref TagProject }
+            - { Key: armature-install, Value: !Ref InstallId }
+            - { Key: owner, Value: !Ref Owner }
+            - { Key: council, Value: !Ref Council }
+            - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt WorkerInstanceProfile.Arn
+        InstanceInitiatedShutdownBehavior: terminate
+        SecurityGroupIds:
+          - !Ref WorkerSecurityGroup
+        MetadataOptions:
+          HttpEndpoint: enabled
+          HttpTokens: required
+          HttpPutResponseHopLimit: 1
+          HttpProtocolIpv6: disabled
+          InstanceMetadataTags: disabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: !Ref VolumeSize
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "${Prefix}-${InstallId}-worker" }
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "${Prefix}-${InstallId}-worker" }
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+          - ResourceType: network-interface
+            Tags:
+              - { Key: project, Value: !Ref TagProject }
+              - { Key: armature-install, Value: !Ref InstallId }
+              - { Key: owner, Value: !Ref Owner }
+              - { Key: council, Value: !Ref Council }
+              - { Key: "bpmeta:finops:team", Value: !Ref FinopsTeam }
+
+Outputs:
+  SecurityGroupId:
+    Value: !Ref WorkerSecurityGroup
+  InstanceProfileName:
+    Value: !Ref WorkerInstanceProfile
+  WorkerRoleArn:
+    Value: !GetAtt WorkerRole.Arn
+  LaunchTemplateIds:
+    Value: !Ref LinuxLaunchTemplate
+  BucketName:
+    Value: !Ref ArtifactBucket

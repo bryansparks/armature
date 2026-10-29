@@ -214,6 +214,75 @@ The optimizer sees the child's trace history without the noise of the parent wor
 
 ---
 
+## Calling a stored workflow
+
+`subagent_spec` points at a file. `call:` names a stored workflow, the kind the Armature server keeps with versions, and treats it as a function: typed inputs in, typed outputs back.
+
+```yaml
+  - id: fix
+    call:
+      workflow: pr-fix
+      version: 4            # optional; omitted = the version the call bundle pins
+    with:
+      repo: "{{ repo }}"
+      pr: "{{ triage.pr_number }}"
+    depends_on: [triage]
+```
+
+The callee declares its interface in `contracts`:
+
+```yaml
+contracts:
+  inputs:
+    - {name: repo, type: string, required: true}
+    - {name: pr, type: integer, required: true}
+    - {name: dry_run, type: boolean, default: false}
+  outputs:
+    - {name: passed, type: boolean, from: "{{ verify.passed }}"}
+    - {name: summary, type: string, from: "{{ report.content }}"}
+```
+
+A call differs from a subagent in three ways:
+
+- **Isolation is the only mode.** The callee sees its `with:` values, coerced to its declared input types, plus the keys every run gets (`run_id`). It never sees the caller's context. Values in `with:` are Jinja2 rendered against the caller's context, and only string values may hold templates.
+- **The result is the interface.** The stage's output is exactly the callee's typed outputs (`{{ fix.passed }}`), or the callee's final stage output when it declares none, never its whole context.
+- **The callee is resolved before the run.** The engine reads called workflows from a call bundle and never from the server database.
+
+### Call bundles
+
+Whoever starts the run materializes every reachable callee beside the top-level workflow file:
+
+```
+workdir/
+├── workflow.yaml
+└── calls/
+    ├── manifest.json          {"pins": {"pr-fix": 4, "lint": 2}}
+    ├── pr-fix@4.yaml
+    └── lint@2.yaml
+```
+
+A call with `version:` reads that exact file. A call without one reads the version `manifest.json` pins. The same bundle serves the whole run tree, including calls made by callees and by subagent children.
+
+The bundle format and its helpers live in `armature/spec/calls.py`:
+
+| Name | Use |
+|------|-----|
+| `CallResolver` | Protocol: `resolve(workflow, version) -> ResolvedCall`, raising `CallNotFound` |
+| `BundleCallResolver` | Reads a bundle directory; the engine's default |
+| `MappingCallResolver` | Resolves from an in-memory map, for tests and previews |
+| `write_call_bundle` | Writes a bundle that `BundleCallResolver` reads back |
+| `call_graph` | Resolves everything a spec reaches through `call:` and reports `CALL_UNRESOLVED`, `CALL_INVALID_CALLEE`, and `CALL_CYCLE` |
+
+Pass a resolver to `Harness(call_resolver=...)` or `validate_spec(call_resolver=...)` to use another source. With a resolver, validation also checks each `with:` against the callee's inputs: unknown keys, missing required inputs, and literal values of the wrong type.
+
+`armature package build` vendors the bundle into the package, and `armature package verify` checks that every call in the package resolves from it.
+
+### Looping a call
+
+A `loop` on a call stage runs the callee once per round. `until` reads the callee's typed outputs, and `with:` can pass `{{ _iteration.num }}` into the callee. `loop.timeout_s` caps the total time across rounds. See `docs/DECLARATIVE-CONTROL-FLOW.md` → *Looping a call*.
+
+---
+
 ## Session directories
 
 Each child run gets a dedicated directory under the parent's session:
@@ -232,6 +301,8 @@ sessions/
     │   └── child_4/
     └── stage_global_summary.json
 ```
+
+A call stage nests the same way: `stage_<id>/child_0/`, or `stage_<id>/iter_<n>/child_0/` inside a loop.
 
 Each child's traces are self-contained. HQS scoring sees the full tree. `armature improve` on a child spec uses its own `child_N/` trace data, not the parent's.
 
@@ -452,6 +523,9 @@ stages:
 | `partition_source` | `str` | Jinja2 expression resolving to a list — partitioned across child runs |
 | `partition_key` | `str` | Context variable name for each partition in the child (default: `item`) |
 | `fan_in` | `str` | How to collect N child results: `list`, `merge`, `first`, `consensus` |
+| `call.workflow` | `str` | Stored workflow to call, resolved from the call bundle |
+| `call.version` | `int` | Exact version to call (default: the bundle's pinned version) |
+| `with` | `dict` | The callee's inputs; string values are Jinja2 over the caller's context |
 
 ---
 

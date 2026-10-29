@@ -1,0 +1,28 @@
+name: linear
+version: 1.0.0
+description: Linear through the team's Linear connection. Calls run on the server, so no step holds the API key.
+adapters:
+  comment:
+    description: Add a comment to an issue.
+    cmd: armature tool linear.comment
+    writes: true
+    params:
+      type: object
+      required: [issue, body]
+      additionalProperties: false
+      properties:
+        issue: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        body: {type: string, minLength: 1}
+        connection: {type: string}
+  transition:
+    description: Move an issue to the team's state of that name. An unknown state is data, not a failure.
+    cmd: armature tool linear.transition
+    writes: true
+    params:
+      type: object
+      required: [issue, state]
+      additionalProperties: false
+      properties:
+        issue: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        state: {type: string, minLength: 1, maxLength: 100}
+        connection: {type: string}

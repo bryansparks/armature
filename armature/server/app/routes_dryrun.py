@@ -45,7 +45,8 @@ async def test_workflow(workflow_id: str, payload: DryRunBody, request: Request,
                 conn, srv.keyring, access=access, user_id=session.user_id, username=session.user.username,
                 workflow_id=workflow_id, payload=payload.model_dump(), now=srv.now(), ip=ip,
                 max_active=srv.cfg.dry_run.max_active)
-        dryrun.start(binary, launch, args, dryrun.child_env(launch, endpoint, srv.cfg.packs_dir, missing_empty), hub)
+        dryrun.start(binary, launch, args, dryrun.child_env(launch, endpoint, srv.cfg.packs_dir, missing_empty), hub,
+                     memory_mb=srv.cfg.dry_run.memory_mb)
         return launch
 
     try:

@@ -499,3 +499,24 @@ def test_spec_destinations_defaults_to_none():
     from armature.spec.models import HarnessSpec
     spec = HarnessSpec.model_validate({"name": "wf", "stages": [{"id": "s"}]})
     assert spec.destinations is None
+
+
+def test_call_stage_parses_with_inputs_and_loop_timeout():
+    spec = HarnessSpec.model_validate({
+        "name": "caller",
+        "stages": [{
+            "id": "fix",
+            "call": {"workflow": "fixer", "version": 2},
+            "with": {"repo": "{{ repo }}"},
+            "loop": {"max_iterations": 3, "until": "{{ passed }}", "timeout_s": 600},
+        }],
+    })
+    stage = spec.stages[0]
+    assert stage.call.workflow == "fixer" and stage.call.version == 2
+    assert stage.with_ == {"repo": "{{ repo }}"}
+    assert stage.loop.timeout_s == 600
+
+
+def test_call_ref_rejects_unknown_fields():
+    with pytest.raises(Exception):
+        Stage.model_validate({"id": "c", "call": {"workflow": "w", "inputs": {}}})

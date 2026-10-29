@@ -1,0 +1,480 @@
+{
+  "description": "An author outside pr-authors.json gets no review: resolve declines and nothing posts.",
+  "source": "github",
+  "env": {},
+  "files": {
+    "config/teams.json": {
+      "teams": [
+        {
+          "id": "mobile",
+          "name": "Mobile",
+          "auto_fix": false,
+          "repos": [
+            {
+              "slug": "fs-eng/mobile-ios",
+              "platform": "ios",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            },
+            {
+              "slug": "fs-eng/android-tree",
+              "platform": "android",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "dev"
+              ]
+            },
+            {
+              "slug": "fs-eng/mobile-api-nodejs",
+              "platform": "backend",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "product-prototype",
+          "name": "Product Prototype",
+          "auto_fix": false,
+          "repos": []
+        }
+      ]
+    },
+    "config/roles.json": {
+      "base_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git blame:*)",
+        "Bash(cd:*)",
+        "Bash(ls:*)",
+        "Bash(wc:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git rev-list:*)",
+        "Bash(git cat-file:*)"
+      ],
+      "roles": [
+        {
+          "name": "simplicity",
+          "prompt": "prompts/simplicity.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "correctness",
+          "prompt": "prompts/correctness.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:m3.material.io)",
+            "mcp__jira__jira_get_issue",
+            "mcp__jira__jira_search"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          },
+          "mcp_inherit": [
+            "jira"
+          ]
+        },
+        {
+          "name": "security",
+          "prompt": "prompts/security.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "performance",
+          "prompt": "prompts/performance.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {}
+        },
+        {
+          "name": "beauty",
+          "prompt": "prompts/beauty.md",
+          "platforms": [
+            "ios",
+            "android"
+          ]
+        },
+        {
+          "name": "test_adequacy",
+          "prompt": "prompts/test_adequacy.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "concurrency",
+          "prompt": "prompts/concurrency.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {},
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          }
+        },
+        {
+          "name": "conventions",
+          "prompt": "prompts/conventions.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "prompt": "prompts/compatibility.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        }
+      ]
+    },
+    "state/pr-queue/job.json": {
+      "repo": "fs-eng/android-tree",
+      "number": 4821,
+      "platform": "android",
+      "mode": "review",
+      "action": "opened",
+      "head": "{{rev:state/repos/fs-eng_android-tree:MEMTEMDIS-4512-memories-cache}}"
+    },
+    "config/pr-authors.json": {
+      "authors": {
+        "fs-eng/android-tree": [
+          "jstutz4"
+        ]
+      }
+    },
+    "config/validate.json": {
+      "commands": {
+        "fs-eng/android-tree": "./validate.sh --quick --base {base}"
+      }
+    }
+  },
+  "repos": {
+    "state/repos/fs-eng_android-tree": {
+      "base": "dev",
+      "branch": "MEMTEMDIS-4512-memories-cache",
+      "remote": "fs-eng/android-tree",
+      "files": {
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt": "package org.familysearch.tree.memories\n\nclass MemoriesViewModel(private val repo: MemoriesRepository) {\n    fun load(personId: String) = repo.memories(personId)\n}\n",
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesRepository.kt": "package org.familysearch.tree.memories\n\ninterface MemoriesRepository {\n    fun memories(personId: String): List<Memory>\n}\n",
+        "validate.sh": "#!/bin/sh\necho 'BUILD SUCCESSFUL in 41s'\n"
+      },
+      "commits": [
+        {
+          "message": "Cache memories per person",
+          "files": {
+            "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt": "package org.familysearch.tree.memories\n\nclass MemoriesViewModel(private val repo: MemoriesRepository) {\n    private var cache: Map<String, List<Memory>> = emptyMap()\n\n    fun load(personId: String): List<Memory> =\n        cache[personId] ?: repo.memories(personId).also { cache = cache + (personId to it) }\n\n    fun signedOut() {\n        cache = emptyMap()\n    }\n}\n"
+          }
+        }
+      ]
+    }
+  },
+  "context": {
+    "job_file": "{{home}}/state/pr-queue/job.json"
+  },
+  "fakes": {
+    "gh": [
+      {
+        "match": "^api user --jq .login",
+        "stdout": "fs-armature\n"
+      },
+      {
+        "match": "^pr view 4821 --repo fs-eng/android-tree --json",
+        "stdout": {
+          "state": "OPEN",
+          "isDraft": false,
+          "isCrossRepository": false,
+          "headRefOid": "{{rev:state/repos/fs-eng_android-tree:MEMTEMDIS-4512-memories-cache}}",
+          "baseRefName": "dev",
+          "author": {
+            "login": "contractor-dev"
+          },
+          "title": "MEMTEMDIS-4512 Cache memories per person",
+          "body": "Caches each person's memories so the tab opens instantly.\n\nFixes MEMTEMDIS-4512.",
+          "headRefName": "MEMTEMDIS-4512-memories-cache",
+          "mergeCommit": null
+        }
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821/requested_reviewers",
+        "stdout": ""
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821/files --paginate --slurp",
+        "stdout": [
+          [
+            {
+              "filename": "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt",
+              "status": "modified",
+              "additions": 8,
+              "deletions": 1,
+              "patch": "@@ -1,5 +1,12 @@\n package org.familysearch.tree.memories\n \n class MemoriesViewModel(private val repo: MemoriesRepository) {\n-    fun load(personId: String) = repo.memories(personId)\n+    private var cache: Map<String, List<Memory>> = emptyMap()\n+\n+    fun load(personId: String): List<Memory> =\n+        cache[personId] ?: repo.memories(personId).also { cache = cache + (personId to it) }\n+\n+    fun signedOut() {\n+        cache = emptyMap()\n+    }\n }"
+            }
+          ]
+        ]
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821 --jq .state",
+        "stdout": "open\n"
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821 --jq .head.sha",
+        "stdout": "{{rev:state/repos/fs-eng_android-tree:MEMTEMDIS-4512-memories-cache}}\n"
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821 --jq .merged",
+        "stdout": "false\n"
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/pulls/4821/reviews --method POST|^api repos/fs-eng/android-tree/pulls/4821/reviews -X POST|^api -X POST repos/fs-eng/android-tree/pulls/4821/reviews|^api repos/fs-eng/android-tree/pulls/4821/reviews --input",
+        "stdout": {
+          "id": 2150001,
+          "html_url": "https://github.com/fs-eng/android-tree/pull/4821#pullrequestreview-2150001",
+          "state": "COMMENTED"
+        }
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/issues/comments/3150001 --method PATCH",
+        "stdout": {
+          "id": 3150001
+        }
+      },
+      {
+        "match": "--paginate --slurp",
+        "stdout": [
+          []
+        ]
+      },
+      {
+        "match": "^api repos/fs-eng/android-tree/issues/4821/comments -f body=",
+        "stdout": {
+          "id": 3150001,
+          "html_url": "https://github.com/fs-eng/android-tree/pull/4821#issuecomment-3150001"
+        }
+      }
+    ],
+    "claude": [
+      {
+        "match": "--json-schema",
+        "result": {
+          "result": "",
+          "structured_output": {
+            "verdict": "comment",
+            "summary": "One blocking issue: the memories cache outlives sign-out.",
+            "decisions": [
+              {
+                "claim": "The cache is never cleared on sign-out, so the next user sees the previous user's memories.",
+                "raised_by": [
+                  "correctness",
+                  "security"
+                ],
+                "decision": "block",
+                "reason": "Confirmed: nothing calls signedOut().",
+                "disposition": "keep"
+              },
+              {
+                "claim": "signedOut() has no test.",
+                "raised_by": [
+                  "test_adequacy"
+                ],
+                "decision": "suggest",
+                "reason": "Worth a test once the call is wired.",
+                "disposition": "keep"
+              }
+            ],
+            "comments": [
+              {
+                "path": "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt",
+                "line": 7,
+                "severity": "high",
+                "blocking": true,
+                "claim": "Cache survives sign-out",
+                "raised_by": [
+                  "correctness",
+                  "security"
+                ],
+                "body": "This cache is keyed by person id only and nothing calls `signedOut()`, so after a sign-out the next user sees the previous user's memories. Clear it from the sign-out flow.",
+                "verified": "Searched for signedOut callers: none."
+              },
+              {
+                "path": "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt",
+                "line": 9,
+                "severity": "low",
+                "blocking": false,
+                "claim": "No test for signedOut",
+                "raised_by": [
+                  "test_adequacy"
+                ],
+                "body": "Add a test that `signedOut()` empties the cache."
+              }
+            ]
+          }
+        }
+      },
+      {
+        "match": "\\n\\n[^\\n]*correctness|prompts/correctness\\.md",
+        "result": "1. MemoriesViewModel.kt:7 (high): the cache is never cleared on sign-out; nothing calls signedOut()."
+      },
+      {
+        "match": "\\n\\n[^\\n]*security|prompts/security\\.md",
+        "result": "1. MemoriesViewModel.kt:7 (high): one user's memories can show to the next user on a shared device."
+      },
+      {
+        "match": "\\n\\n[^\\n]*test_adequacy|prompts/test_adequacy\\.md",
+        "result": "1. MemoriesViewModel.kt:9 (low): signedOut() is untested."
+      },
+      {
+        "match": "",
+        "result": "No findings."
+      }
+    ]
+  },
+  "stubs": {},
+  "ops": {
+    "effects": [
+      {
+        "tool": "gh",
+        "args": [
+          "pr",
+          "view",
+          "4821",
+          "--repo",
+          "fs-eng/android-tree",
+          "--json",
+          "state,isDraft,isCrossRepository,headRefOid,baseRefName,author,title,body,headRefName,mergeCommit"
+        ]
+      },
+      {
+        "tool": "gh",
+        "args": [
+          "api",
+          "repos/fs-eng/android-tree/pulls/4821/requested_reviewers",
+          "--jq",
+          ".teams[].slug"
+        ]
+      }
+    ],
+    "result": {
+      "posted": false,
+      "skipped": true,
+      "reason": "contractor-dev is not on the review list for fs-eng/android-tree, and no reviewing team is requested"
+    },
+    "sessions": [],
+    "outputs": {
+      "resolve": {
+        "synced": [],
+        "reviewed": false,
+        "reason": "contractor-dev is not on the review list for fs-eng/android-tree, and no reviewing team is requested",
+        "repo": "fs-eng/android-tree",
+        "number": 4821,
+        "mode": "review"
+      },
+      "status": {
+        "status": "skipped"
+      },
+      "incremental": {
+        "verdict": "full_review",
+        "reason": "resolve declined",
+        "addressed_findings": [],
+        "new_concerns": [],
+        "synced": [],
+        "prev": "",
+        "lines": 0
+      },
+      "assignments": {
+        "jobs": [],
+        "skipped": [],
+        "count": 0
+      },
+      "reviews": [],
+      "verify": {
+        "ran": false,
+        "ok": null,
+        "reason": "resolve declined this pull request",
+        "environmental": false,
+        "failed_steps": [],
+        "placement": {
+          "where": "m1"
+        }
+      },
+      "team_lead": {
+        "verdict": "approve",
+        "summary": "",
+        "comments": [],
+        "decisions": [],
+        "skipped": true
+      },
+      "post": {
+        "posted": false,
+        "skipped": true,
+        "reason": "contractor-dev is not on the review list for fs-eng/android-tree, and no reviewing team is requested"
+      }
+    }
+  }
+}

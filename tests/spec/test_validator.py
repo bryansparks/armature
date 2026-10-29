@@ -349,6 +349,18 @@ def test_explicit_tier_triggers_undefined_not_default_check():
     assert "DEFAULT_TIER_NOT_CONFIGURED" not in codes(errors)
 
 
+# ── requires: capabilities ───────────────────────────────────────────────────
+
+def test_requires_accepts_capabilities():
+    errors = validate_spec(_valid_spec(requires=["llm", "git", "claude-code", "platform:ios"]), strict=False)
+    assert "INVALID_REQUIREMENT" not in codes(errors)
+
+
+def test_requires_rejects_a_name_that_is_not_a_capability():
+    errors = validate_spec(_valid_spec(requires=["git", "Platform iOS"]), strict=False)
+    assert [e.code for e in errors if e.code == "INVALID_REQUIREMENT"] == ["INVALID_REQUIREMENT"]
+
+
 # ── Contract.inputs name field ────────────────────────────────────────────────
 
 def test_contract_input_missing_name_detected():

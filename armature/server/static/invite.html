@@ -20,10 +20,12 @@
     <p id="who"></p>
     <label>New password <input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required></label>
     <label>New password again <input id="password-again" name="password-again" type="password" autocomplete="new-password" minlength="12" required></label>
-    <p>Add this account to an authenticator app, then enter the code it shows.</p>
-    <p class="mono wrap-anywhere" id="otpauth"></p>
-    <p>Or type the secret: <span class="mono wrap-anywhere" id="secret"></span></p>
-    <label>Authenticator code <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    <div id="enroll" hidden>
+      <p>Add this account to an authenticator app, then enter the code it shows.</p>
+      <p class="mono wrap-anywhere" id="otpauth"></p>
+      <p>Or type the secret: <span class="mono wrap-anywhere" id="secret"></span></p>
+      <label>Authenticator code <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+    </div>
     <button type="submit">Set password and sign in</button>
   </form>
   <div class="err" id="err" role="alert" aria-live="assertive"></div>

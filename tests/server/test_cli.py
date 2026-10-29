@@ -16,7 +16,8 @@ PASSWORD = "correct horse battery"
 SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
 
 
-def _init(tmp_path, monkeypatch, *extra, codes=None):
+def _init(tmp_path, monkeypatch, *extra, codes=None, totp=True):
+    monkeypatch.setenv("ARMATURE_SERVER_REQUIRE_TOTP", "true" if totp else "false")
     monkeypatch.setattr("getpass.getpass", lambda prompt="": PASSWORD)
     monkeypatch.setattr("armature.server.users.pyotp.random_base32", lambda: SECRET)
     config = tmp_path / "server.yaml"
@@ -54,6 +55,19 @@ def test_create_admin_confirms_the_authenticator(tmp_path, monkeypatch):
         row = conn.execute(select(users)).one()
     engine.dispose()
     assert row.totp_confirmed_at is not None and row.last_totp_step > 0
+
+
+def test_create_admin_without_totp_asks_for_no_code(tmp_path, monkeypatch):
+    config, result = _init(tmp_path, monkeypatch, codes=[], totp=False)
+    assert result.exit_code == 0, result.output
+    assert "otpauth://" not in result.output and "Code from the authenticator" not in result.output
+    engine = make_engine(load_config(config).database_url)
+    with engine.connect() as conn:
+        row = conn.execute(select(users)).one()
+    engine.dispose()
+    assert row.is_admin and verify_password(PASSWORD, row.password_hash) and row.totp_secret_enc is None
+    _, again = _init(tmp_path, monkeypatch, codes=[], totp=False)
+    assert "already exists" in again.output
 
 
 def test_create_admin_removed_after_three_wrong_codes(tmp_path, monkeypatch):
@@ -225,3 +239,22 @@ def test_runs_relink_by_id_or_unique_name(tmp_path, monkeypatch):
     missing = relink("old-dup", "nothing")
     assert missing.exit_code == 1 and "No workflow has the id or name nothing" in missing.output
     engine.dispose()
+
+
+def test_backfill_locations_marks_unplaceable_runs_unknown_once(tmp_path, monkeypatch):
+    from sqlalchemy import insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import runs, teams
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", slug="own", created_at=utcnow()))
+        conn.execute(insert(runs).values(id=new_id(), team_id=team, status="succeeded", started_at=utcnow()))
+    engine.dispose()
+    first = CliRunner().invoke(app, ["server", "backfill-locations", "--config", str(config)])
+    assert first.exit_code == 0 and "Located 1 run (1 unknown)." in first.output, first.output
+    again = CliRunner().invoke(app, ["server", "backfill-locations", "--config", str(config)])
+    assert again.exit_code == 0 and "Located 0 runs." in again.output, again.output

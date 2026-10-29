@@ -1,7 +1,8 @@
 from __future__ import annotations
+import re
 from enum import Enum
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, model_validator
 from pydantic_core import PydanticCustomError
 
 
@@ -16,6 +17,10 @@ class OutputMode(str, Enum):
     TEXT = "text"
     GUIDED_JSON = "guided_json"
     JSON = "json"
+
+
+# A runner capability: `llm`, `git`, `claude-code`, or a qualified one such as `platform:ios`.
+CAPABILITY = re.compile(r"^[a-z][a-z0-9-]{0,31}(:[a-z0-9][a-z0-9._-]{0,63})?$")
 
 
 # ── Mission/work layer (missions design §3): the fixed closure-reason set a
@@ -159,6 +164,25 @@ class IterationConfig(BaseModel):
     iteration_var: str = "_iteration"
     backoff_s: float | None = None   # initial wait (seconds); doubles each iteration
     backoff_max_s: float = 60.0
+    timeout_s: float | None = None   # wall-clock budget across rounds, checked after each round
+
+
+class CallRef(BaseModel):
+    """A stored workflow a `call:` stage runs, resolved before the run (armature/spec/calls.py)."""
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: str
+    version: int | None = None  # None → the version the call bundle pins
+
+
+class GateApproval(BaseModel):
+    """Who may decide a `gate: human` stage when the server runs it, how long it waits before it is rejected, and
+    the Slack channel its card goes to. A run in a Slack thread gets the card in that thread without one."""
+    model_config = ConfigDict(extra="forbid")
+
+    min_role: Literal["project_lead", "team_lead", "admin"] = "project_lead"
+    expires_hours: float = Field(72, gt=0, le=720)
+    slack_channel: str | None = Field(None, pattern=r"^[CG][A-Z0-9]{2,20}$")  # where the approval card goes
 
 
 PACK_ADAPTER_CONTEXT = "pack_adapter"
@@ -218,6 +242,35 @@ class FileState(BaseModel):
     manifest: str = "manifest.json"
 
 
+AGENT_HARNESSES = ("claude-code", "codex")
+# Claude Code's own rule for a skill name, which also keeps it a safe directory name.
+SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+CONTEXT_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# A role document's key, as the server stores it. No template marker fits, so a role is never rendered.
+ROLE_KEY = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$")
+
+
+class AgentStep(BaseModel):
+    """A Claude Code or Codex session a stage runs. Only prompt, context_files, and ref are rendered at run time."""
+    model_config = ConfigDict(extra="forbid")
+
+    harness: Literal["claude-code", "codex"] = "claude-code"
+    model: str                          # a provider alias on a server, or a model id locally
+    effort: ReasoningEffort | None = None
+    access: Literal["read", "write"] = "read"
+    prompt: str
+    role: str | None = None             # a role document's key; its text leads the session's system prompt
+    skills: list[str] = Field(default_factory=list)
+    repo_skills: bool | list[str] | None = None  # the default branch's .claude/skills; None: on when skills is empty
+    repo_rules: list[str] = Field(default_factory=list)  # more globs read from the default branch, like CLAUDE.md
+    allowed_tools: list[str] | None = None  # None means the access level's default allowlist
+    disallowed_tools: list[str] = Field(default_factory=list)
+    timeout_s: float = 1800
+    context_files: dict[str, str] = Field(default_factory=dict)  # untrusted text goes here, never into prompt
+    ref: str | None = None              # the branch or commit to check out instead of the run's ref input
+    hooks: Literal[False] = False
+
+
 class Stage(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -225,8 +278,10 @@ class Stage(BaseModel):
     role: Role | None = None
     depends_on: list[str] = Field(default_factory=list)
     adapter: str | None = None
-    with_: dict[str, Any] | None = Field(None, alias="with")  # parameters for the adapter, rendered at run time
+    with_: dict[str, Any] | None = Field(None, alias="with")  # adapter parameters or call inputs, rendered at run time
+    call: CallRef | None = None
     gate: str | None = None
+    approval: GateApproval | None = None
     tool_call: ToolCallConfig | None = None
     signature: Signature | None = None
     output_mode: OutputMode = OutputMode.TEXT
@@ -251,7 +306,7 @@ class Stage(BaseModel):
     response_stage: bool = False       # when True, stream tokens to caller in real time
     sandbox_image: str | None = None   # per-stage Docker image override; falls back to sandbox.image
     loop: IterationConfig | None = None  # deliberate iteration (not retry)
-    agent: str | None = None            # agent_library key; resolved to role at load time, then cleared
+    agent: str | AgentStep | None = None  # agent_library key (resolved to role at load time), or a session
     context_policy: ContextPolicy | None = None  # per-stage MUST/NEVER (adds to workflow default)
 
 
@@ -526,6 +581,7 @@ class HarnessSpec(BaseModel):
     version: str = "1.0"
     description: str = ""
     mission: str = ""
+    requires: list[str] = Field(default_factory=list)  # runner capabilities a server job needs to run this
     context_layers: list[ContextLayer] = Field(default_factory=list)
     context_policy: ContextPolicy | None = None
     checkpoint: bool = False             # persist completed stage results for resume across runs
@@ -555,3 +611,5 @@ class HarnessSpec(BaseModel):
     # work_unit: render the mission context layer from the injected work record
     # (design §4) — slice 2 wires the runtime; the grammar lands here
     mission_source: Literal["static", "work_unit"] = "static"
+    # Directory of the file the loader read this spec from, which holds the default call bundle.
+    _source_dir: str | None = PrivateAttr(default=None)

@@ -52,6 +52,7 @@ class ScriptNode(BaseNode):
         env = child_env({**self._env, "ARMATURE_CONTEXT": json.dumps(context, default=str)})
         proc = await asyncio.create_subprocess_shell(
             cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -65,6 +66,8 @@ class ScriptNode(BaseNode):
         except BaseException:
             await self._kill_group(proc)
             raise
+        # A background child the script left must not outlive its step.
+        await self._kill_group(proc)
         envelope = {
             "stdout": stdout.decode(errors="replace"),
             "stderr": stderr.decode(errors="replace"),

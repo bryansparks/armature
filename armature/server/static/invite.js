@@ -4,6 +4,7 @@ import { secretFromOtpauth, tokenFromHash } from './otpauth.js';
 const form = document.getElementById('invite');
 const intro = document.getElementById('intro');
 const errorMessage = document.getElementById('err');
+const enroll = document.getElementById('enroll');
 
 // The token lives in the fragment so it never reaches a log. Drop it from the address bar and history too.
 const token = tokenFromHash(location.hash);
@@ -24,10 +25,13 @@ async function start() {
     errorMessage.textContent = messageOf(err);
     return;
   }
-  intro.textContent = 'Set a password of at least 12 characters and add an authenticator to finish setting up your account.';
   document.getElementById('who').textContent = `Username: ${invite.username}`;
-  document.getElementById('otpauth').textContent = invite.otpauth_uri;
-  document.getElementById('secret').textContent = secretFromOtpauth(invite.otpauth_uri);
+  if (invite.otpauth_uri) {
+    intro.textContent = 'Set a password of at least 12 characters and add an authenticator to finish setting up your account.';
+    document.getElementById('otpauth').textContent = invite.otpauth_uri;
+    document.getElementById('secret').textContent = secretFromOtpauth(invite.otpauth_uri);
+    enroll.hidden = false;
+  } else intro.textContent = 'Set a password of at least 12 characters to finish setting up your account.';
   form.hidden = false;
   form.password.focus();
 }
@@ -43,12 +47,14 @@ form.addEventListener('submit', async (submitEvent) => {
   const submitButton = form.querySelector('button');
   submitButton.disabled = true;
   try {
-    await api('/api/invite/accept', { method: 'POST', body: { token, password: form.password.value, code: form.code.value.replace(/\s+/g, '') } });
+    const body = { token, password: form.password.value };
+    if (!enroll.hidden) body.code = form.code.value.replace(/\s+/g, '');
+    await api('/api/invite/accept', { method: 'POST', body });
     location.replace(url('/'));
   } catch (err) {
     form.code.value = '';
     errorMessage.textContent = messageOf(err);
-    form.code.focus();
+    (enroll.hidden ? form.password : form.code).focus();
   } finally {
     submitButton.disabled = false;
   }

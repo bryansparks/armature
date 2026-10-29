@@ -21,6 +21,7 @@ URL_MAX = 2048
 FIELD_MAX = 200
 MAX_LINKS = 20
 MAX_FIELDS = 30
+OUTCOMES = ("pr_opened", "pushed", "recommended", "approved", "blocked", "noop")
 
 
 def subject_problem(value: Any) -> str | None:
@@ -77,12 +78,15 @@ def link_url(value: Any) -> str | None:
 
 
 def summary_patch(payload: dict[str, Any]) -> dict[str, Any]:
-    """The usable part of a ``summary`` event: title, verdict, links, and fields. Anything else is ignored."""
+    """The usable part of a ``summary`` event: title, verdict, outcome, links, and fields. Anything else, risk
+    included, is ignored, because the server decides a run's risk."""
     patch: dict[str, Any] = {}
     for name, limit in (("title", TITLE_MAX), ("verdict", VERDICT_MAX)):
         value = _line(payload.get(name), limit)
         if value:
             patch[name] = value
+    if payload.get("outcome") in OUTCOMES:
+        patch["outcome"] = payload["outcome"]
     links = []
     for link in payload.get("links") if isinstance(payload.get("links"), list) else []:
         if not isinstance(link, dict):
@@ -103,7 +107,7 @@ def summary_patch(payload: dict[str, Any]) -> dict[str, Any]:
 def merge_summary(current: Any, patch: dict[str, Any]) -> dict[str, Any]:
     """``patch`` over ``current``: later values win, and a link's URL appears once, with its latest label."""
     merged = dict(current) if isinstance(current, dict) else {}
-    for name in ("title", "verdict"):
+    for name in ("title", "verdict", "outcome"):
         if name in patch:
             merged[name] = patch[name]
     if "links" in patch:

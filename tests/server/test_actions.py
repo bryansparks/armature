@@ -415,3 +415,33 @@ def test_a_team_key_run_is_offered_nothing_and_refused_even_for_an_admin(world, 
     assert not fake.ran()
     with engine.connect() as conn:
         assert conn.execute(select(operations.c.id)).first() is None
+
+
+def _status(engine, run_id):
+    with engine.connect() as conn:
+        return conn.execute(select(runs.c.status, runs.c.error).where(runs.c.id == run_id)).one()
+
+
+def test_a_cancel_that_succeeds_ends_the_run_as_canceled(world, engine, keyring, clock, fake):
+    run_id = _run(engine, clock, world["team"], status="running")
+    fake.set(stdout='{"ok": true, "message": "Cancelled the review."}\n')
+    assert _post(world, engine, keyring, clock, "contributor", run_id, "cancel").json()["operation"]["outcome"] == "ok"
+    status, error = _status(engine, run_id)
+    assert status == "canceled" and error == "Cancelled by contributor."
+    client, _ = _as(world, engine, keyring, clock, "contributor")
+    assert client.get(f"/api/runs/{run_id}").json()["run"]["status"] == "canceled"
+
+
+@pytest.mark.parametrize("control", [{"stdout": '{"ok": false, "message": "A newer review started."}\n', "exit": 3},
+                                     {"stderr": "boom\n", "exit": 1}])
+def test_a_cancel_that_is_refused_or_fails_leaves_the_run_running(world, engine, keyring, clock, fake, control):
+    run_id = _run(engine, clock, world["team"], status="running")
+    fake.set(**control)
+    _post(world, engine, keyring, clock, "contributor", run_id, "cancel")
+    assert _status(engine, run_id)[0] == "running"
+
+
+def test_a_rerun_never_ends_a_run(world, engine, keyring, clock, fake):
+    run_id = _run(engine, clock, world["team"], status="failed")
+    _post(world, engine, keyring, clock, "contributor", run_id, "rerun")
+    assert _status(engine, run_id)[0] == "failed"

@@ -280,7 +280,7 @@ async def test_subagent_runs_child_resolved_from_spec_dir_not_cwd(tmp_path, monk
         "  greet:\n"
         "    name: greet\n"
         "    type: script\n"
-        "    cmd: \"echo 'child says: {{greeting}}'\"\n"
+        "    cmd: \"python3 -c 'import json, os; c = json.loads(os.environ[\\\"ARMATURE_CONTEXT\\\"]); print(\\\"child says:\\\", c.get(\\\"greeting\\\", \\\"\\\"))'\"\n"
         "stages:\n"
         "  - id: respond\n"
         "    adapter: greet\n",
@@ -324,7 +324,7 @@ async def test_subagent_child_survives_multiline_context_on_iteration_two(tmp_pa
         "  greet:\n"
         "    name: greet\n"
         "    type: script\n"
-        "    cmd: \"echo 'round: {{greeting}}'\"\n"
+        "    cmd: \"python3 -c 'import json, os; c = json.loads(os.environ[\\\"ARMATURE_CONTEXT\\\"]); print(\\\"round:\\\", c.get(\\\"greeting\\\", \\\"\\\"))'\"\n"
         "stages:\n"
         "  - id: respond\n"
         "    adapter: greet\n",

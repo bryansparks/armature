@@ -9,7 +9,7 @@ from armature.server.db import new_id, utcnow
 from armature.server.db.schema import audit
 
 # A commit after a write to one of these re-exports definitions when export_on_change is set.
-DEFINITION_KINDS = frozenset({"workflow", "document", "provider", "setting", "team", "project"})
+DEFINITION_KINDS = frozenset({"workflow", "document", "provider", "setting", "team", "project", "connection"})
 DEFINITIONS_CHANGED = "armature.definitions_changed"
 
 

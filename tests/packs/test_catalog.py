@@ -3,6 +3,7 @@ import os
 import pytest
 
 from armature.packs import (
+    BUILTIN_DIR,
     PACKS_PATH_ENV,
     PackError,
     catalog,
@@ -98,10 +99,11 @@ def test_broken_pack_is_an_error_not_a_crash(tmp_path):
     assert [e.path.name for e in cat.errors] == ["bad"]
 
 
-def test_default_search_path_reads_env_then_home(tmp_path, monkeypatch):
+def test_default_search_path_reads_builtins_then_env_then_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv(PACKS_PATH_ENV, os.pathsep.join([str(tmp_path / "a"), "", str(tmp_path / "b")]))
-    assert search_path() == [tmp_path / "a", tmp_path / "b", tmp_path / "home" / ".armature" / "packs"]
+    assert search_path() == [BUILTIN_DIR, tmp_path / "a", tmp_path / "b",
+                             tmp_path / "home" / ".armature" / "packs"]
     write_pack(tmp_path / "home" / ".armature" / "packs" / "demo")
     write_pack(tmp_path / "b" / "demo", version="3.0.0")
     assert catalog().pack("demo").version == "3.0.0"

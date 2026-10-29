@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from armature.cli import app
 from armature.packs import AdapterDef
-from armature.server import defs, rbac
+from armature.server import connections, defs, rbac
 from armature.server import secrets as secret_store
 from armature.server.config import ExportConfig
 from armature.server.db import new_id, utcnow
@@ -67,6 +67,9 @@ def seeded(engine, keyring):
                                               aliases={"lead": "us.anthropic.claude-opus-5-5"},
                                               created_at=now, updated_at=now))
         secret_store.set_secret(conn, keyring, team_id=None, name="BEDROCK", value=SECRET_VALUE, actor_id="t")
+        connections.set_connection(conn, keyring, team_id=team_id, project_id=None, row=None,
+                                   body={"kind": "linear", "name": "linear", "api_key": f"lin_api_{SECRET_VALUE}"},
+                                   actor_id="t", now=now, ip=None)
     add_user(engine, keyring, Clock(now), "stephan", is_admin=True)
     return engine
 
@@ -83,19 +86,22 @@ def test_export_writes_every_definition_and_no_secret(seeded, tmp_path):
     assert set(files) == {
         "workflows/instance/review.yml", "workflows/team-mobile/review.yml", "workflows/team-other/private.yml",
         "roles/instance/security.md", "prompts/instance/_shared.md", "missions/project-mobile-android-tree/goal.md",
-        "teams.json", "settings.json", "providers.json", "manifest.json"}
+        "skills/instance/risk-rubric.md", "teams.json", "settings.json", "providers.json", "connections.json",
+        "manifest.json"}
     assert files["workflows/instance/review.yml"].decode() == f"{STORED_WORKFLOW_HEADER}\n{WORKFLOW}"
     assert files["roles/instance/security.md"] == b"---\nname: security\n---\n\nBe careful.\n"
     assert json.loads(files["teams.json"])["teams"][0] == {
         "slug": "mobile", "name": "Mobile", "projects": [{"name": "android-tree", "repo": "fs-eng/android-tree",
                                                          "platform": "android",
                                                          "enabled_workflows": ["fix", "pr_review"],
-                                                         "branch_filters": ["dev"]}]}
+                                                         "branch_filters": ["dev"], "environment_type": None}]}
     assert json.loads(files["settings.json"]) == {"instance": {"ops.validate": {"a": 1}},
                                                   "team-mobile": {"teams.mobile.auto_fix": True}}
     assert json.loads(files["providers.json"])["providers"] == [{
         "scope": "team-mobile", "kind": "bedrock", "aliases": {"lead": "us.anthropic.claude-opus-5-5"},
         "config": {"region": "us-east-1", "credential_secret": "BEDROCK", "credential_scope": "instance"}}]
+    assert json.loads(files["connections.json"])["connections"] == [
+        {"scope": "team-mobile", "kind": "linear", "name": "linear", "config": {}}]
     every = b"".join(files.values())
     assert SECRET_VALUE.encode() not in every and b"stephan" not in every and b"old body" not in every
     assert manifest["files"] == {path: hashlib.sha256(data).hexdigest()

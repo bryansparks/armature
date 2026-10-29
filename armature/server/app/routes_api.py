@@ -11,6 +11,7 @@ from sqlalchemy import and_, delete, exists, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from armature.server import audit, display, invites, rbac, subjects, trigger
+from armature.server import connections as vendor_connections
 from armature.server import secrets as secret_store
 from armature.server.app.deps import (
     Granted,
@@ -29,6 +30,8 @@ from armature.server.auth import AuthError, Session, count_call
 from armature.server.db import new_id
 from armature.server.db.schema import audit as audit_table
 from armature.server.db.schema import (
+    connections,
+    environment_types,
     memberships,
     projects,
     run_steps,
@@ -41,9 +44,11 @@ from armature.server.db.schema import (
 from armature.server.ingest import about
 from armature.server.users import (
     LastAdmin,
+    SlackTaken,
     create_user,
     public_user,
     reset_sign_in,
+    set_slack,
     update_user,
 )
 
@@ -51,12 +56,18 @@ router = APIRouter()
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,99}$")
 PLATFORM = re.compile(r"^[a-z0-9-]{1,32}$")
+# owner/name, or a clone or browser address on a host that ends in one.
+REPO = re.compile(r"^(?:(?:https|ssh|git)://(?:git@)?(?P<url_host>[^/\s@:]+)(?::\d+)?/|git@(?P<ssh_host>[^:/\s]+):"
+                  r"|(?P<bare_host>[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/)?"
+                  r"(?P<owner>[A-Za-z0-9-]{1,39})/(?P<name>[A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$")
+GITHUB_HOST = "github.com"
+BRANCH = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,191}$")
 SECRET_VALUE_MAX = 32 * 1024
 LIMIT_DEFAULT = 50
 LIMIT_MAX = 200
 MAX_WORKFLOW_FILTER = 50
 LOOKUP_LIMIT = 20
-RUN_STATUSES = ("queued", "running", "succeeded", "failed", "canceled", "lost")
+RUN_STATUSES = ("queued", "running", "waiting", "succeeded", "failed", "canceled", "lost")
 
 
 class NameBody(BaseModel):
@@ -66,6 +77,20 @@ class NameBody(BaseModel):
 class ProjectBody(BaseModel):
     name: str
     platform: str | None = None
+    environment_type_id: str | None = None
+    repo: str | None = None
+    connection_id: str | None = None
+    default_branch: str | None = None
+
+
+class ProjectChangeBody(BaseModel):
+    repo: str | None = None
+    connection_id: str | None = None
+    default_branch: str | None = None
+
+
+class EnvironmentTypeBody(BaseModel):
+    environment_type_id: str | None = None
 
 
 class NewUserBody(BaseModel):
@@ -74,6 +99,11 @@ class NewUserBody(BaseModel):
     email: str | None = None
     team_id: str | None = None
     role: str | None = None
+
+
+class SlackBody(BaseModel):
+    workspace_id: str | None = None
+    user_id: str | None = None
 
 
 class UserChangeBody(BaseModel):
@@ -108,7 +138,52 @@ def _team(row: Any, role: str | None = None) -> dict[str, Any]:
 def _project(row: Any) -> dict[str, Any]:
     return {"id": row.id, "team_id": row.team_id, "name": row.name, "platform": row.platform,
             "enabled_workflows": row.enabled_workflows, "branch_filters": row.branch_filters,
-            "created_at": row.created_at}
+            "environment_type_id": row.environment_type_id, "repo": row.repo, "connection_id": row.connection_id,
+            "default_branch": row.default_branch, "created_at": row.created_at}
+
+
+def repo_slug(value: str | None, host: str | None = None) -> str | None:
+    """``owner/name`` as webhook routing matches it. Another host is allowed only as ``host`` and kept in front."""
+    if value is None or not value.strip():
+        return None
+    match = REPO.fullmatch(value.strip())
+    if not match or set(match.group("name")) == {"."}:
+        raise ApiError(400, "A repository is owner/name, or its github.com address.")
+    found = (match.group("url_host") or match.group("ssh_host") or match.group("bare_host") or GITHUB_HOST).lower()
+    slug = f"{match.group('owner')}/{match.group('name')}"
+    if found == GITHUB_HOST:
+        return slug
+    if host is not None and found == host.lower():
+        return f"{found}/{slug}"
+    raise ApiError(400, "Only github.com repositories work here. Paste a github.com address or owner/name.")
+
+
+def _check_branch(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    if not BRANCH.fullmatch(value.strip()):
+        raise ApiError(400, "A branch is letters, digits, '.', '_', '/', or '-'.")
+    return value.strip()
+
+
+def _check_connection(conn: Any, team_id: str, connection_id: str | None) -> None:
+    if connection_id is not None and conn.execute(select(connections.c.id).where(
+            connections.c.id == connection_id, connections.c.team_id == team_id,
+            connections.c.project_id.is_(None), connections.c.kind == "github_app")).first() is None:
+        raise ApiError(400, "Pick one of this team's GitHub connections.")
+
+
+def _check_repo_reach(conn: Any, team_id: str, access: Any) -> None:
+    """A gh CLI connection reaches any repository its login can, so only a server admin points a project at one."""
+    if not access.is_admin and vendor_connections.gh_cli_in_team(conn, team_id):
+        raise ApiError(403, "This team uses a gh CLI connection. Only a server admin can set a project's repository "
+                            "or connection.")
+
+
+def _check_environment_type(conn: Any, type_id: str | None) -> None:
+    if type_id is not None and conn.execute(select(environment_types.c.id)
+                                            .where(environment_types.c.id == type_id)).first() is None:
+        raise ApiError(400, "No such environment type.")
 
 
 def _cursor(before: str | None) -> tuple[datetime, str | None] | None:
@@ -196,25 +271,88 @@ def create_project(body: ProjectBody, request: Request,
     name = _check_name(body.name, "project")
     if body.platform is not None and not PLATFORM.fullmatch(body.platform):
         raise ApiError(400, "A platform is up to 32 lowercase letters, digits, or '-'.")
+    repo, branch = repo_slug(body.repo), _check_branch(body.default_branch)
     srv = server(request)
     project_id = new_id()
     team_id = granted.target.team_id
     try:
         with srv.engine.begin() as conn:
+            _check_environment_type(conn, body.environment_type_id)
+            _check_connection(conn, team_id, body.connection_id or None)
+            _check_repo_reach(conn, team_id, granted.access)
             conn.execute(insert(projects).values(id=project_id, team_id=team_id, name=name, platform=body.platform,
+                                                 environment_type_id=body.environment_type_id, repo=repo,
+                                                 connection_id=body.connection_id or None, default_branch=branch,
                                                  created_at=srv.now()))
             audit.record(conn, action="project.create", actor_id=granted.user_id, team_id=team_id,
-                         target_kind="project", target_id=project_id, detail={"name": name}, ip=client_ip(request))
+                         target_kind="project", target_id=project_id,
+                         detail={"name": name, "environment_type_id": body.environment_type_id, "repo": repo},
+                         ip=client_ip(request))
             row = conn.execute(select(projects).where(projects.c.id == project_id)).one()
     except IntegrityError as exc:
         raise ApiError(409, "That team has a project with that name.") from exc
     return {"project": _project(row)}
 
 
+@router.get("/api/projects")
+def list_all_projects(request: Request, session: Session = Depends(signed_in)) -> dict[str, Any]:
+    access = _access(request, session)
+    scope = rbac.visible_scope(access)
+    query = (select(projects, teams.c.name.label("team_name")).join(teams, teams.c.id == projects.c.team_id)
+             .order_by(teams.c.name, projects.c.name))
+    if not scope.all:
+        query = query.where(or_(projects.c.team_id.in_(scope.team_ids), projects.c.id.in_(scope.project_ids)))
+    with server(request).engine.connect() as conn:
+        rows = conn.execute(query).all()
+    return {"projects": [{**_project(r), "team_name": r.team_name} for r in rows]}
+
+
+@router.post("/api/projects/{project_id}")
+def update_project(body: ProjectChangeBody, request: Request,
+                   granted: Granted = Depends(require("project_lead", by_project()))) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    if "repo" in body.model_fields_set:
+        values["repo"] = repo_slug(body.repo)
+    if "default_branch" in body.model_fields_set:
+        values["default_branch"] = _check_branch(body.default_branch)
+    if "connection_id" in body.model_fields_set:
+        values["connection_id"] = body.connection_id or None
+    srv = server(request)
+    project_id = granted.target.project_id
+    with srv.engine.begin() as conn:
+        if "connection_id" in values:
+            _check_connection(conn, granted.target.team_id, values["connection_id"])
+        if "repo" in values or "connection_id" in values:
+            _check_repo_reach(conn, granted.target.team_id, granted.access)
+        if values:
+            conn.execute(update(projects).where(projects.c.id == project_id).values(**values))
+            audit.record(conn, action="project.update", actor_id=granted.user_id, team_id=granted.target.team_id,
+                         target_kind="project", target_id=project_id, detail=values, ip=client_ip(request))
+        row = conn.execute(select(projects).where(projects.c.id == project_id)).one()
+    return {"project": {**_project(row), "role": granted.role}}
+
+
 @router.get("/api/projects/{project_id}")
 def get_project(request: Request, granted: Granted = Depends(require("viewer", by_project()))) -> dict[str, Any]:
     with server(request).engine.connect() as conn:
         row = conn.execute(select(projects).where(projects.c.id == granted.target.project_id)).one()
+    return {"project": {**_project(row), "role": granted.role}}
+
+
+@router.post("/api/projects/{project_id}/environment-type")
+def set_project_environment_type(body: EnvironmentTypeBody, request: Request,
+                                 granted: Granted = Depends(require("project_lead", by_project()))) -> dict[str, Any]:
+    srv = server(request)
+    project_id = granted.target.project_id
+    with srv.engine.begin() as conn:
+        _check_environment_type(conn, body.environment_type_id)
+        before = conn.execute(select(projects.c.environment_type_id).where(projects.c.id == project_id)).scalar()
+        conn.execute(update(projects).where(projects.c.id == project_id)
+                     .values(environment_type_id=body.environment_type_id))
+        audit.record(conn, action="project.environment_type", actor_id=granted.user_id,
+                     team_id=granted.target.team_id, target_kind="project", target_id=project_id,
+                     detail={"from": before, "to": body.environment_type_id}, ip=client_ip(request))
+        row = conn.execute(select(projects).where(projects.c.id == project_id)).one()
     return {"project": {**_project(row), "role": granted.role}}
 
 
@@ -344,7 +482,8 @@ def reissue_invite(user_id: str, request: Request, session: Session = Depends(si
         access = rbac.load_access(conn, session.user_id, bool(session.user.is_admin))
         if row is None:
             raise ApiError(404, "No such user.")
-        if not access.is_admin and (row.totp_confirmed_at is not None or row.is_admin
+        signed_up = row.totp_confirmed_at is not None or (not srv.cfg.require_totp and row.password_hash is not None)
+        if not access.is_admin and (signed_up or row.is_admin
                                     or not _leads_every_membership(conn, access, user_id)):
             raise ApiError(403, "Not allowed.")
     if row.oidc_sub is not None and row.password_hash is None:
@@ -385,6 +524,25 @@ def update_user_route(user_id: str, body: UserChangeBody, request: Request,
             row = conn.execute(select(users).where(users.c.id == user_id)).one()
     except LastAdmin as exc:
         raise ApiError(409, "This is the last enabled admin. Make another admin first.") from exc
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return {"user": public_user(row)}
+
+
+@router.post("/api/users/{user_id}/slack")
+def set_user_slack(user_id: str, body: SlackBody, request: Request,
+                   granted: Granted = Depends(require("admin"))) -> dict[str, Any]:
+    """Link a user to a Slack account directly. A user links their own with the code the bot sends them."""
+    try:
+        with server(request).engine.begin() as conn:
+            if not set_slack(conn, user_id, workspace_id=body.workspace_id, slack_user_id=body.user_id,
+                             actor_id=granted.user_id, ip=client_ip(request)):
+                raise ApiError(404, "No such user.")
+            row = conn.execute(select(users).where(users.c.id == user_id)).one()
+    except SlackTaken as exc:
+        raise ApiError(409, str(exc)) from exc
+    except IntegrityError as exc:
+        raise ApiError(409, "Another user already linked this Slack account.") from exc
     except ValueError as exc:
         raise ApiError(400, str(exc)) from exc
     return {"user": public_user(row)}
@@ -516,19 +674,31 @@ def _fix_outcome(ref: Any) -> str | None:
     return outcome if isinstance(outcome, str) and outcome else None
 
 
+def _latest_per_subject(query):
+    """Keep the newest run of each thread or subject the query finds, with how many runs it stands for."""
+    bucket = func.coalesce(runs.c.thread, runs.c.subject, runs.c.id)
+    newest = (runs.c.started_at.desc(), runs.c.id.desc())
+    ranked = query.add_columns(func.row_number().over(partition_by=bucket, order_by=newest).label("subject_rank"),
+                               func.count().over(partition_by=bucket).label("group_size")).subquery()
+    latest = select(*[c for c in ranked.c if c.name != "subject_rank"]).where(ranked.c.subject_rank == 1)
+    return latest, ranked.c.started_at, ranked.c.id
+
+
 @router.get("/api/runs")
 def list_runs(request: Request, team: str | None = None, project: str | None = None, status: str | None = None,
               workflow: str | None = Query(None, max_length=191), with_outputs: bool = False,
-              subject: str | None = Query(None, max_length=191), before: str | None = None,
+              subject: str | None = Query(None, max_length=191), thread: str | None = Query(None, max_length=191),
+              before: str | None = None,
               workflow_list: str | None = Query(None, alias="workflows", max_length=4000),
-              include_hidden: bool = False,
+              include_hidden: bool = False, group: bool = False,
               limit: int = Query(LIMIT_DEFAULT, ge=1, le=LIMIT_MAX),
               session: Session = Depends(signed_in)) -> dict[str, Any]:
     scope = rbac.visible_scope(_access(request, session))
     query = (select(runs.c.id, runs.c.team_id, runs.c.project_id,
                     func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), runs.c.status,
                     func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.started_at,
-                    runs.c.finished_at, runs.c.cost_usd, runs.c.subject, runs.c.summary, *trigger.columns())
+                    runs.c.finished_at, runs.c.cost_usd, runs.c.subject, runs.c.thread, runs.c.summary,
+                    runs.c.outcome, runs.c.risk, runs.c.location, *trigger.columns())
              .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
              .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
     if team:
@@ -543,6 +713,8 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
         query = query.where(name.in_(chosen))
     if subject:
         query = query.where(runs.c.subject == subject)
+    if thread:
+        query = query.where(or_(runs.c.thread == thread, and_(runs.c.thread.is_(None), runs.c.subject == thread)))
     if with_outputs:
         query = query.where(exists().where(run_steps.c.run_id == runs.c.id, run_steps.c.parent_step.is_(None),
                                            run_steps.c.output.is_not(None)))
@@ -550,10 +722,7 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
         if status not in RUN_STATUSES:
             raise ApiError(400, f"status must be one of {', '.join(RUN_STATUSES)}.")
         query = query.where(runs.c.status == status)
-    clause = _before_clause(_cursor(before), runs.c.started_at, runs.c.id)
-    if clause is not None:
-        query = query.where(clause)
-    query = query.order_by(runs.c.started_at.desc(), runs.c.id.desc()).limit(limit)
+    cursor = _cursor(before)
     with server(request).engine.connect() as conn:
         settings = display.load(conn)
         if not include_hidden:
@@ -564,15 +733,22 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
             if actors:
                 actor = func.coalesce(runs.c.triggered_by, runs.c.actor)
                 query = query.where(or_(actor.is_(None), actor.not_in(actors)))
-        rows = conn.execute(query).all()
+        at, row_id = runs.c.started_at, runs.c.id
+        if group:
+            query, at, row_id = _latest_per_subject(query)
+        clause = _before_clause(cursor, at, row_id)
+        if clause is not None:
+            query = query.where(clause)
+        rows = conn.execute(query.order_by(at.desc(), row_id.desc()).limit(limit)).all()
         pulls = subjects.pull_states(conn, scope, {r.subject for r in rows if r.subject})
         started = trigger.describe(conn, [r._mapping for r in rows])
     listed = [{"id": r.id, "team_id": r.team_id, "project_id": r.project_id, "workflow": r.workflow,
                "status": r.status, "triggered_by": r.triggered_by, "started_at": r.started_at,
                "finished_at": r.finished_at,
                "cost_usd": float(r.cost_usd) if r.cost_usd is not None and settings["show_cost"] else None,
-               **about(r.subject, r.summary), "pr": pulls.get(r.subject), "outcome": _fix_outcome(r.trigger_ref),
-               "trigger": started[r.id]}
+               **about(r.subject, r.summary), "thread": r.thread, "pr": pulls.get(r.subject),
+               "outcome": r.outcome, "fix_outcome": _fix_outcome(r.trigger_ref), "risk": r.risk,
+               "trigger": started[r.id], "location": r.location, **({"group_size": r.group_size} if group else {})}
               for r in rows]
     return {"runs": listed, "next_before": _next(rows, limit, "started_at")}
 

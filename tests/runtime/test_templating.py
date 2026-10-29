@@ -1,4 +1,5 @@
 """Every template Armature renders goes through a sandbox."""
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +14,10 @@ from armature.permissions.permissions import PermissionLevel
 from armature.registry.registry import ToolDescriptor
 from armature.runtime.engine import Harness
 from armature.runtime.prompt import _render_description
-from armature.runtime.templating import SandboxedNativeEnvironment, native_env, text_env
+from armature.runtime import templating
+from armature.runtime.templating import (
+    MAX_OUTPUT_CHARS, SandboxedNativeEnvironment, TemplateLimitError, native_env, text_env,
+)
 from armature.spec.loader import load_spec
 from armature.spec.models import (
     Adapter, HarnessSpec, ModelTierConfig, ModelTiers, Stage, ToolCallConfig,
@@ -129,3 +133,128 @@ def test_load_spec_keeps_runtime_placeholders(tmp_path):
     loaded = load_spec(spec, vars={"topic": "demo"})
     assert loaded.name == "demo"
     assert loaded.stages[0].partition_source == "{{ planner.items }}"
+
+
+HUGE = [
+    "{{ 'x' * 50000000 }}", "{{ 50000000 * 'x' }}", "{{ [1] * 50000000 }}", "{{ 2 ** 10000000 }}",
+    "{% set a = 'x' * 100000 %}{{ a ~ a ~ a ~ a ~ a ~ a ~ a ~ a ~ a ~ a ~ a }}",
+    "{% set a = 'x' * 100000 %}{{ a + a + a + a + a + a + a + a + a + a + a }}",
+    "{% set a = ['x'] * 100000 %}{{ (a + a + a + a + a + a + a + a + a + a + a) | length }}",
+    "{{ '%99999999s' % 'x' }}", "{{ '%.99999999f' % 1.0 }}", "{{ '%*s' % (99999999, 'x') }}",
+    "{{ '{:99999999}'.format('x') }}", "{{ '{:{w}}'.format('x', w=99999999) }}",
+    "{{ 'x' | center(99999999) }}", "{{ 'x' | indent(99999999) }}", "{{ ('a\n' * 50000) | indent(50000) }}",
+    "{{ 'x' | wordwrap(99999999) }}", "{{ 'x' | truncate(99999999) }}", "{{ '%99999999s' | format('x') }}",
+    "{{ ('a' * 99999) | replace('a', 'b' * 99999) }}", "{{ ('a' * 99999).replace('a', 'b' * 99999) }}",
+    "{{ ['b' * 99999, 'b' * 99999, 'b' * 99999, 'b' * 99999, 'b' * 99999, 'b' * 99999, 'b' * 99999, 'b' * 99999,"
+    " 'b' * 99999, 'b' * 99999, 'b' * 99999] | join }}",
+    "{{ ('b' * 99999).join(['c'] * 99999) }}",
+    "{{ 'x'.ljust(99999999) }}", "{{ 'x'.zfill(99999999) }}", "{{ ('\t' * 99999).expandtabs(99999) }}",
+    "{% for a in range(100000) %}{% for b in range(100000) %}{% endfor %}{% endfor %}",
+    "{% macro m() %}{% endmacro %}{% for a in range(100000) %}{% for b in range(100000) %}{{ m() }}"
+    "{% endfor %}{% endfor %}",
+    "{% for a in range(20) %}{{ 'x' * 99999 }}{% endfor %}",
+    "{{ ['x' * 99999] * 99999 }}", "{{ ['x' * 99999] * 50 }}",
+    "{% set l = ['x' * 99999] * 9 %}{% for i in range(99999) %}{% set s = l | string %}{% endfor %}",
+    "{% set l = ['x' * 99999] * 9 %}{% for i in range(99999) %}{% set s = l | tojson %}{% endfor %}",
+    "{% set l = ['x' * 99999] * 9 %}{% for i in range(99999) %}{% set s = l | pprint %}{% endfor %}",
+    "{% set l = ['x' * 99999] * 9 %}{% for i in range(99999) %}{% set s = l ~ '' %}{% endfor %}",
+    "{{ ['a' * 99999] | map('replace', 'a', 'bb' * 50) | list | length }}",
+    "{% set l = ['ab' * 49999] * 9 %}{% for i in range(9999) %}{% set s = l | map('center', 99999) | list %}"
+    "{% endfor %}",
+    "{{ ['x'] | sum(start='y' * 99999) }}", "{{ [['x' * 99999]] | sum(start=[]) }}",
+    "{{ 'abc'.translate({97: 'x' * 99999}) }}",
+    "{% for i in range(99999) %}{% set x = ('x' * 99999).upper() %}{% endfor %}",
+    "{% for i in range(99999) %}{% set x = 'x' * 99999 %}{% endfor %}",
+    "{{ '{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}{0}'.format('x' * 99999) }}",
+    "{% set x = 'x' * 99999 %}{{ '%s%s%s%s%s%s%s%s%s%s%s%s' % (x, x, x, x, x, x, x, x, x, x, x, x) }}",
+    "{% for i in range(99999) %}{% for j in range(99999) %}{% endfor %}{% endfor %}",
+    "{% for i in range(99999) %}{% set s = 'x'*99999 %}{% endfor %}",
+    "{% for i in range(999) %}{% for j in range(999) %}{{ ('x'*99999)|upper }}{% endfor %}{% endfor %}",
+    "{% set ns = namespace(l=[]) %}{% for i in range(99999) %}{% set ns.l = ns.l + ['x'*99999] %}{% endfor %}",
+    "{{ ('x'*99999).translate({120: 'y'*99999}) }}",
+    "{{ ([[0]*99999]*300)|sum(start=[]) }}",
+    "{{ (['x'*99999]*2000)|string }}",
+    "{{ (['x'*99999]*2000)|tojson }}",
+    "{{ (['x'*99999]*2000)|pprint }}",
+    "{{ range(2000)|map('center', 99999)|list }}",
+    "{{ range(99999)|map('string')|map('center', 99999)|join }}",
+    "{{ ('x\n'*50000)|wordwrap(1) }}",
+    "{% set l = ['x'*99999] %}{{ (l * 20) | length }}",
+    "{% set a = ['x'*99999]*6 %}{{ (a + a) | length }}",
+    "{% set a = range(60000) | list %}{{ (a + a) | length }}",
+    "{% set l = ['x'*99999]*9 %}{% for i in range(9999) %}{% set n = l | length %}{% endfor %}",
+    "{% set l = ['x'*99999]*9 %}{% for i in range(9999) %}{% set n = l | first %}{% endfor %}",
+    "{% set d = {'a': 1} %}{% for i in range(60000) %}{% set x = d.a %}{% set y = d.a %}{% endfor %}",
+    "{% set d = {'a': 1} %}{% for i in range(60000) %}{% set x = d['a'] %}{% set y = d['a'] %}{% endfor %}",
+    "{{ range(99999) | select('odd') | map('abs') | list | length }}",
+]
+
+
+@pytest.mark.parametrize("source", HUGE)
+@pytest.mark.parametrize("env", [text_env(ChainableUndefined), native_env()], ids=["text", "native"])
+def test_huge_templates_fail_fast(env, source):
+    started = time.monotonic()
+    with pytest.raises(TemplateLimitError):
+        env.from_string(source).render()
+    assert time.monotonic() - started < 1
+
+
+@pytest.mark.parametrize("env", [text_env(), native_env()], ids=["text", "native"])
+def test_nested_loops_fail_in_under_a_second(env):
+    loops = "{% for a in range(99999) %}{% for b in range(99999) %}{% for c in range(99999) %}" \
+            "{% endfor %}{% endfor %}{% endfor %}"
+    started = time.monotonic()
+    with pytest.raises(TemplateLimitError):
+        env.from_string(loops).render()
+    assert time.monotonic() - started < 1
+
+
+def test_a_render_past_the_deadline_stops(monkeypatch):
+    monkeypatch.setattr(templating, "RENDER_DEADLINE_S", 0.0)
+    with pytest.raises(TemplateLimitError, match="longer than"):
+        text_env().from_string("{% for a in range(1000) %}{% endfor %}").render()
+
+
+def test_each_render_gets_its_own_budget():
+    template = text_env().from_string("{% for a in range(60000) %}{% endfor %}ok")
+    assert [template.render() for _ in range(3)] == ["ok", "ok", "ok"]
+
+
+def test_compiled_expression_refuses_huge_results():
+    with pytest.raises(TemplateLimitError):
+        native_env().compile_expression("'x' * 50000000")()
+
+
+@pytest.mark.parametrize("env", [text_env(), native_env()], ids=["text", "native"])
+def test_huge_ranges_are_refused(env):
+    with pytest.raises(OverflowError):
+        env.from_string("{{ range(10000000) | list }}").render()
+
+
+def test_output_past_the_cap_names_the_cap():
+    with pytest.raises(TemplateLimitError, match=str(MAX_OUTPUT_CHARS)):
+        text_env().from_string("{% for a in range(20) %}{{ 'x' * 99999 }}{% endfor %}").render()
+
+
+def test_small_templates_still_work():
+    source = ("{{ 'a' ~ 'b' ~ x }}|{{ 'ab' * 3 }}|{{ 2 ** 10 }}|{{ [1] + [2] }}|{{ 'a' + 'b' }}|{{ 7 % 3 }}|"
+              "{{ '%5s|%.2f' % ('x', 1.5) }}|{{ '{:>5}'.format('x') }}|{{ 'x' | center(5) }}|{{ [1, 2] | join(',') }}|"
+              "{% for i in range(3) %}{{ i }}{% endfor %}|{{ 'abc'.replace('b', 'X') }}|{{ ','.join(['a', 'b']) }}")
+    assert text_env().from_string(source).render(x=1) == (
+        "ab1|ababab|1024|[1, 2]|ab|1|    x|1.50|    x|  x  |1,2|012|aXc|a,b")
+    assert native_env().from_string("{{ 2 ** 10 }}").render() == 1024
+
+
+def test_prompt_description_falls_back_on_a_huge_render():
+    assert _render_description("{{ 'x' * 50000000 }}", {}) == "{{ 'x' * 50000000 }}"
+
+
+def test_prompt_description_renders_block_tags_alone():
+    assert _render_description("Plan.{% if topic %} Focus.{% endif %}", {"topic": "x"}) == "Plan. Focus."
+
+
+async def test_gate_message_renders_block_tags_alone(capsys):
+    node = HumanGateNode(stage=Stage(id="g", gate="human", present="Approve{% if topic %} it{% endif %}?"))
+    with patch("builtins.input", return_value="yes"):
+        await node.execute({"topic": "x"})
+    assert "Approve it?" in capsys.readouterr().out

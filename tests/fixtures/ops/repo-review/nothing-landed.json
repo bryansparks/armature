@@ -1,0 +1,365 @@
+{
+  "description": "No watched repo moved since its mark, so no session runs and the lead decides nothing.",
+  "source": "schedule",
+  "env": {
+    "REVIEW_FIRST_RUN_WINDOW": "1 day ago"
+  },
+  "files": {
+    "config/teams.json": {
+      "teams": [
+        {
+          "id": "mobile",
+          "name": "Mobile",
+          "auto_fix": false,
+          "repos": [
+            {
+              "slug": "fs-eng/mobile-ios",
+              "platform": "ios",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": false,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            },
+            {
+              "slug": "fs-eng/android-tree",
+              "platform": "android",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "dev"
+              ]
+            },
+            {
+              "slug": "fs-eng/mobile-api-nodejs",
+              "platform": "backend",
+              "pipelines": {
+                "pr_review": true,
+                "daily_review": true,
+                "fix": true,
+                "discuss": true
+              },
+              "review_branches": [
+                "master"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "product-prototype",
+          "name": "Product Prototype",
+          "auto_fix": false,
+          "repos": []
+        }
+      ]
+    },
+    "config/roles.json": {
+      "base_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Bash(git log:*)",
+        "Bash(git diff:*)",
+        "Bash(git show:*)",
+        "Bash(git status:*)",
+        "Bash(git blame:*)",
+        "Bash(cd:*)",
+        "Bash(ls:*)",
+        "Bash(wc:*)",
+        "Bash(git ls-files:*)",
+        "Bash(git merge-base:*)",
+        "Bash(git rev-list:*)",
+        "Bash(git cat-file:*)"
+      ],
+      "roles": [
+        {
+          "name": "simplicity",
+          "prompt": "prompts/simplicity.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "correctness",
+          "prompt": "prompts/correctness.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:m3.material.io)",
+            "mcp__jira__jira_get_issue",
+            "mcp__jira__jira_search"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          },
+          "mcp_inherit": [
+            "jira"
+          ]
+        },
+        {
+          "name": "security",
+          "prompt": "prompts/security.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "performance",
+          "prompt": "prompts/performance.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {}
+        },
+        {
+          "name": "beauty",
+          "prompt": "prompts/beauty.md",
+          "platforms": [
+            "ios",
+            "android"
+          ]
+        },
+        {
+          "name": "test_adequacy",
+          "prompt": "prompts/test_adequacy.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "concurrency",
+          "prompt": "prompts/concurrency.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ],
+          "models": {},
+          "extra_tools": [
+            "mcp__sosumi__searchAppleDocumentation",
+            "mcp__sosumi__fetchAppleDocumentation",
+            "mcp__sosumi__fetchExternalDocumentation",
+            "WebFetch(domain:developer.android.com)",
+            "WebFetch(domain:kotlinlang.org)"
+          ],
+          "mcp_servers": {
+            "sosumi": {
+              "type": "http",
+              "url": "https://sosumi.ai/mcp"
+            }
+          }
+        },
+        {
+          "name": "conventions",
+          "prompt": "prompts/conventions.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        },
+        {
+          "name": "compatibility",
+          "prompt": "prompts/compatibility.md",
+          "platforms": [
+            "ios",
+            "android",
+            "backend"
+          ]
+        }
+      ]
+    },
+    "state/marks/fs-eng_android-tree": "{{rev:state/repos/fs-eng_android-tree:dev~0}}",
+    "state/marks/fs-eng_mobile-api-nodejs": "{{rev:state/repos/fs-eng_mobile-api-nodejs:master}}"
+  },
+  "repos": {
+    "state/repos/fs-eng_android-tree": {
+      "base": "dev",
+      "remote": "fs-eng/android-tree",
+      "files": {
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesViewModel.kt": "package org.familysearch.tree.memories\n\nclass MemoriesViewModel(private val repo: MemoriesRepository) {\n    fun load(personId: String) = repo.memories(personId)\n}\n",
+        "app/src/main/java/org/familysearch/tree/memories/MemoriesRepository.kt": "package org.familysearch.tree.memories\n\ninterface MemoriesRepository {\n    fun memories(personId: String): List<Memory>\n}\n"
+      },
+      "commits": []
+    },
+    "state/repos/fs-eng_mobile-api-nodejs": {
+      "base": "master",
+      "remote": "fs-eng/mobile-api-nodejs",
+      "files": {
+        "src/routes/memories.js": "module.exports = (req, res) => res.json([])\n"
+      }
+    }
+  },
+  "fakes": {
+    "claude": [
+      {
+        "match": "prompts/correctness\\.md|\\n\\n[^\\n]*correctness",
+        "result": "1. MemoriesViewModel.kt:7 (high, confident): the cache is keyed by person id only, so a different signed-in user sees the previous user's memories until signedOut() runs. signedOut() is never called from the sign-out flow."
+      },
+      {
+        "match": "prompts/simplicity\\.md|\\n\\n[^\\n]*simplicity",
+        "result": "No findings. The cache is small and local."
+      },
+      {
+        "match": "prompts/test_adequacy\\.md|\\n\\n[^\\n]*test_adequacy",
+        "result": "1. MemoriesViewModel.kt:9 (medium): signedOut() has no test, so nothing pins the cache clearing that the sign-out defect depends on."
+      },
+      {
+        "match": "",
+        "result": "No findings."
+      }
+    ]
+  },
+  "stubs": {
+    "team_lead": {
+      "summary": "Nothing landed since the last review.",
+      "changes": [],
+      "conflicts": [],
+      "no_action": []
+    },
+    "digest": {
+      "content": "*Daily review:* no new commits on fs-eng/android-tree or fs-eng/mobile-api-nodejs. Nothing to review."
+    }
+  },
+  "ops": {
+    "effects": [
+      {
+        "tool": "git",
+        "args": [
+          "-C",
+          "$OPS_HOME/state/repos/fs-eng_android-tree",
+          "fetch",
+          "--quiet",
+          "origin"
+        ]
+      },
+      {
+        "tool": "git",
+        "args": [
+          "-C",
+          "$OPS_HOME/state/repos/fs-eng_mobile-api-nodejs",
+          "fetch",
+          "--quiet",
+          "origin"
+        ]
+      }
+    ],
+    "result": {
+      "report": "digest.md",
+      "attached": true,
+      "verdict": "No changes"
+    },
+    "sessions": [
+      {
+        "stage": "team_lead",
+        "kind": "role",
+        "role": "TeamLead",
+        "type": "judge",
+        "output_mode": "guided_json",
+        "prompt": "You are the team lead. Eight specialist reviewers looked at the code that\nlanded since the last review: simplicity, correctness, security,\nperformance, beauty, test adequacy, concurrency, and conventions. Each reports independently and\nnone of them sees the others.\n\nYour job is to decide what actually changes. You are not a summarizer.\n\nRead every review. Then:\n\nDrop anything speculative, anything a linter catches, anything a\nreviewer hedged on, and anything that is a matter of taste rather than\nconsequence. A reviewer being confident is not evidence.\n\nReconcile conflicts explicitly. Reviewers will disagree, and the\ndisagreements are the most valuable thing here. Performance will want a\ncache that simplicity wants gone; security will want validation that\nbeauty finds intrusive. Pick a side, say which reviewer you overruled,\nand say why. This team prefers the simpler change when the tradeoff is\nclose.\n\nMerge duplicates. Several reviewers finding the same line from different\nangles is one decision, and the strongest reason to act on it.\n\nFor each thing you decide to change, give the repo, the file, what to do\nin one sentence, and which reviewers backed it. Rank by blast radius on\na user who cannot upgrade, not by how alarming the review sounded.\n\nBe willing to decide that nothing needs to change. That is a real\noutcome and saying it plainly is more useful than manufacturing work.\n\nReviews:\n[]"
+      },
+      {
+        "stage": "digest",
+        "kind": "role",
+        "role": "Digest",
+        "type": "worker",
+        "output_mode": "text",
+        "prompt": "Write the Slack post for this morning's review.\n\nOutput the message text and nothing else. No JSON, no object, no code\nfence, no preamble, no field names. The first character of your response\nis the first character of the Slack message. Whatever you emit is posted\nverbatim.\n\nSlack mrkdwn, no headings, under 40 lines.\n\nOpen with coverage: what was reviewed and anything that went unreviewed.\nAn engineer skimming at 9am must not read a missing review as a clean\none.\n\nLead with the count of high-severity changes. One line per change: repo,\nfile, what to do. Note any conflict the lead resolved in one line each,\nbecause that is where the judgment was. Close with a single line naming\nwhat was reviewed and what was clean.\n\nIf the lead decided nothing needs to change, say that in one line and\nstop.\n\n{'summary': 'Nothing landed since the last review.', 'changes': [], 'conflicts': [], 'no_action': []}"
+      }
+    ],
+    "outputs": {
+      "repos": {
+        "repos": [
+          {
+            "slug": "fs-eng/android-tree",
+            "platform": "android"
+          },
+          {
+            "slug": "fs-eng/mobile-api-nodejs",
+            "platform": "backend"
+          }
+        ]
+      },
+      "sync": [
+        {
+          "repo": "fs-eng/android-tree",
+          "platform": "android",
+          "path": "$OPS_HOME/state/repos/fs-eng_android-tree",
+          "branch": "dev",
+          "head": "c40f5e22575d157a25e7414cdb642989b512cfab",
+          "range": "c40f5e22575d157a25e7414cdb642989b512cfab..c40f5e22575d157a25e7414cdb642989b512cfab",
+          "commit_count": 0,
+          "files": [],
+          "has_changes": false
+        },
+        {
+          "repo": "fs-eng/mobile-api-nodejs",
+          "platform": "backend",
+          "path": "$OPS_HOME/state/repos/fs-eng_mobile-api-nodejs",
+          "branch": "master",
+          "head": "6f46b29c7a36b99dfb7bbb87445dd673a913eb90",
+          "range": "6f46b29c7a36b99dfb7bbb87445dd673a913eb90..6f46b29c7a36b99dfb7bbb87445dd673a913eb90",
+          "commit_count": 0,
+          "files": [],
+          "has_changes": false
+        }
+      ],
+      "assignments": {
+        "jobs": [],
+        "skipped": [
+          {
+            "repo": "fs-eng/android-tree",
+            "reason": "no new commits"
+          },
+          {
+            "repo": "fs-eng/mobile-api-nodejs",
+            "reason": "no new commits"
+          }
+        ],
+        "count": 0
+      },
+      "reviews": [],
+      "team_lead": {
+        "summary": "Nothing landed since the last review.",
+        "changes": [],
+        "conflicts": [],
+        "no_action": []
+      },
+      "digest": {
+        "content": "*Daily review:* no new commits on fs-eng/android-tree or fs-eng/mobile-api-nodejs. Nothing to review."
+      },
+      "report": {
+        "report": "digest.md",
+        "attached": true,
+        "verdict": "No changes"
+      }
+    }
+  }
+}

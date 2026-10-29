@@ -9,6 +9,7 @@ export const user = () => current?.user ?? null;
 export const isAdmin = () => Boolean(current?.user?.is_admin);
 export const isSso = () => Boolean(current?.sso);
 export const memberships = () => current?.memberships ?? [];
+export const requiresTotp = () => Boolean(current?.auth?.totp);
 
 export function ledTeamIds(sessionPayload = current) {
   return (sessionPayload?.memberships ?? []).filter((membership) => membership.scope_kind === 'team' && membership.role === 'team_lead').map((membership) => membership.scope_id);
@@ -19,9 +20,9 @@ export const canManageTeam = (teamId) => isAdmin() || ledTeamIds().includes(team
 // The server is the real gate. This only hides what a role cannot use.
 export function navFor(sessionPayload) {
   if (!sessionPayload?.user) return [];
-  if (sessionPayload.user.is_admin) return ['overview', 'runs', 'subjects', 'trends', 'teams', 'status', 'workflows', 'roles', 'packs', 'users', 'secrets', 'runner-keys', 'webhooks', 'settings', 'account'];
-  if (ledTeamIds(sessionPayload).length) return ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'account'];
-  return ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'account'];
+  if (sessionPayload.user.is_admin) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'status', 'workflows', 'roles', 'packs', 'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'triggers', 'settings', 'account'];
+  if (ledTeamIds(sessionPayload).length) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'triggers', 'account'];
+  return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'account'];
 }
 
 // Step-up for a single sign-on account is a fresh sign-in at the provider, which returns to this page.
@@ -34,9 +35,10 @@ export function ssoStepUpPath(hash) {
 // Mirrors RETURN_HASH in routes_oidc.py, so a link from a pull request survives sign-in.
 const RETURN_HASH = /^#\/[A-Za-z0-9/_?=&.%+-]{0,200}$/;
 
-export function returnHash(search) {
-  const back = new URLSearchParams(search || '').get('return') || '';
-  return RETURN_HASH.test(back) ? back : '';
+// The server's signed-out redirect to /login keeps the link's own hash, so that counts too.
+export function returnHash(search, hash = '') {
+  const back = new URLSearchParams(search || '').get('return') || hash || '';
+  return RETURN_HASH.test(back) && back !== '#/' ? back : '';
 }
 
 export function loginPath(hash) {
@@ -45,6 +47,12 @@ export function loginPath(hash) {
 
 export function ssoLoginPath(back) {
   return back ? `/auth/oidc/login?return=${encodeURIComponent(back)}` : '/auth/oidc/login';
+}
+
+export function signInIntro(methods = {}) {
+  if (methods.password) return methods.totp ? 'Sign in with your username and password, plus your authenticator code once you have set one up.' : 'Sign in with your username and password.';
+  if (methods.oidc) return 'Sign in with your organization account.';
+  return 'No sign-in method is enabled on this server.';
 }
 
 export function signInNotice(search) {

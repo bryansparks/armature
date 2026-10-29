@@ -1,4 +1,5 @@
-// A live tail of one run's newest events, opened from the Live block on the Runs page.
+// A live tail of one run's newest events, at the top of a thread's page while the run is in progress.
+import { backfill, compactWhere, isActivity, isBoundary, nowText, roleOf, roleState, RunActivity, stageTrack, verdictTone } from './activity.js';
 import { api, listOf } from './api.js';
 import { clear, duration, element, errorBox, link, statusChip } from './dom.js';
 import { applyStepEvent, describe, elapsedSeconds, eventStepKey, newestBefore, oneLine, summarizeInput, TERMINAL } from './feed.js';
@@ -8,6 +9,7 @@ import { progress } from './runpage.js';
 
 export const TAIL_CAP = 300;
 export const TAIL_LOAD = 150;
+const BACKFILL_PAGE = 1000;
 const LOG_LINE_MAX = 2000;
 const POLL_MS = 2000;
 const SETTLE_MS = 1500;
@@ -28,9 +30,11 @@ export function isHeartbeat(event) {
   return typeof payload.elapsed_s === 'number' && Object.keys(payload).every((key) => BEAT_KEYS.has(key));
 }
 
-export const stillRunning = (beat) => `Still running${beat.step ? ` ${beat.step}` : ''} · ${duration(beat.elapsed_s)}`;
+export const stillRunning = (beat) => (beat.step ? `${beat.step} · still running ${duration(beat.elapsed_s)}` : `Still running · ${duration(beat.elapsed_s)}`);
 
 // Heartbeats update one line instead of adding rows, and the oldest rows go once there are more than ``cap``.
+// A role's session activity updates that role's one "now" line, which goes when the role finishes. A step
+// whose events carry roles loses its start and finish rows, since its roles' own lines say more.
 export class TailModel {
   constructor(cap = TAIL_CAP) {
     this.cap = cap;
@@ -38,10 +42,13 @@ export class TailModel {
     this.lastSeq = 0;
     this.beat = null;
     this.nextId = 0;
+    this.now = new Map();
+    this.roleSteps = new Set();
   }
 
   append(events) {
     const added = [];
+    const hidden = [];
     for (const event of events) {
       const seq = Number(event?.seq);
       if (!Number.isFinite(seq) || seq <= this.lastSeq) continue;
@@ -52,58 +59,113 @@ export class TailModel {
         continue;
       }
       this.beat = null;
-      const row = { id: ++this.nextId, seq, kind: String(event.kind || 'unknown'), step_key: eventStepKey(event), ts: event.ts || null, payload };
+      const kind = String(event.kind || 'unknown');
+      const key = eventStepKey(event);
+      const role = roleOf(payload);
+      if (role) {
+        if (!this.roleSteps.has(key)) {
+          this.roleSteps.add(key);
+          const boundaries = this.rows.filter((row) => row.step_key === key && isBoundary(row.kind));
+          this.rows = this.rows.filter((row) => !boundaries.includes(row));
+          hidden.push(...boundaries);
+        }
+        const id = `${key ?? ''}\u0000${role}`;
+        if (isActivity(kind, payload)) {
+          const text = nowText(kind, payload);
+          if (text) this.now.set(id, { role, step_key: key, text });
+          continue;
+        }
+        const state = kind === 'log' ? roleState(payload) : null;
+        if (state === 'finished' || state === 'failed') this.now.delete(id);
+      }
+      if (isBoundary(kind) && this.roleSteps.has(key)) continue;
+      const row = { id: ++this.nextId, seq, kind, step_key: key, ts: event.ts || null, payload };
       this.rows.push(row);
       added.push(row);
     }
-    const dropped = this.rows.splice(0, Math.max(0, this.rows.length - this.cap));
+    const dropped = [...hidden, ...this.rows.splice(0, Math.max(0, this.rows.length - this.cap))];
     const fresh = new Set(added);
     const gone = new Set(dropped);
     return { added: added.filter((row) => !gone.has(row)), removed: dropped.filter((row) => !fresh.has(row)).map((row) => row.id) };
+  }
+
+  nowLines() {
+    return [...this.now.values()];
   }
 }
 
 export function tailLine(row, { showCost = true } = {}) {
   const payload = row.payload || {};
+  const who = roleOf(payload);
+  if (who && row.kind === 'log' && payload.message !== undefined && payload.message !== null) {
+    const tone = payload.level === 'error' ? 'bad' : payload.verdict ? verdictTone(payload.verdict) : 'muted';
+    return { tone, label: null, text: oneLine(payload.message, 400), mono: false, who };
+  }
   const logged = payload.message ?? payload.line;
   if (row.kind === 'log' && logged !== undefined && logged !== null) {
     const text = String(logged);
     return { tone: 'muted', label: payload.stream ? String(payload.stream) : 'log',
-      text: text.length > LOG_LINE_MAX ? `${text.slice(0, LOG_LINE_MAX - 1)}…` : text, mono: true };
+      text: text.length > LOG_LINE_MAX ? `${text.slice(0, LOG_LINE_MAX - 1)}…` : text, mono: true, who };
   }
-  if (row.kind === 'text') return { tone: 'text', label: 'Text', text: oneLine(payload.text, 400), mono: false };
-  if (row.kind === 'tool_call') return { tone: 'muted', label: payload.tool || 'Tool', text: summarizeInput(payload.input), mono: false };
-  return { ...describe(row, { showCost }), mono: false };
+  if (row.kind === 'text') return { tone: 'text', label: 'Text', text: oneLine(payload.text, 400), mono: false, who };
+  if (row.kind === 'tool_call') return { tone: 'muted', label: payload.tool || 'Tool', text: summarizeInput(payload.input), mono: false, who };
+  return { ...describe(row, { showCost }), mono: false, who };
 }
 
 function setText(node, text) {
   if (node.textContent !== text) node.textContent = text;
 }
 
-export function openTail({ runId, run: seed = {}, label, color, title, subject, display, signal: viewSignal, onClose = () => {} }) {
+// Says a run ended when it was seen running and then ending. A run already over when the tail opens counts only
+// when the page drew it as running (``drawnLive``), and the page's redraw backoff bounds how often that repeats.
+export function endNotice(onEnd, { drawnLive = false } = {}) {
+  let wasLive = false;
+  let loaded = false;
+  let told = false;
+  const tell = (run) => {
+    if (told) return false;
+    told = true;
+    onEnd(run);
+    return true;
+  };
+  return {
+    opened: (run) => {
+      wasLive = !TERMINAL.has(run.status);
+      return !wasLive && drawnLive ? tell(run) : false;
+    },
+    loaded: () => { loaded = true; },
+    // The end arrived among the events the tail loaded on opening, so it ended before anyone watched.
+    ending: () => { if (!loaded) wasLive = false; },
+    ended: (run) => (wasLive && loaded ? tell(run) : false),
+  };
+}
+
+export function openTail({ runId, run: seed = {}, label, color, title, subject, display, signal: viewSignal, drawnLive = false, onEnd = () => {} }) {
   const controller = new AbortController();
   const signal = controller.signal;
   const stopWithView = () => close();
   viewSignal?.addEventListener('abort', stopWithView);
   let run = { ...seed };
   let steps = [];
+  const notice = endNotice(onEnd, { drawnLive });
 
   const chipSlot = element('span', {}, statusChip(run.status));
   const elapsedText = element('span', { class: 'mono' });
   const liveNote = element('span', { class: 'muted' }, 'Connecting…');
-  const closeButton = element('button', { type: 'button', class: 'tail-close' }, 'Close');
   const progressText = element('p', { class: 'run-progress' });
+  const whereText = element('p', { class: 'run-where', hidden: true });
+  const nowList = element('div', { class: 'tail-now', hidden: true });
   const list = element('div', { class: 'tail-list' });
   const box = element('div', { class: 'tail-box', tabindex: 0, role: 'region', 'aria-label': 'Newest events' }, list);
   const beatLine = element('p', { class: 'tail-beat', hidden: true });
   const jumpButton = element('button', { type: 'button', class: 'jump', hidden: true }, 'Jump to latest');
   const announcer = element('div', { class: 'visually-hidden', role: 'status' });
-  const node = element('section', { class: 'tail-panel', id: 'runs-tail', role: 'region', 'aria-label': `Log of ${label}`, tabindex: -1 },
+  const node = element('section', { class: 'tail-panel', role: 'region', 'aria-label': `Log of ${label}` },
     element('div', { class: 'tail-head' },
-      element('h2', { class: 'tail-title' }, element('span', { class: `swatch sw-${color}`, 'aria-hidden': 'true' }), label), closeButton),
+      element('h3', { class: 'tail-title' }, element('span', { class: `swatch sw-${color}`, 'aria-hidden': 'true' }), label)),
     element('div', { class: 'tail-meta' }, element('span', { class: 'tail-name' }, title), subject, chipSlot, elapsedText, liveNote,
       link(hashFor('run', [runId]), 'Open full run')),
-    progressText, element('div', { class: 'tail-frame' }, box, jumpButton), beatLine, announcer);
+    progressText, whereText, element('div', { class: 'tail-frame' }, box, jumpButton), nowList, beatLine, announcer);
 
   let shownStatus = run.status;
   const drawHeader = () => {
@@ -114,7 +176,22 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
     const isOpen = !TERMINAL.has(run.status);
     setText(elapsedText, duration(elapsedSeconds(run.started_at, run.finished_at || (isOpen ? null : run.started_at))));
   };
-  const syncProgress = () => setText(progressText, progress(steps).text);
+  const activity = new RunActivity();
+  let activityReady = false;
+  let activityQueue = [];
+  const syncWhere = () => {
+    const text = compactWhere(stageTrack(steps, activity));
+    whereText.hidden = !text;
+    setText(whereText, text);
+  };
+  const syncProgress = () => {
+    setText(progressText, progress(steps).text);
+    syncWhere();
+  };
+  const feedActivity = (events) => {
+    if (!activityReady) activityQueue.push(...events);
+    else if (activity.apply(events)) syncWhere();
+  };
   const setLive = (state) => setText(liveNote, LIVE_STATES[state] || '');
   drawHeader();
   syncProgress();
@@ -151,9 +228,16 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
 
   const rowNode = (row) => {
     const line = tailLine(row, { showCost: display.show_cost });
+    const who = line.who || row.step_key;
     return element('div', { class: `tail-row tone-${line.tone}${line.mono ? ' tail-log' : ''}`, title: row.ts },
-      row.step_key ? element('span', { class: 'tail-step' }, row.step_key) : null,
-      element('span', { class: 'feed-label' }, line.label), ' ', element('span', { class: 'tail-text' }, line.text));
+      who ? element('span', { class: line.who ? 'tail-step tail-role' : 'tail-step' }, who) : null,
+      line.label ? [element('span', { class: 'feed-label' }, line.label), ' '] : null, element('span', { class: 'tail-text' }, line.text));
+  };
+  const drawNow = () => {
+    const lines = model.nowLines();
+    nowList.hidden = !lines.length;
+    clear(nowList).append(...lines.map((entry) => element('p', { class: 'tail-now-line' },
+      element('span', { class: 'tail-step tail-role' }, entry.role), ' ', element('span', { class: 'tail-text' }, entry.text))));
   };
   const draw = ({ added, removed }) => {
     if (removed.length) {
@@ -171,6 +255,7 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
       fragment.append(rowElement);
     }
     list.append(fragment);
+    drawNow();
     beatLine.hidden = !model.beat;
     if (model.beat) setText(beatLine, stillRunning(model.beat));
     if (following) toBottom();
@@ -181,16 +266,21 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
   let stream = null;
   let poller = null;
   let settleTimer = 0;
-  const ticker = setInterval(drawHeader, 1000);
+  const ticker = setInterval(() => {
+    drawHeader();
+    syncWhere();
+  }, 1000);
   const settleSoon = () => {
     if (settled) return;
     settled = true;
+    notice.ending();
     settleTimer = setTimeout(() => {
       stream?.close();
       poller?.stop();
       clearInterval(ticker);
       setLive('ended');
       drawHeader();
+      notice.ended(run);
     }, SETTLE_MS);
   };
 
@@ -222,6 +312,7 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
     const batch = queue.sort((left, right) => left.seq - right.seq);
     queue = [];
     sideEffects(batch, { live: true });
+    feedActivity(batch);
     draw(model.append(batch));
   };
   const receive = (events) => {
@@ -268,14 +359,24 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
       const detail = await api(runPath(runId));
       if (signal.aborted) return;
       takeRun(detail);
+      notice.opened(run);
       const lastSeq = run.last_seq === undefined || run.last_seq === null ? NaN : Number(run.last_seq);
       if (Number.isFinite(lastSeq)) {
         const events = listOf(await api(beforePath(runId, newestBefore(lastSeq), TAIL_LOAD)), 'events');
         if (signal.aborted) return;
         sideEffects(events, { live: false });
+        feedActivity(events);
         draw(model.append(events));
       }
       loading = false;
+      notice.loaded();
+      backfill(activity, (after) => api(afterPath(runId, after, BACKFILL_PAGE)), { signal }).catch(() => {}).finally(() => {
+        if (signal.aborted) return;
+        activityReady = true;
+        activity.apply(activityQueue.sort((left, right) => left.seq - right.seq));
+        activityQueue = [];
+        syncWhere();
+      });
       if (queue.length) frame = requestAnimationFrame(flush);
       if (TERMINAL.has(run.status)) {
         settled = true;
@@ -295,31 +396,12 @@ export function openTail({ runId, run: seed = {}, label, color, title, subject, 
     closed = true;
     controller.abort();
     viewSignal?.removeEventListener('abort', stopWithView);
-    document.removeEventListener('keydown', onKey);
     clearInterval(ticker);
     clearTimeout(announceTimer);
     clearTimeout(settleTimer);
     cancelAnimationFrame(frame);
-    node.remove();
-    if (!viewSignal?.aborted) onClose();
   }
-  function onKey(keyEvent) {
-    if (keyEvent.key !== 'Escape' || keyEvent.defaultPrevented) return;
-    if (node.contains(document.activeElement) || document.activeElement === document.body) close();
-  }
-  closeButton.addEventListener('click', close);
-  document.addEventListener('keydown', onKey);
   start();
 
-  return {
-    node,
-    runId: String(runId),
-    close,
-    focus: () => node.focus(),
-    update: (summary) => {
-      run = { ...run, ...summary };
-      drawHeader();
-      if (TERMINAL.has(run.status)) settleSoon();
-    },
-  };
+  return { node, close };
 }

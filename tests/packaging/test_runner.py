@@ -72,7 +72,7 @@ adapters:
   greet:
     name: greet
     type: script
-    cmd: "echo 'child says: {{greeting}}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\\"ARMATURE_CONTEXT\\"]); print(\\"child says:\\", c.get(\\"greeting\\", \\"\\"))'"
 stages:
   - id: respond
     adapter: greet
@@ -143,3 +143,46 @@ def test_package_run_captures_artifact_files_from_workdir(tmp_path, monkeypatch)
     assert "real report body" in captured[0].read_text(encoding="utf-8")
     entry = next(a for a in receipt.artifacts if a.path == "artifacts/report.html")
     assert entry.sha256  # receipt digests the delivered bytes
+
+
+_CALL_PARENT = """\
+name: call-demo
+version: "1.0"
+contracts:
+  inputs: []
+stages:
+  - id: review
+    call: {workflow: linter}
+    with: {target: pkg}
+"""
+
+_LINTER = """\
+# armature: stored-workflow
+name: linter
+contracts:
+  inputs: [{name: target, type: string, required: true}]
+adapters:
+  lint: {name: lint, type: script,
+         cmd: "python3 -c 'import json, os; print(\\"linted\\", json.loads(os.environ[\\"ARMATURE_CONTEXT\\"])[\\"target\\"])'"}
+stages:
+  - id: lint
+    adapter: lint
+"""
+
+
+def test_package_run_executes_bundled_call(tmp_path, monkeypatch):
+    from armature.spec.calls import ResolvedCall, write_call_bundle
+    repo = tmp_path / "repo"
+    write_call_bundle(repo / "calls", [ResolvedCall("linter", 1, _LINTER)], {"linter": 1})
+    spec_path = repo / "workflow.yaml"
+    spec_path.write_text(_CALL_PARENT, encoding="utf-8")
+    pkg = PackageBuilder().build(spec=spec_path, out=tmp_path / "pkg", inputs={})
+
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    receipt = PackageRunner(skip_deps_install=True).run_sync(pkg, tmp_path / "results")
+
+    assert receipt.status == "complete", receipt.error
+    art = next((tmp_path / "results").glob("*/artifacts/review.md")).read_text(encoding="utf-8")
+    assert "linted pkg" in art

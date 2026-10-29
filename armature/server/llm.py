@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import Connection, desc, select
 
 from armature.server import defs
-from armature.server.db.schema import audit, providers, users
+from armature.server.db.schema import INSTANCE_SCOPE, audit, providers, users
 
 TIMEOUT_S = 120
 MAX_TOKENS = 8192
@@ -53,20 +53,20 @@ def claude_binary() -> str | None:
     return shutil.which(CLAUDE_BINARY)
 
 
-def team_aliases(conn: Connection, team_id: str) -> list[str]:
-    rows = conn.execute(select(providers.c.aliases).where(providers.c.team_id == team_id)).all()
+def team_aliases(conn: Connection, team_id: str, project_id: str | None = None) -> list[str]:
+    """The aliases a run in the project, else the team, can use: the project's, the team's, and the instance's."""
+    scopes = [s for s in (project_id, team_id, INSTANCE_SCOPE) if s is not None]
+    rows = conn.execute(select(providers.c.aliases).where(providers.c.scope.in_(scopes))).all()
     return sorted({alias for r in rows for alias in (r.aliases or {})})
 
 
-def resolve_provider(conn: Connection, team_id: str, alias: str) -> tuple[Any, str]:
-    """The team's provider that lists ``alias``, oldest first, and the model id the alias names."""
-    rows = conn.execute(select(providers).where(providers.c.team_id == team_id)
-                        .order_by(providers.c.created_at, providers.c.id)).all()
-    for row in rows:
-        model = (row.aliases or {}).get(alias)
-        if isinstance(model, str) and model:
-            return row, model
-    raise LLMError(400, f"No provider of this team defines the alias {alias}.")
+def resolve_provider(conn: Connection, team_id: str, alias: str, project_id: str | None = None) -> tuple[Any, str]:
+    """The provider that lists ``alias``, the project's first, then the team's, and the model id it names."""
+    found = defs.resolve_alias(conn, alias, team_id, project_id)
+    if found is None:
+        raise LLMError(400, f"No provider of this {'project or ' if project_id else ''}team defines the alias "
+                            f"{alias}.")
+    return found
 
 
 def _parse_json(text: Any) -> dict[str, Any]:
@@ -205,8 +205,8 @@ def check_endpoint(conn: Connection, row: Any) -> None:
         raise LLMError(400, exc.message) from exc
 
 
-def prepare(conn: Connection, keyring: Any, team_id: str, alias: str) -> Call:
-    row, model_id = resolve_provider(conn, team_id, alias)
+def prepare(conn: Connection, keyring: Any, team_id: str, alias: str, project_id: str | None = None) -> Call:
+    row, model_id = resolve_provider(conn, team_id, alias, project_id)
     if not defs.provider_configured(conn, row):
         raise LLMError(400, "The provider's credential secret is not set.")
     check_endpoint(conn, row)
@@ -214,5 +214,5 @@ def prepare(conn: Connection, keyring: Any, team_id: str, alias: str) -> Call:
 
 
 def complete_json(conn: Connection, keyring: Any, team_id: str, alias: str, system: str,
-                  messages: list[dict[str, Any]], schema: dict[str, Any]) -> Completion:
-    return prepare(conn, keyring, team_id, alias).complete(system, messages, schema)
+                  messages: list[dict[str, Any]], schema: dict[str, Any], project_id: str | None = None) -> Completion:
+    return prepare(conn, keyring, team_id, alias, project_id).complete(system, messages, schema)

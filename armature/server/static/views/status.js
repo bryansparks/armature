@@ -38,7 +38,9 @@ export async function render(root, { signal }) {
       return;
     }
     updated.textContent = updatedText(status);
-    append(clear(errorSlot), [status.error ? element('div', { class: 'banner warn', role: 'alert' }, status.error) : null]);
+    const environments = status.environments?.message || (status.environments?.reasons || []).join(' ');
+    append(clear(errorSlot), [status.error ? element('div', { class: 'banner warn', role: 'alert' }, status.error) : null,
+      environments ? element('div', { class: 'banner warn', role: 'status' }, `Environments: ${environments}`) : null]);
     clear(body).append(status.markdown ? renderMarkdown(status.markdown) : empty('Nothing to show yet.'));
     try {
       clear(operationsSlot).append(operationsTable(listOf(await api(`/api/operations?limit=${OPERATIONS_LIMIT}`), 'operations')));

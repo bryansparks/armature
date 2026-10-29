@@ -114,3 +114,81 @@ def test_runs_api_honors_show_cost(sqlite_engine, keyring, clock, show_cost):
     expected = (1.25, 0.5) if show_cost else (None, None)
     assert (listed[0]["cost_usd"], detail["steps"][0]["cost_usd"]) == expected
     assert detail["run"]["cost_usd"] == expected[0]
+
+
+def _subject_runs(engine, clock):
+    team_id = new_id()
+    made = {}
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team_id, name="mobile", created_at=clock()))
+        for name, subject, workflow, status in [
+            ("dev_failed", "MEM-1", "development", "failed"), ("loose_old", None, "digest", "succeeded"),
+            ("review_old", "acme/app#7", "code-review", "succeeded"), ("loose_new", None, "digest", "succeeded"),
+            ("fix", "acme/app#7", "pr-fix", "failed"), ("dev_rerun", "MEM-1", "development", "running"),
+            ("review_new", "acme/app#7", "code-review", "succeeded"),
+        ]:
+            clock.advance(seconds=1)
+            made[name] = new_id()
+            conn.execute(insert(runs).values(id=made[name], team_id=team_id, status=status, started_at=clock(),
+                                             subject=subject, workflow_name=workflow))
+    return made
+
+
+def test_grouped_runs_keep_the_latest_per_subject(engine, keyring, clock):
+    _user_id, secret = add_user(engine, keyring, clock, "ana", is_admin=True)
+    made = _subject_runs(engine, clock)
+    client = make_client(engine, keyring, clock)
+    assert login(client, "ana", clock.code(secret)).status_code == 200
+
+    def listed(**params):
+        return [(r["id"], r.get("group_size")) for r in client.get("/api/runs", params=params).json()["runs"]]
+
+    assert listed(group=True) == [(made["review_new"], 3), (made["dev_rerun"], 2), (made["loose_new"], 1),
+                                  (made["loose_old"], 1)]
+    assert listed(group=True, status="failed") == [(made["fix"], 1), (made["dev_failed"], 1)]
+    assert listed(group=True, workflows="code-review") == [(made["review_new"], 2)]
+    assert listed(group=True, subject="MEM-1") == [(made["dev_rerun"], 2)]
+    newest_first = ["review_new", "dev_rerun", "fix", "loose_new", "review_old", "loose_old", "dev_failed"]
+    assert listed() == [(made[name], None) for name in newest_first]
+
+    seen, before = [], None
+    while True:
+        page = client.get("/api/runs", params={"group": True, "limit": 1} | ({"before": before} if before else {})).json()
+        seen += [r["id"] for r in page["runs"]]
+        before = page["next_before"]
+        if before is None:
+            break
+    assert seen == [made["review_new"], made["dev_rerun"], made["loose_new"], made["loose_old"]]
+
+
+def test_a_pull_requests_runs_group_with_the_issue_thread(engine, keyring, clock):
+    _user_id, secret = add_user(engine, keyring, clock, "ana", is_admin=True)
+    team_id = new_id()
+    made = {}
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team_id, name="mobile", created_at=clock()))
+        for name, subject, thread, workflow, title in [
+            ("dev", "MEM-1", "MEM-1", "development", "Build it"),
+            ("review", "acme/app#7", "MEM-1", "code-review", "[MEM-1] Build it"),
+            ("other_pull", "acme/app#8", None, "code-review", "Unrelated"),
+            ("fix", "acme/app#7", "MEM-1", "pr-fix", "Fix review comments"),
+        ]:
+            clock.advance(seconds=1)
+            made[name] = new_id()
+            conn.execute(insert(runs).values(id=made[name], team_id=team_id, status="succeeded", started_at=clock(),
+                                             subject=subject, thread=thread, workflow_name=workflow,
+                                             summary={"title": title}))
+    client = make_client(engine, keyring, clock)
+    assert login(client, "ana", clock.code(secret)).status_code == 200
+
+    def listed(**params):
+        return [(r["id"], r.get("group_size"), r["thread"], r["title"])
+                for r in client.get("/api/runs", params=params).json()["runs"]]
+
+    assert listed(group=True) == [(made["fix"], 3, "MEM-1", "Fix review comments"),
+                                  (made["other_pull"], 1, None, "Unrelated")]
+    assert [row[0] for row in listed(thread="MEM-1")] == [made["fix"], made["review"], made["dev"]]
+    assert [row[0] for row in listed(thread="acme/app#8")] == [made["other_pull"]]
+    assert listed(thread="acme/app#7") == []
+    detail = client.get(f"/api/runs/{made['review']}").json()["run"]
+    assert (detail["subject"], detail["thread"]) == ("acme/app#7", "MEM-1")

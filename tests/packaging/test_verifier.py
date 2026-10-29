@@ -214,3 +214,45 @@ def test_collect_api_key_envs_sweeps_tool_modules(tmp_path):
     spec = load_spec(spec_file)
     envs = collect_api_key_envs(spec)
     assert envs == {"OPENROUTER_API_KEY", "TAVILY_API_KEY"}
+
+
+_CALL_PARENT = """\
+name: call-demo
+version: "1.0"
+stages:
+  - id: review
+    call: {workflow: linter}
+"""
+
+_LINTER = """\
+name: linter
+adapters:
+  lint: {name: lint, type: script, cmd: "echo lint-ok"}
+stages:
+  - id: lint
+    adapter: lint
+"""
+
+
+def _call_build(tmp_path):
+    from armature.spec.calls import ResolvedCall, write_call_bundle
+    write_call_bundle(tmp_path / "calls", [ResolvedCall("linter", 1, _LINTER)], {"linter": 1})
+    spec_path = tmp_path / "workflow.yaml"
+    spec_path.write_text(_CALL_PARENT, encoding="utf-8")
+    pkg = _Builder().build(spec=spec_path, out=tmp_path / "pkg", inputs={})
+    return pkg, PackageManifest.model_validate(_Y.load(pkg / "package.yaml"))
+
+
+def test_v9_bundled_called_workflow_passes(tmp_path):
+    pkg, manifest = _call_build(tmp_path)
+    v9 = _v9(CompletenessVerifier().verify(pkg, manifest, write_integrity=False))
+    assert v9.status == "pass"
+    assert "1 called workflow" in v9.detail
+
+
+def test_v9_missing_called_workflow_fails(tmp_path):
+    pkg, manifest = _call_build(tmp_path)
+    (pkg / "calls" / "linter@1.yaml").unlink()
+    v9 = _v9(CompletenessVerifier().verify(pkg, manifest, write_integrity=False))
+    assert v9.status == "fail"
+    assert "CALL_UNRESOLVED" in v9.detail

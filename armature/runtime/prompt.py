@@ -143,7 +143,7 @@ def _render_description(description: str, context: dict[str, Any]) -> str:
     the context JSON. Undefined variables silently render as empty string.
     Template errors never raise; the raw description is returned as a fallback.
     """
-    if "{{" not in description:
+    if "{{" not in description and "{%" not in description:
         return description
     try:
         from jinja2 import ChainableUndefined

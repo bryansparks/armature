@@ -128,6 +128,16 @@ def test_install_refuses_a_templated_cmd_and_symlinks(server_config, tmp_path):
     assert _rows(url, packs) == [] and not list(installed.iterdir())
 
 
+def test_a_builtin_pack_name_cannot_be_installed_or_removed(server_config, tmp_path):
+    config, url, installed = server_config
+    write_pack(tmp_path / "github", name="github")
+    result = _cli(config, "install", str(tmp_path / "github"))
+    assert result.exit_code == 1 and "built-in pack" in result.output
+    result = _cli(config, "remove", "slack")
+    assert result.exit_code == 1 and "built-in pack" in result.output
+    assert _rows(url, packs) == [] and not list(installed.iterdir())
+
+
 def test_remove(server_config):
     config, url, installed = server_config
     assert _cli(config, "install", str(HELLO)).exit_code == 0
@@ -164,7 +174,9 @@ def test_routes_list_packs_adapters_and_errors(sqlite_engine, keyring, tmp_path,
     assert login(client, "viewer", clock.code(secret)).status_code == 200
 
     body = client.get("/api/packs").json()
-    [pack] = body["packs"]
+    [pack] = [p for p in body["packs"] if not p["builtin"]]
+    assert {p["name"] for p in body["packs"] if p["builtin"]} == {"conversation", "github", "jira", "linear",
+                                                                    "review", "slack"}
     assert (pack["name"], pack["version"], pack["source"], pack["pinned_ref"]) == ("hello", "5.0.0", None, None)
     errors = {e["pack"]: e["message"] for e in body["errors"]}
     assert set(errors) == {"broken", "hello"}
@@ -173,7 +185,7 @@ def test_routes_list_packs_adapters_and_errors(sqlite_engine, keyring, tmp_path,
 
     monkeypatch.delenv(PACKS_PATH_ENV)
     body = client.get("/api/packs").json()
-    [pack] = body["packs"]
+    [pack] = [p for p in body["packs"] if not p["builtin"]]
     greet = next(a for a in pack["adapters"] if a["ref"] == "hello/greet")
     assert greet["params"]["required"] == ["name"] and greet["timeout"] == 30
     assert greet["writes"] is False and greet["secrets"] == [] and greet["outputs"]["type"] == "object"
@@ -187,7 +199,8 @@ def test_routes_show_the_install_record_and_see_new_installs(sqlite_engine, keyr
     client = _client(sqlite_engine, keyring, clock, installed)
     _, secret = add_user(sqlite_engine, keyring, clock, "viewer")
     assert login(client, "viewer", clock.code(secret)).status_code == 200
-    assert client.get("/api/packs").json() == {"packs": [], "errors": []}
+    listed = client.get("/api/packs").json()
+    assert [p for p in listed["packs"] if not p["builtin"]] == [] and listed["errors"] == []
 
     from armature.server.packs import install
     install(sqlite_engine, installed, str(HELLO), now=clock())

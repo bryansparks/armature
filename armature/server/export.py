@@ -1,7 +1,8 @@
 """Write an instance's definitions to files (`armature server export`), and again after each change.
 
 The export holds workflows, roles, prompts, missions, teams and projects,
-settings, and providers. It never holds a secret value, a user, or history.
+settings, providers, and connection metadata. It never holds a secret value,
+a user, or history.
 """
 from __future__ import annotations
 
@@ -26,7 +27,9 @@ from armature.server.config import ExportConfig
 from armature.server.db import utcnow
 from armature.server.db.schema import (
     INSTANCE_SCOPE,
+    connections,
     documents,
+    environment_types,
     projects,
     providers,
     settings,
@@ -41,7 +44,7 @@ log = logging.getLogger(__name__)
 
 FORMAT = 1
 MANIFEST = "manifest.json"
-DOCUMENT_DIRS = {"role": "roles", "prompt": "prompts", "mission": "missions"}
+DOCUMENT_DIRS = {"role": "roles", "prompt": "prompts", "mission": "missions", "skill": "skills"}
 INSTANCE_ID_SETTING = "instance.id"
 COMMAND_TIMEOUT = 120
 ERROR_MAX = 500
@@ -149,11 +152,14 @@ def _teams(conn: Connection, team_id: str | None) -> list[dict[str, Any]]:
         query = query.where(teams.c.id == team_id)
     out = []
     for team in conn.execute(query):
-        rows = conn.execute(select(projects).where(projects.c.team_id == team.id)
+        rows = conn.execute(select(projects, environment_types.c.name.label("environment_type"))
+                            .select_from(projects.outerjoin(environment_types,
+                                                            environment_types.c.id == projects.c.environment_type_id))
+                            .where(projects.c.team_id == team.id)
                             .order_by(projects.c.created_at, projects.c.name))
         out.append({"slug": team.slug, "name": team.name, "projects": [
             {"name": p.name, "repo": p.repo, "platform": p.platform, "enabled_workflows": p.enabled_workflows or [],
-             "branch_filters": p.branch_filters or []} for p in rows]})
+             "branch_filters": p.branch_filters or [], "environment_type": p.environment_type} for p in rows]})
     return out
 
 
@@ -168,11 +174,20 @@ def _settings(conn: Connection, scopes: dict[str, str], keep: set[str] | None) -
 
 
 def _providers(conn: Connection, scopes: dict[str, str], team_id: str | None) -> list[dict[str, Any]]:
-    query = select(providers).order_by(providers.c.team_id, providers.c.kind)
+    query = select(providers).order_by(providers.c.scope, providers.c.kind)
     if team_id is not None:
         query = query.where(providers.c.team_id == team_id)
-    return [{"scope": scopes.get(r.team_id, r.team_id), "kind": r.kind, "config": _public_config(r.config),
+    return [{"scope": scopes.get(r.scope, r.scope), "kind": r.kind, "config": _public_config(r.config),
              "aliases": r.aliases or {}} for r in conn.execute(query)]
+
+
+def _connections(conn: Connection, scopes: dict[str, str], team_id: str | None) -> list[dict[str, Any]]:
+    query = select(connections.c.scope, connections.c.kind, connections.c.name, connections.c.config) \
+        .order_by(connections.c.scope, connections.c.kind, connections.c.name)
+    if team_id is not None:
+        query = query.where(connections.c.team_id == team_id)
+    return [{"scope": scopes.get(r.scope, r.scope), "kind": r.kind, "name": r.name, "config": r.config or {}}
+            for r in conn.execute(query)]
 
 
 def _fsync_dir(path: Path) -> None:
@@ -250,6 +265,7 @@ def export_definitions(conn: Connection, dest: Path, *, team: str | None = None,
         builder.write("teams.json", _json({"teams": _teams(conn, team_id)}))
         builder.write("settings.json", _json(_settings(conn, scopes, keep)))
         builder.write("providers.json", _json({"providers": _providers(conn, scopes, team_id)}))
+        builder.write("connections.json", _json({"connections": _connections(conn, scopes, team_id)}))
         manifest = {"format": FORMAT, "instance_id": _instance_id(conn),
                     "exported_at": (now or utcnow()).isoformat(), "team": team, "objects": builder.objects,
                     "files": dict(sorted(builder.files.items()))}

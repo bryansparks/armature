@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
-const { capsules, chosenWorkflows, hashParams, isHidden, isLive, listParams, liveElapsed, liveRuns, matches, prTitle, repoOf, runHeaders, runStatus, shortWhen,
-  subjectHref, triggerOf, verdictText, verdictTone, workflowOptions } =
+const { capsules, chosenWorkflows, groupText, hashParams, isHidden, isNewer, listParams, liveElapsed, matches, prTitle, runHeaders, runStatus, shortWhen,
+  rethreaded, runRowHref, subjectHref, threadOf, triggerOf, verdictText, verdictTone, workflowOptions } =
   await import(new URL('views/runs.js', STATIC));
 const { hashFor } = await import(new URL('router.js', STATIC));
 
@@ -17,15 +17,6 @@ test('prTitle prefers the pull request title, then the run title, then the workf
   assert.equal(prTitle({}, null, {}), 'Unnamed workflow');
 });
 
-test('repoOf splits a pull request subject and rejects anything else', () => {
-  assert.deepEqual(repoOf('fs-eng/android-tree#1818'), { repo: 'fs-eng/android-tree', number: '1818' });
-  assert.equal(repoOf('daily-review'), null);
-  assert.equal(repoOf('PROJ-7'), null);
-  assert.equal(repoOf('acme/app#0'), null);
-  assert.equal(repoOf('acme app/x#1'), null);
-  assert.equal(repoOf(null), null);
-});
-
 test('verdictText maps review verdicts and tidies the rest', () => {
   for (const verdict of ['approve', 'Approved', 'Approval Recommended']) assert.equal(verdictText(verdict), 'Approved');
   for (const verdict of ['comment', 'changes', 'REQUEST_CHANGES', 'changes_requested', 'Changes Recommended']) {
@@ -34,6 +25,10 @@ test('verdictText maps review verdicts and tidies the rest', () => {
   assert.equal(verdictText('No changes'), 'No changes');
   assert.equal(verdictText('ok'), 'Ok');
   assert.equal(verdictText('push_failed'), 'Push failed');
+  assert.equal(verdictText('opened'), 'PR Created');
+  assert.equal(verdictText('review-blocked'), 'Review Blocked');
+  assert.equal(verdictText('pushed'), 'Changes Pushed');
+  assert.equal(verdictText('blocked'), 'Blocked');
   assert.equal(verdictText(null), '');
 });
 
@@ -52,9 +47,15 @@ test('runStatus puts activity and failures before the pull request state', () =>
     [{ status: 'succeeded' }, { verdict: null, merged: true }, 'Merged', 'ok'],
     [{ status: 'succeeded', verdict: 'No changes' }, { verdict: null, merged: false }, 'No changes', 'ok'],
     [{ status: 'succeeded', verdict: 'No changes' }, null, 'No changes', 'ok'],
-    [{ status: 'succeeded', outcome: 'declined' }, null, 'Declined', 'ok'],
-    [{ status: 'succeeded', outcome: 'push_failed' }, null, 'Push failed', 'bad'],
+    [{ status: 'succeeded', fix_outcome: 'declined' }, null, 'Declined', 'ok'],
+    [{ status: 'succeeded', fix_outcome: 'push_failed' }, null, 'Push failed', 'bad'],
+    [{ status: 'succeeded', verdict: 'No changes', fix_outcome: 'pushed' }, null, 'No changes', 'ok'],
     [{ status: 'succeeded' }, null, 'Done', 'ok'],
+    [{ status: 'succeeded', verdict: 'comment', outcome: 'pushed' }, null, 'Changes Pushed', 'ok'],
+    [{ status: 'succeeded', outcome: 'recommended' }, null, 'Changes Recommended', 'warn'],
+    [{ status: 'succeeded', outcome: 'blocked' }, null, 'Blocked', 'bad'],
+    [{ status: 'succeeded', outcome: 'noop' }, null, 'Nothing to Do', 'ok'],
+    [{ status: 'succeeded', outcome: 'pr_opened' }, null, 'PR Created', 'ok'],
   ];
   for (const [run, pr, text, tone] of cases) assert.deepEqual(runStatus(run, pr), { text, tone }, JSON.stringify([run, pr]));
 });
@@ -88,8 +89,43 @@ test('workflow choices round-trip through the hash', () => {
 
 test('listParams asks the API for the chosen workflows and hidden ones', () => {
   const params = listParams({ team: 't', subject: 'MEM-1', workflows: ['a', 'b'], hidden: true }, 'cursor');
-  assert.equal(String(params), 'limit=50&team=t&subject=MEM-1&workflows=a%2Cb&include_hidden=1&before=cursor');
-  assert.equal(String(listParams({ workflows: [] })), 'limit=50');
+  assert.equal(String(params), 'limit=50&team=t&subject=MEM-1&workflows=a%2Cb&include_hidden=1&group=1&before=cursor');
+  assert.equal(String(listParams({ workflows: [] })), 'limit=50&group=1');
+  assert.equal(String(listParams({ workflows: [], every: true })), 'limit=50');
+});
+
+test('a thread filter reaches the API and the hash, and groups a pull request with its issue', () => {
+  assert.equal(String(listParams({ thread: 'MEM-1', workflows: [], every: true })), 'limit=50&thread=MEM-1');
+  assert.equal(hashFor('runs', [], hashParams({ thread: 'MEM-1', workflows: [], every: true })), '#/runs?thread=MEM-1&every=1');
+  assert.equal(threadOf({ subject: 'acme/app#7', thread: 'MEM-1' }), 'MEM-1');
+  assert.equal(threadOf({ subject: 'acme/app#7', thread: null }), 'acme/app#7');
+  assert.equal(threadOf({}), '');
+  assert.equal(rethreaded('acme/app#7', { subject: 'acme/app#7', thread: 'MEM-1' }), true);
+  assert.equal(rethreaded('MEM-1', { subject: 'acme/app#7', thread: 'MEM-1' }), false);
+  assert.equal(rethreaded(undefined, {}), false);
+  const base = { workflows: [], hidden: true, thread: 'MEM-1' };
+  assert.equal(matches({ workflow: 'x', subject: 'acme/app#7', thread: 'MEM-1' }, base, {}), true);
+  assert.equal(matches({ workflow: 'x', subject: 'MEM-1', thread: 'MEM-1' }, base, {}), true);
+  assert.equal(matches({ workflow: 'x', subject: 'acme/app#7', thread: null }, base, {}), false);
+});
+
+test('every run round-trips through the hash and only groups of several get a marker', () => {
+  assert.equal(hashFor('runs', [], hashParams({ workflows: [], every: true })), '#/runs?every=1');
+  assert.equal(hashFor('runs', [], hashParams({ workflows: [], every: false })), '#/runs');
+  assert.equal(groupText(3), '3 runs');
+  assert.equal(groupText(1), '');
+  assert.equal(groupText(undefined), '');
+});
+
+test('isNewer only lets a later run replace the shown one', () => {
+  const shown = { id: 'b', started_at: '2026-10-27T12:00:01Z' };
+  assert.equal(isNewer({ id: 'a', started_at: '2026-10-27T12:00:02Z' }, shown), true);
+  assert.equal(isNewer({ id: 'z', started_at: '2026-10-27T12:00:00Z' }, shown), false);
+  assert.equal(isNewer({ id: 'c', started_at: shown.started_at }, shown), true);
+  assert.equal(isNewer({ id: 'a', started_at: shown.started_at }, shown), false);
+  assert.equal(isNewer({ id: 'b', started_at: shown.started_at }, shown), false);
+  assert.equal(isNewer({ id: 'a', started_at: null }, shown), false);
+  assert.equal(isNewer({ id: 'a', started_at: shown.started_at }, { id: 'b' }), true);
 });
 
 test('matches hides hidden workflows unless shown or chosen', () => {
@@ -151,23 +187,6 @@ test('capsules list All and each visible workflow, pressing one only for a singl
   assert.ok(!capsules(display, ['digest'], []).some((item) => item.id === 'digest'));
 });
 
-test('live runs are running or queued, pass the filter, and ignore the status filter', () => {
-  const base = { team: '', project: '', status: 'failed', subject: '', workflows: [], hidden: false };
-  assert.equal(isLive({ status: 'running', workflow: 'code-review' }, base, display), true);
-  assert.equal(isLive({ status: 'queued', workflow: 'code-review' }, base, display), true);
-  assert.equal(isLive({ status: 'succeeded', workflow: 'code-review' }, base, display), false);
-  assert.equal(isLive({ status: 'running', workflow: 'digest' }, base, display), false);
-  assert.equal(isLive({ status: 'running', workflow: 'jira-work' }, { ...base, workflows: ['code-review'] }, display), false);
-  assert.equal(isLive({ status: 'running', workflow: 'code-review', triggered_by: 'bot' }, base, { ...display, hidden_actors: ['bot'] }), false);
-  const runs = [
-    { id: 1, status: 'running', workflow: 'code-review', started_at: '2026-10-01T00:00:00Z' },
-    { id: 2, status: 'queued', workflow: 'code-review', started_at: '2026-10-02T00:00:00Z' },
-    { id: 3, status: 'failed', workflow: 'code-review', started_at: '2026-10-03T00:00:00Z' },
-    { id: 1, status: 'running', workflow: 'code-review', started_at: '2026-10-01T00:00:00Z' },
-  ];
-  assert.deepEqual(liveRuns(runs, base, display).map((run) => run.id), [2, 1]);
-});
-
 test('liveElapsed ticks from the start and waits without one', () => {
   assert.equal(liveElapsed({ started_at: '2026-10-01T00:00:00Z' }, Date.parse('2026-10-01T00:04:05Z')), '4m 5s');
   assert.equal(liveElapsed({ started_at: null }), 'Waiting');
@@ -178,4 +197,10 @@ test('shortWhen keeps the start time to month/day and time', () => {
   assert.equal(shortWhen(new Date(2026, 9, 27, 9, 5).toISOString(), now), '10/27 9:05');
   assert.equal(shortWhen(new Date(2025, 11, 31, 23, 59).toISOString(), now), '12/31/25 23:59');
   assert.equal(shortWhen(null, now), '—');
+});
+
+test('runRowHref opens the thread when the run has one, else the run', () => {
+  assert.equal(runRowHref({ id: 'r1', thread: 'FS-1', subject: 'acme/app#2' }), hashFor('subject', ['FS-1']));
+  assert.equal(runRowHref({ id: 'r1', subject: 'acme/app#2' }), hashFor('subject', ['acme/app#2']));
+  assert.equal(runRowHref({ id: 'r1' }), hashFor('run', ['r1']));
 });

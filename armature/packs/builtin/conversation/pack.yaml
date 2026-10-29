@@ -1,0 +1,69 @@
+name: conversation
+version: 1.0.0
+description: >-
+  The conversation a turn answers, through the server. A turn reaches only its own conversation, and only while it
+  runs. What the model wrote is data to these tools, and none of them can decide a gate.
+adapters:
+  history:
+    description: >-
+      The conversation's messages, each fenced as data under a tag nobody in the thread sees, the open proposal,
+      and saved state. For the workflow assistant, also the rules and the text a draft starts from.
+    cmd: armature tool conversation.history
+    writes: false
+    params:
+      type: object
+      additionalProperties: false
+      properties: {}
+  reply:
+    description: Post a reply in the conversation. Slack text is escaped, so it can't link or mention anyone.
+    cmd: armature tool conversation.reply
+    writes: true
+    params:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text: {type: string, minLength: 1}
+  ask:
+    description: Post a question and wait for the user. The turn ends, and their answer starts the next one.
+    cmd: armature tool conversation.ask
+    writes: true
+    params:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text: {type: string, minLength: 1}
+  set:
+    description: Save one value of the conversation's state for later turns, or remove it with null.
+    cmd: armature tool conversation.set
+    writes: true
+    params:
+      type: object
+      required: [key]
+      additionalProperties: false
+      properties:
+        key: {type: string, pattern: '^[a-z][a-z0-9_]{0,39}$'}
+        value: {}
+  decide:
+    description: >-
+      Apply the model's action under rules the server enforces. confirmed goes only for an open proposal and a
+      message newer than it, under a daily cap. Its result's go is true only then, so a later step that acts runs
+      on the condition that decide.go is true. draft is the workflow assistant's, validated and never saved.
+    cmd: armature tool conversation.decide
+    writes: true
+    params:
+      type: object
+      required: [action]
+      additionalProperties: false
+      properties:
+        action: {type: string, enum: [ask, answer, propose, confirmed, cancel, not_a_task, draft]}
+        reply: {type: string}
+        proposal:
+          type: object
+          additionalProperties: false
+          properties:
+            title: {type: string}
+            summary: {type: string}
+            plan: {type: string}
+        body: {type: string}

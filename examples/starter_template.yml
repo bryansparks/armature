@@ -89,7 +89,7 @@ adapters:
   fetch_sources:
     name: fetch_sources
     type: script
-    cmd: "echo 'Fetching sources for: {{ topic }}'"   # replace with a real fetch
+    cmd: "python3 -c 'import json, os; print(\"Fetching sources for:\", json.loads(os.environ[\"ARMATURE_CONTEXT\"])[\"topic\"])'"   # replace with a real fetch
     timeout: 30   # seconds before the command is killed
 
 

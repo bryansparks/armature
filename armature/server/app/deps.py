@@ -108,7 +108,8 @@ def signed_in(request: Request) -> Session:
 
 
 def require_step_up(request: Request, session: Session) -> None:
-    if not session.has_step_up(server(request).now()):
+    srv = server(request)
+    if srv.cfg.require_totp and not session.has_step_up(srv.now()):
         raise ApiError(403, STEP_UP_REQUIRED)
 
 

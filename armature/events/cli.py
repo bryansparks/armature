@@ -31,7 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--link", dest="links", action="append", default=[],
                         help="summary: a link as label=url, https or a same-origin path, repeatable")
     parser.add_argument("--stream-claude", action="store_true",
-                        help="Read Claude Code stream-json on stdin, emit its events, and copy stdin to stdout")
+                        help="Read Claude Code stream-json on stdin, emit its events with each --field, and copy stdin to stdout")
     return parser
 
 
@@ -56,7 +56,7 @@ def _payload(parser: argparse.ArgumentParser, args: argparse.Namespace) -> dict[
 
 
 def _summary(parser: argparse.ArgumentParser, args: argparse.Namespace) -> dict[str, Any]:
-    """title and verdict as given, every other --field under fields, and each --link."""
+    """title, verdict, and outcome as given, every other --field under fields, and each --link."""
     payload: dict[str, Any] = {}
     if args.json_payload:
         payload = _payload(parser, argparse.Namespace(json_payload=args.json_payload, fields=[]))
@@ -65,7 +65,7 @@ def _summary(parser: argparse.ArgumentParser, args: argparse.Namespace) -> dict[
         key, sep, value = item.partition("=")
         if not sep or not key:
             parser.error(f"--field must be key=value, got {item!r}")
-        if key in ("title", "verdict"):
+        if key in ("title", "verdict", "outcome"):
             payload[key] = value
         else:
             fields[key] = value
@@ -109,8 +109,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.stream_claude:
         from armature.events.claude_stream import pipe
+        fields = _payload(parser, args)
         emitter = get_emitter()
-        pipe(emitter, args.step, sys.stdin.buffer, sys.stdout.buffer)
+        pipe(emitter, args.step, sys.stdin.buffer, sys.stdout.buffer, fields)
         emitter.close()
         return 0
     if not args.kind:

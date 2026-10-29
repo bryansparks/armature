@@ -1,0 +1,156 @@
+{
+  "description": "A Story still In Progress, keyed in the branch, moves to In Test with a comment.",
+  "source": "github",
+  "headers": {
+    "content-type": "application/json",
+    "user-agent": "GitHub-Hookshot/7e2a1f0",
+    "x-github-event": "pull_request",
+    "x-github-delivery": "6c1f0e40-b5a3-11f0-8000-3e2a9c41d7b5"
+  },
+  "env": {
+    "JIRA_SERVER": "https://familysearch.atlassian.net"
+  },
+  "payload": {
+    "action": "closed",
+    "number": 4821,
+    "pull_request": {
+      "url": "https://api.github.com/repos/fs-eng/android-tree/pulls/4821",
+      "id": 2093104821,
+      "html_url": "https://github.com/fs-eng/android-tree/pull/4821",
+      "number": 4821,
+      "state": "closed",
+      "locked": false,
+      "title": "Fix crash opening a source with no citation",
+      "user": {
+        "login": "jstutz4",
+        "id": 4418211,
+        "type": "User"
+      },
+      "body": "The citation sheet assumed a citation.\n\nAdds a guard and a test.",
+      "created_at": "2026-10-20T15:02:11Z",
+      "updated_at": "2026-10-27T21:40:03Z",
+      "closed_at": "2026-10-27T21:40:03Z",
+      "merged_at": "2026-10-27T21:40:03Z",
+      "merge_commit_sha": "3f1c9a2b7d4e5f60718293a4b5c6d7e8f9a0b1c2",
+      "draft": false,
+      "head": {
+        "label": "fs-eng:MEMTEMDIS-4512-source-citation-crash",
+        "ref": "MEMTEMDIS-4512-source-citation-crash",
+        "sha": "9b2e4d6f8a0c1e3f5a7b9d1f3e5c7a9b1d3f5e7a",
+        "repo": {
+          "full_name": "fs-eng/android-tree"
+        }
+      },
+      "base": {
+        "label": "fs-eng:dev",
+        "ref": "dev",
+        "sha": "1a3c5e7f9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a",
+        "repo": {
+          "full_name": "fs-eng/android-tree"
+        }
+      },
+      "merged": true,
+      "mergeable": null,
+      "merged_by": {
+        "login": "jstutz4",
+        "id": 4418211,
+        "type": "User"
+      },
+      "comments": 2,
+      "review_comments": 4,
+      "commits": 3,
+      "additions": 41,
+      "deletions": 9,
+      "changed_files": 4
+    },
+    "repository": {
+      "id": 381004821,
+      "name": "android-tree",
+      "full_name": "fs-eng/android-tree",
+      "private": true,
+      "owner": {
+        "login": "fs-eng",
+        "type": "Organization"
+      },
+      "default_branch": "dev"
+    },
+    "organization": {
+      "login": "fs-eng",
+      "id": 1093400
+    },
+    "sender": {
+      "login": "jstutz4",
+      "id": 4418211,
+      "type": "User"
+    },
+    "installation": {
+      "id": 51234567
+    }
+  },
+  "jira": {
+    "issue": {
+      "fields": {
+        "status": {
+          "name": "In Progress"
+        },
+        "issuetype": {
+          "name": "Story"
+        }
+      }
+    },
+    "transitions": [
+      {
+        "id": "11",
+        "name": "To Do",
+        "to": {
+          "name": "To Do"
+        }
+      },
+      {
+        "id": "21",
+        "name": "In Progress",
+        "to": {
+          "name": "In Progress"
+        }
+      },
+      {
+        "id": "31",
+        "name": "In Test",
+        "to": {
+          "name": "In Test"
+        }
+      },
+      {
+        "id": "41",
+        "name": "Done",
+        "to": {
+          "name": "Done"
+        }
+      }
+    ]
+  },
+  "ops": {
+    "effects": [
+      {
+        "vendor": "jira",
+        "op": "transition",
+        "issue": "MEMTEMDIS-4512",
+        "transition": "In Test"
+      },
+      {
+        "vendor": "jira",
+        "op": "comment",
+        "issue": "MEMTEMDIS-4512",
+        "body": "Merged fs-eng/android-tree#4821 by jstutz4.\n\nFix crash opening a source with no citation\nhttps://github.com/fs-eng/android-tree/pull/4821\n\nMoved automatically on merge."
+      }
+    ],
+    "result": {
+      "issue": "MEMTEMDIS-4512",
+      "transitioned": true,
+      "from": "In Progress",
+      "to": "In Test",
+      "issue_type": "Story",
+      "url": "https://familysearch.atlassian.net/browse/MEMTEMDIS-4512"
+    }
+  }
+}

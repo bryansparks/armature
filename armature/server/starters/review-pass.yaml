@@ -1,0 +1,412 @@
+name: review-pass
+version: "1.0"
+description: "One review of a pull request's head: risk, a specialist panel, the team lead's decisions, the posted review, and the reviewed mark."
+
+contracts:
+  inputs:
+    - {name: repo, type: string, required: true}    # the repository's https URL, which agent sessions clone
+    - {name: slug, type: string, required: true}    # owner/name, for the GitHub tools
+    - {name: number, type: integer, required: true}
+    - {name: ref, type: string, required: true}     # the commit or ref the sessions review
+    - {name: round, type: integer, default: 1}
+  outputs:
+    - {name: marked, type: boolean, from: "{{ marked.valid }}"}
+    - {name: risk, type: string, from: "{{ risk.level }}"}
+    - {name: head, type: string, from: "{{ risk.head or marked.head }}"}
+    - {name: verdict, type: string, from: "{{ team_lead.verdict }}"}
+    - {name: comments, type: array, from: "{{ team_lead.comments }}"}
+  max_llm_calls: 20
+  timeout_hours: 2
+
+stages:
+  # A head that already carries a valid mark ends the run as a no-op.
+  - id: marked
+    adapter: review/marked
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+    depends_on: []
+
+  - id: rate
+    skip_if: "{{ marked.valid }}"
+    agent:
+      model: review
+      prompt: |
+        Rate the risk of merging pull request #{{ number }} of {{ slug }}, checked out here, with the risk-rubric
+        skill. The diff is against the pull request's base branch.
+      skills: [risk-rubric]
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [level, reasons]
+      properties:
+        level: {enum: [low, medium, high]}
+        reasons: {type: array, items: {type: string}}
+    depends_on: [marked]
+
+  # The server raises the level to its path floors and picks the panel from it.
+  - id: risk
+    skip_if: "{{ marked.valid }}"
+    adapter: review/risk
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      level: "{{ rate.level }}"
+      reasons: "{{ rate.reasons }}"
+      expect_head: "{{ rate.commit }}"
+    depends_on: [rate]
+
+  # The panel: every specialist runs in parallel, each with its role document as instructions. Low risk runs only
+  # the low-risk panel, so the others skip.
+  - id: simplicity
+    skip_if: "{{ marked.valid or 'simplicity' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: simplicity
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: correctness
+    skip_if: "{{ marked.valid or 'correctness' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: correctness
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: security
+    skip_if: "{{ marked.valid or 'security' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: security
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: performance
+    skip_if: "{{ marked.valid or 'performance' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: performance
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: beauty
+    skip_if: "{{ marked.valid or 'beauty' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: beauty
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: test_adequacy
+    skip_if: "{{ marked.valid or 'test_adequacy' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: test_adequacy
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: concurrency
+    skip_if: "{{ marked.valid or 'concurrency' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: concurrency
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: conventions
+    skip_if: "{{ marked.valid or 'conventions' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: conventions
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  - id: compatibility
+    skip_if: "{{ marked.valid or 'compatibility' not in risk.panel }}"
+    fail_as_value: true
+    agent:
+      model: review
+      role: compatibility
+      prompt: |
+        Review pull request #{{ number }} of {{ slug }}, checked out here. Report only findings in lines the pull
+        request changes.
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [findings]
+      properties:
+        findings:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, claim, body]
+            properties:
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              claim: {type: string}
+              body: {type: string}
+              suggestion: {type: string}
+    depends_on: [risk]
+
+  # The lead checks each finding in the code and decides what blocks the merge.
+  - id: team_lead
+    skip_if: "{{ marked.valid }}"
+    agent:
+      model: review
+      role: team_lead
+      prompt: |
+        Lead the review of pull request #{{ number }} of {{ slug }}, checked out here. Each specialist's review is in
+        the context file named for its role. A skipped specialist didn't run. Check each finding in the code, then
+        decide it: block, suggest, or drop, with a one-line reason. Approve only when nothing blocks.
+      context_files:
+        simplicity: "{{ simplicity }}"
+        correctness: "{{ correctness }}"
+        security: "{{ security }}"
+        performance: "{{ performance }}"
+        beauty: "{{ beauty }}"
+        test_adequacy: "{{ test_adequacy }}"
+        concurrency: "{{ concurrency }}"
+        conventions: "{{ conventions }}"
+        compatibility: "{{ compatibility }}"
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [verdict, summary, decisions, comments]
+      properties:
+        verdict: {enum: [approve, comment]}
+        summary: {type: string}
+        decisions:
+          type: array
+          items:
+            type: object
+            required: [claim, path, raised_by, decision, reason]
+            properties:
+              claim: {type: string}
+              raised_by: {type: array, items: {type: string}}
+              decision: {enum: [block, suggest, drop]}
+              reason: {type: string}
+              finding_id: {type: string}
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              disposition: {enum: [keep, drop_rebutted, resolved]}
+        comments:
+          type: array
+          items:
+            type: object
+            required: [path, line, severity, blocking, body, claim]
+            properties:
+              claim: {type: string}
+              raised_by: {type: array, items: {type: string}}
+              finding_id: {type: string}
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              severity: {enum: [high, medium, low]}
+              blocking: {type: boolean}
+              body: {type: string}
+              suggestion: {type: string}
+              fix: {type: string}
+    depends_on: [simplicity, correctness, security, performance, beauty, test_adequacy, concurrency, conventions, compatibility]
+
+  # The server records each decision as a finding of this step, with its reason.
+  - id: decisions
+    skip_if: "{{ marked.valid }}"
+    adapter: review/decisions
+    fail_as_value: true
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      decisions: "{{ team_lead.decisions }}"
+    depends_on: [team_lead]
+
+  - id: post
+    skip_if: "{{ marked.valid }}"
+    adapter: github/post-review
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      head: "{{ risk.head }}"
+      verdict: "{{ team_lead.verdict }}"
+      summary: "{{ team_lead.summary }}"
+      comments: "{{ team_lead.comments }}"
+      decisions: "{{ team_lead.decisions }}"
+    depends_on: [team_lead]
+
+  # The server marks only a head whose review this run posted as an approval.
+  - id: mark
+    skip_if: "{{ marked.valid or team_lead.verdict != 'approve' }}"
+    adapter: review/mark
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+    depends_on: [post]

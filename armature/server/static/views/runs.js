@@ -3,22 +3,23 @@ import { append, card, clear, duration, element, empty, errorBox, link, loading,
 import { loadDisplay, workflowColor, workflowLabel } from '../display.js';
 import { elapsedSeconds } from '../feed.js';
 import { every, subscribe } from '../live.js';
+import { externalLink, externalLinks } from '../outcome.js';
 import { hashFor } from '../router.js';
-import { openTail } from '../tail.js';
-import { runningCard } from './overview.js';
 
-const STATUSES = ['queued', 'running', 'succeeded', 'failed', 'canceled', 'lost'];
+const STATUSES = ['queued', 'running', 'waiting', 'succeeded', 'failed', 'canceled', 'lost'];
 const PAGE_SIZE = 50;
 const MAX_ROWS = 200;
 const POLL_MS = 5000;
-const PULL_SUBJECT = /^([^#\s]+\/[^#\s]+)#([1-9][0-9]{0,9})$/;
 const APPROVED = new Set(['approve', 'approved', 'approval recommended']);
 const CHANGES = new Set(['comment', 'changes', 'request_changes', 'changes_requested', 'changes recommended']);
+const OUTCOMES = { opened: 'PR Created', pr_opened: 'PR Created', recommended: 'Changes Recommended', noop: 'Nothing to Do', pushed: 'Changes Pushed', 'review-blocked': 'Review Blocked', 'dry-run': 'Dry Run', 'push-failed': 'Push Failed',
+  'pr-failed': 'PR Failed' };
+const OUT_KINDS = new Set(['pull', 'issue', 'slack']);
 const ACTIVE = new Set(['queued', 'running']);
 const ENDED = new Set(['failed', 'canceled', 'lost']);
 
-export const runHeaders = (display) => [['Started', 'col-tight'], ['Run', 'col-title'], ['Workflow', 'col-tight'], 'Repository',
-  ['Status', 'col-tight'], 'Trigger', ['Time', 'num col-tight'], ...(display?.show_cost ? [['Cost', 'num col-tight']] : [])];
+export const runHeaders = (display) => [['Started', 'col-tight'], ['Run', 'col-title'], ['Workflow', 'col-tight'], 'Links',
+  ['Outcome', 'col-tight'], ['Where', 'col-tight'], 'Trigger', ['Time', 'num col-tight'], ...(display?.show_cost ? [['Cost', 'num col-tight']] : [])];
 
 export function shortWhen(timestamp, now = new Date()) {
   const date = new Date(timestamp || '');
@@ -30,16 +31,12 @@ export function shortWhen(timestamp, now = new Date()) {
 
 export const prTitle = (run, pr, display) => pr?.title || run.title || workflowLabel(display, run.workflow);
 
-export function repoOf(subject) {
-  const match = PULL_SUBJECT.exec(subject || '');
-  return match ? { repo: match[1], number: match[2] } : null;
-}
-
 export function verdictText(verdict) {
   const text = String(verdict || '').trim();
   if (!text) return '';
   if (APPROVED.has(text.toLowerCase())) return 'Approved';
   if (CHANGES.has(text.toLowerCase())) return 'Changes Recommended';
+  if (Object.hasOwn(OUTCOMES, text.toLowerCase())) return OUTCOMES[text.toLowerCase()];
   return text.charAt(0).toUpperCase() + text.slice(1).replace(/_/g, ' ');
 }
 
@@ -50,13 +47,15 @@ const outcomeTone = (label) => {
 
 export function runStatus(run, pr) {
   if (ACTIVE.has(run.status)) return { text: 'In Progress', tone: 'running' };
+  if (run.status === 'waiting') return { text: 'Waiting for approval', tone: 'warn' };
   if (ENDED.has(run.status)) return { text: statusText(run.status), tone: statusTone(run.status) };
   if (pr) {
     const verdict = verdictText(pr.verdict);
     const text = [verdict, pr.merged ? 'Merged' : ''].filter(Boolean).join(' - ');
     if (text) return { text, tone: outcomeTone(verdict) };
   }
-  const own = verdictText(run.verdict) || verdictText(run.outcome) || 'Done';
+  // A typed outcome only exists on newer runs. Older ones read as they always did: verdict, then fix outcome.
+  const own = verdictText(run.outcome) || verdictText(run.verdict) || verdictText(run.fix_outcome) || 'Done';
   return { text: own, tone: outcomeTone(own) };
 }
 
@@ -68,21 +67,41 @@ export function chosenWorkflows(query) {
 
 export function listParams(filter, before = '') {
   const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
-  for (const key of ['team', 'project', 'status', 'subject']) if (filter[key]) params.set(key, filter[key]);
+  for (const key of ['team', 'project', 'status', 'subject', 'thread']) if (filter[key]) params.set(key, filter[key]);
   if (filter.workflows?.length) params.set('workflows', filter.workflows.join(','));
   if (filter.hidden) params.set('include_hidden', '1');
+  if (!filter.every) params.set('group', '1');
   if (before) params.set('before', before);
   return params;
 }
 
 export function hashParams(filter) {
-  return { team: filter.team, project: filter.project, status: filter.status, subject: filter.subject,
-    workflows: filter.workflows?.join(',') || '', hidden: filter.hidden ? '1' : '' };
+  return { team: filter.team, project: filter.project, status: filter.status, subject: filter.subject, thread: filter.thread,
+    workflows: filter.workflows?.join(',') || '', hidden: filter.hidden ? '1' : '', every: filter.every ? '1' : '' };
+}
+
+export const threadOf = (run) => run.thread || run.subject || '';
+
+export const rethreaded = (shown, run) => (shown || '') !== threadOf(run);
+
+export const groupText = (size) => (size > 1 ? `${size} runs` : '');
+
+const startedAt = (value) => {
+  const at = Date.parse(value || '');
+  return Number.isNaN(at) ? -Infinity : at;
+};
+
+// The server's order: started_at, then id, both descending.
+export function isNewer(run, shown) {
+  const left = startedAt(run.started_at);
+  const right = startedAt(shown.started_at);
+  return left === right ? String(run.id) > String(shown.id) : left > right;
 }
 
 export function matches(run, filter, display) {
   if (filter.status && run.status !== filter.status) return false;
   if (filter.subject && run.subject !== filter.subject) return false;
+  if (filter.thread && threadOf(run) !== filter.thread) return false;
   if (filter.hidden) return !filter.workflows?.length || filter.workflows.includes(run.workflow);
   if (display?.hidden_actors?.includes(run.triggered_by)) return false;
   if (filter.workflows?.length) return filter.workflows.includes(run.workflow);
@@ -93,16 +112,6 @@ export function workflowOptions(display, names) {
   const all = new Set([...Object.keys(display?.workflow_labels || {}), ...names.filter(Boolean)]);
   return [...all].map((name) => ({ id: name, name: workflowLabel(display, name), hidden: isHidden(display, name) }))
     .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-export function isLive(run, filter, display) {
-  return ACTIVE.has(run?.status) && matches(run, { ...filter, status: '' }, display);
-}
-
-export function liveRuns(runs, filter, display) {
-  const byId = new Map();
-  for (const run of runs) if (isLive(run, filter, display)) byId.set(String(run.id), run);
-  return [...byId.values()].sort((left, right) => String(right.started_at || '').localeCompare(String(left.started_at || '')));
 }
 
 // "All" first, then each visible workflow. One chosen workflow presses its capsule, several press none.
@@ -134,12 +143,21 @@ export function verdictChip(verdict) {
   return element('span', { class: `chip ${verdictTone(verdict)}`.trim() }, String(verdict).replace(/_/g, ' '));
 }
 
+export const locationText = (where) => (typeof where?.label === 'string' && where.label) || 'Unknown';
+
+export function locationChip(where) {
+  const detail = [where?.environment_type, where?.instance, where?.instance_type].filter((part) => typeof part === 'string' && part).join(' · ');
+  return element('span', { class: 'chip', title: detail || null }, locationText(where));
+}
+
 export function subjectLink(subject) {
   return subject ? link(subjectHref(subject), subject) : '—';
 }
 
+// The subject a trigger names is already in the row, so it is not repeated.
 function triggerCell(run) {
-  const { label, detail } = triggerOf(run);
+  const { label, detail: named } = triggerOf(run);
+  const detail = named === run.subject || named === run.thread ? '' : named;
   return [element('span', { class: 'trigger-label' }, label), detail ? element('span', { class: 'muted trigger-detail' }, detail) : null];
 }
 
@@ -147,9 +165,12 @@ function setText(node, text) {
   if (node.textContent !== text) node.textContent = text;
 }
 
-function repoCell(subject) {
-  const pull = repoOf(subject);
-  return pull ? [pull.repo, ' ', link(subjectHref(subject), `#${pull.number}`, { class: 'muted' })] : '—';
+// The thread's page when the run is in one, else the run's own.
+export const runRowHref = (run) => (threadOf(run) ? subjectHref(threadOf(run)) : hashFor('run', [run.id]));
+
+function linksCell(run) {
+  const out = externalLinks({ links: run.links }).filter((item) => OUT_KINDS.has(item.kind));
+  return out.length ? element('span', { class: 'row-links' }, out.map((item) => externalLink({ ...item, label: item.short }))) : '—';
 }
 
 function projectLoader() {
@@ -172,8 +193,16 @@ function fillOptions(select, anyLabel, items, selected) {
 }
 
 function elapsed(run) {
-  if (!run.finished_at) return run.status === 'running' ? 'Running' : '—';
+  if (ACTIVE.has(run.status)) return element('span', { class: 'row-elapsed', 'data-started': run.started_at || '' }, liveElapsed(run));
+  if (!run.finished_at) return '—';
   return duration(secondsBetween(run.started_at, run.finished_at));
+}
+
+// A click anywhere on a row opens what its title links to, unless it landed on a link of its own.
+function openRow(clickEvent) {
+  const row = clickEvent.target.closest('tr[data-href]');
+  if (!row || clickEvent.target.closest('a, button, input, select, summary') || getSelection()?.toString()) return;
+  location.hash = row.dataset.href;
 }
 
 export async function render(root, { query, signal }) {
@@ -185,6 +214,7 @@ export async function render(root, { query, signal }) {
     STATUSES.map((status) => element('option', { value: status }, statusText(status))));
   statusSelect.value = STATUSES.includes(query.get('status')) ? query.get('status') : '';
   const subject = query.get('subject') || '';
+  const thread = query.get('thread') || '';
   const workflowSelect = element('select', { name: 'workflows', multiple: true, size: 1 });
   const pickerToggle = element('button', { type: 'button', class: 'picker-toggle', 'aria-expanded': 'false', 'aria-controls': 'runs-workflow-picker' }, 'Workflows');
   const picker = element('label', { id: 'runs-workflow-picker', hidden: true }, element('span', { class: 'visually-hidden' }, 'Workflows'), workflowSelect);
@@ -196,23 +226,23 @@ export async function render(root, { query, signal }) {
   });
   const hiddenBox = element('input', { type: 'checkbox', name: 'hidden' });
   hiddenBox.checked = query.get('hidden') === '1';
+  const everyBox = element('input', { type: 'checkbox', name: 'every' });
+  everyBox.checked = query.get('every') === '1';
   const filters = element('form', { class: 'filters', role: 'search', 'aria-label': 'Filter runs' },
     labelled('Team', teamSelect), labelled('Project', projectSelect), labelled('Status', statusSelect),
-    pickerToggle, picker, labelled('Show hidden', hiddenBox), element('button', { type: 'submit' }, 'Apply'),
-    subject ? element('span', { class: 'muted' }, `Subject: ${subject} `, link(hashFor('runs'), 'Clear')) : null);
+    pickerToggle, picker, labelled('Show hidden', hiddenBox), labelled('Show every run', everyBox), element('button', { type: 'submit' }, 'Apply'),
+    subject ? element('span', { class: 'muted' }, `Subject: ${subject} `, link(hashFor('runs'), 'Clear')) : null,
+    thread ? element('span', { class: 'muted' }, `Thread: ${thread} `, link(hashFor('runs'), 'Clear')) : null);
   const capsuleRow = element('div', { class: 'capsules', role: 'group', 'aria-label': 'Show one workflow' });
-  const liveList = element('div', { class: 'running-list', tabindex: -1 });
-  const liveSection = element('section', { class: 'live-runs', 'aria-labelledby': 'runs-live-heading' },
-    element('h2', { id: 'runs-live-heading' }, 'Live'), liveList);
   const body = element('div', {}, loading());
-  root.append(capsuleRow, filters, liveSection, body);
+  root.append(capsuleRow, filters, body);
 
   const [teams, display, definitions] = await Promise.all([
     api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []),
     loadDisplay(),
     api('/api/workflows').then((payload) => listOf(payload, 'workflows')).catch(() => []),
   ]);
-  const filter = { team: '', project: '', status: statusSelect.value, subject, workflows: chosenWorkflows(query), hidden: hiddenBox.checked };
+  const filter = { team: '', project: '', status: statusSelect.value, subject, thread, workflows: chosenWorkflows(query), hidden: hiddenBox.checked, every: everyBox.checked };
   let before = query.get('before') || '';
   const names = new Set(definitions.map((definition) => definition.name));
   const fillWorkflows = (more) => {
@@ -237,8 +267,8 @@ export async function render(root, { query, signal }) {
   });
   filters.addEventListener('submit', (submitEvent) => {
     submitEvent.preventDefault();
-    location.hash = hashFor('runs', [], hashParams({ team: teamSelect.value, project: projectSelect.value, status: statusSelect.value, subject,
-      workflows: [...workflowSelect.selectedOptions].map((option) => option.value), hidden: hiddenBox.checked }));
+    location.hash = hashFor('runs', [], hashParams({ team: teamSelect.value, project: projectSelect.value, status: statusSelect.value, subject, thread,
+      workflows: [...workflowSelect.selectedOptions].map((option) => option.value), hidden: hiddenBox.checked, every: everyBox.checked }));
   });
 
   const prs = new Map();
@@ -246,20 +276,30 @@ export async function render(root, { query, signal }) {
     if (run.pr && run.subject) prs.set(run.subject, run.pr);
     return prs.get(run.subject) || null;
   };
+  // Stream updates carry no group_size, so each row keeps the count its run was listed with.
+  const sizes = new Map();
+  const counted = new Set();
   const cells = (run) => {
     const pr = prFor(run);
     const status = runStatus(run, pr);
+    const count = groupText(sizes.get(String(run.id)));
     return [
-      element('span', { title: when(run.started_at) }, shortWhen(run.started_at)),
-      link(hashFor('run', [run.id]), prTitle(run, pr, display)), workflowLabel(display, run.workflow),
-      repoCell(run.subject), element('span', { class: `state state-${status.tone}` }, status.text),
+      link(hashFor('run', [run.id]), shortWhen(run.started_at), { title: `Open this run, started ${when(run.started_at)}` }),
+      [link(runRowHref(run), prTitle(run, pr, display)), count ? element('span', { class: 'muted' }, ` · ${count}`) : null],
+      workflowLabel(display, run.workflow),
+      linksCell(run), element('span', { class: `state state-${status.tone}` }, status.text), locationChip(run.location),
       triggerCell(run), elapsed(run), ...(display.show_cost ? [money(run.cost_usd)] : []),
     ];
   };
   const headers = runHeaders(display);
   const rowFor = (run) => {
+    if (run.group_size) sizes.set(String(run.id), run.group_size);
     const row = tableRow(headers, cells(run));
     row.dataset.runId = String(run.id);
+    row.dataset.href = runRowHref(run);
+    row.classList.add('row-link');
+    if (run.started_at) row.dataset.startedAt = run.started_at;
+    if (threadOf(run)) row.dataset.thread = threadOf(run);
     return row;
   };
 
@@ -280,7 +320,7 @@ export async function render(root, { query, signal }) {
     if (token !== listToken || signal?.aborted) return;
     const runs = listOf(page, 'runs');
     fillWorkflows(runs.map((run) => run.workflow));
-    const isFiltered = [filter.team, filter.project, filter.status, filter.subject, filter.workflows.length, before].some(Boolean);
+    const isFiltered = [filter.team, filter.project, filter.status, filter.subject, filter.thread, filter.workflows.length, before].some(Boolean);
     emptyCard = card(empty(isFiltered ? 'No runs match these filters. Clear a filter to see more.' : 'No runs yet.'));
     runTable = table(headers, []);
     tbody = runTable.querySelector('tbody');
@@ -293,71 +333,14 @@ export async function render(root, { query, signal }) {
     if (pager.firstChild) body.append(pager);
   };
 
-  // Live: running and queued runs that pass the filter. A click opens their tail beside the list.
-  const live = new Map();
-  const order = [];
-  const colorOf = (workflow) => workflowColor(display, workflow, order);
-  let tail = null;
-  const liveDetails = (run) => {
-    const { label, detail } = triggerOf(run);
-    return [
-      element('span', { class: 'running-title' }, prTitle(run, prFor(run), display)),
-      run.subject ? element('span', { class: 'muted' }, run.subject) : null,
-      element('span', { class: 'muted' }, label, detail ? ` · ${detail}` : ''),
-      element('span', { class: 'running-elapsed mono', 'data-run-id': String(run.id) }, liveElapsed(run)),
-    ];
-  };
-  const liveButton = (runId) => [...liveList.querySelectorAll('button.running-run')].find((button) => button.dataset.runId === runId);
-  const drawLive = () => {
-    const focusedId = liveList.contains(document.activeElement) ? document.activeElement.dataset?.runId : null;
-    const shown = liveRuns([...live.values()], filter, display);
-    clear(liveList).append(...(shown.length ? shown.map((run) => {
-      const item = runningCard(run, display, { open: () => openFor(run), color: colorOf(run.workflow), details: liveDetails(run) });
-      item.setAttribute('aria-controls', 'runs-tail');
-      item.setAttribute('aria-expanded', String(tail?.runId === String(run.id)));
-      return item;
-    }) : [element('p', { class: 'live-empty' }, 'Nothing running')]));
-    if (focusedId) liveButton(focusedId)?.focus();
-  };
-  const openFor = (run) => {
-    if (tail?.runId === String(run.id)) {
-      tail.focus();
-      return;
-    }
-    tail?.close();
-    const opened = openTail({ runId: run.id, run, display, signal, label: workflowLabel(display, run.workflow), color: colorOf(run.workflow),
-      title: prTitle(run, prFor(run), display), subject: run.subject ? subjectLink(run.subject) : null,
-      onClose: () => {
-        if (tail === opened) tail = null;
-        drawLive();
-        (liveButton(opened.runId) || liveList).focus();
-      } });
-    tail = opened;
-    root.append(opened.node);
-    drawLive();
-    opened.focus();
-  };
-  let liveToken = 0;
-  const seedLive = async () => {
-    const token = ++liveToken;
-    try {
-      const pages = await Promise.all([...ACTIVE].map((status) => api(`/api/runs?${listParams({ ...filter, status })}`)));
-      if (token !== liveToken || signal?.aborted) return;
-      live.clear();
-      for (const run of liveRuns(pages.flatMap((page) => listOf(page, 'runs')), filter, display)) live.set(String(run.id), run);
-      drawLive();
-    } catch {}
-  };
   const ticker = setInterval(() => {
     const now = Date.now();
-    for (const span of liveList.querySelectorAll('.running-elapsed')) {
-      const run = live.get(span.dataset.runId);
-      if (run) setText(span, liveElapsed(run, now));
-    }
+    for (const span of body.querySelectorAll('.row-elapsed')) setText(span, liveElapsed({ started_at: span.dataset.started }, now));
   }, 1000);
   signal?.addEventListener('abort', () => clearInterval(ticker));
+  body.addEventListener('click', openRow);
 
-  // Capsules filter in place, so the Live block and an open tail stay put.
+  // Capsules filter in place, without reloading the page.
   const capsuleButtons = new Map();
   const choose = (workflows) => {
     filter.workflows = workflows;
@@ -366,12 +349,10 @@ export async function render(root, { query, signal }) {
     syncPicker();
     for (const item of capsules(display, [...names], filter.workflows)) capsuleButtons.get(item.id)?.setAttribute('aria-pressed', String(item.pressed));
     loadList();
-    seedLive();
   };
 
   await loadList();
   const shownCapsules = capsules(display, [...names], filter.workflows);
-  order.push(...shownCapsules.map((item) => item.id).filter(Boolean));
   for (const item of shownCapsules) {
     const button = element('button', { type: 'button', class: 'capsule', 'aria-pressed': String(item.pressed) },
       item.color ? element('span', { class: `swatch sw-${item.color}`, 'aria-hidden': 'true' }) : null, item.name);
@@ -379,8 +360,6 @@ export async function render(root, { query, signal }) {
     capsuleButtons.set(item.id, button);
     capsuleRow.append(button);
   }
-  await seedLive();
-  drawLive();
 
   const pending = new Map();
   let frame = 0;
@@ -388,30 +367,41 @@ export async function render(root, { query, signal }) {
     frame = 0;
     const batch = [...pending.values()];
     pending.clear();
-    if (signal?.aborted) return;
-    let liveChanged = false;
-    for (const run of batch) {
-      const id = String(run.id);
-      if (isLive(run, filter, display)) live.set(id, { ...live.get(id), ...run });
-      else if (!live.delete(id)) continue;
-      liveChanged = true;
-    }
-    if (liveChanged) drawLive();
-    for (const run of batch) {
-      if (tail?.runId === String(run.id)) tail.update(run);
-      if (!before) upsert(run);
-    }
+    if (signal?.aborted || before) return;
+    for (const run of batch) upsert(run);
   };
   const upsert = (run) => {
     const existing = tbody.querySelector(`tr[data-run-id="${CSS.escape(String(run.id))}"]`);
-    if (existing) {
+    if (existing && (filter.every || !rethreaded(existing.dataset.thread, run))) {
       const freshCells = [...rowFor(run).cells];
       [...existing.cells].forEach((cell, index) => {
         if (!cell.contains(document.activeElement)) cell.replaceWith(freshCells[index]);
       });
       return;
     }
+    // A run whose thread changed mid-run moves into the row for its new thread.
+    if (existing) {
+      existing.remove();
+      counted.delete(String(run.id));
+    }
     if (!matches(run, filter, display)) return;
+    const id = String(run.id);
+    const key = threadOf(run);
+    const grouped = !filter.every && key;
+    const replaced = grouped ? [...tbody.rows].find((row) => row.dataset.thread === key) : null;
+    if (replaced) {
+      if (!isNewer(run, { started_at: replaced.dataset.startedAt, id: replaced.dataset.runId })) return;
+      sizes.set(id, (sizes.get(replaced.dataset.runId) || 1) + (counted.has(id) ? 0 : 1));
+      counted.add(id);
+      replaced.remove();
+    } else if (grouped) {
+      const params = listParams({ ...filter, thread: key });
+      params.set('limit', '1');
+      api(`/api/runs?${params}`).then((page) => {
+        const latest = listOf(page, 'runs')[0];
+        if (String(latest?.id) === id) receive(latest);
+      }).catch(() => {});
+    }
     const row = rowFor(run);
     const scrolledPast = window.scrollY > 0 && runTable.getBoundingClientRect().top < 0;
     tbody.prepend(row);
@@ -434,7 +424,6 @@ export async function render(root, { query, signal }) {
     events: { run: receive },
     onState: (state) => { liveNote.textContent = states[state] || ''; },
     onFallback: () => every(POLL_MS, async () => {
-      await seedLive();
       if (before) return;
       for (const run of listOf(await api(`/api/runs?${listParams(filter)}`), 'runs').reverse()) receive(run);
     }, signal),

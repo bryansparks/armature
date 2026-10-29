@@ -12,15 +12,19 @@ from fastapi import APIRouter, FastAPI
 from fastapi.responses import RedirectResponse
 from sqlalchemy import Engine
 
-from armature.server import actions, worker
+from armature.server import actions, environments, pollers, worker
 from armature.server.app import (
     routes_actions,
     routes_api,
     routes_assist,
     routes_auth,
+    routes_connections,
+    routes_conversations,
     routes_defs,
     routes_dryrun,
+    routes_environments,
     routes_export,
+    routes_gates,
     routes_jobs,
     routes_live,
     routes_oidc,
@@ -29,6 +33,8 @@ from armature.server.app import (
     routes_stats,
     routes_status,
     routes_subjects,
+    routes_tools,
+    routes_triggers,
     routes_webhooks,
     static,
 )
@@ -39,7 +45,7 @@ from armature.server.config import ServerConfig
 from armature.server.crypto import Keyring
 from armature.server.db import utcnow
 from armature.server.export import ExportHook
-from armature.server.ingest import LiveHub
+from armature.server.ingest import LiveHub, RateLimit
 from armature.server.oidc import Provider
 from armature.server.status import StatusHook
 
@@ -58,12 +64,16 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
         export.attach()
     status = StatusHook(engine, keyring, cfg.status, clock=clock) if cfg.status else None
     job_worker = worker.Worker(engine, keyring, cfg, hub, clock=clock, interval=worker_interval or worker.INTERVAL_S)
+    envs = environments.EnvironmentService(engine, keyring, cfg, clock=clock)
+    scheduler = pollers.Scheduler(engine, keyring, clock=clock, transport=lambda: app.state.vendor_transport)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await hub.start()
         if worker_interval is not None:
             await asyncio.to_thread(job_worker.start)
+            envs.start()
+            scheduler.start()
         if export is not None:
             export.schedule()
         if cfg.actions:
@@ -74,6 +84,8 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
             yield
         finally:
             await asyncio.to_thread(job_worker.stop)
+            await asyncio.to_thread(envs.stop)
+            await asyncio.to_thread(scheduler.stop)
             await hub.stop()
             if export is not None:
                 await asyncio.to_thread(export.stop)
@@ -85,6 +97,11 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
     app.state.export = export
     app.state.status = status
     app.state.worker = job_worker
+    app.state.environments = envs
+    app.state.scheduler = scheduler
+    app.state.vendor_transport = None
+    app.state.runner_polls = RateLimit(routes_runner.POLL_PER_S, routes_runner.POLL_BURST)
+    app.state.tool_calls = RateLimit(routes_tools.CALLS_PER_S, routes_tools.CALLS_BURST)
     app.state.server = Server(
         cfg=cfg, engine=engine, keyring=keyring, clock=clock, dummy_hash=dummy_hash(password_cost),
         static_dir=static_dir, provider=Provider(cfg.oidc, oidc_transport) if cfg.oidc else None,
@@ -103,6 +120,8 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
                    routes_runner.router, routes_oidc.router, routes_packs.router, routes_export.router,
                    routes_assist.router, routes_dryrun.router, routes_stats.router, routes_subjects.router,
                    routes_actions.router, routes_status.router, routes_webhooks.router, routes_jobs.router,
+                   routes_environments.router, routes_connections.router, routes_tools.router, routes_gates.router,
+                   routes_conversations.router, routes_triggers.router,
                    static.router):
         app.include_router(router, prefix=base)
 
@@ -114,6 +133,8 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
     overrides = {f"{base}{path}": routes_defs.DEFS_BODY_LIMIT for path in routes_defs.DEFS_PATHS}
     overrides[f"{base}{routes_assist.ASSIST_PATH}"] = routes_assist.ASSIST_BODY_LIMIT
     overrides[f"{base}{routes_webhooks.HOOKS_PATH}"] = routes_webhooks.HOOKS_BODY_LIMIT
+    overrides[f"{base}{routes_tools.TOOLS_PATH}"] = routes_tools.TOOLS_BODY_LIMIT
+    overrides[f"{base}{routes_runner.JOBS_PATH}"] = routes_runner.JOBS_BODY_LIMIT
     app.add_middleware(BodyLimit, overrides={**overrides, f"{base}/api/events": routes_runner.EVENTS_BODY_LIMIT})
     app.add_middleware(SecurityHeaders, hsts=not app.state.server.insecure_localhost)
     return app

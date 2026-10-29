@@ -1,0 +1,114 @@
+name: code-review
+version: "1.0"
+description: "Review a pull request with the specialist panel and the team lead. With auto_fix, apply and build the lead's findings in one session, push that commit once, and review the new head."
+
+contracts:
+  inputs:
+    - {name: repo, type: string, required: true}    # the repository's https URL, which agent sessions clone
+    - {name: slug, type: string, required: true}    # owner/name, for the GitHub tools
+    - {name: number, type: integer, required: true}
+    - {name: ref, type: string, required: true}     # the pull request's head commit
+    - {name: branch, type: string, default: ""}     # the pull request's head branch, which auto_fix pushes to
+    - {name: auto_fix, type: boolean, default: false}
+    - {name: round, type: integer, default: 1}
+  outputs:
+    - {name: risk, type: string, from: "{{ second.risk or first.risk }}"}
+    - {name: verdict, type: string, from: "{{ second.verdict or first.verdict }}"}
+    - {name: head, type: string, from: "{{ second.head or first.head }}"}
+    - {name: pushed, type: boolean, from: "{{ push.pushed }}"}
+  max_llm_calls: 5
+  timeout_hours: 4
+
+stages:
+  - id: first
+    call: {workflow: review-pass}
+    with:
+      repo: "{{ repo }}"
+      slug: "{{ slug }}"
+      number: "{{ number }}"
+      ref: "{{ ref }}"
+      round: "{{ round }}"
+    depends_on: []
+
+  # The push preconditions, checked before any fix is made: the same repository, an allowed author, and low or
+  # medium risk. Only round 1 of an auto_fix run with findings to fix asks.
+  - id: pushable
+    skip_if: "{{ not auto_fix or round >= 2 or not branch or first.marked or first.verdict == 'approve' or not first.comments }}"
+    adapter: review/pushable
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      branch: "{{ branch }}"
+    depends_on: [first]
+
+  # The fix and its build run in one write session, as the agent user with only the session's environment, so the
+  # pull request's code never runs with the run's secrets or tokens.
+  - id: fix
+    skip_if: "{{ not pushable.pushable }}"
+    fail_as_value: true
+    agent:
+      model: review
+      access: write
+      prompt: |
+        Apply the team lead's findings on pull request #{{ number }} of {{ slug }}, checked out here. They are in
+        the findings context file. Change only files the pull request already changes, and skip a finding you
+        can't fix safely. Then run ./.armature/build. Commit only when the build passes, in one commit whose
+        message lists the findings it fixes. Reply with the findings you fixed, keeping each one's claim and path
+        as the findings file gives them, and whether the build passed.
+      context_files:
+        findings: "{{ first.comments }}"
+    output_mode: guided_json
+    output_schema:
+      type: object
+      required: [fixed, built]
+      properties:
+        built: {type: boolean}
+        fixed:
+          type: array
+          items:
+            type: object
+            required: [claim, path, reason]
+            properties:
+              claim: {type: string}
+              path: {type: string}
+              line: {type: integer, minimum: 1}
+              finding_id: {type: string}
+              raised_by: {type: array, items: {type: string}}
+              reason: {type: string}
+    depends_on: [pushable]
+
+  # The server's gate decides again and binds the push to the commit the session left, read when it ended.
+  - id: push
+    skip_if: "{{ not fix.built or not fix.fixed or fix.commit == ref }}"
+    adapter: github/push
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      branch: "{{ branch }}"
+      commit: "{{ fix.commit }}"
+      worktree: "{{ fix.worktree }}"
+    depends_on: [fix]
+
+  # The server takes the fix commit from its own record of the approved push.
+  - id: fixed
+    skip_if: "{{ not push.pushed }}"
+    adapter: review/decisions
+    fail_as_value: true
+    with:
+      repo: "{{ slug }}"
+      number: "{{ number }}"
+      decisions: "{{ fix.fixed }}"
+      fixed: true
+    depends_on: [push]
+
+  # The pushed head gets its own review, once. round 2 never fixes, and the server refuses its push anyway.
+  - id: second
+    skip_if: "{{ not push.pushed }}"
+    call: {workflow: review-pass}
+    with:
+      repo: "{{ repo }}"
+      slug: "{{ slug }}"
+      number: "{{ number }}"
+      ref: "{{ push.commit }}"
+      round: 2
+    depends_on: [fixed]

@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 VERSION = "v1"
 KEY_BYTES = 32
 NONCE_BYTES = 12
-LABELS = ("secrets", "sessions", "totp", "runners")
+LABELS = ("secrets", "sessions", "totp", "runners", "aws", "connections", "grants", "slack-link")
 
 
 class MasterKeyError(Exception):

@@ -6,7 +6,7 @@ adapters:
   reveal:
     name: reveal
     type: script
-    cmd: "echo 'greeting={{ greeting }} secret={{ secret }}'"
+    cmd: "python3 -c 'import json, os; c = json.loads(os.environ[\"ARMATURE_CONTEXT\"]); print(\"greeting=\" + str(c.get(\"greeting\", \"\")) + \" secret=\" + str(c.get(\"secret\", \"\")))'"
 
 stages:
   - id: reveal

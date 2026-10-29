@@ -4,7 +4,7 @@ import { afterEach, test } from 'node:test';
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
 const { parseHash, hashFor } = await import(new URL('router.js', STATIC));
 const { api, ApiError, basePath, configure, errorMessage, listOf, outcome, setCsrf } = await import(new URL('api.js', STATIC));
-const { loginPath, navFor, returnHash, signInNotice, ssoLoginPath, ssoStepUpPath } = await import(new URL('session.js', STATIC));
+const { loginPath, navFor, returnHash, signInIntro, signInNotice, ssoLoginPath, ssoStepUpPath } = await import(new URL('session.js', STATIC));
 const { secretFromOtpauth, tokenFromHash } = await import(new URL('otpauth.js', STATIC));
 const { deleteKeyPath, keyCells, keysPath } = await import(new URL('views/runnerkeys.js', STATIC));
 
@@ -165,9 +165,9 @@ test('a network failure reads as unreachable', async () => {
 test('navFor hides what a role cannot use', () => {
   const lead = { user: { id: 1 }, memberships: [{ scope_kind: 'team', scope_id: 't', role: 'team_lead' }] };
   const viewer = { user: { id: 2 }, memberships: [{ scope_kind: 'project', scope_id: 'p', role: 'viewer' }] };
-  assert.deepEqual(navFor({ user: { is_admin: true } }), ['overview', 'runs', 'subjects', 'trends', 'teams', 'status', 'workflows', 'roles', 'packs', 'users', 'secrets', 'runner-keys', 'webhooks', 'settings', 'account']);
-  assert.deepEqual(navFor(lead), ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'account']);
-  assert.deepEqual(navFor(viewer), ['overview', 'runs', 'subjects', 'trends', 'teams', 'workflows', 'roles', 'packs', 'account']);
+  assert.deepEqual(navFor({ user: { is_admin: true } }), ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'status', 'workflows', 'roles', 'packs', 'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'triggers', 'settings', 'account']);
+  assert.deepEqual(navFor(lead), ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'triggers', 'account']);
+  assert.deepEqual(navFor(viewer), ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'account']);
   assert.deepEqual(navFor({ user: null }), []);
 });
 
@@ -199,6 +199,13 @@ test('signInNotice is generic for a failed single sign-on', () => {
   assert.equal(signInNotice(''), '');
 });
 
+test('signInIntro mentions the authenticator only when the server requires one', () => {
+  assert.equal(signInIntro({ password: true }), 'Sign in with your username and password.');
+  assert.match(signInIntro({ password: true, totp: true }), /authenticator code/);
+  assert.equal(signInIntro({ oidc: true }), 'Sign in with your organization account.');
+  assert.equal(signInIntro({}), 'No sign-in method is enabled on this server.');
+});
+
 test('sign-in keeps the view a link pointed at', () => {
   assert.equal(loginPath('#/run/d59ade37-59ff/log'), '/login?return=%23%2Frun%2Fd59ade37-59ff%2Flog');
   assert.equal(loginPath('#/'), '/login');
@@ -208,17 +215,23 @@ test('sign-in keeps the view a link pointed at', () => {
   assert.equal(returnHash('?return=https%3A%2F%2Fevil.test'), '');
   assert.equal(returnHash('?return=%2F%2Fevil.test'), '');
   assert.equal(returnHash(''), '');
+  assert.equal(returnHash('', '#/run/abc/log'), '#/run/abc/log');
+  assert.equal(returnHash('?return=%23%2Fruns', '#/run/abc/log'), '#/runs');
+  assert.equal(returnHash('', '#/x"><script>'), '');
+  assert.equal(returnHash('', '#/'), '');
   assert.equal(ssoLoginPath('#/run/abc/log'), '/auth/oidc/login?return=%23%2Frun%2Fabc%2Flog');
   assert.equal(ssoLoginPath(''), '/auth/oidc/login');
 });
 
-const { alertKey, keptDismissals, visibleAlerts } = await import(new URL('views/overview.js', STATIC));
+const { alertKey, hiddenAlerts, visibleAlerts } = await import(new URL('views/overview.js', STATIC));
 
-test('a dismissed alert stays hidden until a newer run fails', () => {
+test('a dismissed alert stays hidden for good, even after newer runs fail', () => {
   const alert = { kind: 'failed', workflow: 'code-review', run_id: 'r1', message: '10 runs of code-review failed' };
+  const lost = { kind: 'lost', run_id: 'r9', message: '2 runs were lost' };
   assert.equal(alertKey(alert), 'failed:code-review');
   assert.deepEqual(visibleAlerts([alert], {}), [alert]);
-  assert.deepEqual(visibleAlerts([alert], { 'failed:code-review': 'r1' }), []);
-  assert.deepEqual(visibleAlerts([{ ...alert, run_id: 'r2' }], { 'failed:code-review': 'r1' }).length, 1);
-  assert.deepEqual(keptDismissals([alert], { 'failed:code-review': 'r1', 'lost:': 'r9' }), { 'failed:code-review': 'r1' });
+  assert.deepEqual(visibleAlerts([alert], { 'failed:code-review': true }), []);
+  assert.deepEqual(visibleAlerts([{ ...alert, run_id: 'r2' }], { 'failed:code-review': 'r1' }), []);
+  assert.deepEqual(visibleAlerts([alert, lost], { 'failed:code-review': true }), [lost]);
+  assert.deepEqual(hiddenAlerts([alert, lost], { 'failed:code-review': true }), [alert]);
 });

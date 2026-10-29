@@ -205,3 +205,29 @@ async def test_skip_if_with_llm_stage_skipped(tmp_path):
     harness = _make_harness(stages, tmp_path)
     result = await harness.run({})
     assert result["analysis"] == {"_skipped": True}
+
+
+async def test_skip_if_sees_an_output_two_stages_upstream(tmp_path):
+    """A review's later stages skip on the first stage's mark check, through a stage in between."""
+    async def marked(args): return {"valid": True}
+    async def resolve(args): return {"head": "abc"}
+    async def review(args): return {"ran": True}
+    from armature.registry.registry import ToolDescriptor
+    from armature.permissions.permissions import PermissionLevel
+
+    stages = [
+        Stage(id="marked", tool_call=ToolCallConfig(name="marked"), depends_on=[]),
+        Stage(id="resolve", tool_call=ToolCallConfig(name="resolve"), depends_on=["marked"]),
+        Stage(id="review", skip_if="{{ marked.valid }}", tool_call=ToolCallConfig(name="review"),
+              depends_on=["resolve"]),
+    ]
+    harness = _make_harness(stages, tmp_path)
+    for name, handler in (("marked", marked), ("resolve", resolve), ("review", review)):
+        harness._registry.register(ToolDescriptor(
+            name=name, description=name, permission=PermissionLevel.READ_ONLY,
+            handler=handler, parameters={},
+        ))
+
+    result = await harness.run({})
+    assert result["resolve"]["head"] == "abc"
+    assert result["review"] == {"_skipped": True}

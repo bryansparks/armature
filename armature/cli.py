@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 import typer
 from armature.runtime.engine import Harness
@@ -16,11 +17,15 @@ app.add_typer(mission_app, name="mission")
 from armature.packaging.cli import package_app  # noqa: E402
 app.add_typer(package_app, name="package")
 
-from armature.server.cli import server_app  # noqa: E402
+from armature.server.cli import env_app, server_app  # noqa: E402
 app.add_typer(server_app, name="server")
+app.add_typer(env_app, name="env")
 
 from armature.packs.cli import pack_app  # noqa: E402
 app.add_typer(pack_app, name="pack")
+
+from armature.runner.cli import runner_app  # noqa: E402
+app.add_typer(runner_app, name="runner")
 
 
 @app.command()
@@ -425,7 +430,11 @@ def validate(
         typer.echo(f"Failed to parse spec: {exc}", err=True)
         raise typer.Exit(1)
 
-    all_issues = validate_spec(loaded, strict=False)
+    from armature.spec.calls import BundleCallResolver, MANIFEST
+    bundle = BundleCallResolver.for_spec(loaded)
+    all_issues = validate_spec(loaded, strict=False,
+                               call_resolver=bundle if isinstance(bundle, BundleCallResolver)
+                               and (bundle.root / MANIFEST).is_file() else None)
     if strict_templates:
         from ruamel.yaml import YAML
         from armature.spec.template_lint import lint_tree
@@ -881,6 +890,17 @@ def _print_provider_error(exc: Exception) -> bool:
     return False
 
 
+PR_SET_DUMPABLE = 4
+
+
+def _undumpable() -> None:
+    """Keep other processes of this user, such as a workflow's own scripts, from reading the run's memory."""
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
+
+
 @app.command()
 def run(
     spec: Path = typer.Argument(..., help="Path to workflow spec YAML"),
@@ -899,6 +919,7 @@ def run(
     ),
 ):
     """Run a workflow from a YAML spec file."""
+    _undumpable()
     if not spec.exists():
         typer.echo(f"Spec file not found: {spec}", err=True)
         raise typer.Exit(1)
@@ -906,6 +927,7 @@ def run(
     parsed_inputs = parse_inputs(inputs)
 
     from armature.spec.validator import SpecValidationError
+    from armature.spec.contract_io import InputError
     from armature.adapters.registry import AdapterRegistry
 
     try:
@@ -917,6 +939,9 @@ def run(
         )
     except SpecValidationError as exc:
         typer.echo(f"Spec validation failed:\n{exc}", err=True)
+        raise typer.Exit(1)
+    except InputError as exc:
+        typer.echo(f"✗ {exc}", err=True)
         raise typer.Exit(1)
 
     if dry_run:
@@ -947,13 +972,17 @@ def run(
         harness._on_event = _make_on_event(quiet, fan_out_ids=fan_out_ids)
         return await harness.run(parsed_inputs, force=force)
 
+    from armature.nodes.gate import GateSuspended
     from armature.runtime.checkpoint import SessionDirInUse
 
     try:
         result = asyncio.run(_run())
     except typer.Exit:
         raise
-    except SessionDirInUse as exc:
+    except GateSuspended as paused:
+        typer.echo(f"Paused at gate {paused.stage.id} for a decision on the server.")
+        raise typer.Exit(0)
+    except (SessionDirInUse, InputError) as exc:
         typer.echo(f"✗ {exc}", err=True)
         raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001
@@ -1950,6 +1979,16 @@ def channels_start(
 def emit(ctx: typer.Context) -> None:
     """Send an event to ARMATURE_EVENTS (same as `python -m armature.events`)."""
     from armature.events.cli import main
+    raise typer.Exit(main(list(ctx.args)))
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+def tool(ctx: typer.Context) -> None:
+    """Run a built-in pack tool through the server's broker, or answer git as its credential helper."""
+    from armature.packs.tool import main
     raise typer.Exit(main(list(ctx.args)))
 
 

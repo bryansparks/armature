@@ -9,8 +9,8 @@ from sqlalchemy.engine import Connection
 
 from armature.server.db.schema import runner_keys, runs, users, webhook_deliveries, webhooks
 
-KIND_LABELS = {"pr": "Pull request", "jira": "Jira", "schedule": "Schedule", "cron": "Schedule", "slack": "Slack",
-               "webhook": "Webhook", "cli": "Command line", "dry_run": "Test run", "test": "Test run"}
+KIND_LABELS = {"pr": "Pull request", "jira": "Jira", "linear": "Linear", "schedule": "Schedule", "cron": "Schedule",
+               "slack": "Slack", "webhook": "Webhook", "cli": "Command line", "dry_run": "Test run", "test": "Test run"}
 
 
 def columns() -> list:
@@ -40,8 +40,10 @@ def _generic(kind: str | None, ref: dict[str, Any], actor: str | None, key_name:
     if kind == "pr" and _text(ref.get("repo")):
         number = ref.get("number")
         detail = f"{ref['repo']}#{number}" if isinstance(number, int) and not isinstance(number, bool) else ref["repo"]
-    elif kind == "jira":
+    elif kind in ("jira", "linear"):
         detail = _text(ref.get("issue"))
+    elif kind == "schedule":
+        detail = _text(ref.get("cron"))
     if detail is None and actor and actor != key_name:
         detail = actor
     return {"label": label, "detail": detail}

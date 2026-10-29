@@ -61,14 +61,16 @@ def issue(conn: Connection, keyring: Keyring, user_id: str, *, created_by: str |
     return token
 
 
-def _open_invite(conn: Connection, keyring: Keyring, token: Any, now: datetime) -> tuple[Any, Any] | None:
+def _open_invite(conn: Connection, keyring: Keyring, token: Any, now: datetime,
+                 require_totp: bool) -> tuple[Any, Any] | None:
     if not _valid_token(token):
         return None
     row = conn.execute(select(invites).where(invites.c.token_hmac == invite_hmac(keyring, token))).first()
     if row is None or row.used_at is not None or row.expires_at <= now:
         return None
     user = conn.execute(select(users).where(users.c.id == row.user_id)).first()
-    if user is None or user.disabled or user.totp_confirmed_at is not None:
+    if user is None or user.disabled or user.totp_confirmed_at is not None \
+            or (not require_totp and user.password_hash is not None):
         return None
     return row, user
 
@@ -81,15 +83,17 @@ def _throttle_key(keyring: Keyring, token: Any) -> str:
 @dataclass(frozen=True)
 class Inspected:
     username: str
-    otpauth_uri: str
+    otpauth_uri: str | None
 
 
-def inspect(engine: Engine, keyring: Keyring, token: Any, *, ip: str, now: datetime) -> Inspected:
+def inspect(engine: Engine, keyring: Keyring, token: Any, *, ip: str, now: datetime,
+            require_totp: bool = True) -> Inspected:
     """What the invite page shows. The authenticator secret is made and sealed on the first look."""
     attempt_id = begin_attempt(engine, ip=ip, username=_throttle_key(keyring, token), now=now)
     with engine.begin() as conn:
-        opened = _open_invite(conn, keyring, token, now)
-        if opened is not None:
+        opened = _open_invite(conn, keyring, token, now, require_totp)
+        uri = None
+        if opened is not None and require_totp:
             _, user = opened
             if user.totp_secret_enc is None:
                 conn.execute(update(users).where(users.c.id == user.id, users.c.totp_secret_enc.is_(None)).values(
@@ -97,9 +101,9 @@ def inspect(engine: Engine, keyring: Keyring, token: Any, *, ip: str, now: datet
             user = conn.execute(select(users).where(users.c.id == user.id)).one()
             uri = otpauth_uri(keyring, user)
         finish_attempt(conn, attempt_id, opened is not None, now)
-    if opened is None or uri is None:
+    if opened is None or (require_totp and uri is None):
         raise AuthError(401, REFUSED)
-    return Inspected(username=user.username, otpauth_uri=uri)
+    return Inspected(username=opened[1].username, otpauth_uri=uri)
 
 
 @dataclass(frozen=True)
@@ -114,22 +118,22 @@ class _Refused(Exception):
 
 
 def accept(engine: Engine, keyring: Keyring, token: Any, *, password: str, code: Any, ip: str, now: datetime,
-           cost: int | None = None) -> Accepted:
+           cost: int | None = None, require_totp: bool = True) -> Accepted:
     """Set the password, confirm the authenticator, use up the invite, and start a session, all or nothing."""
     attempt_id = begin_attempt(engine, ip=ip, username=_throttle_key(keyring, token), now=now)
     password_hash = hash_password(password, **({"cost": cost} if cost else {}))
     try:
         with engine.begin() as conn:
-            opened = _open_invite(conn, keyring, token, now)
+            opened = _open_invite(conn, keyring, token, now, require_totp)
             if opened is None:
                 raise _Refused
             invite, user = opened
-            step = match_totp(totp_secret(keyring, user), code, now)
-            if step is None:
+            step = match_totp(totp_secret(keyring, user), code, now) if require_totp else None
+            if require_totp and step is None:
                 raise _Refused
             used = conn.execute(update(invites).where(invites.c.id == invite.id, invites.c.used_at.is_(None))
                                 .values(used_at=now))
-            if used.rowcount != 1 or not confirm_enrollment(conn, user.id, step, now):
+            if used.rowcount != 1 or (require_totp and not confirm_enrollment(conn, user.id, step, now)):
                 raise _Refused
             conn.execute(update(users).where(users.c.id == user.id)
                          .values(password_hash=password_hash, last_login_at=now))

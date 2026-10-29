@@ -21,27 +21,35 @@ TOTP_ISSUER = "Armature"
 DISPLAY_NAME_MAX = 120
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,126}$")
+SLACK_WORKSPACE = re.compile(r"^[TE][A-Z0-9]{2,31}$")
+SLACK_USER = re.compile(r"^[UW][A-Z0-9]{2,31}$")
 
 
 class LastAdmin(ValueError):
     """The change would leave no enabled admin."""
 
 
+class SlackTaken(ValueError):
+    """Another user already linked that Slack account."""
+
+
 @dataclass(frozen=True)
 class NewAdmin:
     user_id: str
-    otpauth_uri: str
+    otpauth_uri: str | None
 
 
 def totp_aad(user_id: str) -> dict[str, str]:
     return {"user_id": user_id}
 
 
-def has_admin(conn: Connection) -> bool:
-    """An admin who can actually sign in: a confirmed authenticator, or an OIDC subject."""
-    return conn.execute(select(users.c.id).where(
-        users.c.is_admin.is_(True), or_(users.c.totp_confirmed_at.is_not(None), users.c.oidc_sub.is_not(None)))
-        .limit(1)).first() is not None
+def has_admin(conn: Connection, require_totp: bool = True) -> bool:
+    """An admin who can sign in: a confirmed authenticator, an OIDC subject, or a password when no code is required."""
+    signs_in = [users.c.totp_confirmed_at.is_not(None), users.c.oidc_sub.is_not(None)]
+    if not require_totp:
+        signs_in.append(users.c.password_hash.is_not(None))
+    return conn.execute(select(users.c.id).where(users.c.is_admin.is_(True), or_(*signs_in))
+                        .limit(1)).first() is not None
 
 
 def has_sealed_values(conn: Connection) -> bool:
@@ -56,8 +64,8 @@ def normal_username(username: Any) -> str:
 
 
 def create_admin(conn: Connection, keyring: Keyring, *, username: str, password: str,
-                 actor_id: str | None = None) -> NewAdmin:
-    """An admin whose authenticator is confirmed by ``confirm_admin`` before the CLI exits."""
+                 actor_id: str | None = None, require_totp: bool = True) -> NewAdmin:
+    """An admin whose authenticator, when required, is confirmed by ``confirm_admin`` before the CLI exits."""
     username = normal_username(username)
     if not USERNAME.fullmatch(username):
         raise ValueError(USERNAME_RULE)
@@ -65,15 +73,15 @@ def create_admin(conn: Connection, keyring: Keyring, *, username: str, password:
     if conn.execute(select(users.c.id).where(users.c.username == username)).first():
         raise ValueError(f"user {username!r} already exists")
     user_id = new_id()
-    totp_secret = pyotp.random_base32()
+    totp_secret = pyotp.random_base32() if require_totp else None
     conn.execute(insert(users).values(
         id=user_id, username=username, display_name=username, password_hash=hash_password(password),
-        totp_secret_enc=keyring.seal(totp_secret, totp_aad(user_id), label="totp"),
+        totp_secret_enc=keyring.seal(totp_secret, totp_aad(user_id), label="totp") if totp_secret else None,
         last_totp_step=0, is_admin=True, disabled=False, created_at=utcnow(),
     ))
     audit.record(conn, action="user.create_admin", actor_id=actor_id or user_id,
                  target_kind="user", target_id=user_id, detail={"username": username})
-    uri = pyotp.TOTP(totp_secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER)
+    uri = pyotp.TOTP(totp_secret).provisioning_uri(name=username, issuer_name=TOTP_ISSUER) if totp_secret else None
     return NewAdmin(user_id=user_id, otpauth_uri=uri)
 
 
@@ -81,8 +89,10 @@ def public_user(row: Any) -> dict[str, Any]:
     return {
         "id": row.id, "username": row.username, "display_name": row.display_name, "email": row.email,
         "is_admin": bool(row.is_admin), "disabled": bool(row.disabled), "sso": row.oidc_sub is not None,
-        "totp_confirmed": row.totp_confirmed_at is not None, "created_at": row.created_at,
+        "totp_confirmed": row.totp_confirmed_at is not None, "has_password": row.password_hash is not None,
+        "created_at": row.created_at,
         "last_login_at": row.last_login_at,
+        "slack_workspace_id": row.slack_workspace_id, "slack_user_id": row.slack_user_id,
     }
 
 
@@ -167,6 +177,38 @@ def update_user(conn: Connection, user_id: str, *, is_admin: bool | None = None,
     audit.record(conn, action="user.update", actor_id=actor_id, target_kind="user", target_id=user_id,
                  detail=changes, ip=ip)
     return changes
+
+
+def _slack_id(value: Any) -> str:
+    if value is not None and not isinstance(value, str):
+        raise ValueError("Slack ids are text.")
+    return (value or "").strip().upper()
+
+
+def set_slack(conn: Connection, user_id: str, *, workspace_id: Any, slack_user_id: Any, actor_id: str | None,
+              ip: str | None = None) -> bool:
+    """Link the user to one Slack account, or unlink with both empty. False when the user does not exist.
+
+    Raises ValueError for ids that aren't Slack's, and SlackTaken when another user holds the account.
+    """
+    workspace, member = _slack_id(workspace_id), _slack_id(slack_user_id)
+    if bool(workspace) != bool(member):
+        raise ValueError("Give both the Slack workspace id and the Slack member id, or neither.")
+    if workspace and not (SLACK_WORKSPACE.fullmatch(workspace) and SLACK_USER.fullmatch(member)):
+        raise ValueError("A Slack workspace id looks like T0123ABCD and a member id like U0123ABCD.")
+    row = conn.execute(select(users.c.slack_workspace_id, users.c.slack_user_id).where(users.c.id == user_id)).first()
+    if row is None:
+        return False
+    if workspace and conn.execute(select(users.c.id).where(users.c.slack_workspace_id == workspace,
+                                                           users.c.slack_user_id == member,
+                                                           users.c.id != user_id)).first():
+        raise SlackTaken("Another user already linked this Slack account.")
+    conn.execute(update(users).where(users.c.id == user_id).values(slack_workspace_id=workspace or None,
+                                                                   slack_user_id=member or None))
+    audit.record(conn, action="user.slack", actor_id=actor_id, target_kind="user", target_id=user_id,
+                 detail={"old": [row.slack_workspace_id, row.slack_user_id], "new": [workspace or None, member or None]},
+                 ip=ip)
+    return True
 
 
 def active_admin_count(conn: Connection) -> int:

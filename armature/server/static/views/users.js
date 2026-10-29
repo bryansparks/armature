@@ -1,6 +1,6 @@
 import { api, listOf } from '../api.js';
 import { attempt, card, clear, confirmDialog, element, empty, errorBox, loading, pageHeader, table } from '../dom.js';
-import { canManageTeam, isAdmin, user as me } from '../session.js';
+import { canManageTeam, isAdmin, requiresTotp, user as me } from '../session.js';
 
 const INVITE_ROLES_FOR_LEADS = ['project_lead', 'contributor', 'viewer'];
 
@@ -62,12 +62,12 @@ function showInvite(shownOnce, username, inviteUrl) {
 
 function inviteButton(account, status, shownOnce, reload) {
   if (account.sso || account.id === me()?.id) return null;
-  const isReset = account.totp_confirmed;
+  const isReset = account.totp_confirmed || (!requiresTotp() && account.has_password);
   if (isReset && !isAdmin()) return null;
   const label = isReset ? 'Reset sign-in' : 'New invite';
   const button = element('button', { type: 'button', class: 'link-button', 'aria-label': `${label} for ${account.username}` }, label);
   button.addEventListener('click', async () => {
-    if (isReset && !(await confirmDialog(`Reset sign-in for ${account.username}?`, 'Their password and authenticator are cleared and they are signed out everywhere. They sign in again only through the new invite link.', 'Reset'))) return;
+    if (isReset && !(await confirmDialog(`Reset sign-in for ${account.username}?`, `Their ${requiresTotp() ? 'password and authenticator are' : 'password is'} cleared and they are signed out everywhere. They sign in again only through the new invite link.`, 'Reset'))) return;
     const issued = await attempt(status, button, () => api(`/api/users/${encodeURIComponent(account.id)}/invite`, { method: 'POST', body: {} }));
     if (issued?.invite_url) {
       await reload();
@@ -138,7 +138,7 @@ function createForm(scopes, reload, shownOnce) {
   const status = element('div', { role: 'status' });
   const form = element('form', { class: 'stacked-form' },
     element('h2', { class: 'inline' }, 'Invite a user'),
-    element('p', { class: 'note' }, 'You get a link to send them. It works once, for 72 hours, and they set their own password and authenticator with it.'),
+    element('p', { class: 'note' }, `You get a link to send them. It works once, for 72 hours, and they set their own ${requiresTotp() ? 'password and authenticator' : 'password'} with it.`),
     element('label', { class: 'stacked', for: usernameInput.id }, 'Username', usernameInput),
     element('label', { class: 'stacked', for: nameInput.id }, 'Display name', nameInput),
     element('label', { class: 'stacked', for: emailInput.id }, 'Email', emailInput),
@@ -153,6 +153,36 @@ function createForm(scopes, reload, shownOnce) {
     if (!created) return;
     await reload();
     if (created.invite_url) showInvite(shownOnce, body.username, created.invite_url);
+  });
+  return card(form);
+}
+
+// Admins link a user's Slack account, so a Slack approval counts only from someone an admin vouched for.
+function slackForm(accounts, reload) {
+  const field = (id, label, placeholder) => {
+    const input = element('input', { type: 'text', id, name: id, placeholder, autocomplete: 'off', spellcheck: 'false', class: 'mono' });
+    return { input, node: element('label', { class: 'stacked', for: id }, label, input) };
+  };
+  const picker = element('select', { id: 'slack-user', name: 'slack-user' }, accounts.map((account) => element('option', { value: account.id }, account.username)));
+  const workspace = field('slack-workspace', 'Slack workspace id', 'T0123ABCD');
+  const member = field('slack-member', 'Slack member id', 'U0123ABCD');
+  const fill = () => {
+    const account = accounts.find((candidate) => candidate.id === picker.value);
+    workspace.input.value = account?.slack_workspace_id || '';
+    member.input.value = account?.slack_user_id || '';
+  };
+  picker.addEventListener('change', fill);
+  fill();
+  const status = element('div', { role: 'status', class: 'note' });
+  const saveButton = element('button', { type: 'submit', class: 'primary' }, 'Save Slack account');
+  const form = element('form', { class: 'stacked-form' }, element('h2', { class: 'inline' }, 'Slack account'),
+    element('p', { class: 'note' }, 'Slack approvals count only from a linked account. Leave both ids empty to unlink.'),
+    element('label', { class: 'stacked', for: picker.id }, 'User', picker), workspace.node, member.node,
+    element('div', { class: 'wf-actions' }, saveButton), status);
+  form.addEventListener('submit', async (submitEvent) => {
+    submitEvent.preventDefault();
+    const saved = await attempt(status, saveButton, () => api(`/api/users/${encodeURIComponent(picker.value)}/slack`, { method: 'POST', body: { workspace_id: workspace.input.value, user_id: member.input.value } }));
+    if (saved?.user) reload();
   });
   return card(form);
 }
@@ -183,6 +213,7 @@ export async function render(root) {
     clear(formsSlot);
     if (scopes.teams.length || scopes.projects.length) formsSlot.append(grantForm(accounts, scopes, reload));
     if (isAdmin() || scopes.teams.length) formsSlot.append(createForm(scopes, reload, shownOnce));
+    if (isAdmin() && accounts.length) formsSlot.append(slackForm(accounts, reload));
   }
 
   await reload();

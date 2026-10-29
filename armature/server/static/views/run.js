@@ -1,17 +1,25 @@
 import { actionsBar } from '../actions.js';
+import { backfill, feedSlot, nowText, rosterLine, RunActivity, stageTrack } from '../activity.js';
 import { api, listOf } from '../api.js';
-import { append, card, clear, duration, element, empty, errorBox, link, loading, money, pageHeader, statusChip, tabs, when } from '../dom.js';
+import { append, attempt, card, clear, confirmDialog, duration, element, empty, errorBox, link, loading, money, pageHeader, statusChip, tabs, when } from '../dom.js';
 import { loadDisplay, workflowLabel } from '../display.js';
 import { applyStepEvent, branchText, describe, earlierPage, elapsedSeconds, FeedModel, groupItems, newestBefore, oneLine, stepKey, stepTree, summarizeInput, TERMINAL } from '../feed.js';
 import { every, subscribe } from '../live.js';
 import { renderMarkdown } from '../markdown.js';
+import { decisionSummary, externalLink, externalLinks, outcomeSentence, riskBadge } from '../outcome.js';
+import { findingCard, resultView } from '../result.js';
 import { hashFor } from '../router.js';
-import { activeTab, artifactForTab, byteSize, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, runTabs, summaryLinks } from '../runpage.js';
-import { subjectLink, verdictChip } from './runs.js';
+import { activeTab, artifactForTab, byteSize, canCancel, canRerun, downloadType, LOG_TAB, orderArtifacts, OUTPUT_TAB, outputText, prettyJson, progress, rerunNote, rerunPending, runTabs, settledJob } from '../runpage.js';
+import { currentSession } from '../session.js';
+import { gateCard } from './gates.js';
+import { isNewer, locationChip, runStatus, subjectHref } from './runs.js';
+import { subjectPath } from './subject.js';
 
 const PAGE = 1000;
 const EARLIER_PAGE = 500;
 const POLL_MS = 2000;
+const RERUN_POLL_MS = 5000;
+const RERUN_SETTLE_TRIES = 12;
 const REFRESH_MS = 1500;
 const SETTLE_MS = 1500;
 const ANNOUNCE_MS = 2000;
@@ -64,15 +72,99 @@ function fillTool(details, item) {
     ] : element('div', { class: 'tool-head muted' }, 'No result yet.')));
 }
 
+function reviewDisclosure(review) {
+  const details = element('details', { class: 'feed-review' }, element('summary', {}, 'Review'));
+  details.addEventListener('toggle', () => {
+    if (details.open && details.childElementCount === 1) details.append(element('div', { class: 'feed-review-body' }, renderMarkdown(review)));
+  });
+  return details;
+}
+
 function itemNode(item, showCost) {
   if (item.kind === 'tool_call') return toolNode(item);
+  if (item.kind === 'finding') return element('div', { class: 'feed-item', title: item.ts }, findingCard(item.payload));
   if (item.kind === 'text') {
     return element('div', { class: 'feed-item feed-text', title: item.ts }, String(item.payload.text ?? ''),
       item.payload.truncated ? element('span', { class: 'muted' }, ' (truncated)') : null);
   }
   const { tone, label, text } = describe(item, { showCost });
-  return element('div', { class: `feed-item feed-line tone-${tone}`, title: item.ts },
+  const line = element('div', { class: `feed-item feed-line tone-${tone}`, title: item.ts },
     element('span', { class: 'feed-label' }, label), ' ', element('span', {}, text));
+  const review = item.kind === 'log' && typeof item.payload.review === 'string' && item.payload.review ? item.payload.review : null;
+  return review ? element('div', { class: 'feed-item' }, line, reviewDisclosure(review)) : line;
+}
+
+function rosterNode(entry, now, reviews) {
+  const line = rosterLine(entry, now);
+  const key = `${entry.step_key}\u0000${entry.role}`;
+  let review = null;
+  if (entry.review) {
+    review = element('details', { class: 'feed-review', 'data-key': key }, element('summary', {}, 'Review'));
+    if (reviews.open.has(key)) {
+      review.open = true;
+      review.append(reviews.body(key, entry.review));
+    }
+    review.addEventListener('toggle', () => {
+      if (review.open) reviews.open.add(key);
+      else reviews.open.delete(key);
+      if (review.open && review.childElementCount === 1) review.append(reviews.body(key, entry.review));
+    });
+  }
+  return element('li', { class: `roster-row roster-${line.state}` },
+    element('span', { class: 'roster-icon', 'aria-hidden': 'true' }, line.icon),
+    element('span', { class: 'roster-role' }, entry.role),
+    element('span', { class: 'roster-state' }, line.state === 'running' ? 'working' : line.label),
+    line.detail ? element('span', { class: 'roster-detail' }, line.detail) : null,
+    review);
+}
+
+// Where the run is: its steps and who is working on each, then the result once the lead decides.
+// After the run ends with a decision, the result alone stands, since it says everything the roster did.
+function whereView() {
+  const node = element('section', { class: 'where', 'aria-label': 'Progress and result', hidden: true });
+  const progressNode = element('div', { class: 'where-progress' });
+  const result = resultView({ level: 2 });
+  node.append(result.node, progressNode);
+  const cache = new Map();
+  const reviews = {
+    open: new Set(),
+    body: (key, text) => {
+      if (!cache.has(key)) cache.set(key, element('div', { class: 'feed-review-body' }, renderMarkdown(text)));
+      return cache.get(key);
+    },
+  };
+  const openStages = new Map();
+  // A tick skips the redraw while focus is inside, so a keyboard user keeps their place.
+  const draw = (steps, activity, { tick = false, now = Date.now(), finished = false } = {}) => {
+    if (tick && node.contains(document.activeElement)) return;
+    const decided = result.draw(activity, { now });
+    const track = decided && finished ? [] : stageTrack(steps, activity, now);
+    node.hidden = !track.length && !decided;
+    progressNode.hidden = !track.length;
+    if (!track.length) return;
+    const lastWithRoles = [...track].reverse().find((stage) => stage.roles.length)?.key;
+    const anyCurrent = track.some((stage) => stage.current && stage.roles.length);
+    append(clear(progressNode), [
+      element('ol', { class: 'stage-track', 'aria-label': 'Steps' }, track.map((stage) => element('li', {
+        class: `stage stage-${stage.state}${stage.current ? ' current' : ''}`, 'aria-current': stage.current ? 'step' : null, title: stage.error || null },
+      element('span', { class: 'stage-icon', 'aria-hidden': 'true' }, stage.icon), ' ', element('span', { class: 'stage-name' }, stage.label),
+      element('span', { class: 'visually-hidden' }, ` ${stage.state}`),
+      stage.seconds && stage.state !== 'waiting' ? element('span', { class: 'stage-time' }, duration(stage.seconds)) : null))),
+      track.filter((stage) => stage.headline).map((stage) => element('p', { class: 'where-headline' }, stage.headline)),
+      track.filter((stage) => stage.roles.length > 1 || (stage.roles.length && !stage.headline)).map((stage) => {
+        const open = openStages.has(stage.key) ? openStages.get(stage.key) : stage.current || (!anyCurrent && stage.key === lastWithRoles);
+        const details = element('details', { class: 'roster', open },
+          element('summary', {}, element('span', { class: 'stage-name' }, stage.label), ' ',
+            element('span', { class: 'muted' }, [`${stage.done}/${stage.total} done`, stage.failed ? `${stage.failed} failed` : null,
+              stage.findings ? `${stage.findings} ${stage.findings === 1 ? 'finding' : 'findings'}` : null].filter(Boolean).join(' · '))),
+          element('ul', { class: 'roster-list', role: 'list' }, stage.roles.map((entry) => rosterNode(entry, now, reviews)),
+            stage.waiting ? element('li', { class: 'roster-row roster-waiting' }, element('span', { class: 'roster-icon', 'aria-hidden': 'true' }, '…'),
+              element('span', { class: 'roster-role' }, `${stage.waiting} more waiting`)) : null));
+        details.addEventListener('toggle', () => openStages.set(stage.key, details.open));
+        return details;
+      })]);
+  };
+  return { node, draw };
 }
 
 function findingNode(finding) {
@@ -81,6 +173,24 @@ function findingNode(finding) {
     element('div', {}, element('span', { class: `chip ${finding.severity === 'high' || finding.severity === 'critical' ? 'bad' : 'warn'}` }, String(finding.severity || 'finding')), oneLine(finding.title || 'Finding', 200)),
     where ? element('code', { class: 'wrap-anywhere' }, where) : null,
     finding.body ? element('p', { class: 'finding-body' }, oneLine(finding.body, 400)) : null);
+}
+
+// Where this run sits in its thread, and a pointer to the newest run when a later one replaced it.
+async function threadNote(slot, run, signal) {
+  const thread = run.thread || run.subject;
+  let detail;
+  try {
+    detail = (await api(subjectPath(thread)))?.subject;
+  } catch {
+    return;
+  }
+  const others = (detail?.runs || []).filter((other) => String(other.id) !== String(run.id));
+  if (signal?.aborted || !others.length) return;
+  const newer = others.filter((other) => isNewer(other, run));
+  slot.append(newer.length
+    ? element('div', { class: 'banner warn' }, `${newer.length === 1 ? 'A later run' : `${newer.length} later runs`} replaced this one, so its result may be out of date. `,
+      link(subjectHref(thread), 'See the latest'))
+    : element('p', { class: 'note' }, `This is the latest of ${others.length + 1} runs on `, link(subjectHref(thread), detail.title || thread), '.'));
 }
 
 function artifactBody(artifact) {
@@ -208,11 +318,12 @@ export async function render(root, { args, signal }) {
   let names = orderArtifacts(listOf(artifactList, 'artifacts').map((artifact) => artifact.name));
   const active = activeTab(args[1], names);
 
-  // Header
+  // Header: what it is, how it came out, where it leads, then the details nobody needs first.
   const workflowName = workflowLabel(display, run.workflow);
+  const thread = run.thread || run.subject;
   const titleText = element('span', {}, run.summary?.title || workflowName || 'Run');
-  const chipSlot = element('span', {}, statusChip(run.status));
-  const verdictSlot = element('span', {});
+  const chipSlot = element('span', {});
+  const locationSlot = element('span', {});
   const liveNote = element('span', { class: 'live-state muted', role: 'status' }, 'Connecting…');
   const projectText = element('span', {}, '—');
   const durationText = element('span', { class: 'mono' });
@@ -220,22 +331,119 @@ export async function render(root, { args, signal }) {
   const tokenText = element('span', { class: 'mono' });
   const extraMeta = element('span', {});
   const fieldsSlot = element('span', { class: 'run-fields' });
-  const linksSlot = element('div', { class: 'run-links' });
+  const linksSlot = element('nav', { class: 'run-links', 'aria-label': 'Links' });
+  const sentenceText = element('p', { class: 'run-outcome', hidden: true });
   const progressText = element('p', { class: 'run-progress' });
   const errorSlot = element('div', {});
+  const threadSlot = element('div', {});
   const actions = actionsBar(runId);
-  const heading = pageHeader('', chipSlot, verdictSlot, run.dry_run ? element('span', { class: 'chip warn', title: 'Recorded outputs stood in for every step.' }, 'Dry run') : null, liveNote);
+  let job = detail?.job || null;
+  const cancelSlot = element('div', { class: 'run-actions' });
+  const gatesSlot = element('div', { class: 'run-gates' });
+  const drawGates = async () => {
+    let found;
+    try {
+      found = listOf(await api(`${runPath(runId)}/gates`), 'gates');
+    } catch {
+      return;
+    }
+    if (!signal?.aborted) gatesSlot.replaceChildren(...found.map((gate) => gateCard(gate, drawGates)));
+  };
+  const drawCancel = () => {
+    clear(cancelSlot);
+    if (TERMINAL.has(run.status)) return;
+    if (job?.cancel_requested_at) {
+      cancelSlot.append(element('p', { class: 'muted' }, 'Cancel requested. The run stops when its runner next checks in.'));
+      return;
+    }
+    if (!canCancel(job, run, currentSession())) return;
+    const button = element('button', { type: 'button' }, 'Cancel run');
+    const status = element('span', { role: 'status' });
+    button.addEventListener('click', async () => {
+      if (!(await confirmDialog('Cancel this run?', 'Its runner stops it and the run ends as canceled. It cannot be resumed.', 'Cancel run'))) return;
+      const answer = await attempt(status, button, () => api(`${runPath(runId)}/cancel`, { method: 'POST', body: {} }));
+      if (answer?.job) {
+        job = { ...job, ...answer.job };
+        drawCancel();
+      }
+    });
+    cancelSlot.append(button, status);
+  };
+  const rerunSlot = element('div', { class: 'run-actions' });
+  let shownRerun = null;
+  let rerunPoller = null;
+  const followRerun = () => {
+    rerunPoller?.stop();
+    rerunPoller = every(RERUN_POLL_MS, async () => {
+      const fresh = await api(runPath(runId));
+      if (fresh?.run) run = { ...run, can_rerun: fresh.run.can_rerun, rerun: fresh.run.rerun };
+      drawRerun();
+      return rerunPending(run.rerun);
+    }, signal);
+  };
+  // A run ends before its runner lets go of the job, so whether it may be rerun is known only once the job settles.
+  const settleRerun = () => {
+    let tries = 0;
+    every(RERUN_POLL_MS, async () => {
+      tries += 1;
+      const fresh = await api(runPath(runId));
+      if (fresh?.run) run = { ...run, can_rerun: fresh.run.can_rerun, rerun: fresh.run.rerun };
+      if (fresh && 'job' in fresh) job = fresh.job;
+      drawRerun();
+      return !settledJob(job) && tries < RERUN_SETTLE_TRIES;
+    }, signal);
+  };
+  const drawRerun = () => {
+    const note = rerunNote(run.rerun);
+    const key = JSON.stringify([canRerun(run), note]);
+    if (key === shownRerun) return;
+    shownRerun = key;
+    clear(rerunSlot);
+    if (note) rerunSlot.append(note.runId ? link(hashFor('run', [note.runId]), note.text) : element('p', { class: 'muted' }, note.text));
+    if (!canRerun(run)) return;
+    const button = element('button', { type: 'button' }, 'Rerun');
+    const status = element('span', { role: 'status' });
+    button.addEventListener('click', async () => {
+      if (!(await confirmDialog('Rerun this run?', 'A new run of this workflow starts at its current version, with the same inputs and trigger. This run stays as it is.', 'Rerun'))) return;
+      const answer = await attempt(status, button, () => api(`${runPath(runId)}/rerun`, { method: 'POST', body: {} }));
+      if (!answer?.job) return;
+      run = { ...run, can_rerun: false, rerun: answer.job };
+      drawRerun();
+      followRerun();
+    });
+    rerunSlot.append(button, status);
+  };
+  const heading = pageHeader('', chipSlot, locationSlot, run.dry_run ? element('span', { class: 'chip warn', title: 'Recorded outputs stood in for every step.' }, 'Dry run') : null, liveNote);
   heading.querySelector('h1').append(titleText);
-  root.append(element('p', { class: 'crumb' }, link(hashFor('runs'), 'Runs')), heading,
+  root.append(element('p', { class: 'crumb' }, link(hashFor('runs'), 'Runs'), thread ? [' / ', link(subjectHref(thread), thread)] : null), heading,
+    sentenceText, linksSlot,
     element('div', { class: 'meta' },
-      run.subject ? labelled('Subject', subjectLink(run.subject)) : null,
       run.summary?.title ? labelled('Workflow', element('span', {}, workflowName)) : null,
-      labelled('Project', projectText),
-      labelled('Triggered by', element('span', {}, [run.triggered_by || '—', run.trigger_kind ? ` (${run.trigger_kind})` : ''].join(''))),
       labelled('Started', element('span', { title: run.started_at || null }, when(run.started_at))),
-      labelled('Duration', durationText), display.show_cost ? labelled('Cost', costText) : null, labelled('Tokens', tokenText), fieldsSlot, extraMeta),
-    linksSlot, actions.node, progressText, errorSlot);
+      labelled('Took', durationText), extraMeta),
+    threadSlot, actions.node, cancelSlot, rerunSlot, gatesSlot, progressText, errorSlot);
+  const where = whereView();
+  const activity = new RunActivity();
+  let activityReady = false;
+  let activityQueue = [];
+  let whereFrame = 0;
+  const drawWhere = () => {
+    if (!whereFrame) {
+      whereFrame = requestAnimationFrame(() => {
+        whereFrame = 0;
+        where.draw(steps, activity, { finished: TERMINAL.has(run.status) });
+        drawSentence();
+      });
+    }
+  };
+  const feedActivity = (events) => {
+    if (!activityReady) activityQueue.push(...events);
+    else if (activity.apply(events)) drawWhere();
+  };
+  root.append(where.node);
   actions.refresh();
+  if (rerunPending(run.rerun)) followRerun();
+  if (thread) threadNote(threadSlot, run, signal);
   if (run.team_id) {
     api(`/api/teams/${encodeURIComponent(run.team_id)}/projects`).then((payload) => {
       const project = listOf(payload, 'projects').find((candidate) => String(candidate.id) === String(run.project_id));
@@ -243,32 +451,50 @@ export async function render(root, { args, signal }) {
     }).catch(() => {});
   }
 
-  let shownStatus = run.status;
+  let shownStatus = null;
   let shownSummary = null;
+  const runOutcome = () => run.outcome || run.summary?.outcome || null;
+  const drawSentence = () => {
+    const text = outcomeSentence(runOutcome(), decisionSummary(activity)?.counts);
+    sentenceText.hidden = !text;
+    setText(sentenceText, text);
+  };
+  let shownLocation = null;
   const drawSummary = () => {
     const summary = run.summary && typeof run.summary === 'object' ? run.summary : {};
     const key = JSON.stringify(summary);
     if (key === shownSummary) return;
     shownSummary = key;
     setText(titleText, summary.title || workflowName || 'Run');
-    append(clear(verdictSlot), [verdictChip(summary.verdict)]);
     const fields = summary.fields && typeof summary.fields === 'object' ? Object.entries(summary.fields) : [];
     append(clear(fieldsSlot), fields.map(([name, value]) => labelled(name, element('span', {}, String(value)))));
-    append(clear(linksSlot), summaryLinks(summary).map(({ label, url }) => {
-      const anchor = element('a', { rel: 'noopener noreferrer', target: url.startsWith('/') ? null : '_blank' }, label);
-      // dom.js keeps to https and hash links, and summaryLinks has already vetted this one.
-      anchor.setAttribute('href', url);
-      return anchor;
-    }));
+    const links = externalLinks({ links: [...(Array.isArray(run.links) ? run.links : []), ...(Array.isArray(summary.links) ? summary.links : [])] });
+    linksSlot.hidden = !links.length;
+    append(clear(linksSlot), links.map(externalLink));
   };
   const updateHeader = () => {
-    if (run.status !== shownStatus) {
-      shownStatus = run.status;
-      clear(chipSlot).append(statusChip(run.status));
-      actions.refresh();
+    const outcome = runStatus({ status: run.status, verdict: run.summary?.verdict, outcome: runOutcome() }, null);
+    const risk = riskBadge(run.risk, Array.isArray(run.risk_reasons) ? run.risk_reasons[0]?.text : null);
+    if (`${run.status}|${outcome.text}|${risk?.text}|${risk?.title}` !== shownStatus) {
+      if (run.status !== shownStatus?.split('|')[0]) {
+        actions.refresh();
+        drawGates();
+      }
+      shownStatus = `${run.status}|${outcome.text}|${risk?.text}|${risk?.title}`;
+      append(clear(chipSlot), [element('span', { class: `state state-${outcome.tone}` }, outcome.text),
+        risk ? element('span', { class: `chip ${risk.tone}`, title: risk.title }, risk.text) : null]);
+      drawCancel();
     }
+    drawRerun();
     drawSummary();
+    drawSentence();
+    const placed = JSON.stringify(run.location || null);
+    if (placed !== shownLocation) {
+      shownLocation = placed;
+      append(clear(locationSlot), [locationChip(run.location)]);
+    }
     const isOpen = !TERMINAL.has(run.status);
+    progressText.hidden = !isOpen;
     setText(durationText, duration(elapsedSeconds(run.started_at, run.finished_at || (isOpen ? null : run.started_at))));
     setText(costText, money(run.cost_usd, 4));
     setText(tokenText, `${tokens(run.input_tokens)} in · ${tokens(run.output_tokens)} out`);
@@ -278,15 +504,30 @@ export async function render(root, { args, signal }) {
     const errorText = run.error ? oneLine(run.error, 600) : '';
     if (errorSlot.textContent !== errorText) clear(errorSlot).append(errorText ? element('div', { class: 'banner bad', role: 'alert' }, errorText) : null);
   };
-  const syncProgress = () => setText(progressText, progress(steps).text);
+  const syncProgress = () => {
+    setText(progressText, progress(steps).text);
+    drawWhere();
+  };
   updateHeader();
+  drawCancel();
   syncProgress();
+  backfill(activity, (after) => api(eventsPath(runId, after, PAGE)), { signal }).catch(() => {}).finally(() => {
+    if (signal?.aborted) return;
+    activityReady = true;
+    activity.apply(activityQueue.sort((left, right) => left.seq - right.seq));
+    activityQueue = [];
+    drawWhere();
+  });
 
   // Tabs
   const baseHash = hashFor('run', [runId]);
   let tabRow = tabs(baseHash, runTabs(names), active, { label: 'Run sections' });
   const panel = tabRow.panel;
-  root.append(tabRow.tablist, panel);
+  root.append(tabRow.tablist, panel, element('details', { class: 'card run-details' }, element('summary', {}, 'Run details'),
+    element('div', { class: 'meta' },
+      labelled('Project', projectText),
+      labelled('Triggered by', element('span', {}, [run.triggered_by || '—', run.trigger_kind ? ` (${run.trigger_kind})` : ''].join(''))),
+      display.show_cost ? labelled('Cost', costText) : null, labelled('Tokens', tokenText), fieldsSlot)));
   const activeArtifact = artifactForTab(active, names);
   const artifactTab = activeArtifact ? artifactView(runId, activeArtifact, signal) : null;
   const output = active === OUTPUT_TAB ? outputView(runId, signal, display.show_cost) : null;
@@ -346,23 +587,59 @@ export async function render(root, { args, signal }) {
   });
 
   const groupNode = (stepId) => element('section', { class: 'feed-group', 'data-step': stepId ?? '' }, element('h3', { class: 'feed-step' }, stepId || 'Run'));
+  // A step whose events carry roles shows its roles' lines, with each role's session activity collapsed and no start or finish rows.
+  const roleSteps = new Set();
+  const boundaryNodes = new Map();
+  const activityBoxes = new WeakMap();
+  const markRoleStep = (key) => {
+    if (roleSteps.has(key)) return;
+    roleSteps.add(key);
+    for (const node of boundaryNodes.get(key) || []) node.hidden = true;
+    boundaryNodes.delete(key);
+  };
+  const activityBox = (section, role) => {
+    if (!activityBoxes.has(section)) activityBoxes.set(section, new Map());
+    const boxes = activityBoxes.get(section);
+    if (!boxes.has(role)) {
+      const label = element('span', { class: 'feed-label' });
+      const latest = element('span', { class: 'feed-activity-now' });
+      const body = element('div', { class: 'feed-activity-body' });
+      const details = element('details', { class: 'feed-item feed-activity' }, element('summary', {}, label, ' ', latest), body);
+      section.append(details);
+      boxes.set(role, { label, latest, body, count: 0 });
+    }
+    return boxes.get(role);
+  };
+  const putInto = (section, item, node) => {
+    const { slot, role } = feedSlot(item);
+    if (role) markRoleStep(item.step_key);
+    if (slot === 'activity') {
+      const box = activityBox(section, role);
+      box.body.append(node);
+      box.count += 1;
+      setText(box.label, `${role} · activity (${box.count.toLocaleString('en-US')})`);
+      const latest = nowText(item.kind, item.payload);
+      if (latest) setText(box.latest, latest);
+    } else {
+      section.append(node);
+      if (slot === 'boundary' && roleSteps.has(item.step_key)) node.hidden = true;
+      else if (slot === 'boundary') boundaryNodes.set(item.step_key, [...(boundaryNodes.get(item.step_key) || []), node]);
+    }
+    nodes.set(item.id, node);
+  };
   const place = (item, node) => {
     const last = feedList.lastElementChild;
     const group = last && last.dataset.step === (item.step_key ?? '') ? last : feedList.appendChild(groupNode(item.step_key));
-    group.append(node);
-    nodes.set(item.id, node);
+    putInto(group, item, node);
   };
   const renderAll = () => {
     clear(feedList);
     nodes.clear();
+    boundaryNodes.clear();
     const fragment = document.createDocumentFragment();
     for (const group of groupItems(model.items)) {
       const section = groupNode(group.step_key);
-      for (const item of group.items) {
-        const node = itemNode(item, display.show_cost);
-        section.append(node);
-        nodes.set(item.id, node);
-      }
+      for (const item of group.items) putInto(section, item, itemNode(item, display.show_cost));
       fragment.append(section);
     }
     feedList.append(fragment);
@@ -374,8 +651,10 @@ export async function render(root, { args, signal }) {
       for (const id of removed) {
         const node = nodes.get(id);
         nodes.delete(id);
-        const group = node?.parentElement;
+        const group = node?.closest('.feed-group');
+        const box = node?.parentElement?.classList.contains('feed-activity-body') ? node.parentElement : null;
         node?.remove();
+        if (box && !box.childElementCount) box.parentElement.remove();
         if (group && group.childElementCount <= 1) group.remove();
       }
       if (!following) feedBox.scrollTop -= before - feedList.scrollHeight;
@@ -459,6 +738,7 @@ export async function render(root, { args, signal }) {
       if (live && ['step_end', 'step_failed', 'cost', 'run_end'].includes(event.kind)) refreshSoon();
       if (live && ['step_start', 'step_end', 'step_failed', 'step_skipped'].includes(event.kind)) outputSoon();
     }
+    feedActivity(events);
     if (stepsChanged) syncProgress();
   };
 
@@ -508,7 +788,10 @@ export async function render(root, { args, signal }) {
   let poller = null;
   let settled = false;
   const setLive = (state) => setText(liveNote, LIVE_STATES[state] || '');
-  const ticker = setInterval(updateHeader, 1000);
+  const ticker = setInterval(() => {
+    updateHeader();
+    where.draw(steps, activity, { tick: true, finished: TERMINAL.has(run.status) });
+  }, 1000);
   settleSoon = () => {
     if (settled) return;
     settled = true;
@@ -519,11 +802,14 @@ export async function render(root, { args, signal }) {
       clearInterval(ticker);
       setLive('ended');
       updateHeader();
+      drawWhere();
       outputSoon();
+      if (!settledJob(job)) settleRerun();
     }, SETTLE_MS);
   };
   signal?.addEventListener('abort', () => {
     clearInterval(ticker);
+    cancelAnimationFrame(whereFrame);
     clearTimeout(refreshTimer);
     clearTimeout(announceTimer);
     clearTimeout(outputTimer);
@@ -603,6 +889,7 @@ export async function render(root, { args, signal }) {
     settled = true;
     clearInterval(ticker);
     setLive('ended');
+    if (!settledJob(job)) settleRerun();
   } else {
     openStream(hasBefore ? Math.max(lastSeq, seenSeq()) : null);
   }

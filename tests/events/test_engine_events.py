@@ -282,6 +282,7 @@ async def test_top_level_run_registers_with_the_server(monkeypatch, tmp_path):
         monkeypatch.setenv("ARMATURE_RUNNER_KEY", "rk")
         monkeypatch.setenv("ARMATURE_ACTOR", "alice")
         monkeypatch.setenv("ARMATURE_TRIGGER_KIND", "schedule")
+        monkeypatch.setenv("ARMATURE_LOCATION", '{"kind": "aws-mac", "instance": "i-0mac"}')
         harness = Harness(spec=_spec(), session_dir=tmp_path, traces_db=tmp_path / "t.db")
         with patch("armature.nodes.llm.LLMNode.execute", side_effect=_llm):
             await harness.run({"project": "android"})
@@ -289,7 +290,8 @@ async def test_top_level_run_registers_with_the_server(monkeypatch, tmp_path):
         assert path == "/api/runner/runs"
         assert headers["Authorization"] == "Bearer rk"
         assert body == {"workflow": "events-test", "project": "android", "actor": "alice",
-                        "trigger_kind": "schedule", "trigger_ref": {}, "subject": None, "rerun_of": None}
+                        "trigger_kind": "schedule", "trigger_ref": {}, "subject": None, "rerun_of": None,
+                        "location": {"kind": "aws-mac", "label": "AWS macOS", "instance": "i-0mac"}}
         events = r.wait_for(9)
         assert events[0]["kind"] == "run_start" and events[0]["token"] == "srv-token"
         assert harness._events._closed

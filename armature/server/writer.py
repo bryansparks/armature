@@ -21,8 +21,8 @@ from typing import Any
 
 from sqlalchemy import Connection, Engine, delete, func, insert, select, text, update
 
-from armature.events.summary import merge_summary
-from armature.server import runners
+from armature.events.summary import OUTCOMES, merge_summary
+from armature.server import runners, threads
 from armature.server.db import new_id
 from armature.server.db.schema import (
     findings,
@@ -75,6 +75,7 @@ class RunChange:
     findings: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, dict[str, Any]] = field(default_factory=dict)
     summary: dict[str, Any] | None = None
+    location: dict[str, Any] | None = None
 
 
 @dataclass
@@ -290,6 +291,7 @@ def _merge_run(into: RunChange, change: RunChange) -> None:
     into.artifacts.update(change.artifacts)
     if change.summary:
         into.summary = merge_summary(into.summary, change.summary)
+    into.location = change.location or into.location
 
 
 def merge_step(into: StepChange, step: StepChange) -> None:
@@ -335,9 +337,25 @@ def _apply_run(conn: Connection, run_id: str, change: RunChange) -> None:
     if change.end is not None:
         status, finished_at, error = change.end
         values.update(status=status, finished_at=finished_at, error=error)
+    if change.location is not None:
+        values["location"] = change.location
     if change.summary:
-        current = conn.execute(select(runs.c.summary).where(runs.c.id == run_id)).scalar()
-        values["summary"] = merge_summary(current, change.summary)
+        current = conn.execute(select(runs.c.summary, runs.c.subject, runs.c.team_id, runs.c.outcome_source,
+                                      runs.c.thread)
+                               .where(runs.c.id == run_id)).first()
+        if current is not None:
+            patch = change.summary
+            if current.outcome_source == "server":
+                patch = {k: v for k, v in patch.items() if k != "outcome"}
+            elif "outcome" in patch:
+                conn.execute(update(runs).where(runs.c.id == run_id, runs.c.outcome_source.is_distinct_from("server"))
+                             .values(outcome=patch["outcome"], outcome_source="runner"))
+            values["summary"] = merge_summary(current.summary, patch)
+            thread, joined = threads.joining(current.subject, values["summary"])
+            # A thread the trigger set explicitly stays.
+            if thread is not None and current.thread is None:
+                values["thread"] = thread
+            threads.adopt(conn, current.team_id, joined, thread)
     if values:
         conn.execute(update(runs).where(runs.c.id == run_id).values(**values))
     if change.end is None and change.last_event_at is not None:
@@ -353,6 +371,16 @@ def _apply_run(conn: Connection, run_id: str, change: RunChange) -> None:
         conn.execute(insert(run_artifacts).values(run_id=run_id, **artifact))
     if change.end is not None:
         runners.revoke_tokens(conn, [run_id])
+        # Imported here, since the broker imports ingest, which imports this module.
+        from armature.server import broker
+        broker.run_ended(run_id)
+
+
+def server_outcome(conn: Connection, run_id: str, outcome: str) -> None:
+    """Set the run's outcome from the server. Runner summaries can't change it after this."""
+    if outcome not in OUTCOMES:
+        raise ValueError(outcome)
+    conn.execute(update(runs).where(runs.c.id == run_id).values(outcome=outcome, outcome_source="server"))
 
 
 def _upsert_step(conn: Connection, run_id: str, key: str, step: StepChange) -> None:
@@ -392,4 +420,8 @@ def sweep_lost(conn: Connection, now: datetime, after: timedelta) -> list[str]:
         changed = conn.execute(update(runs).where(runs.c.id == run_id, *stale).values(status="lost", finished_at=last))
         if changed.rowcount == 1:
             lost.append(run_id)
+    # Imported here for the same cycle as in _apply_run.
+    from armature.server import broker
+    for run_id in lost:
+        broker.run_ended(run_id)
     return lost

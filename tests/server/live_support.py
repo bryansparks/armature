@@ -46,6 +46,7 @@ class LiveServer:
         self.port = free_port()
         self.origin = f"http://127.0.0.1:{self.port}"
         self.dir = socket_dir() if socket else None
+        overrides.setdefault("require_totp", True)
         cfg = ServerConfig(database_url=str(engine.url), public_origin=self.origin,
                            events_socket=os.path.join(self.dir, "e.sock") if socket else "", **overrides)
         self.app = create_app(cfg, engine, keyring, clock=clock, password_cost=COST)

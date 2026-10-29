@@ -12,6 +12,7 @@ _STEP_EVENTS = {
     "stage_resumed": "step_skipped",
     "retry_attempt": "retry",
     "loop_iteration": "progress",
+    "loop_stopped": "log",
     "tier_escalation_warning": "log",
 }
 
