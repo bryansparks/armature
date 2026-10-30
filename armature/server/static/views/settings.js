@@ -3,6 +3,7 @@ import { attempt, card, clear, confirmDialog, element, empty, errorBox, loading,
 import { DISPLAY_DEFAULTS, SERIES_COLORS } from '../display.js';
 import { hashFor } from '../router.js';
 import { parseJson } from '../schema.js';
+import { ALL_TEAMS_LABEL } from '../scopes.js';
 
 const INSTANCE = 'instance';
 
@@ -123,7 +124,7 @@ export async function render(root, { query }) {
   const teams = await api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []);
   const projectLists = await Promise.all(teams.map((team) => api(`/api/teams/${encodeURIComponent(team.id)}/projects`)
     .then((payload) => listOf(payload, 'projects')).catch(() => [])));
-  const scopes = [[INSTANCE, 'Default (all teams)'], ...teams.flatMap((team, index) => [[String(team.id), team.name],
+  const scopes = [[INSTANCE, ALL_TEAMS_LABEL], ...teams.flatMap((team, index) => [[String(team.id), team.name],
     ...projectLists[index].map((project) => [String(project.id), `${team.name} / ${project.name}`])])];
   const scopeName = (scope) => scopes.find(([id]) => id === scopeParam(scope))?.[1] || scope;
   const filter = query.get('scope') || '';

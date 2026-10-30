@@ -6,7 +6,7 @@ import { diffView } from '../diff.js';
 import { frontMatter, SHOWN_FIELDS } from '../frontmatter.js';
 import { navigate, protect, release } from '../guard.js';
 import { hashFor } from '../router.js';
-import { creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
+import { ALL_TEAMS_LABEL, creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
 import { canManageTeam, currentSession, isAdmin } from '../session.js';
 import { stepsPanel } from './steps.js';
 
@@ -73,11 +73,11 @@ export async function teamNames() {
   return new Map(teams.map((team) => [String(team.id), team.name]));
 }
 
-export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : 'Default (all teams)');
+export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : ALL_TEAMS_LABEL);
 
 export function scopeText(record, names) {
   if (record.scope_name) return record.scope_name;
-  if (record.scope_kind === 'instance') return 'Default (all teams)';
+  if (record.scope_kind === 'instance') return ALL_TEAMS_LABEL;
   return scopeLabel(record.team_id, names);
 }
 
@@ -112,7 +112,7 @@ export function frontMatterView(body) {
 }
 
 export async function loadScopes() {
-  const teams = await api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []);
+  const teams = listOf(await api('/api/teams'), 'teams');
   const led = teams.filter((team) => isAdmin() || canManageTeam(team.id));
   const projectLists = await Promise.all(led.map((team) => api(`/api/teams/${encodeURIComponent(team.id)}/projects`)
     .then((payload) => listOf(payload, 'projects')).catch(() => [])));
@@ -348,9 +348,16 @@ function forkButton(config, record, status) {
   button.addEventListener('click', async () => {
     clear(status);
     button.disabled = true;
-    const scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record))
-      && (!toProject || scope.scope_kind === 'project'));
-    button.disabled = false;
+    let scopes;
+    try {
+      scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record))
+        && (!toProject || scope.scope_kind === 'project'));
+    } catch (err) {
+      status.append(errorBox(err));
+      return;
+    } finally {
+      button.disabled = false;
+    }
     if (!scopes.length) {
       status.append(errorBox({ message: toProject ? 'You do not lead another project to copy this into.' : 'You do not lead a team or project to copy this into.' }));
       return;

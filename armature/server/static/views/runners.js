@@ -26,7 +26,7 @@ export function runnerCells(runner) {
     element('span', { class: `state state-${runner.online ? 'ok' : 'unknown'}` }, runner.online ? 'Online' : 'Offline'),
     capabilities.length ? capabilities.join(', ') : 'Only jobs that need nothing',
     runner.slots ? `${runner.running} of ${runner.slots}` : String(runner.running),
-    runner.team ? `${runner.key} (${runner.team})` : `${runner.key} (instance)`,
+    runner.team ? `${runner.key} (${runner.team})` : `${runner.key} (all teams)`,
     runner.last_seen_at ? when(runner.last_seen_at) : 'Never',
   ];
 }

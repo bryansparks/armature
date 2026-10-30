@@ -1,5 +1,6 @@
 import { api, listOf } from '../api.js';
 import { attempt, card, clear, confirmDialog, element, empty, errorBox, loading, pageHeader, table, tabs, when } from '../dom.js';
+import { ALL_TEAMS_LABEL } from '../scopes.js';
 import { canManageTeam, isAdmin } from '../session.js';
 
 const INSTANCE = 'instance';
@@ -75,7 +76,7 @@ export async function render(root, { args }) {
     root.append(errorBox(err));
     return;
   }
-  const scopes = [...(isAdmin() ? [{ id: INSTANCE, label: 'Default (all teams)' }] : []), ...teams.map((team) => ({ id: String(team.id), label: team.name }))];
+  const scopes = [...(isAdmin() ? [{ id: INSTANCE, label: ALL_TEAMS_LABEL }] : []), ...teams.map((team) => ({ id: String(team.id), label: team.name }))];
   if (!scopes.length) {
     root.append(card(empty('You do not manage any team’s secrets.')));
     return;

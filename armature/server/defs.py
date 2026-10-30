@@ -1417,7 +1417,7 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
         raise DefError(400, f"credential_scope must be one of {', '.join(CREDENTIAL_SCOPES)}.")
     if config.get("credential_scope") == "instance" and not is_admin \
             and (previous or {}).get("credential_scope") != "instance":
-        raise DefError(403, "Only an admin can point a provider at a secret for all teams.")
+        raise DefError(403, "Only an admin can point a provider at a secret for all teams (credential_scope: instance).")
     if not may_name_secret and secret and secret != (previous or {}).get("credential_secret"):
         raise DefError(403, "Only a team lead or an admin can point a provider at a team secret.")
     for key in REQUIRED_CONFIG.get(kind, ()):

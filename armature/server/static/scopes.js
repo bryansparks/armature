@@ -2,6 +2,8 @@ import { ledTeamIds } from './session.js';
 
 const PROJECT_EDITORS = new Set(['project_lead', 'team_lead']);
 
+export const ALL_TEAMS_LABEL = 'Default (all teams)';
+
 export const sameScope = (first, second) => first.scope_kind === second.scope_kind && String(first.scope_id ?? '') === String(second.scope_id ?? '');
 
 export const scopeKey = (scope) => `${scope.scope_kind}:${scope.scope_id ?? ''}`;
@@ -12,7 +14,7 @@ export const findScope = (scopes, key) => scopes.find((scope) => scopeKey(scope)
 export function creatableScopes(sessionPayload, teams = [], projectsByTeam = new Map()) {
   const isAdmin = Boolean(sessionPayload?.user?.is_admin);
   const led = new Set(ledTeamIds(sessionPayload).map(String));
-  const scopes = isAdmin ? [{ scope_kind: 'instance', scope_id: null, label: 'Default (all teams)' }] : [];
+  const scopes = isAdmin ? [{ scope_kind: 'instance', scope_id: null, label: ALL_TEAMS_LABEL }] : [];
   for (const team of teams) {
     if (!isAdmin && !led.has(String(team.id))) continue;
     scopes.push({ scope_kind: 'team', scope_id: String(team.id), label: team.name });

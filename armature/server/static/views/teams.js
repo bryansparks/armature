@@ -132,7 +132,7 @@ async function showTab(panel, team, active) {
   }
 }
 
-function renameControl(team, heading) {
+function renameControl(team, heading, onRenamed) {
   const renameButton = element('button', { type: 'button', class: 'btn small' }, 'Rename');
   const nameInput = element('input', { type: 'text', id: 'rename-team-name', required: true, maxlength: 60, 'aria-describedby': 'rename-team-note' });
   const saveButton = element('button', { type: 'submit', class: 'primary' }, 'Save');
@@ -179,6 +179,7 @@ function renameControl(team, heading) {
     close();
     status.append(element('p', { class: 'note' }, 'Saved.'));
     api('/api/session').then(setSession).catch(() => {});
+    onRenamed();
   });
   return { button: renameButton, form: element('div', {}, editor, status) };
 }
@@ -202,7 +203,7 @@ async function detail(root, teamId, requestedTab) {
   const { tablist, panel } = tabs(teamPageHref(team.id), sections, active, { label: 'Team sections' });
   panel.append(loading());
   const header = pageHeader(team.name);
-  const rename = isAdmin() ? renameControl(team, header.querySelector('h1')) : null;
+  const rename = isAdmin() ? renameControl(team, header.querySelector('h1'), () => showTab(panel, team, active)) : null;
   if (rename) header.append(rename.button);
   root.append(crumb, header, ...(rename ? [rename.form] : []), tablist, panel);
   await showTab(panel, team, active);

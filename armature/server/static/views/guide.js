@@ -1,8 +1,8 @@
 import { INSTRUCTION_MAX } from '../assistant.js';
 import { clear, element, errorBox, link, loading, pageHeader } from '../dom.js';
-import { navigate } from '../guard.js';
+import { navigate, protect, release } from '../guard.js';
 import { hashFor } from '../router.js';
-import { isAdmin, ledTeamIds } from '../session.js';
+import { currentSession, isAdmin, ledTeamIds, navFor } from '../session.js';
 import { loadScopes, scopeSelect } from './definition.js';
 
 const EXAMPLES = [
@@ -100,10 +100,21 @@ export function render(root) {
   root.append(step(4, 'Test it safely',
     element('p', { class: 'guide-prose' }, "On the workflow's page, the Test run card has a Start test run button. It replays recorded step outputs, so nothing runs, posts, or pushes, and no model is called."),
     element('p', { class: 'guide-prose' }, 'A new workflow has no recorded outputs yet, so tick Treat steps with no recorded output as empty. Otherwise every step fails.'),
-    element('p', { class: 'guide-prose' }, 'When you want it to run for real, ask an admin or team lead to set up a trigger.')));
+    element('p', { class: 'guide-prose' }, 'When you want it to run for real, see step 6.')));
 
   root.append(step(5, 'Change it later',
     element('p', { class: 'guide-prose' }, 'If you can edit the workflow, use Describe a change on its page. Every saved change is a new version you can go back to.')));
+
+  const webhooksPage = navFor(currentSession()).includes('webhooks') ? link(hashFor('webhooks'), 'Webhooks page') : 'Webhooks page';
+  root.append(step(6, 'Connect it to your repo',
+    element('p', { class: 'guide-prose' }, 'A workflow runs for real when a webhook rule or a trigger starts it. A webhook rule runs it when your repo sends an event, such as a pull request opening.'),
+    element('p', { class: 'guide-prose' }, "An admin or team lead sets this up, and only they see Webhooks in the menu. If you don't, send one of them the repository (owner/name), the workflow's name, and which events should start it, for example a pull request opened or updated."),
+    element('h3', { class: 'guide-subhead' }, 'What they do'),
+    element('ol', { class: 'guide-list' },
+      element('li', {}, 'On the ', webhooksPage, ", open the team's tab and use Add a webhook with Source GitHub, then Create webhook. Copy the secret it shows, because it is not shown again. A team that already has a GitHub webhook can reuse it."),
+      element('li', {}, 'In the GitHub repository, open Settings, Webhooks, Add webhook. Paste the URL for the sender, which ends in /hooks/ and a token, into Payload URL, set Content type to application/json, paste the secret, and pick the events, such as Pull requests.'),
+      element('li', {}, 'Back on the webhook, use Add a rule. Pick the workflow, put the event in Events (pull_request for pull requests), and press Add rule.'),
+      element('li', {}, 'A new webhook is pending approval, so its first deliveries are held and nothing runs. Under Deliveries, press Review on a held delivery, check the sender, and press Approve. That delivery then runs through the rules.'))));
 
   function update() {
     let why = '';
@@ -116,8 +127,10 @@ export function render(root) {
   }
 
   for (const input of Object.values(inputs)) input.addEventListener('input', update);
+  protect(() => Object.values(inputs).some((input) => input.value.trim() !== ''));
   draftButton.addEventListener('click', () => {
     if (!scopeControl || !inputs.steps.value.trim()) return;
+    release();
     navigate(hashFor('new-workflow', [], { scope: scopeControl.select.value, describe: composeDescription(answers()) }));
   });
 
