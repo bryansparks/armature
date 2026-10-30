@@ -575,3 +575,27 @@ tr.row-link:hover td { background: var(--surface-2); }
 .chat-message p { margin: 4px 0 0; }
 .chat-user { margin-left: 24px; background: var(--surface-2); }
 .chat-assistant, .chat-system { margin-right: 24px; }
+
+.copy-list { list-style: none; margin: 0; padding: 0; }
+.copy-list li { overflow-wrap: anywhere; }
+.copy-list li + li { margin-top: 6px; }
+
+/* Create a workflow guide: numbered steps, plain prose, and the description fields. */
+.guide-intro { max-width: 72ch; margin: 4px 0 18px; color: var(--ink-2); }
+.guide-step { margin-bottom: 18px; }
+.guide-step > h2 { display: flex; align-items: center; gap: 10px; }
+.guide-number { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 999px; background: var(--accent-wash); color: var(--accent); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.guide-prose, .guide-list { max-width: 72ch; }
+.guide-prose { margin: 0 0 10px; }
+.guide-list { margin: 0; padding-left: 1.4em; }
+.guide-list > li { margin: 4px 0; }
+.guide-subhead { margin: 20px 0 6px; }
+.guide-examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 16px; }
+.guide-fields { max-width: 640px; }
+.guide-field { display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; color: var(--ink-2); }
+.guide-field > label { font-weight: 600; color: var(--ink); }
+.guide-hint { color: var(--muted); font-size: 12.5px; }
+.guide-scope { max-width: 520px; }
+@media (max-width: 760px) {
+  .guide-examples > button { flex: 1 1 100%; text-align: left; }
+}

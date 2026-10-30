@@ -75,7 +75,7 @@ export async function render(root, { args }) {
     root.append(errorBox(err));
     return;
   }
-  const scopes = [...(isAdmin() ? [{ id: INSTANCE, label: 'Instance' }] : []), ...teams.map((team) => ({ id: String(team.id), label: team.name }))];
+  const scopes = [...(isAdmin() ? [{ id: INSTANCE, label: 'Default (all teams)' }] : []), ...teams.map((team) => ({ id: String(team.id), label: team.name }))];
   if (!scopes.length) {
     root.append(card(empty('You do not manage any team’s secrets.')));
     return;
@@ -98,7 +98,7 @@ export async function render(root, { args }) {
     if (message) clear(status).append(element('p', { class: 'note' }, message));
     clear(listSlot).append(card(secrets.length ? table(['Name', 'Status', 'New value', ''], secrets.map((secret) => [
       element('span', { class: 'mono' }, secret.name), secretState(secret), replaceForm(scope, secret, status, reload), deleteButton(scope, secret, status, reload),
-    ])) : empty(scope === INSTANCE ? 'No instance secrets yet.' : 'This team has no secrets yet.')));
+    ])) : empty(scope === INSTANCE ? 'No secrets for all teams yet.' : 'This team has no secrets yet.')));
   }
 
   await reload();

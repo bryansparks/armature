@@ -118,7 +118,7 @@ def check(key: str, value: Any, team_id: str | None) -> Any:
     if name not in CHECKS:
         raise Invalid(f"Unknown display setting. The display settings are {', '.join(PREFIX + k for k in CHECKS)}.")
     if team_id is not None:
-        raise Invalid("Display settings apply to the whole instance, so set them on the instance scope.")
+        raise Invalid("Display settings apply to the whole server, so set them on Default (all teams).")
     return CHECKS[name](value)
 
 

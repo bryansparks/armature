@@ -86,6 +86,6 @@ export function runnerKeysSection(teamId, { heading = 'Runner keys' } = {}) {
 
 export async function render(root) {
   root.append(pageHeader('Runner keys'));
-  root.append(element('p', { class: 'note' }, 'An instance key registers runs for every team. Each run lands in the team whose project matches its repository, else in Operations.'));
-  root.append(card(runnerKeysSection(null, { heading: 'Instance keys' })));
+  root.append(element('p', { class: 'note' }, 'A key for all teams registers runs for every team. Each run lands in the team whose project matches its repository, else in Operations.'));
+  root.append(card(runnerKeysSection(null, { heading: 'Keys for all teams' })));
 }

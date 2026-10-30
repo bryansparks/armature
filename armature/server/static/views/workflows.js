@@ -5,15 +5,39 @@ import { mayCreate } from '../scopes.js';
 import { currentSession } from '../session.js';
 import { detailPage, effectiveText, lintLabel, newPage, scopeText, teamNames, WORKFLOW } from './definition.js';
 
+export function groupByName(workflows, names = new Map()) {
+  const groups = new Map();
+  for (const workflow of workflows) {
+    if (!groups.has(workflow.name)) groups.set(workflow.name, []);
+    groups.get(workflow.name).push(workflow);
+  }
+  const rank = (workflow) => (workflow.scope_kind === 'instance' ? 0 : 1);
+  return [...groups].map(([name, copies]) => ({
+    name, copies: copies.sort((first, second) => rank(first) - rank(second) || scopeText(first, names).localeCompare(scopeText(second, names))),
+  }));
+}
+
+function copyItem(workflow, name, names) {
+  const usedBy = effectiveText(workflow.effective_for);
+  return element('li', {},
+    element('a', { href: hashFor('workflow', [workflow.id]) }, element('span', { class: 'visually-hidden' }, `${name} `), `${scopeText(workflow, names)} · v${workflow.current_version}`),
+    usedBy !== '—' ? element('span', { class: 'muted' }, ` · used by ${usedBy}`) : null,
+    workflow.lint_ok !== true ? [' ', lintLabel(workflow.lint_ok)] : null);
+}
+
+export const latest = (copies) => copies.reduce((newest, workflow) => (new Date(workflow.updated_at || 0) > new Date(newest || 0) ? workflow.updated_at : newest), null);
+
 export function workflowTable(workflows, names) {
-  return table(['Workflow', 'Kind', 'Scope', ['Version', 'num'], 'Lint', 'Used by', 'Updated'], workflows.map((workflow) => [
-    link(hashFor('workflow', [workflow.id]), workflow.name), WORKFLOW.kindLabel(workflow) || '—', scopeText(workflow, names), String(workflow.current_version),
-    lintLabel(workflow.lint_ok), effectiveText(workflow.effective_for), when(workflow.updated_at),
+  return table(['Workflow', 'Kind', 'Copies', 'Updated'], groupByName(workflows, names).map(({ name, copies }) => [
+    copies.length === 1 ? link(hashFor('workflow', [copies[0].id]), name) : name,
+    [...new Set(copies.map((workflow) => WORKFLOW.kindLabel(workflow)).filter(Boolean))].join(', ') || '—',
+    element('ul', { class: 'copy-list' }, copies.map((workflow) => copyItem(workflow, name, names))),
+    when(latest(copies)),
   ]));
 }
 
 async function list(root, query) {
-  root.append(pageHeader('Workflows', mayCreate(currentSession()) ? link('#/new-workflow', 'New workflow', { class: 'btn' }) : null));
+  root.append(pageHeader('Workflows', mayCreate(currentSession()) ? link('#/new-workflow', 'New workflow', { class: 'btn' }) : null, link('#/workflow-guide', 'How to create a workflow')));
   const names = await teamNames();
   const team = query.get('team') || '';
   const teamSelect = element('select', { id: 'workflow-team' }, element('option', { value: '' }, 'All teams'),
@@ -37,7 +61,7 @@ async function list(root, query) {
 }
 
 export async function render(root, { name, args, query }) {
-  if (name === 'new-workflow') return newPage(root, WORKFLOW, null, query.get('scope'));
+  if (name === 'new-workflow') return newPage(root, WORKFLOW, null, query.get('scope'), query.get('describe'));
   if (name === 'workflow' && args[0]) return detailPage(root, WORKFLOW, args[0], args[1]);
   return list(root, query);
 }

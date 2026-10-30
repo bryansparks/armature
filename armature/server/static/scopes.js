@@ -12,7 +12,7 @@ export const findScope = (scopes, key) => scopes.find((scope) => scopeKey(scope)
 export function creatableScopes(sessionPayload, teams = [], projectsByTeam = new Map()) {
   const isAdmin = Boolean(sessionPayload?.user?.is_admin);
   const led = new Set(ledTeamIds(sessionPayload).map(String));
-  const scopes = isAdmin ? [{ scope_kind: 'instance', scope_id: null, label: 'Instance' }] : [];
+  const scopes = isAdmin ? [{ scope_kind: 'instance', scope_id: null, label: 'Default (all teams)' }] : [];
   for (const team of teams) {
     if (!isAdmin && !led.has(String(team.id))) continue;
     scopes.push({ scope_kind: 'team', scope_id: String(team.id), label: team.name });

@@ -22,6 +22,7 @@ CONTRACT = [
     "POST /api/invite/accept",
     "GET /api/teams",
     "POST /api/teams",
+    "POST /api/teams/{id}",
     "GET /api/teams/{id}/projects",
     "POST /api/teams/{id}/projects",
     "GET /api/projects",

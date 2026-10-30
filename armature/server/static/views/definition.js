@@ -73,11 +73,11 @@ export async function teamNames() {
   return new Map(teams.map((team) => [String(team.id), team.name]));
 }
 
-export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : 'Instance');
+export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : 'Default (all teams)');
 
 export function scopeText(record, names) {
   if (record.scope_name) return record.scope_name;
-  if (record.scope_kind === 'instance') return 'Instance';
+  if (record.scope_kind === 'instance') return 'Default (all teams)';
   return scopeLabel(record.team_id, names);
 }
 
@@ -119,7 +119,7 @@ export async function loadScopes() {
   return creatableScopes(currentSession(), teams, new Map(led.map((team, index) => [String(team.id), projectLists[index]])));
 }
 
-function scopeSelect(id, scopes, wanted) {
+export function scopeSelect(id, scopes, wanted) {
   const select = element('select', { id, required: true }, scopes.map((scope) => element('option', { value: scopeKey(scope) }, scope.label)));
   if (findScope(scopes, wanted)) select.value = wanted;
   return { select, chosen: () => findScope(scopes, select.value) };
@@ -521,9 +521,9 @@ function describedView(config, record, detail, editable) {
   return parts;
 }
 
-function describeNew(config, { nameInput, chosen, kindInput, fields, onYaml }) {
+function describeNew(config, { nameInput, chosen, kindInput, fields, onYaml, initial }) {
   const panel = describePanel({
-    idPrefix: 'describe-new', label: 'Describe the workflow', placeholder: NEW_EXAMPLE, fields,
+    idPrefix: 'describe-new', label: 'Describe the workflow', placeholder: NEW_EXAMPLE, fields, initial,
     request: (args) => proposeBody({ name: nameInput.value, scope: chosen(), ...args }),
     apply: async (proposal, note) => {
       const scope = chosen();
@@ -591,9 +591,11 @@ export async function detailPage(root, config, id, mode) {
   root.append(versions.root);
 }
 
-export async function newPage(root, config, kind, wantedScope) {
+export async function newPage(root, config, kind, wantedScope, describeText) {
   const noun = config.noun(kind);
   root.append(pageHeader(`New ${noun}`));
+  if (config === WORKFLOW) root.append(element('p', { class: 'note' }, 'New to workflows? ',
+    element('a', { href: '#/workflow-guide', target: '_blank', rel: 'noopener noreferrer' }, 'Open the guide', element('span', { class: 'visually-hidden' }, ' (opens in a new tab)'))));
   const scopes = (await loadScopes()).filter((scope) => config !== WORKFLOW || scope.scope_kind === 'project');
   if (!scopes.length) {
     root.append(card(empty(config === WORKFLOW ? 'You can add a workflow only to a project you lead.' : `You can add a ${noun} only to a team or project you lead.`)));
@@ -613,7 +615,7 @@ export async function newPage(root, config, kind, wantedScope) {
   const slot = element('div');
   root.append(slot);
   if (config.describe) {
-    slot.append(describeNew(config, { nameInput, chosen, kindInput, fields, onYaml: () => {
+    slot.append(describeNew(config, { nameInput, chosen, kindInput, fields, initial: describeText || '', onYaml: () => {
       clear(slot);
       startFromYaml();
       nameInput.focus();
