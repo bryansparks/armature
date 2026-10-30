@@ -340,8 +340,9 @@ export function startedByCard(starters) {
 }
 
 // Claude proposes, the user reads the plain-words summary, and only Apply saves.
-export function describePanel({ idPrefix, label, placeholder, fields = null, request, apply }) {
+export function describePanel({ idPrefix, label, placeholder, fields = null, request, apply, initial = '' }) {
   const instruction = element('textarea', { id: `${idPrefix}-instruction`, rows: 10, maxlength: INSTRUCTION_MAX, placeholder, 'aria-describedby': `${idPrefix}-hint` });
+  instruction.value = String(initial).slice(0, INSTRUCTION_MAX);
   const sendButton = element('button', { type: 'button', class: 'primary' }, 'Send');
   const cancelButton = element('button', { type: 'button', hidden: true }, 'Cancel');
   const working = element('div', { role: 'status' });

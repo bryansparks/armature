@@ -6,7 +6,7 @@ import { isSso, loginPath, navFor, setSession, ssoStepUpPath, user } from './ses
 
 const NAV_GROUPS = [
   ['Work', [['overview', 'Overview', 'home'], ['gates', 'Waiting for you', 'inbox'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['projects', 'Projects', 'folder'], ['status', 'Status', 'pulse']]],
-  ['Definitions', [['workflows', 'Workflows', 'flow'], ['roles', 'Roles and prompts', 'doc'], ['packs', 'Packs', 'box']]],
+  ['Definitions', [['workflows', 'Workflows', 'flow'], ['workflow-guide', 'Create a workflow', 'plus'], ['roles', 'Roles and prompts', 'doc'], ['packs', 'Packs', 'box']]],
   ['Manage', [['setup', 'Setup', 'check'], ['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['runners', 'Runners', 'server'], ['aws', 'AWS', 'cloud'], ['webhooks', 'Webhooks', 'hook'], ['triggers', 'Triggers', 'clock'], ['settings', 'Settings', 'gear']]],
   ['You', [['account', 'Account', 'person']]],
 ];
@@ -31,6 +31,7 @@ const ICON_PATHS = {
   cloud: 'M4.5 12.5h7.5a2.5 2.5 0 0 0 .3-5 4 4 0 0 0-7.6-1A3 3 0 0 0 4.5 12.5z',
   folder: 'M1.5 3.5h4.5l1.5 1.5h7v8h-13z',
   check: 'M2.5 8.5l3.5 3.5 7.5-8',
+  plus: 'M8 2.5v11M2.5 8h11',
   inbox: 'M1.5 9.5l2-6.5h9l2 6.5v4h-13zM1.5 9.5h4l1 2h3l1-2h4',
   menu: 'M2 4h12M2 8h12M2 12h12',
   collapse: 'M10 3L5 8l5 5',
@@ -72,6 +73,7 @@ const VIEW_LOADERS = {
   workflows: () => import('./views/workflows.js'),
   workflow: () => import('./views/workflows.js'),
   'new-workflow': () => import('./views/workflows.js'),
+  'workflow-guide': () => import('./views/guide.js'),
   roles: () => import('./views/roles.js'),
   document: () => import('./views/roles.js'),
   'new-document': () => import('./views/roles.js'),

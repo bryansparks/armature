@@ -1290,7 +1290,7 @@ def summary(kind: Kind, row: Any, access: rbac.Access, names: dict[str, str]) ->
     scope = row_scope(row)
     scope_id = scope.project_id or scope.team_id or INSTANCE_SCOPE
     item = {"id": row.id, kind.name_col: getattr(row, kind.name_col), "scope_kind": scope.kind, "scope_id": scope_id,
-            "scope_name": names.get(scope_id, "Instance") if scope.kind != "instance" else "Instance",
+            "scope_name": names.get(scope_id, scope.kind.capitalize()) if scope.kind != "instance" else "Default (all teams)",
             "scope": row.scope, "team_id": row.team_id, "project_id": row.project_id,
             "current_version": row.current_version, "updated_at": row.updated_at,
             "editable": can_write(access, scope), "can_fork": writes_anywhere(access)}
@@ -1417,7 +1417,7 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
         raise DefError(400, f"credential_scope must be one of {', '.join(CREDENTIAL_SCOPES)}.")
     if config.get("credential_scope") == "instance" and not is_admin \
             and (previous or {}).get("credential_scope") != "instance":
-        raise DefError(403, "Only an admin can point a provider at an instance secret.")
+        raise DefError(403, "Only an admin can point a provider at a secret for all teams (credential_scope: instance).")
     if not may_name_secret and secret and secret != (previous or {}).get("credential_secret"):
         raise DefError(403, "Only a team lead or an admin can point a provider at a team secret.")
     for key in REQUIRED_CONFIG.get(kind, ()):
@@ -1498,7 +1498,7 @@ def update_provider(conn: Connection, *, provider_id: str, body: dict[str, Any],
                                      body.get("credential_secret"), is_admin=is_admin, previous=row.config or {},
                                      may_name_secret=may_name_secret)
     if not is_admin and (row.config or {}).get("credential_scope") == "instance" and config != (row.config or {}):
-        raise DefError(403, "This provider uses an instance secret, so only an admin can change its credential, "
+        raise DefError(403, "This provider uses a secret for all teams, so only an admin can change its credential, "
                             "region, or api_base. You can edit its aliases.")
     if not may_name_secret and (row.config or {}).get("credential_secret") and config != (row.config or {}):
         raise DefError(403, "This provider uses a team secret, so only a team lead or an admin can change its "
@@ -1549,7 +1549,7 @@ def put_setting(conn: Connection, *, team_id: str | None, key: Any, value: Any, 
         raise DefError(422, f"Write {key} as {ENV_PREFIX}{key[len(ENV_PREFIX):]}. The env. prefix is lowercase.")
     if key.startswith(display.PREFIX):
         if project_id is not None:
-            raise DefError(400, "Display settings belong to the instance or a team, not a project.")
+            raise DefError(400, "Display settings belong to Default (all teams) or a team, not a project.")
         try:
             value = display.check(key, value, team_id)
         except display.Invalid as exc:

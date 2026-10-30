@@ -490,7 +490,7 @@ def agent_models(conn: Connection, keyring: Keyring, team_id: str, project_id: s
         if not defs.provider_configured(conn, row):
             raise JobError(f"The credential secret of the provider for {alias} is not set.")
         if not instance and defs.credential_team(row) is None and (row.config or {}).get("credential_secret"):
-            raise JobError(f"The provider for {alias} uses an instance secret, and a team runner can't receive one.")
+            raise JobError(f"The provider for {alias} uses a secret for all teams, and a team runner can't receive one.")
         models[alias] = {"model": model, "env": _provider_env(row, defs.provider_credential(conn, keyring, row))}
     return {MODELS_ENV: json.dumps(models)} if models else {}
 
@@ -544,9 +544,9 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
     except secret_store.MissingSecrets as exc:
         raise JobError(f"missing secret {', '.join(exc.args[0])}") from exc
     except secret_store.InstanceOnlySecrets as exc:
-        raise JobError(f"Secret {', '.join(exc.args[0])} is set only for the instance, and a team runner "
-                       "can't receive an instance secret. Set it for the team, or run the job on an instance "
-                       "runner.") from exc
+        raise JobError(f"Secret {', '.join(exc.args[0])} is set only for all teams, and a team runner "
+                       "can't receive a secret for all teams. Set it for the team, or run the job on a runner "
+                       "whose key is for all teams.") from exc
     try:
         args = dryrun.input_args(job.inputs)
     except dryrun.DryRunError as exc:

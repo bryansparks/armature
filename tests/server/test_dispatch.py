@@ -451,7 +451,7 @@ def test_the_bundle_still_refuses_an_instance_secret_to_a_team_claim(sqlite_engi
     job_id = _job(sqlite_engine, clock, world)
     with sqlite_engine.begin() as conn:
         job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
-        with pytest.raises(worker.JobError, match="SHARED is set only for the instance"):
+        with pytest.raises(worker.JobError, match="SHARED is set only for all teams"):
             worker.build_bundle(conn, keyring, job, now=clock(), lease=worker.LEASE, events="x",
                                 instance_secrets=False)
 

@@ -3,6 +3,7 @@ import { attempt, card, clear, confirmDialog, element, empty, errorBox, loading,
 import { DISPLAY_DEFAULTS, SERIES_COLORS } from '../display.js';
 import { hashFor } from '../router.js';
 import { parseJson } from '../schema.js';
+import { ALL_TEAMS_LABEL } from '../scopes.js';
 
 const INSTANCE = 'instance';
 
@@ -88,7 +89,7 @@ async function displayCard(onSaved) {
   const status = element('div', { role: 'status' });
   const form = element('form', { class: 'stacked-form display-form' },
     element('h2', { class: 'inline' }, 'Display'),
-    element('p', { class: 'note' }, 'How the Overview and Trends pages show numbers to everyone on this instance.'),
+    element('p', { class: 'note' }, 'How the Overview and Trends pages show numbers to everyone on this server.'),
     element('fieldset', {}, element('legend', {}, 'Show'),
       element('label', { for: showCost.id }, showCost, ' Cost'), ' ', element('label', { for: showHours.id }, showHours, ' Man hours')),
     element('label', { class: 'stacked', for: multiplier.id }, 'Man hours per hour of agent time', multiplier),
@@ -119,11 +120,11 @@ async function displayCard(onSaved) {
 
 export async function render(root, { query }) {
   root.append(pageHeader('Settings'));
-  root.append(element('p', { class: 'note' }, 'Instance, team, and project settings, stored as JSON. A project’s env. settings win over its team’s. Secrets do not belong here. Keep them on the Secrets page.'));
+  root.append(element('p', { class: 'note' }, 'Settings for all teams, each team, and each project, stored as JSON. A project’s env. settings win over its team’s. Secrets do not belong here. Keep them on the Secrets page.'));
   const teams = await api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []);
   const projectLists = await Promise.all(teams.map((team) => api(`/api/teams/${encodeURIComponent(team.id)}/projects`)
     .then((payload) => listOf(payload, 'projects')).catch(() => [])));
-  const scopes = [[INSTANCE, 'Instance'], ...teams.flatMap((team, index) => [[String(team.id), team.name],
+  const scopes = [[INSTANCE, ALL_TEAMS_LABEL], ...teams.flatMap((team, index) => [[String(team.id), team.name],
     ...projectLists[index].map((project) => [String(project.id), `${team.name} / ${project.name}`])])];
   const scopeName = (scope) => scopes.find(([id]) => id === scopeParam(scope))?.[1] || scope;
   const filter = query.get('scope') || '';

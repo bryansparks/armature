@@ -6,7 +6,7 @@ import { diffView } from '../diff.js';
 import { frontMatter, SHOWN_FIELDS } from '../frontmatter.js';
 import { navigate, protect, release } from '../guard.js';
 import { hashFor } from '../router.js';
-import { creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
+import { ALL_TEAMS_LABEL, creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
 import { canManageTeam, currentSession, isAdmin } from '../session.js';
 import { stepsPanel } from './steps.js';
 
@@ -73,11 +73,11 @@ export async function teamNames() {
   return new Map(teams.map((team) => [String(team.id), team.name]));
 }
 
-export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : 'Instance');
+export const scopeLabel = (teamId, names) => (teamId ? names.get(String(teamId)) || 'Team' : ALL_TEAMS_LABEL);
 
 export function scopeText(record, names) {
   if (record.scope_name) return record.scope_name;
-  if (record.scope_kind === 'instance') return 'Instance';
+  if (record.scope_kind === 'instance') return ALL_TEAMS_LABEL;
   return scopeLabel(record.team_id, names);
 }
 
@@ -112,14 +112,14 @@ export function frontMatterView(body) {
 }
 
 export async function loadScopes() {
-  const teams = await api('/api/teams').then((payload) => listOf(payload, 'teams')).catch(() => []);
+  const teams = listOf(await api('/api/teams'), 'teams');
   const led = teams.filter((team) => isAdmin() || canManageTeam(team.id));
   const projectLists = await Promise.all(led.map((team) => api(`/api/teams/${encodeURIComponent(team.id)}/projects`)
     .then((payload) => listOf(payload, 'projects')).catch(() => [])));
   return creatableScopes(currentSession(), teams, new Map(led.map((team, index) => [String(team.id), projectLists[index]])));
 }
 
-function scopeSelect(id, scopes, wanted) {
+export function scopeSelect(id, scopes, wanted) {
   const select = element('select', { id, required: true }, scopes.map((scope) => element('option', { value: scopeKey(scope) }, scope.label)));
   if (findScope(scopes, wanted)) select.value = wanted;
   return { select, chosen: () => findScope(scopes, select.value) };
@@ -348,9 +348,16 @@ function forkButton(config, record, status) {
   button.addEventListener('click', async () => {
     clear(status);
     button.disabled = true;
-    const scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record))
-      && (!toProject || scope.scope_kind === 'project'));
-    button.disabled = false;
+    let scopes;
+    try {
+      scopes = (await loadScopes()).filter((scope) => !(record.scope_kind && sameScope(scope, record))
+        && (!toProject || scope.scope_kind === 'project'));
+    } catch (err) {
+      status.append(errorBox(err));
+      return;
+    } finally {
+      button.disabled = false;
+    }
     if (!scopes.length) {
       status.append(errorBox({ message: toProject ? 'You do not lead another project to copy this into.' : 'You do not lead a team or project to copy this into.' }));
       return;
@@ -521,9 +528,9 @@ function describedView(config, record, detail, editable) {
   return parts;
 }
 
-function describeNew(config, { nameInput, chosen, kindInput, fields, onYaml }) {
+function describeNew(config, { nameInput, chosen, kindInput, fields, onYaml, initial }) {
   const panel = describePanel({
-    idPrefix: 'describe-new', label: 'Describe the workflow', placeholder: NEW_EXAMPLE, fields,
+    idPrefix: 'describe-new', label: 'Describe the workflow', placeholder: NEW_EXAMPLE, fields, initial,
     request: (args) => proposeBody({ name: nameInput.value, scope: chosen(), ...args }),
     apply: async (proposal, note) => {
       const scope = chosen();
@@ -591,9 +598,11 @@ export async function detailPage(root, config, id, mode) {
   root.append(versions.root);
 }
 
-export async function newPage(root, config, kind, wantedScope) {
+export async function newPage(root, config, kind, wantedScope, describeText) {
   const noun = config.noun(kind);
   root.append(pageHeader(`New ${noun}`));
+  if (config === WORKFLOW) root.append(element('p', { class: 'note' }, 'New to workflows? ',
+    element('a', { href: '#/workflow-guide', target: '_blank', rel: 'noopener noreferrer' }, 'Open the guide', element('span', { class: 'visually-hidden' }, ' (opens in a new tab)'))));
   const scopes = (await loadScopes()).filter((scope) => config !== WORKFLOW || scope.scope_kind === 'project');
   if (!scopes.length) {
     root.append(card(empty(config === WORKFLOW ? 'You can add a workflow only to a project you lead.' : `You can add a ${noun} only to a team or project you lead.`)));
@@ -613,7 +622,7 @@ export async function newPage(root, config, kind, wantedScope) {
   const slot = element('div');
   root.append(slot);
   if (config.describe) {
-    slot.append(describeNew(config, { nameInput, chosen, kindInput, fields, onYaml: () => {
+    slot.append(describeNew(config, { nameInput, chosen, kindInput, fields, initial: describeText || '', onYaml: () => {
       clear(slot);
       startFromYaml();
       nameInput.focus();

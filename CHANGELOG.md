@@ -8,6 +8,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Team renames.** Admins can rename a team from its team page.
+- **Create a workflow guide.** A **Create a workflow** menu entry, and a
+  link on the Workflows page, open a step-by-step page for new users. It
+  shows which projects you can add workflows to, asks what starts the
+  workflow, its steps, its output, and what it must never do, then opens
+  New workflow with that description and project filled in so Claude
+  drafts the YAML. It also explains how to test the workflow safely and
+  change it later. The New workflow page links back to the guide. The
+  Workflows list, and the workflow tables on team and project pages, now
+  show each workflow name once, with its copies in each scope in one row
+  along with their version, who uses them, and any lint issues.
+
+### Changed
+
+- The server-wide scope is labelled Default (all teams) instead of Instance.
+
 ## [0.9.0] - 2026-10-29
 
 ### Added

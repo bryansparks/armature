@@ -248,6 +248,25 @@ def create_team(body: NameBody, request: Request, granted: Granted = Depends(req
     return {"team": _team(row, "admin")}
 
 
+@router.post("/api/teams/{team_id}")
+def rename_team(body: NameBody, request: Request,
+                granted: Granted = Depends(require("admin", by_team(), step_up=True))) -> dict[str, Any]:
+    name = _check_name(body.name, "team")
+    srv = server(request)
+    team_id = granted.target.team_id
+    try:
+        with srv.engine.begin() as conn:
+            old_name = conn.execute(select(teams.c.name).where(teams.c.id == team_id)).scalar_one()
+            if name != old_name:
+                conn.execute(update(teams).where(teams.c.id == team_id).values(name=name))
+                audit.record(conn, action="team.rename", actor_id=granted.user_id, team_id=team_id, target_kind="team",
+                             target_id=team_id, detail={"old_name": old_name, "name": name}, ip=client_ip(request))
+            row = conn.execute(select(teams).where(teams.c.id == team_id)).one()
+    except IntegrityError as exc:
+        raise ApiError(409, "A team with that name exists.") from exc
+    return {"team": _team(row, granted.role)}
+
+
 @router.get("/api/teams/{team_id}/projects")
 def list_projects(team_id: str, request: Request, session: Session = Depends(signed_in)) -> dict[str, Any]:
     access = _access(request, session)

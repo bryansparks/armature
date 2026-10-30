@@ -20,9 +20,9 @@ export const canManageTeam = (teamId) => isAdmin() || ledTeamIds().includes(team
 // The server is the real gate. This only hides what a role cannot use.
 export function navFor(sessionPayload) {
   if (!sessionPayload?.user) return [];
-  if (sessionPayload.user.is_admin) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'status', 'workflows', 'roles', 'packs', 'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'triggers', 'settings', 'account'];
-  if (ledTeamIds(sessionPayload).length) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'triggers', 'account'];
-  return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'roles', 'packs', 'account'];
+  if (sessionPayload.user.is_admin) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'status', 'workflows', 'workflow-guide', 'roles', 'packs', 'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'triggers', 'settings', 'account'];
+  if (ledTeamIds(sessionPayload).length) return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'workflow-guide', 'roles', 'packs', 'users', 'secrets', 'webhooks', 'triggers', 'account'];
+  return ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'workflows', 'workflow-guide', 'roles', 'packs', 'account'];
 }
 
 // Step-up for a single sign-on account is a fresh sign-in at the provider, which returns to this page.

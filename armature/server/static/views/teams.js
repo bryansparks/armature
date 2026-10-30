@@ -2,7 +2,7 @@ import { api, listOf } from '../api.js';
 import { attempt, card, clear, element, empty, errorBox, link, loading, pageHeader, table, tabs } from '../dom.js';
 import { hashFor } from '../router.js';
 import { scopeKey } from '../scopes.js';
-import { canManageTeam, isAdmin } from '../session.js';
+import { canManageTeam, isAdmin, setSession } from '../session.js';
 import { connectionsCard, teamConnectionsPath } from './connections.js';
 import { teamNames } from './definition.js';
 import { providersSection } from './providers.js';
@@ -132,6 +132,58 @@ async function showTab(panel, team, active) {
   }
 }
 
+function renameControl(team, heading, onRenamed) {
+  const renameButton = element('button', { type: 'button', class: 'btn small' }, 'Rename');
+  const nameInput = element('input', { type: 'text', id: 'rename-team-name', required: true, maxlength: 60, 'aria-describedby': 'rename-team-note' });
+  const saveButton = element('button', { type: 'submit', class: 'primary' }, 'Save');
+  const cancelButton = element('button', { type: 'button' }, 'Cancel');
+  const status = element('div', { role: 'status' });
+  const form = element('form', { class: 'wf-actions', novalidate: true }, element('label', { for: nameInput.id }, 'Team name'), nameInput, saveButton, cancelButton);
+  const editor = element('div', { hidden: true }, form,
+    element('p', { class: 'note', id: 'rename-team-note' }, 'Single sign-on group mappings in server.yaml name teams by name. Update them to match.'));
+  const close = () => {
+    editor.hidden = true;
+    renameButton.hidden = false;
+    renameButton.focus();
+  };
+  renameButton.addEventListener('click', () => {
+    clear(status);
+    nameInput.value = team.name;
+    renameButton.hidden = true;
+    editor.hidden = false;
+    nameInput.focus();
+    nameInput.select();
+  });
+  cancelButton.addEventListener('click', () => {
+    clear(status);
+    close();
+  });
+  form.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.key !== 'Escape') return;
+    clear(status);
+    close();
+  });
+  form.addEventListener('submit', async (submitEvent) => {
+    submitEvent.preventDefault();
+    const name = nameInput.value.trim();
+    if (!name) {
+      clear(status).append(errorBox({ message: 'Enter a team name.' }));
+      nameInput.focus();
+      return;
+    }
+    const renamed = await attempt(status, saveButton, () => api(`/api/teams/${encodeURIComponent(team.id)}`, { method: 'POST', body: { name } }));
+    if (!renamed) return;
+    team.name = renamed.team.name;
+    heading.textContent = team.name;
+    document.title = `${team.name} | Armature`;
+    close();
+    status.append(element('p', { class: 'note' }, 'Saved.'));
+    api('/api/session').then(setSession).catch(() => {});
+    onRenamed();
+  });
+  return { button: renameButton, form: element('div', {}, editor, status) };
+}
+
 async function detail(root, teamId, requestedTab) {
   const crumb = element('p', { class: 'crumb' }, link(hashFor('teams'), 'Teams'));
   let team;
@@ -150,7 +202,10 @@ async function detail(root, teamId, requestedTab) {
   const active = sections.some((tab) => tab.id === requestedTab) ? requestedTab : 'projects';
   const { tablist, panel } = tabs(teamPageHref(team.id), sections, active, { label: 'Team sections' });
   panel.append(loading());
-  root.append(crumb, pageHeader(team.name), tablist, panel);
+  const header = pageHeader(team.name);
+  const rename = isAdmin() ? renameControl(team, header.querySelector('h1'), () => showTab(panel, team, active)) : null;
+  if (rename) header.append(rename.button);
+  root.append(crumb, header, ...(rename ? [rename.form] : []), tablist, panel);
   await showTab(panel, team, active);
 }
 
