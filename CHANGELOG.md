@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-30
+
 ### Added
 
 - **Team renames.** Admins can rename a team from its team page.
@@ -74,6 +76,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and the server stores it in `run_steps.output`, as a list of branch outputs
   for a fan-out step and marked `_truncated` when the event was cut to fit.
   `GET /api/runs` takes `workflow=<name>` and `with_outputs=1`.
+- **Dry runs execute real reads.** A dry-live run calls read-only tools for
+  real and records only writes, so the review specialists actually run and
+  a dry run never opens a fix session. Each review gets the pull request,
+  its files, the discussion, previously posted findings, and the linked
+  Jira issue as context files.
 
 ### Changed
 
