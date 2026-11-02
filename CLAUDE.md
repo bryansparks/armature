@@ -49,7 +49,7 @@ researcher ──► analyst ──► judge ──► writer
 | `role:` | LLM stage — has a system prompt, produces text or JSON |
 | `tool_call:` | Direct tool invocation — no LLM, deterministic |
 | `gate: human` | Pauses execution for human approval |
-| `adapter:` | Runs a shell command or Python function |
+| `adapter:` | Runs a shell command or Python function — either a named entry in `adapters:` or an installed pack's adapter as `adapter: <pack>/<adapter>` with `with:` parameters |
 | `subagent_spec:` | Spawns a child workflow as a nested execution |
 
 ### Model tiers
@@ -322,7 +322,10 @@ Precedence: `--destinations` file > spec `destinations:` section > inferred.
 
 ## Jinja2 in Descriptions and Tool Args
 
-Context values (runtime inputs + upstream stage outputs) are available via Jinja2:
+Context values (runtime inputs + upstream stage outputs) are available via Jinja2,
+rendered in an **immutable sandbox** (`armature.runtime.templating`): no attribute
+writes, no dangerous builtins. `armature validate --strict-templates` refuses any
+template the sandbox would not evaluate safely — run it when templates get clever.
 
 ```yaml
 description: |
@@ -355,6 +358,8 @@ tool_call:
 | `NO_EXECUTION_TYPE` | Stage has no role/tool_call/gate/adapter/subagent_spec | Add one |
 | `UNDEFINED_MODEL_TIER` | Stage references a tier not in `model_tiers` | Define the tier |
 | `UNDEFINED_ADAPTER` | Stage references adapter not in `adapters` | Define the adapter |
+| `UNKNOWN_PACK_ADAPTER` | Stage references `pack/name` adapter no installed pack provides | Install the pack (`armature pack list` shows what's available) |
+| `INVALID_WITH` | `with:` without an adapter/call, or `with:` values fail the pack adapter's JSON Schema (field path in the message) | Match `with:` to the adapter's `params` schema |
 | `SIGNATURE_TYPE_MISMATCH` | Upstream output type ≠ downstream expected type | Align types |
 | `POST_RUN_TRANSCRIPT_OVERFLOW_RISK` | post_run stage has no `signature.input` in a fan-out workflow | Add `signature.input` |
 
@@ -364,6 +369,9 @@ tool_call:
 
 ```bash
 armature validate my_workflow.yml          # catch errors before running (always do this)
+armature validate my_workflow.yml --strict-templates  # also require every template to be sandbox-safe
+armature pack list                          # installed workflow packs + adapter parameter schemas
+armature pack validate ./my-pack            # check a pack.yaml + adapter cmd staticness
 armature run my_workflow.yml \
   --input topic="..." \                    # pass runtime inputs
   --input focus="..." \
@@ -387,6 +395,11 @@ and the run fails closed if a declared secret is unresolvable. A package declari
 `sandbox.mode: docker` spawns its sandboxed stages as sibling containers on the host
 Docker daemon (DooD). Full feature set, deployment to a pool of worker containers, and
 the test catalog: `docs/WORKFLOW-PACKAGES.md`. Example packages: `examples/packages/`.
+
+**Not to be confused with workflow packs** (`armature pack`, singular): a pack is an
+installed directory of script adapters (`pack.yaml`) that specs reference as
+`adapter: <pack>/<adapter>` with `with:` parameters — no bundling, no container.
+See the Workflow packs section in README.md; worked example: `examples/packs/hello/`.
 
 ---
 

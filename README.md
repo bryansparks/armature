@@ -168,6 +168,13 @@ To use PostgreSQL or MySQL, paste its URL on the database screen. That URL is
 the only setting you type. See
 [docs/platform/DEPLOY.md](docs/platform/DEPLOY.md#first-run).
 
+From the web UI, the **Create a workflow** guide walks new users through what
+starts the workflow, its steps, its output, and what it must never do, then
+hands the description to the authoring assistant to draft the YAML — and a
+**Dry run** button on any workflow replays a past run's recorded step outputs
+(stub mode) so a change can be tested safely before it goes live. See
+[docs/platform/DEMO.md](docs/platform/DEMO.md) for a full walkthrough.
+
 ---
 
 ## CLI
@@ -179,10 +186,19 @@ armature run <spec> --auto-improve           # run then auto-apply spec improvem
 armature loop <spec>                         # run a workflow back-to-back under a central budget
 armature loop <spec> --until "{{ judge.done }}" --max-llm-calls 500
 armature validate <spec>                      # validate spec + show KYA-inspired risk score (LOW/MEDIUM/HIGH/CRITICAL)
+armature validate <spec> --strict-templates   # also require every template to be sandbox-safe
 armature new [output]                         # interactive spec creation wizard
 armature doctor                               # environment health check
 armature serve                                # start HTTP service (requires armature[service])
 armature serve --specs-dir ./specs/          # serve with named workflow registry (/workflows API)
+armature server run                           # start the platform server + web UI (requires armature[server])
+armature server init                          # create the master key + database and add the first admin
+armature server migrate                       # apply pending database migrations
+armature pack list                            # list installed workflow packs
+armature pack validate <dir>                  # check a pack's pack.yaml and that adapter cmds are static
+armature server pack install <dir>            # install a pack on the server (audited; git installs pinned to a full sha;
+                                               # installing over a newer version needs --force)
+armature server pack remove <name>            # remove an installed pack (audited)
 armature optimize <spec>                      # single-shot meta-harness optimizer
 armature improve <spec>                       # analyze traces, propose + auto-apply a spec improvement
 armature improve <spec> --no-apply            # propose only; review the diff before applying
@@ -199,6 +215,34 @@ armature package run <pkg> [--profile <env>]      # run a package (default: in a
 armature package verify <pkg>                     # re-run completeness checks without executing
 armature package inspect <pkg>                    # print the package manifest (read-only)
 ```
+
+## Workflow packs
+
+A **workflow pack** is a directory of script adapters that a spec can call by name — no `adapters:` block, no bundling. A **pack is not a [package](#workflow-packages)**: a package is a self-contained deployable bundle, while a pack is an installed library of adapters that any spec can reference as `adapter: <pack>/<adapter>`.
+
+```yaml
+# A stage calling the installed "hello" pack's "greet" adapter:
+stages:
+  - id: greet
+    adapter: hello/greet
+    with:
+      name: "{{ name }}"        # checked against the adapter's JSON Schema at validation
+    depends_on: []
+```
+
+A pack's `pack.yaml` declares each adapter's static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for its parameters and outputs, and a timeout. Parameters travel to the script as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never interpolated into the command line. `with:` is checked against the schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/adapter` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
+
+Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` — the first pack under a name wins. The server ships built-in packs (`conversation`, `github`, `jira`, `linear`, `review`, `slack`) that power its review and integration flows.
+
+```bash
+armature pack list                    # every adapter on the pack paths, with its parameter schema
+armature pack validate ./my-pack      # check pack.yaml and that adapter cmds are static
+armature server pack install ./my-pack   # audited; git installs pinned to a full commit sha;
+                                         #   installing over a newer version needs --force
+armature server pack remove my-pack       # audited
+```
+
+A minimal worked example lives at **[`examples/packs/hello/`](examples/packs/hello/)**.
 
 ## Workflow packages
 
@@ -595,6 +639,9 @@ docs/               # Full documentation (see index below)
 | Document | Purpose |
 |---|---|
 | [BUILD_FIRST_WORKFLOW](docs/BUILD_FIRST_WORKFLOW.md) | Hands-on tutorial — build a working workflow from scratch |
+| [platform/DEMO](docs/platform/DEMO.md) | Guided walkthrough of the server platform — web UI, teams, workflows, runs |
+| [platform/DEPLOY](docs/platform/DEPLOY.md) | Deploying the server behind a reverse proxy; first-run setup |
+| [platform/DESIGN](docs/platform/DESIGN.md) | The platform's design: stored workflows, runners, webhooks, dry runs |
 | [USER-GUIDE](docs/USER-GUIDE.md) | Full spec reference — every field, every option, worked examples |
 | [ARMATURE-SPEC-REF](docs/ARMATURE-SPEC-REF.md) | All spec fields and valid values on one page |
 | [ADAPTER-POWERED-TEAMS](docs/ADAPTER-POWERED-TEAMS.md) | How to set up, train, and continually refresh LoRA adapter-backed skills |

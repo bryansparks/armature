@@ -320,6 +320,37 @@ printed JSON object becomes the stage result; non-object top level or non-zero
 exit raises, subject to `on_fail` / `fail_as_value`). See
 `docs/USER-GUIDE.md` §4.3 for details and a worked example.
 
+### Pack adapters (adapter: <pack>/<adapter>)
+
+A stage may call an **installed workflow pack's** adapter by name instead of
+defining one inline — no `adapters:` entry needed:
+
+```yaml
+stages:
+  - id: greet
+    adapter: hello/greet      # <pack>/<adapter> from an installed pack
+    with:                     # parameters, checked against the adapter's JSON Schema
+      name: "{{ name }}"
+    depends_on: []
+```
+
+A pack is a directory with a `pack.yaml` that declares each adapter's
+`description`, a static `cmd` (may reference `$PACK_DIR`, the pack's own
+directory), a JSON Schema for `params` and for `outputs`, and a `timeout`.
+Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs`; the first
+pack under a name wins. `armature pack list` shows every available adapter
+with its parameter schema; `armature pack validate <dir>` checks a pack.
+
+`with:` (also valid on `call:` stages) is checked against the adapter's
+`params` schema when the workflow is validated and again after it renders,
+and may hold only sandbox-safe template references. Values reach the script
+as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never in the command.
+A `pack/name` adapter no installed pack provides is `UNKNOWN_PACK_ADAPTER`;
+a `with:` that fails the schema (or has no adapter/call to belong to) is
+`INVALID_WITH`, with the field path in the message.
+
+Minimal worked example: `examples/packs/hello/`.
+
 ---
 
 ## skill_library:
@@ -543,7 +574,15 @@ the job user stops it.
 - id: run_script
   adapter: my_cmd             # references adapters: block
   depends_on: []
+
+- id: greet
+  adapter: hello/greet        # or an installed pack's adapter: <pack>/<adapter>
+  with:                       # parameters, checked against the adapter's JSON Schema
+    name: "{{ name }}"
+  depends_on: []
 ```
+
+See [Pack adapters](#pack-adapters-adapter-packadapter) above.
 
 ### Subagent stage (subagent_spec:)
 
@@ -1008,6 +1047,8 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `NO_EXECUTION_TYPE` | Add role / tool_call / gate / adapter / subagent_spec / call / agent |
 | `UNDEFINED_MODEL_TIER` | Define the tier in model_tiers: |
 | `UNDEFINED_ADAPTER` | Define the adapter in adapters: |
+| `UNKNOWN_PACK_ADAPTER` | Install the pack providing `pack/name` (`armature pack list`) |
+| `INVALID_WITH` | Match `with:` to the adapter's params schema (or remove with: with no adapter/call) |
 | `SIGNATURE_TYPE_MISMATCH` | Align types between upstream output and downstream input |
 | `POST_RUN_TRANSCRIPT_OVERFLOW_RISK` | Add signature.input to the post_run stage |
 | `CONTRACT_INPUT_MISSING_NAME` | Add name: to each contracts.inputs entry |
@@ -1063,6 +1104,9 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 
 ```bash
 armature validate spec.yml                         # always run before armature run
+armature validate spec.yml --strict-templates      # also require sandbox-safe templates
+armature pack list                                  # installed packs + adapter parameter schemas
+armature pack validate ./my-pack                    # check a pack.yaml + cmd staticness
 armature mission validate my_mission.mission.yml   # validate a mission document
 armature mission status my_mission.mission.yml      # unit states + recent transitions
 armature mission run my_mission.mission.yml unit_a  # run one unit's workflow
