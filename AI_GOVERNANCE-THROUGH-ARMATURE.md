@@ -2,7 +2,7 @@
 
 **To:** [Governance review board / AI Governance stakeholders]
 **From:** [Bryan Sparks]
-**Date:** 2026-09-24
+**Date:** 2026-11-02 (rev. 2 — refreshed for engine 0.10.x; first issued 2026-09-24)
 **Re:** How agentic AI workflows can satisfy governance requirements through engine-enforced control — with Armature as a working reference implementation
 
 ---
@@ -46,7 +46,11 @@ governance concerns common to the requirements set.
 |---|---|
 | **Approved, reviewable AI configurations** | Every workflow is a declarative spec under version control — diffable and reviewable in a pull request, with full history of approval. The spec *is* the boundary: agents cannot improvise scope beyond their declared task graph. |
 | **Bounded autonomy** | Hard execution budgets (`max_iterations`, `max_llm_calls`, `timeout_hours`), declared dependency graph, explicit retry/loop limits. An agent cannot run open-ended or wander outside its assigned steps. |
+| **Bounded autonomy across process boundaries** | When work is distributed to cloud executors (the missions transport), the same bounds travel with it: each work unit carries a declared posture (`human-led` by default — executors notify, never act — with explicit per-unit delegation), a per-unit `budget_usd` cap, and a closure contract that defines what a legitimate completion looks like. A sweep settles every unit — success, failure, or incomplete closure is recorded, never assumed. Autonomy does not expand because execution moved. |
 | **Guardrails on tool use** | Safety rules enforced at the tool-dispatch chokepoint — not in prompts, which are bypassable by prompt injection. Per-tool permission levels, shell-command classification, path-traversal containment on file operations, and Docker sandbox isolation for execution stages. |
+| **Third-party tool provenance** | Workflow packs are the supply-chain surface for agent capability, and they are gated: `armature pack validate` checks the pack manifest and that every adapter's script command is static (no shell interpolation), adapters' parameters are checked against a declared JSON Schema, and tool and MCP-server access is restricted by declared allowlists. A pack cannot smuggle in an undeclared tool or a dynamic shell command. |
+| **Prompt-injection resistance** | Template inputs render in an immutable Jinja2 sandbox — no attribute writes, no dangerous builtins — and `armature validate --strict-templates` refuses any template the sandbox would not evaluate safely, before approval rather than at runtime. |
+| **Access control on agentic work itself** | The optional platform server extends governance from the engine to *who may launch what*: named teams with role-based access (instance and team scoping), TOTP two-factor and OIDC login, invites, and an audit log. Agentic workloads get the same access governance as any other production system. |
 | **Human-in-the-loop checkpoints** | `gate: human` stages make approval a first-class execution step: the workflow pauses until a named human signs off, and the approval is recorded in the run trace. Structured decision gates handle classify/choose/score judgments deterministically, without an LLM. |
 | **Data governance & confidentiality** | Context governance is declarative: each workflow and stage declares what context it must and must **never** see (stage outputs, runtime inputs, named layers). Sensitive data is structurally excluded from stages — not trusted to prompt discipline — and the effective policy is recorded on every trace row. |
 | **Model governance & inventory** | Models are referenced only through named tiers defined in one block: a complete, current inventory of every model in use with provider, sampling parameters, and key handling. Swapping or deprecating a model is a one-line, reviewable change. No shadow model usage; every call's model is traceable per row. |
@@ -59,9 +63,51 @@ governance concerns common to the requirements set.
 | **Reproducibility** | A workflow is a portable, verified package — spec, tools, inputs, integrity digest — that runs identically anywhere. What was approved is exactly what executed. |
 
 **Why engine enforcement matters:** policy memos describe intended behavior; engines
-enforce actual behavior. Armature's guardrails are exercised by a 2,000+ test
-suite, which means the controls themselves are continuously verified — a claim a
+enforce actual behavior. Armature's guardrails are exercised by a 4,700+-test
+suite (plus a separately-gated suite for the cloud transport), which means the
+controls themselves are continuously verified — a claim a
 document-only policy cannot make.
+
+## Context as a governed contract
+
+The rows above treat context mostly as a restriction — what a stage must **never**
+see. That is the security half. The effectiveness half matters just as much to
+governance, and it is the half most often left to prompt engineering.
+
+The argument is simple. An agentic team acts on exactly what is in its context:
+its mission, the outputs of prior stages, memory of earlier runs, retrieved
+knowledge. That context *is* the operational reality the team works from —
+under-provisioned context is a failure mode with the same blast radius as
+over-provisioned context. A researcher who cannot see prior findings invents
+them; a judge who cannot see the deliverable grades the wrong thing; a writer
+without the source material paraphrases confidently. If a stage's authority is
+declared and enforced, but its *inputs* are improvised, then what it actually
+does is still improvised.
+
+The governance answer is the same pattern applied to inputs: **the context
+contract should be declared, versioned, and auditable — not implicit.** Armature
+implements this today:
+
+| Contract element | Mechanism (declared in the spec) |
+|---|---|
+| Mission & orientation | A workflow-level `mission` inherited by every stage; missions sourced statically or per work unit (`mission_source`), with posture, budget, and closure semantics in mission documents |
+| Principles & invariants | Named `context_layers` (style rules, domain constraints, safety principles) forced into stage prompts by policy, with precedence — invariant content is declared once and reviewed, not pasted into every prompt |
+| Scoping | Stage `signature.input` declares exactly which upstream outputs a stage consumes, in a typed contract — cumulative-by-default context is narrowed to what the stage is accountable for |
+| Restrictions | `context_policy` (`must`/`never`) closes sensitive outputs, inputs, and layers at any level; a closure always wins over a force; the effective policy is recorded on every trace row |
+| Cross-run memory | Continuation/carry-forward and per-conversation memory carry prior results forward under the same declared scoping; persistent knowledge lives in a typed store with provenance, not free-floating prompt text |
+
+The audit story is the same as for tools: because the context contract is part
+of the versioned spec, a reviewer approving the spec is approving what the team
+will see — and the trace records what it actually saw.
+
+One honest boundary: retrieval is currently provisioned declaratively and
+passively. Active, on-demand context navigation — stages fetching what they
+need from memory under the same policies, rather than receiving what a spec
+author guessed they'd need — is designed and implemented on a development
+branch, and independent evaluations through 2026 have consistently found that
+scoped, on-demand retrieval beats passive injection once context volume grows.
+The pattern above is built so that transition changes no governance property:
+navigated context passes through the same policies and the same trace.
 
 ## What this pattern does not cover (stated plainly)
 
@@ -85,7 +131,9 @@ To be credible, this memo should also be honest about scope:
 
 1. Treat **engine-enforced control** (declared authority, machine-enforced
    guardrails, complete traces, integrity sealing, fail-closed operation) as the
-   minimum bar for any agentic AI use in the organization.
+   minimum bar for any agentic AI use in the organization. A declared, auditable
+   **context contract** is part of that bar: approving an agentic workflow means
+   approving what it may do *and* what it will see.
 2. Use Armature as a **reference implementation** when evaluating the requirement
    set against agentic use cases — a concrete, inspectable answer to "what would
    compliance look like for agents?"
@@ -96,4 +144,5 @@ To be credible, this memo should also be honest about scope:
 
 *Supporting detail: Armature's architecture and control surface are documented in
 `docs/ARCHITECTURE.md`, `docs/SAFETY-AND-GOVERNANCE.md`, `docs/CONTEXT-ISOLATION.md`,
+`docs/MISSION-AS-CONTEXT.md`, `docs/MEMORY-AND-CONTEXT.md`,
 `docs/SANDBOX-AND-ISOLATION.md`, and `docs/WORKFLOW-PACKAGES.md` in the repository.*
