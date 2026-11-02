@@ -19,7 +19,7 @@ The analogy: the LLM is the engine. Armature is the car.
 
 ## Research Foundation
 
-Armature synthesizes eleven academic papers published between February 2025 and June 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
+Armature synthesizes thirteen academic papers and open-source architectures published between February 2025 and July 2026, plus one industry governance framework, all converging on the same insight: **the harness is more important than the model.**
 
 | Source | Key Contribution |
 |--------|-----------------|
@@ -35,6 +35,7 @@ Armature synthesizes eleven academic papers published between February 2025 and 
 | **Self-Harness** — [arXiv:2606.09498](https://arxiv.org/abs/2606.09498)v1 | Causal 3-tuple failure attribution; declared editable surfaces; K-proposal diversity; regression gating |
 | **Skill-to-LoRA** — CUHK, [arXiv:2606.16769](https://arxiv.org/abs/2606.16769) | Distill textual skills into plug-and-play LoRA adapters loaded at runtime; cuts skill prefill tokens while preserving behavior |
 | **C-LoRA** — Shanxi University / Manchester, [arXiv:2502.17920](https://arxiv.org/abs/2502.17920) | Continual LoRA updates via frozen `R_old` + trainable near-zero `R_delta` with orthogonality regularizer; reduces catastrophic forgetting when skills/traces arrive sequentially |
+| **NapMem** — [arXiv:2607.05794](https://arxiv.org/abs/2607.05794) | Active memory navigation: L0 raw stage captures + L1 reconciled entity/fact records exposed through read-only `memory.*` tools, so agents pull memory on demand instead of receiving a fixed passive dump |
 | **Microsoft AGT** — github.com/microsoft/agent-governance-toolkit | Reversibility classification, tamper-evident traces, human approval gates, strict mode |
 
 The benchmarked insight from NLAH: when workflows are defined in readable, editable natural language rather than code, both humans and optimizers can reason about them causally. A YAML diff is meaningful; a Python AST diff is opaque.
@@ -223,10 +224,21 @@ This is the strategic differentiator. Each loop compounds the others.
              │  Trace failures reveal    │
              │  knowledge gaps → improve │
              │  retrieval index          │
+             └────────────┬──────────────┘
+                          │ richer context
+             ┌────────────▼──────────────┐
+             │  Loop 4: Consensus        │
+             │  deliberation             │
+             │  Calibrate deliberation   │
+             │  priors from outcomes →   │
+             │  cleaner quality signal   │
+             │  back to Loops 1–3        │
              └───────────────────────────┘
 ```
 
-**The key property:** the harness gets measurably better the more it runs — without human engineering effort after initial deployment. Traces fuel fine-tuning. Fine-tuned models produce better traces. Better traces improve both improvement loops.
+**The key property:** the harness gets measurably better the more it runs — without human engineering effort after initial deployment. Traces fuel fine-tuning. Fine-tuned models produce better traces. Better traces improve both improvement loops, and consensus deliberation sharpens the quality signal those loops depend on.
+
+Where each loop stands: loops 1–2 run end-to-end (loop 2's training step runs out-of-band through the pluggable trainer interface — the shipped PEFT trainer is a scaffold). Loops 3–4 have their substrate running — cross-run memory with hybrid search, and consensus quorum feeding HQS — while their automatic refinement steps (failures improving the retrieval index; deliberation priors calibrating from outcomes) are future work.
 
 ### Accountability in the improvement loop
 
@@ -364,7 +376,7 @@ armature watch <spec>                       # daemon: fire run() on every cron/w
 
 ## What's Implemented
 
-All ten papers and the AGT framework are fully implemented.
+Every source in the research table above is fully implemented.
 
 | Research concept | Armature implementation |
 |-----------------|------------------------|
@@ -393,6 +405,7 @@ All ten papers and the AGT framework are fully implemented.
 | Drift score | `ImprovementReport.drift_score` |
 | Post-condition verification | `ToolDescriptor.postcondition`, `PostconditionFailed` |
 | Consensus fan-in | `fan_in: "consensus"`, `_consensus_judge()` |
+| Active memory navigation | `memory.navigation_tools`, read-only `memory.*` tools, `_memory_index`, per-stage `_knowledge` suppression — NapMem ([arXiv:2607.05794](https://arxiv.org/abs/2607.05794)) |
 | Component governance | `_classify_changes()`, `.pending.yaml` staging |
 | Deliberate iteration loop | `IterationConfig`, `_run_with_loop`, `loop:` stage field |
 | LoRA adapter skills | `skill_library.adapter`, `adapter_support: dynamic`, pluggable adapter factory — Skill-to-LoRA ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)) |
