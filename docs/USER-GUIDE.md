@@ -78,6 +78,8 @@ This guide covers everything you need to build agentic workflows with Armature: 
 38. [Docker sandbox isolation](#38-docker-sandbox-isolation)
 39. [Workflow packages](#39-workflow-packages)
 40. [Context governance](#40-context-governance)
+41. [Workflow packs (pack adapters)](#41-workflow-packs-pack-adapters)
+42. [Test runs and dry runs (server)](#42-test-runs-and-dry-runs-server)
 
 ---
 
@@ -4264,6 +4266,49 @@ layer names, injected keys). Closures always win over forces, layer-level
 `never:` is a non-relaxable floor, and the effective policy is recorded on
 every trace row. Full grammar and validation codes:
 `docs/ARMATURE-SPEC-REF.md`.
+
+---
+
+## 41. Workflow packs (pack adapters)
+
+**Problem.** A script adapter's `cmd` lives in the spec's `adapters:` block, so every workflow re-declares the commands it needs — and sharing a script adapter between workflows means copying YAML, not code.
+
+**Solution.** A **workflow pack** is an installed directory of script adapters that any spec can call by name: `adapter: <pack>/<adapter>` with parameters under `with:`. No `adapters:` block, no bundling. (A pack is not a [workflow package](#39-workflow-packages) — a package is a self-contained deployable bundle; a pack is a library of adapters installed on the host or server.)
+
+```yaml
+stages:
+  - id: greet
+    adapter: hello/greet      # the "hello" pack's "greet" adapter
+    with:
+      name: "{{ name }}"      # checked against the adapter's JSON Schema
+    depends_on: []
+```
+
+A pack is a directory with a `pack.yaml` declaring each adapter: a `description`, a static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for `params` and for `outputs`, and a `timeout`. Parameters reach the script as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never interpolated into the command. `with:` is validated against the adapter's `params` schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/name` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
+
+Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` (first pack under a name wins). The server ships built-in packs — `conversation`, `github`, `jira`, `linear`, `review`, `slack` — that power its review and integration flows.
+
+```bash
+armature pack list                    # every available adapter + its parameter schema
+armature pack validate ./my-pack      # check pack.yaml + that adapter cmds are static
+armature server pack install ./my-pack   # audited; git installs must pin a full commit sha;
+                                         #   installing over a newer version needs --force
+armature server pack remove my-pack       # audited
+```
+
+A minimal worked example — two adapters, a workflow using both — lives at `examples/packs/hello/`.
+
+---
+
+## 42. Test runs and dry runs (server)
+
+The platform server can execute a workflow's steps without doing real work, so a change can be tested safely before it goes live.
+
+**Stub mode (engine).** With `ARMATURE_STUB_OUTPUTS` set to a JSON file mapping stage id to output, every step returns its recorded output and no subprocess, tool module, file read, or model call happens. A step with no recorded output fails with `STUB_MISSING` unless `ARMATURE_STUB_DEFAULT=empty`; gates approve. A step's `step_end` event carries its output, and the server stores it in `run_steps.output`, so a past run's outputs can replay as the next test run's stubs.
+
+**Dry runs (server UI).** A **Dry run** button on a workflow page starts a test run (`POST /api/workflows/{id}/test`) that replays a past run's step outputs — plus any you supply — through stub mode. Dry-live runs execute read-only tools for real and record only writes, so the review specialists actually run and a dry run never opens a fix session. Runs stream live with a "Dry run" badge; `dry_run.max_active` (default 8) caps concurrent test runs per server.
+
+Full walkthrough: `docs/platform/DEMO.md`; deployment and reverse-proxy setup: `docs/platform/DEPLOY.md`.
 
 ---
 

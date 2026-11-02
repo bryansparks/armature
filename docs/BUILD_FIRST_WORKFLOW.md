@@ -4,6 +4,13 @@ A hands-on walkthrough. By the end you will have a working 6-agent research pipe
 
 No prior Armature experience needed. You need Python 3.11+, an Anthropic API key, and about 20 minutes.
 
+> **Prefer the browser?** The platform server's **Create a workflow** guide
+> (web UI, `armature server run` — see the README quick start) walks you
+> through the same decisions interactively — what starts the workflow, its
+> steps, its output, what it must never do — then drafts the YAML for you
+> and lets you test it with a dry run before it goes live. This tutorial
+> builds the spec by hand instead; both paths produce the same YAML.
+
 ---
 
 ## What we're building
