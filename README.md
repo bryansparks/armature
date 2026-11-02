@@ -18,7 +18,7 @@ For more information, docs, and examples, visit **[armature.now](https://armatur
 
 ## What it does
 
-Armature reads a YAML spec that defines a **workflow** as a directed acyclic graph (DAG) of **stages**. Each stage is one of four things:
+Armature reads a YAML spec that defines a **workflow** as a directed acyclic graph (DAG) of **stages**. Each stage is one of five things:
 
 - An **LLM call** — a role with a system prompt, model tier, and output format
 - A **script/adapter** — a Python function or shell command
@@ -39,12 +39,18 @@ pip install armature-agents
 With optional extras:
 
 ```bash
+pip install "armature-agents[server]"    # the platform server + web UI (armature server run)
 pip install "armature-agents[service]"   # FastAPI HTTP service (armature serve)
+pip install "armature-agents[cloud]"     # remote mission transport (unlocks armature/transport)
 pip install "armature-agents[telemetry]" # OpenTelemetry export
 pip install "armature-agents[wizard]"    # interactive spec wizard (armature new)
 ```
 
+`[server]` adds SQLAlchemy, alembic, and auth — everything the platform server needs (stored workflows, teams, runs, webhooks, the web UI). It is the install for quick start step 4 below.
+
 `[service]` adds FastAPI and uvicorn, needed only if you run `armature serve` to expose workflows as an HTTP API. The core `armature run` command works without it.
+
+`[cloud]` makes boto3 an explicit dependency and unlocks `armature/transport` — see [Cloud transport](#cloud-transport). The default install never imports boto3.
 
 `[telemetry]` adds the OpenTelemetry SDK for span export to OTLP backends (Jaeger, Honeycomb, etc.). Without it, `armature.telemetry` degrades silently to no-ops — traces are written to the local SQLite store regardless.
 
@@ -101,6 +107,8 @@ armature run hello_ollama.yml --input topic="what a DAG is"
 
 ## Quick start
 
+Armature runs two ways. **As an engine** — write a YAML spec and run it from Python or the CLI (steps 1–3). **As a platform** — run the server and manage workflows through a web UI with teams, runners, and webhooks (step 4). Both use the same engine underneath.
+
 **1. Write a spec** (`my_workflow.yml`):
 
 ```yaml
@@ -151,7 +159,7 @@ armature run my_workflow.yml --input text="Your content here..."
 
 > This spec uses Anthropic (`ANTHROPIC_API_KEY`). To run on OpenAI or a local model instead, change the `model_tiers` block — see **No API key?** above for the Ollama version.
 
-**4. Or run the server and set it up in the browser:**
+**4. Or run the platform server and set it up in the browser:**
 
 ```bash
 git clone <this repository> && cd armature
@@ -164,7 +172,8 @@ The first run prints a one-time setup link, such as
 sets up the database and your admin account, then signs you in and walks you
 through your team's models, AWS, runners, connections, repos, and webhooks. Every step
 after the admin can be skipped and finished later from **Setup** in the menu.
-To use PostgreSQL or MySQL, paste its URL on the database screen. That URL is
+To use PostgreSQL or MySQL, paste its URL on the database screen (install the
+`[postgres]` or `[mysql]` extra for the driver). That URL is
 the only setting you type. See
 [docs/platform/DEPLOY.md](docs/platform/DEPLOY.md#first-run).
 
@@ -252,7 +261,7 @@ A **workflow package** is a self-contained, verified, portable bundle — the sp
 armature package build --spec my_workflow.yml --out my_pkg --tools ./tools
 armature package run my_pkg --profile secrets.env   # default: runs in a container
 armature package run my_pkg --direct               # in-process (no Docker)
-armature package verify my_pkg                     # 8 completeness checks, no execution
+armature package verify my_pkg                     # nine completeness checks, no execution
 ```
 
 - **Reference-only secrets.** The bundle carries secret *names* (`api_key_env`), never values. Values are injected at run time from an owner-supplied `--profile` `.env` (gitignored); the run fails closed if a declared secret is unresolvable.
@@ -386,157 +395,28 @@ Each use case is a YAML workflow spec + a small set of Python tool modules. The 
 
 ## Research foundation
 
-Armature is built from eleven academic papers, one industry governance framework, and one open-source agent architecture project — all but one published this year (each paper's date is listed below). Every major design decision traces to an experimentally validated finding: **the harness matters more than the model.**
+Armature's design is not improvised: every major decision traces to an experimentally validated finding from recent harness research — **the harness matters more than the model.** The spec format and role types come from NLAH; the trace-driven optimizer from Meta-Harness; the NL-to-spec authoring assistant from AutoHarness; runtime safety rules from AgentSpec; the two-loop self-improvement design from Continual Harness; prediction-verified improvement contracts from AHE; memory staleness and drift scoring from System Scaling; reversibility classification and tamper-evident traces from Microsoft's Agent Governance Toolkit; static spec risk scoring from KYA; LoRA adapter skills from Skill-to-LoRA and C-LoRA; and active memory navigation from NapMem. All of it is implemented.
 
-### The papers
-
-**[NLAH] Natural-Language Agent Harnesses** — Tsinghua University, March 2026 ([arXiv:2603.25723](https://arxiv.org/abs/2603.25723))
-
-Establishes the architectural model. NLAH defines six core harness components (contracts, roles, stage structure, adapters/scripts, state semantics, and a failure taxonomy) and shows that workflows defined in structured natural language outperform code-based equivalents on complex benchmark tasks (47.2 vs. 30.4 on OSWorld). It also specifies parallel fan-out as a core orchestration primitive.
-
-**[Meta-Harness] Automated Optimization End-to-End** — Stanford University, March 2026 ([arXiv:2603.28052](https://arxiv.org/abs/2603.28052))
-
-The paper behind the optimizer. Meta-Harness introduces an outer optimization loop where a frontier model reads execution traces and proposes improvements to the harness spec itself. Key finding: giving the optimizer access to full execution traces — not just pass/fail scores — raises best-run accuracy from 41.3% to 56.7% by enabling causal reasoning about why runs failed. Armature keeps a `ProposalStore` of prior proposals and re-runs the loop via `run_loop()`.
-
-**[AutoHarness] LLM-Synthesized Harnesses** — February 2026 ([arXiv:2603.03329](https://arxiv.org/abs/2603.03329))
-
-Demonstrates that LLMs can iteratively write their own harness code and produce systems that outperform larger models without harnesses. The concept most directly applied: the **harness-as-verifier**, where the harness validates outputs meet domain-specific legality constraints before accepting them — the ancestor of the `judge` role type and `SpecDrafter`.
-
-**[AgentSpec] Runtime Enforcement for Safe Agents** — March 2025 ([arXiv:2503.18666](https://arxiv.org/abs/2503.18666))
-
-Introduces a declarative rule language for constraining agent behavior at runtime. Rules are composable, lightweight (millisecond-scale evaluation), and LLM-generatable. Armature implements the full enforcement architecture: pre/post-tool hooks wired into the engine and a declarative condition DSL (`ToolSafetyRule` + `SafetyCondition`) written directly in YAML.
-
-**[Continual Harness] Reset-Free Self-Improvement** — May 2026 ([arXiv:2605.09998](https://arxiv.org/abs/2605.09998))
-
-Formalizes the two-loop self-improvement design: an inner loop (a `post_run` refiner stage that sees the full transcript after the DAG completes) and an outer loop (`SelfImproveRunner` — load traces → diagnose → propose YAML revision → auto-apply). Its emphasis on recurring failure signatures informs Armature's own diagnostic taxonomy (`stage_failed`, `output_invalid`, `low_confidence`, `high_escalation`, `low_skill_activation`), and its fine-tuning bridge — high-quality judge traces exported as SFT/DPO training data — is implemented directly.
-
-**[AHE] Agentic Harness Engineering** — April 2026 ([arXiv:2604.25850](https://arxiv.org/abs/2604.25850))
-
-The accountability paper. AHE introduces the prediction-verification loop: every proposed spec revision carries a falsifiable contract (`predicted_fixes`, `predicted_regressions`), and the next cycle verifies those predictions against observed diagnostic shift. Implements component-level improvement targeting — long-term memory evolution alone yielded +5.6pp; system prompt evolution *alone* caused -2.3pp regression, validating the "one component at a time" discipline.
-
-**[System Scaling] From Model Scaling to System Scaling** — May 2026 ([arXiv:2605.26112](https://arxiv.org/abs/2605.26112))
-
-Identifies three system-level failure modes — which it terms "exposure without access," "stale-but-confident," and "confident-but-unchecked": memory that is present but unreachable, aging memory trusted without warning, and tool side effects assumed rather than verified. Armature answers with staleness penalties, context provenance tracking, post-condition verification, its own drift score (regression detection across improvement cycles), and component governance (auto-apply vs. human-review classification for spec changes).
-
-**[NapMem] From Passive Retrieval to Active Memory Navigation** — July 2026 ([arXiv:2607.05794](https://arxiv.org/abs/2607.05794))
-
-Reframes long-term memory from "passively retrieved context" into "a structured action space the agent navigates." NapMem organizes memory as a linked multi-granularity pyramid and exposes it through memory tools. Armature ports the structural thesis — raw stage captures (L0), reconciled entity/fact records (L1), and read-only navigation tools — while leaving out the RL-trained policy, which is not portable to a harness. The result is `memory.navigation_tools`: stages can query MemoryStore and KnowledgeStore on demand instead of receiving a fixed passive dump.
-
-**[AGT] Microsoft Agent Governance Toolkit** — 2025
-
-Five governance primitives borrowed directly: reversibility classification for every tool call (`FULL / PARTIAL / NONE`), tamper-evident SHA-256 hashing of trace inputs and the governing policy, a `require_approval` gate wired into the tool-call path, and `safety_mode: strict` (fail-closed — deny on no-match).
-
-**[The Log is the Agent]** — Yohei Nakajima, May 2026 ([arXiv:2605.21997](https://arxiv.org/abs/2605.21997))
-
-Event-sourced, graph-memory agent architecture with content-addressed caching of LLM responses and event-triggered reactive behaviors. Adopted concepts: SHA-256 cache keying by model + messages + kwargs (`LLMCache`), audit replay from the trace store (`armature replay`), and the `BehaviorRule`/`BehaviorRegistry` hook layer for pattern-triggered post-run behaviors.
-
-**[KYA] Know Your Agents** — Veldt Labs, May 2026 ([arXiv:2605.25376](https://arxiv.org/abs/2605.25376))
-
-Governance layer operating at definition-time (static risk scoring), runtime-trust (anomaly counting), and composition (only-tighten). Adopted: five-factor static spec risk score surfaced by `armature validate`, `RogueSignalCounter` wired into safety hooks and the run summary, and `CONFLICTING_SAFETY_RULES` validation enforcing the only-tighten composition principle.
-
-**[Skill-to-LoRA] From Using Skills to Learning Behaviors for Token-Efficient LLM Agents** — The Chinese University of Hong Kong, June 2026 ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769))
-
-The paper behind LoRA adapter skills. S2L shows that agent skills expressed as SKILL.md procedural documents can be distilled into lightweight, task-specific LoRA adapters, then plugged in at runtime instead of injecting the full skill text into the prompt. Armature's `skill_library.adapter` references, `adapter_support: dynamic` tiers, and the pluggable adapter factory implement this pattern directly: skill text is omitted when the adapter loads, cutting prefill tokens while preserving behavior. The `s2l` backend trains adapters from skill documents; the `trace` backend trains from exported high-quality traces.
-
-**[C-LoRA] Continual Low-Rank Adaptation for Pre-trained Models** — Shanxi University / University of Manchester, February 2025 ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920))
-
-The paper behind continual adapter learning. C-LoRA keeps a single LoRA adapter and updates it sequentially from new tasks by splitting the routing matrix into a frozen `R_old` (preserving prior knowledge) and a trainable near-zero `R_delta` for the new task, regularized by `λ ||A^T · R_delta||_F²`. This maps directly to Armature's versioned adapter registry: new skill/trace batches can update the prior adapter instead of training a fresh one or keeping a growing set of per-version adapters. `adapter_factory.continual_learning` exposes the C-LoRA settings; `adapter_factory.use_dora` enables DoRA for richer adapter representations.
-
----
-
-### What's implemented
-
-| Source | Concept | Status |
-|---|---|---|
-| NLAH | Declarative NL spec, four role types, fan-out/fan-in | ✅ |
-| Meta-Harness | Single-shot + multi-iteration optimizer, proposal history, prompt bootstrapping | ✅ |
-| AutoHarness | Harness-as-verifier, NL-to-spec synthesis (`SpecDrafter`), `AutoHarness` loop | ✅ |
-| AgentSpec | Pre/post-tool hooks, declarative safety DSL (6 operators, 5 actions) | ✅ |
-| Continual Harness | Diagnostic failure taxonomy, inner refiner loop, `SelfImproveRunner`, `TraceExporter` | ✅ |
-| Harness Benefit ([arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1) | Cheap-evolver (medium-tier `SpecRefiner`), HFR as 5th HQS component, SLR `low_skill_activation` diagnostic | ✅ |
-| AHE | Falsifiable improvement contract, prediction-verification, `_verify_predictions()` | ✅ |
-| System Scaling | Memory staleness, context provenance, drift score, postcondition verification, consensus fan-in, component governance | ✅ |
-| NapMem ([arXiv:2607.05794](https://arxiv.org/abs/2607.05794)) | Active memory navigation: `memory.*` read-only tools, `_memory_index`, per-stage `_knowledge` suppression | ✅ |
-| AGT | Reversibility classification, trace hashing, policy version, `require_approval`, strict mode | ✅ |
-| The Log is the Agent | LLM response caching, audit replay, trace-triggered behaviors (`BehaviorRule`), `--auto-improve` | ✅ |
-| KYA | Static spec risk score, rogue signal counter, only-tighten safety rule validation | ✅ |
-| Skill-to-LoRA ([arXiv:2606.16769](https://arxiv.org/abs/2606.16769)) | LoRA adapter skills: `skill_library.adapter`, `adapter_support: dynamic`, adapter factory | ✅ |
-| C-LoRA ([arXiv:2502.17920](https://arxiv.org/abs/2502.17920)) | Continual adapter updates via `adapter_factory.continual_learning` | ✅ |
-| DoRA | `adapter_factory.use_dora` — Weight-Decomposed Low-Rank Adaptation | ✅ |
+- **[ARCHITECTURE](docs/ARCHITECTURE.md)** — the research table: every source and the Armature feature it maps to
+- **[ARMATURE-PHILOSOPHY](docs/ARMATURE-PHILOSOPHY.md)** — per-paper deep dives and the design rationale
+- **[RESEARCH-CURRENCY-CHECK](docs/RESEARCH-CURRENCY-CHECK.md)** — the mid-2026 literature check: what later work confirmed, what it added, and what was deliberately not adopted
 
 ---
 
 ## The self-improvement flywheel
 
-Armature is the **execution layer** — the first component in a larger system designed to improve itself the more it runs. The chart below shows where the current implementation stands and where the flywheel leads aspirationally.
+Armature is the **execution layer** of a system designed to improve itself the more it runs. Four loops compound each other, and all four are implemented:
 
-```
-  TODAY                         NEAR-TERM                    ASPIRATIONAL
-  ─────────────────────────────────────────────────────────────────────────
+1. **Harness optimization** — every run records traces; the optimizer reads traces and proposal history, proposes YAML spec improvements, and A/B tests them by HQS (`armature improve`).
+2. **SLM fine-tuning** — high-quality judge traces export as SFT/DPO training data (`armature export-traces`); fine-tuned workers register as new model tiers.
+3. **RAG enrichment** — trace failures reveal knowledge gaps; the retrieval index improves.
+4. **Consensus calibration** — deliberation priors calibrate from outcomes, feeding a cleaner quality signal back to loop 1.
 
-  ┌──────────────────┐
-  │  Armature        │  ─── every run records ──►  ┌─────────────────────┐
-  │  Harness         │                              │  TraceStore         │
-  │                  │  ◄── optimizer proposes ───  │  (SQLite, per run)  │
-  │  • DAG executor  │        spec improvements     └──────────┬──────────┘
-  │  • Role routing  │                                         │
-  │  • Safety hooks  │                              ┌──────────▼──────────┐
-  │  • HQS scoring   │                              │  Loop 1:            │
-  │  • Session log   │                              │  Harness Optimizer  │
-  └──────────────────┘                              │                     │
-                                                    │  Reads traces +     │
-                                                    │  proposal history   │
-                                                    │  → proposes YAML    │
-                                                    │  spec improvements  │
-                                                    │  → A/B tests by HQS │
-                                                    └──────────┬──────────┘
-                                                               │ accepted diffs
-                                                    ┌──────────▼──────────┐
-                                                    │  Loop 2:            │
-                                                    │  SLM Fine-Tuning    │
-                                                    │                     │
-                                                    │  High-quality       │
-                                                    │  traces → LoRA      │
-                                                    │  fine-tune workers  │
-                                                    │  → register as      │
-                                                    │  new model tier     │
-                                                    └──────────┬──────────┘
-                                                               │ better workers
-                                                    ┌──────────▼──────────┐
-                                                    │  Loop 3:            │
-                                                    │  RAG                │
-                                                    │                     │
-                                                    │  Trace failures     │
-                                                    │  reveal knowledge   │
-                                                    │  gaps → improve     │
-                                                    │  retrieval index    │
-                                                    └──────────┬──────────┘
-                                                               │ richer context
-                                                    ┌──────────▼──────────┐
-                                                    │  Loop 4:            │
-                                                    │  Consensus          │
-                                                    │  deliberation       │
-                                                    │                     │
-                                                    │  Calibrate          │
-                                                    │  deliberation       │
-                                                    │  priors from        │
-                                                    │  outcomes →         │
-                                                    │  cleaner quality    │
-                                                    │  signal back to     │
-                                                    │  Loop 1             │
-                                                    └─────────────────────┘
-
-  ─────────────────────────────────────────────────────────────────────────
-  All four loops are implemented. 1,516 tests passing.
-```
-
-**The compounding property:** Each loop feeds the next. Better traces → better optimizer proposals → better specs → better traces. Fine-tuned worker models produce better outputs → fewer judge rejections → cleaner quality signal. The harness measurably improves the more it runs, without engineering effort after initial deployment.
+Each loop feeds the next: better traces → better proposals → better specs → better traces. The harness measurably improves the more it runs, without engineering effort after initial deployment. The flywheel diagram and the HQS formula that drives it: **[ARCHITECTURE](docs/ARCHITECTURE.md#the-self-improvement-flywheel)** and **[HQS-AND-SELF-IMPROVEMENT](docs/HQS-AND-SELF-IMPROVEMENT.md)**.
 
 ---
 
 ## Key concepts
-
-**Workflow packages** bundle a spec + inputs + vendored tools + a deps manifest + secret *names* + output destinations into a self-contained, verified directory any container can run. `armature package build` verifies completeness; `armature package run` executes one package in a generic `armature-runner` container and delivers artifacts (+ optional trace) to a results dir. The package is data, not an image — a pool of identical runner containers can pull packages from a queue (SQS, later) with no changes to the package or runner. See `docs/WORKFLOW-PACKAGES.md`.
 
 | Concept | Description |
 |---|---|
@@ -626,6 +506,8 @@ armature/
 ├── adapters/       # Observability adapters (LangFuse, LangSmith)
 ├── templates/      # Reusable workflow spec templates
 ├── service/        # FastAPI HTTP service — WorkflowRegistry, build_app(), /workflows API
+├── server/         # The platform server — web UI, teams, stored workflows, runs, webhooks, packs
+├── transport/      # Cloud transport (optional [cloud] extra) — S3 work store, submit gates, sweep
 └── cli.py          # CLI entry point
 
 examples/           # Annotated workflow YAML specs (copy and modify)
@@ -651,8 +533,9 @@ docs/               # Full documentation (see index below)
 
 | Document | Purpose |
 |---|---|
-| [ARCHITECTURE](docs/ARCHITECTURE.md) | Design rationale, research foundation, implementation table |
+| [ARCHITECTURE](docs/ARCHITECTURE.md) | Design rationale, research foundation, flywheel diagram, implementation table |
 | [ARMATURE-PHILOSOPHY](docs/ARMATURE-PHILOSOPHY.md) | Why a harness — philosophy, research papers, architecture deep-dive |
+| [RESEARCH-CURRENCY-CHECK](docs/RESEARCH-CURRENCY-CHECK.md) | Mid-2026 literature check — confirmations, additions, deliberately not adopted |
 | [DECLARATIVE-CONTROL-FLOW](docs/DECLARATIVE-CONTROL-FLOW.md) | YAML-first control flow — branching, loops, conditions |
 | [DAG-vs-LANGGRAPH](docs/DAG-vs-LANGGRAPH.md) | How Armature's DAG model compares to LangGraph |
 | [MISSION-AS-CONTEXT](docs/MISSION-AS-CONTEXT.md) | Mission statements as persistent agent context |
