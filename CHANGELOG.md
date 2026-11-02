@@ -8,6 +8,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-02
+
+### Changed
+
+- **Documentation refresh.** The README is restructured around the two
+  ways to run Armature — as an engine on a YAML spec, or as the
+  platform server with its web UI — and no longer carries the research
+  paper digests or the flywheel diagram; those live in the
+  documentation. Installation now lists the `[server]`, `[cloud]`,
+  `[postgres]`, and `[mysql]` extras, and the project layout shows the
+  `server/` and `transport/` packages. The user guide gains a workflow
+  packs section and a test-runs/dry-runs section, the spec reference
+  documents pack adapters and their `with:` schema checks, and the
+  build-your-first-workflow tutorial points browser-first users at the
+  Create a workflow guide. Factual fixes along the way: a workflow
+  stage is one of five things (not four), `armature package verify`
+  runs nine completeness checks (not eight), and the flywheel section
+  now states honestly how much of each loop is implemented.
+
 ## [0.10.0] - 2026-10-30
 
 ### Added
