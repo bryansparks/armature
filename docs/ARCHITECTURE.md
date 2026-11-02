@@ -236,7 +236,9 @@ This is the strategic differentiator. Each loop compounds the others.
              └───────────────────────────┘
 ```
 
-**The key property:** the harness gets measurably better the more it runs — without human engineering effort after initial deployment. Traces fuel fine-tuning. Fine-tuned models produce better traces. Better traces improve both improvement loops, and consensus deliberation calibrates the quality signal those loops depend on. All four loops are implemented.
+**The key property:** the harness gets measurably better the more it runs — without human engineering effort after initial deployment. Traces fuel fine-tuning. Fine-tuned models produce better traces. Better traces improve both improvement loops, and consensus deliberation sharpens the quality signal those loops depend on.
+
+Where each loop stands: loops 1–2 run end-to-end (loop 2's training step runs out-of-band through the pluggable trainer interface — the shipped PEFT trainer is a scaffold). Loops 3–4 have their substrate running — cross-run memory with hybrid search, and consensus quorum feeding HQS — while their automatic refinement steps (failures improving the retrieval index; deliberation priors calibrating from outcomes) are future work.
 
 ### Accountability in the improvement loop
 

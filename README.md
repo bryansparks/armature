@@ -405,14 +405,14 @@ Armature's design is not improvised: every major decision traces to an experimen
 
 ## The self-improvement flywheel
 
-Armature is the **execution layer** of a system designed to improve itself the more it runs. Four loops compound each other, and all four are implemented:
+Armature is the **execution layer** of a system designed to improve itself the more it runs. Four loops compound each other. Where each stands today:
 
-1. **Harness optimization** — every run records traces; the optimizer reads traces and proposal history, proposes YAML spec improvements, and A/B tests them by HQS (`armature improve`).
-2. **SLM fine-tuning** — high-quality judge traces export as SFT/DPO training data (`armature export-traces`); fine-tuned workers register as new model tiers.
-3. **RAG enrichment** — trace failures reveal knowledge gaps; the retrieval index improves.
-4. **Consensus calibration** — deliberation priors calibrate from outcomes, feeding a cleaner quality signal back to loop 1.
+1. **Harness optimization — implemented.** Every run records traces to `TraceStore`; `armature improve` reads traces and proposal history, proposes YAML spec improvements, verifies each proposal's predictions, and A/B tests by HQS.
+2. **SLM fine-tuning — implemented.** `armature export-traces` exports high-quality judge traces as SFT/DPO training data, and the trained LoRA adapter plugs in at runtime (`skill_library.adapter`, `adapter_support: dynamic`). The training run itself happens out-of-band: Armature defines the trainer interface (`s2l` and `trace` backends, C-LoRA continual settings) and serves the result — the shipped PEFT trainer is a scaffold for your own training pipeline.
+3. **RAG enrichment — substrate running.** Cross-run memory captures stage outputs into raw captures (L0) and reconciled facts (L1) with hybrid keyword + semantic search (`memory.search_records`), so runs accumulate knowledge. The automatic step — trace failures revealing knowledge gaps and improving the retrieval index — is future work.
+4. **Consensus calibration — substrate running.** `fan_in: consensus` scores agreement across parallel runs, and the quorum score feeds HQS, which the optimizer optimizes against. Calibrating deliberation priors from outcomes is future work.
 
-Each loop feeds the next: better traces → better proposals → better specs → better traces. The harness measurably improves the more it runs, without engineering effort after initial deployment. The flywheel diagram and the HQS formula that drives it: **[ARCHITECTURE](docs/ARCHITECTURE.md#the-self-improvement-flywheel)** and **[HQS-AND-SELF-IMPROVEMENT](docs/HQS-AND-SELF-IMPROVEMENT.md)**.
+Each loop feeds the next: better traces → better proposals → better specs → better traces. The flywheel diagram and the HQS formula that drives it: **[ARCHITECTURE](docs/ARCHITECTURE.md#the-self-improvement-flywheel)** and **[HQS-AND-SELF-IMPROVEMENT](docs/HQS-AND-SELF-IMPROVEMENT.md)**.
 
 ---
 

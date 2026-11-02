@@ -415,7 +415,7 @@ The SSE stream lets a bot forward progress tokens to the user immediately — `"
 
 ### The Self-Improvement Flywheel
 
-This is the strategic differentiator. Each loop makes the others more effective. With the addition of `SelfImproveRunner` (Paper 5), all four loops are now implemented.
+This is the strategic differentiator. Each loop makes the others more effective. Loop 1 is fully implemented (`SelfImproveRunner`, Paper 5). Loop 2 runs through the harness — trace export, the trainer interface, runtime adapter serving — with the training itself out-of-band (the shipped PEFT trainer is a scaffold). Loops 3–4 have their substrate in place, cross-run memory and consensus quorum respectively; their automatic refinement steps are future work.
 
 ```
                         ┌─────────────────────────┐
