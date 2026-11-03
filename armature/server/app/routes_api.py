@@ -761,13 +761,15 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
         rows = conn.execute(query.order_by(at.desc(), row_id.desc()).limit(limit)).all()
         pulls = subjects.pull_states(conn, scope, {r.subject for r in rows if r.subject})
         started = trigger.describe(conn, [r._mapping for r in rows])
+        job_of = subjects.open_jobs(conn, rows)
     listed = [{"id": r.id, "team_id": r.team_id, "project_id": r.project_id, "workflow": r.workflow,
                "status": r.status, "triggered_by": r.triggered_by, "started_at": r.started_at,
                "finished_at": r.finished_at,
                "cost_usd": float(r.cost_usd) if r.cost_usd is not None and settings["show_cost"] else None,
                **about(r.subject, r.summary), "thread": r.thread, "pr": pulls.get(r.subject),
                "outcome": r.outcome, "fix_outcome": _fix_outcome(r.trigger_ref), "risk": r.risk,
-               "trigger": started[r.id], "location": r.location, **({"group_size": r.group_size} if group else {})}
+               "trigger": started[r.id], "location": r.location, "job": job_of.get(r.id),
+               **({"group_size": r.group_size} if group else {})}
               for r in rows]
     return {"runs": listed, "next_before": _next(rows, limit, "started_at")}
 

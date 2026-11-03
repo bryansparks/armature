@@ -1,13 +1,21 @@
 """Subjects: every run about one pull request or issue, grouped into a list row and a history page."""
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Connection, String, and_, cast, func, or_, select
 
 from armature.server import display, rbac
-from armature.server.db.schema import findings, run_artifacts, runs, workflows
+from armature.server.db.schema import (
+    findings,
+    jobs,
+    run_artifacts,
+    runs,
+    webhook_deliveries,
+    workflows,
+)
 from armature.server.ingest import RUN_KIND
 from armature.server.threads import PULL_SUBJECT, PULL_URL, links
 
@@ -16,6 +24,7 @@ FINDINGS_MAX = 2000
 SEARCH_BATCHES = 10
 HEAD_LENGTH = 12
 POSTED_LABEL = "Posted result"
+LOGIN_MAX = 100
 
 WORKFLOW = func.coalesce(workflows.c.name, runs.c.workflow_name)
 
@@ -53,9 +62,10 @@ def make_cursor(at: datetime, subject: str) -> str:
 
 
 def _run_query(scope: rbac.Scope):
-    return (select(runs.c.id, runs.c.subject, runs.c.team_id, WORKFLOW.label("workflow"), RUN_KIND.label("kind"),
+    return (select(runs.c.id, runs.c.subject, runs.c.team_id, runs.c.project_id, WORKFLOW.label("workflow"),
+                   RUN_KIND.label("kind"),
                    runs.c.status, runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.summary,
-                   runs.c.trigger_ref, runs.c.outcome, runs.c.risk, runs.c.risk_reasons)
+                   runs.c.trigger_ref, runs.c.outcome, runs.c.risk, runs.c.risk_reasons, runs.c.location)
             .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
             .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
 
@@ -104,7 +114,48 @@ def pull_states(conn: Connection, scope: rbac.Scope, names: set[str]) -> dict[st
             for name, ordered in by_subject.items() if ordered}
 
 
-def summarize(subject: str, ordered: list[Any], hidden: set[str], show_cost: bool) -> dict[str, Any]:
+OPEN_RUNS = ("queued", "running", "waiting")
+
+
+def open_jobs(conn: Connection, listed: list[Any]) -> dict[str, dict[str, Any]]:
+    """The newest job of each open run, with what deciding on a Cancel needs: its id, status, and cancel request."""
+    ids = [run.id for run in listed if run.status in OPEN_RUNS]
+    found: dict[str, dict[str, Any]] = {}
+    if ids:
+        for job in conn.execute(select(jobs.c.run_id, jobs.c.id, jobs.c.status, jobs.c.cancel_requested_at)
+                                .where(jobs.c.run_id.in_(ids)).order_by(jobs.c.created_at.desc(), jobs.c.id)):
+            found.setdefault(job.run_id, {"id": job.id, "status": job.status,
+                                          "cancel_requested_at": job.cancel_requested_at})
+    return found
+
+
+def _author(payload: str | None) -> str | None:
+    """The login that opened the pull request or issue a GitHub delivery is about."""
+    try:
+        data = json.loads(payload) if payload else None
+    except ValueError:
+        return None
+    for key in ("pull_request", "issue"):
+        login = _text(_dict(_dict(_dict(data).get(key)).get("user")).get("login"))
+        if login:
+            return login[:LOGIN_MAX]
+    return None
+
+
+def authors(conn: Connection, by_subject: dict[str, list[Any]]) -> dict[str, str | None]:
+    """Each subject's author, from the stored payload of its newest run's webhook delivery. None when none is kept."""
+    newest = {}
+    for subject, ordered in by_subject.items():
+        newest[subject] = next((ref["delivery_id"] for run in reversed(ordered)
+                                if isinstance((ref := _dict(run.trigger_ref)).get("delivery_id"), str)), None)
+    wanted = {delivery for delivery in newest.values() if delivery}
+    payloads = dict(conn.execute(select(webhook_deliveries.c.id, webhook_deliveries.c.payload)
+                                 .where(webhook_deliveries.c.id.in_(wanted))).all()) if wanted else {}
+    return {subject: _author(payloads.get(delivery)) if delivery else None for subject, delivery in newest.items()}
+
+
+def summarize(subject: str, ordered: list[Any], hidden: set[str], show_cost: bool,
+              author: str | None = None) -> dict[str, Any]:
     """One list row. Hidden workflows stay out of the counts and cost, never out of the status."""
     counted = [run for run in ordered if run.workflow not in hidden]
     repo, _ = _repo_number(subject, ordered)
@@ -121,6 +172,8 @@ def summarize(subject: str, ordered: list[Any], hidden: set[str], show_cost: boo
         "last_activity": ordered[-1].started_at if ordered else None,
         "repo": repo,
         "team_id": ordered[-1].team_id if ordered else None,
+        "author": author,
+        "location": ordered[-1].location if ordered else None,
     }
 
 
@@ -162,9 +215,11 @@ def list_subjects(conn: Connection, scope: rbac.Scope, team: str | None, q: str,
             query = query.where(runs.c.team_id == team)
         for run in conn.execute(query.order_by(runs.c.started_at, runs.c.id)).all():
             by_subject[run.subject].append(run)
+        author_of = authors(conn, by_subject)
         for index, group in enumerate(groups):
             cursor = (group.last, group.subject)
-            row = summarize(group.subject, by_subject[group.subject], hidden, settings["show_cost"])
+            row = summarize(group.subject, by_subject[group.subject], hidden, settings["show_cost"],
+                            author_of[group.subject])
             if wanted and wanted not in group.subject.lower() and wanted not in (row["title"] or "").lower():
                 continue
             rows.append(row)
@@ -246,6 +301,7 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
         .order_by(runs.c.started_at, findings.c.run_id, findings.c.id).limit(FINDINGS_MAX)).all()
     repo, number = _repo_number(subject, own)
     show_cost = settings["show_cost"]
+    job_of = open_jobs(conn, ordered)
 
     def row(run: Any) -> dict[str, Any]:
         summary, ref = _dict(run.summary), _dict(run.trigger_ref)
@@ -260,6 +316,7 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
             "fields": _scalars(summary.get("fields")), "fix": _scalars(ref.get("fix")),
             "merge": _scalars(ref.get("merge")), "artifacts": artifacts.get(run.id, []),
             "outcome": run.outcome, "risk": run.risk, "risk_reason": first_reason(run.risk_reasons),
+            "team_id": run.team_id, "project_id": run.project_id, "job": job_of.get(run.id),
         }
 
     return {

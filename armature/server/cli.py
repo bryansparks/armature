@@ -379,6 +379,50 @@ def _relink_target(conn, wanted: str):
     return rows[0]
 
 
+@runs_app.command("delete")
+def runs_delete(
+    run_ids: list[str] = typer.Argument(..., help="The runs to delete, by id, as separate arguments or one "
+                                                   "separated by spaces or commas"),
+    username: str = typer.Option(..., "--as", help="The admin the audit log names for the deletion"),
+    config: Path | None = ConfigOption,
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be deleted without changing anything"),
+):
+    """Delete ended runs, their jobs, and every row that belongs to them, such as test runs. Runs still open are
+    refused, and runs that rerun one of them only lose that link."""
+    import re
+
+    from sqlalchemy import select
+
+    from armature.server import history
+    from armature.server.db import make_engine
+    from armature.server.db.schema import users
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.begin() as conn:
+            admin = conn.execute(select(users.c.id).where(users.c.username == username, users.c.is_admin.is_(True),
+                                                          users.c.disabled.is_(False))).scalar()
+            if admin is None:
+                _fail(f"--as {username} is not an enabled admin.")
+            try:
+                # zsh passes an unquoted "$ids" as one argument, so split each on spaces and commas.
+                wanted = [run_id for arg in run_ids for run_id in re.split(r"[\s,]+", arg) if run_id]
+                plans = history.delete_runs(conn, wanted, actor_id=admin, dry_run=dry_run)
+            except history.HistoryError as exc:
+                _fail(str(exc))
+    finally:
+        engine.dispose()
+    verb = "Would delete" if dry_run else "Deleted"
+    for plan in plans:
+        jobs = f" and {len(plan.job_ids)} job{'' if len(plan.job_ids) == 1 else 's'}" if plan.job_ids else ""
+        typer.echo(f"{verb} run {plan.run_id} of {plan.workflow_name or 'no workflow'}{jobs}:")
+        for name, count in sorted(plan.deleted.items()):
+            typer.echo(f"  {name}: {count} row{'' if count == 1 else 's'}")
+        for name, count in sorted(plan.cleared.items()):
+            typer.echo(f"  {name}: {count} link{'' if count == 1 else 's'} cleared")
+
+
 @runs_app.command("relink")
 def runs_relink(
     old_name: str = typer.Option(..., "--from", help="The workflow name the runs were recorded under"),

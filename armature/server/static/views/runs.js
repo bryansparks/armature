@@ -1,10 +1,12 @@
 import { api, listOf } from '../api.js';
-import { append, card, clear, duration, element, empty, errorBox, link, loading, money, pageHeader, secondsBetween, statusText, statusTone, table, tableRow, when } from '../dom.js';
+import { append, attempt, card, clear, confirmDialog, duration, element, empty, errorBox, link, loading, money, pageHeader, secondsBetween, statusText, statusTone, table, tableRow, when } from '../dom.js';
 import { loadDisplay, workflowColor, workflowLabel } from '../display.js';
 import { elapsedSeconds } from '../feed.js';
 import { every, subscribe } from '../live.js';
 import { externalLink, externalLinks } from '../outcome.js';
 import { hashFor } from '../router.js';
+import { canCancel } from '../runpage.js';
+import { currentSession } from '../session.js';
 
 const STATUSES = ['queued', 'running', 'waiting', 'succeeded', 'failed', 'canceled', 'lost'];
 const PAGE_SIZE = 50;
@@ -16,6 +18,7 @@ const OUTCOMES = { opened: 'PR Created', pr_opened: 'PR Created', recommended: '
   'pr-failed': 'PR Failed' };
 const OUT_KINDS = new Set(['pull', 'issue', 'slack']);
 const ACTIVE = new Set(['queued', 'running']);
+const ACTIVE_OR_WAITING = new Set(['queued', 'running', 'waiting']);
 const ENDED = new Set(['failed', 'canceled', 'lost']);
 
 export const runHeaders = (display) => [['Started', 'col-tight'], ['Run', 'col-title'], ['Workflow', 'col-tight'], 'Links',
@@ -148,6 +151,23 @@ export const locationText = (where) => (typeof where?.label === 'string' && wher
 export function locationChip(where) {
   const detail = [where?.environment_type, where?.instance, where?.instance_type].filter((part) => typeof part === 'string' && part).join(' · ');
   return element('span', { class: 'chip', title: detail || null }, locationText(where));
+}
+
+// Cancel for an open run in a list, as the run page offers it. A click on it never opens the row.
+export function cancelControl(run, session = currentSession()) {
+  const job = run?.job;
+  if (job?.cancel_requested_at && ACTIVE_OR_WAITING.has(run.status)) return element('span', { class: 'muted' }, 'Cancel requested');
+  if (!ACTIVE_OR_WAITING.has(run?.status) || !canCancel(job, run, session)) return null;
+  const button = element('button', { type: 'button', class: 'small' }, 'Cancel');
+  const status = element('span', { role: 'status' });
+  const slot = element('span', { class: 'row-cancel' }, button, status);
+  button.addEventListener('click', async (clickEvent) => {
+    clickEvent.stopPropagation();
+    if (!(await confirmDialog('Cancel this run?', 'Its runner stops it and the run ends as canceled. It cannot be resumed.', 'Cancel run'))) return;
+    const answer = await attempt(status, button, () => api(`/api/runs/${encodeURIComponent(run.id)}/cancel`, { method: 'POST', body: {} }));
+    if (answer?.job) slot.replaceChildren(element('span', { class: 'muted' }, 'Cancel requested'));
+  });
+  return slot;
 }
 
 export function subjectLink(subject) {
@@ -287,7 +307,7 @@ export async function render(root, { query, signal }) {
       link(hashFor('run', [run.id]), shortWhen(run.started_at), { title: `Open this run, started ${when(run.started_at)}` }),
       [link(runRowHref(run), prTitle(run, pr, display)), count ? element('span', { class: 'muted' }, ` · ${count}`) : null],
       workflowLabel(display, run.workflow),
-      linksCell(run), element('span', { class: `state state-${status.tone}` }, status.text), locationChip(run.location),
+      linksCell(run), [element('span', { class: `state state-${status.tone}` }, status.text), cancelControl(run)], locationChip(run.location),
       triggerCell(run), elapsed(run), ...(display.show_cost ? [money(run.cost_usd)] : []),
     ];
   };
