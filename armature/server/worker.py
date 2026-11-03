@@ -184,11 +184,16 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
               thread: str | None = None, resume: tuple[str, Any] | None = None, dry_run: bool = False,
               key: str | None = None, not_before: datetime | None = None, supersede: bool = False,
               cancel_running: bool = False, sticky: Iterable[str] = (), rerun_of: str | None = None,
-              requested_by: str | None = None) -> str:
+              requested_by: str | None = None, kind: str = "workflow", resident_id: str | None = None,
+              workflow_version: int | None = None) -> str:
     """Queue a workflow job at the workflow's current version, with its callees pinned. Returns the job id.
 
     ``resume`` is a gate id and the job that paused there: the new job continues that job's run, at the version,
     pins, and dry mode it ran with. Raises ValueError when a called workflow doesn't resolve.
+
+    ``kind`` and ``resident_id`` mark a resident's turn job; the workflow default leaves both as
+    any existing caller queues. ``workflow_version`` pins the job to a version other than the
+    workflow's current one, as a resident pinned at its creation version needs.
 
     Jobs of the workflow with the same ``key`` run one at a time. With ``supersede`` the new job replaces the key's
     queued ones and keeps any ``sticky`` input one of them set. With ``cancel_running`` it also asks the key's
@@ -203,7 +208,8 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
     else:
         row = conn.execute(select(workflows.c.current_version, workflows.c.scope, workflows.c.name)
                            .where(workflows.c.id == workflow_id)).first()
-        version = row.current_version if row is not None else None
+        version = workflow_version if workflow_version is not None else (
+            row.current_version if row is not None else None)
         body = None if version is None else defs.body_of(conn, defs.WORKFLOW, workflow_id, version)
         pins, callees = calls.pin(conn, row.scope, body, row.name) if row is not None else ({}, [])
         pinned = {"workflow_version": version, "call_pins": pins,
@@ -221,6 +227,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
                                      inputs=inputs, status="queued", attempts=0, trigger_id=trigger_id,
                                      delivery_id=delivery_id, thread=thread, created_at=now, concurrency_key=key,
                                      not_before=not_before, rerun_of=rerun_of, requested_by=requested_by,
+                                     kind=kind, resident_id=resident_id,
                                      **pinned))
     if older:
         conn.execute(update(jobs).where(jobs.c.id.in_([row.id for row in older]), jobs.c.status == "queued")
