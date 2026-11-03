@@ -65,6 +65,8 @@ CONVERSATION_KINDS = ("slack", "web")
 CONVERSATION_STATES = ("open", "closed")
 CONVERSATION_AWAITING = ("user", "agent", "none")
 MESSAGE_ROLES = ("user", "assistant", "system")
+RESIDENT_STATES = ("idle", "paused", "closed")
+RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
 TRIGGER_POLL_STATUSES = ("ok", "error", "skipped")
 TRIGGER_SEEN_OUTCOMES = ("queued", "seeded", "shadow", "skipped")
 
@@ -502,6 +504,8 @@ jobs = Table(
     Column("rerun_of", String(36), index=True),
     # The user who asked for the rerun, recorded as the run's triggered_by.
     Column("requested_by", String(36)),
+    # No foreign key, as with delivery_id: the resident that queued this turn, pruned residents keep their jobs.
+    Column("resident_id", String(36), index=True),
     Index(None, "status", "created_at"),
     # The backfill and a run's page find a run's jobs by run.
     Index(None, "run_id"),
@@ -997,4 +1001,66 @@ conversation_pending = Table(
     _ts("created_at"),
     UniqueConstraint("team_id", "thread", "ext_ts"),
     Index(None, "created_at"),
+)
+
+# A resident is one long-lived instance of a workflow, addressed by (workflow_id, instance_key).
+# It consumes a queue of events (resident_events) and turns them into jobs; active_job_id is the lock on a turn.
+residents = Table(
+    "residents", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("project_id", String(36), ForeignKey("projects.id")),
+    Column("workflow_id", String(36), ForeignKey("workflows.id"), nullable=False),
+    Column("workflow_version", Integer, nullable=False),
+    # The empty key is the workflow's single unnamed resident.
+    Column("instance_key", String(191), nullable=False, default=""),
+    Column("state", String(8), nullable=False, default="idle"),
+    # Code-owned facts the resident's runs change only through tools, and the version that staged them.
+    Column("data", JSON),
+    Column("data_version", Integer, nullable=False, default=0),
+    # Changes staged by a finished turn, applied by the next one.
+    Column("staged", JSON),
+    Column("active_job_id", String(36), ForeignKey("jobs.id"), index=True),
+    Column("turns", Integer, nullable=False, default=0),
+    # Today's counters, reset when spent_day rolls over. spent_usd_day is integer micro-dollars.
+    Column("turns_day", Integer, nullable=False, default=0),
+    Column("idle_turns_day", Integer, nullable=False, default=0),
+    Column("emits_day", Integer, nullable=False, default=0),
+    Column("idle_streak", Integer, nullable=False, default=0),
+    _ts("next_idle_at", nullable=True),
+    _ts("last_event_at", nullable=True),
+    _ts("last_turn_at", nullable=True),
+    Column("spent_usd_day", BigInteger, nullable=False, default=0),
+    Column("spent_day", String(10)),
+    _ts("created_at"),
+    _ts("updated_at"),
+    _ts("closed_at", nullable=True),
+    Column("close_reason", String(32)),
+    UniqueConstraint("workflow_id", "instance_key"),
+    Index(None, "state", "next_idle_at"),
+    CheckConstraint(_in("state", RESIDENT_STATES), name="state"),
+)
+
+# One queued event for a resident. seq orders them; dedupe_key collapses a retry of the same event.
+resident_events = Table(
+    "resident_events", metadata,
+    _id(),
+    Column("resident_id", String(36), ForeignKey("residents.id"), nullable=False, index=True),
+    Column("seq", Integer, nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("name", String(64)),
+    Column("payload", JSON),
+    Column("source", JSON),
+    Column("reply_to", JSON),
+    # The reply a handled ask produced, kept with the event that asked.
+    Column("reply", JSON),
+    Column("dedupe_key", String(191)),
+    Column("dry_run", Boolean, nullable=False, default=False),
+    Column("handled", Boolean, nullable=False, default=False),
+    Column("attempts", Integer, nullable=False, default=0),
+    Column("handled_by_job", String(36)),
+    _ts("created_at"),
+    UniqueConstraint("resident_id", "seq"),
+    UniqueConstraint("resident_id", "dedupe_key"),
+    CheckConstraint(_in("kind", RESIDENT_EVENT_KINDS), name="kind"),
 )
