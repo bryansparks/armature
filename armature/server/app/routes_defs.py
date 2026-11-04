@@ -16,7 +16,7 @@ from pydantic import BaseModel, StrictInt
 from sqlalchemy import Connection, and_, func, select
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import calls, defs, rbac, residents, summary, webhooks, worker
+from armature.server import calls, defs, pollers, rbac, residents, summary, webhooks, worker
 from armature.server.app.deps import (
     Granted,
     by_project,
@@ -218,9 +218,18 @@ def _create(request: Request, session: Session, kind: defs.Kind, payload: Create
                                       note=payload.note, actor_id=session.user_id, now=srv.now(),
                                       ip=client_ip(request), doc_kind=payload.kind,
                                       catalog=_catalog(request))
+        if kind is defs.WORKFLOW:
+            _sync_schedule(conn, row, srv.now())
         return {kind.object_kind: _item(conn, kind, row, access),
                 "version": defs.version_detail(conn, kind, row.id, row.current_version),
                 "validation": validation.to_dict()}
+
+
+def _sync_schedule(conn: Connection, row: Any, now: Any) -> None:
+    """Keep the workflow's materialized schedule trigger true to its current version's resident block."""
+    pollers.sync_resident_schedule(
+        conn, workflow_id=row.id,
+        schedule=residents.schedule_of(defs.body_of(conn, defs.WORKFLOW, row.id, row.current_version)), now=now)
 
 
 def _save(request: Request, session: Session, kind: defs.Kind, object_id: str, payload: SaveBody) -> dict[str, Any]:
@@ -236,6 +245,8 @@ def _save(request: Request, session: Session, kind: defs.Kind, object_id: str, p
         row, validation = defs.save(conn, kind, row, access=access, body=payload.body, note=payload.note,
                                     base_version=payload.base_version, actor_id=session.user_id, now=srv.now(),
                                     ip=client_ip(request), catalog=_catalog(request))
+        if kind is defs.WORKFLOW:
+            _sync_schedule(conn, row, srv.now())
         return {kind.object_kind: _item(conn, kind, row, access),
                 "version": defs.version_detail(conn, kind, row.id, row.current_version),
                 "validation": validation.to_dict()}
@@ -265,6 +276,8 @@ def _rollback(request: Request, session: Session, kind: defs.Kind, object_id: st
         row = defs.rollback(conn, kind, row, access=access, version=payload.version, note=payload.note,
                             actor_id=session.user_id, now=srv.now(), ip=client_ip(request),
                             catalog=_catalog(request), base_version=payload.base_version)
+        if kind is defs.WORKFLOW:
+            _sync_schedule(conn, row, srv.now())
         return {kind.object_kind: _item(conn, kind, row, access),
                 "version": defs.version_detail(conn, kind, row.id, row.current_version)}
 

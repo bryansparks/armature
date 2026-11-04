@@ -251,6 +251,20 @@ def spec_of(conn: Connection, workflow_id: str, version: int) -> ResidentCfg | N
     return _cfg(_resident_block(defs.body_of(conn, defs.WORKFLOW, workflow_id, version)))
 
 
+def schedule_of(spec_body: str | None) -> tuple[str, str] | None:
+    """The ``resident.on.schedule`` a spec body carries, as (cron, timezone), or None when it names none.
+
+    The version-save path materializes this as the workflow's schedule trigger
+    (docs/RESIDENT-WORKFLOWS.md, Routing). A block that doesn't parse reads as no schedule, as
+    everywhere else a bad block is left to the save's own validation to refuse.
+    """
+    cfg = _cfg(_resident_block(spec_body))
+    if cfg is None:
+        return None
+    handler = cfg.on.get("schedule")
+    return (handler.cron, handler.timezone) if handler is not None and handler.cron else None
+
+
 def enabled(conn: Connection) -> bool:
     """Whether resident instances are enabled on this deployment — the rollback gate.
 

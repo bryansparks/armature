@@ -10,12 +10,14 @@ import httpx
 import pytest
 from sqlalchemy import insert, select, update
 
-from armature.server import connections, defs, pollers, vendors, worker
+from armature.server import connections, defs, pollers, residents, vendors, worker
 from armature.server.db import new_id
 from armature.server.db.schema import (
     audit,
     jobs,
     projects,
+    resident_events,
+    settings,
     teams,
     trigger_polls,
     trigger_seen,
@@ -23,6 +25,7 @@ from armature.server.db.schema import (
     triggers,
 )
 from armature.server.db.schema import connections as connections_table
+from armature.server.db.schema import residents as resident_rows
 from tests.server.app_support import (
     Clock,
     add_membership,
@@ -533,3 +536,149 @@ def test_a_trigger_disabled_after_its_claim_does_not_run(sqlite_engine, keyring,
     jira.keys = ["ENG-1"]
     assert _run(sqlite_engine, keyring, clock, trigger, jira) is None
     assert jira.requests == [] and _polls(sqlite_engine, trigger.id) == []
+
+
+# Residents: the workflows a schedule or issue poller drives
+
+
+@pytest.fixture
+def admin(sqlite_engine, keyring, clock, world, jira):
+    """The team's lead signed in as an instance admin — the resident block is a frozen field only
+    an admin may change, so the spec saves that materialize a schedule go through this one."""
+    user = add_user(sqlite_engine, keyring, clock, "admin", is_admin=True)[0]
+    add_membership(sqlite_engine, clock, user, "team", world.team, "team_lead")
+    client = make_client(sqlite_engine, keyring, clock)
+    client.app.state.vendor_transport = httpx.MockTransport(jira)
+    headers = mutation(sign_in_as(client, sqlite_engine, keyring, clock, user, step_up=True))
+    return SimpleNamespace(client=client, headers=headers)
+
+
+def _resident_body(cron="*/5 * * * *"):
+    return ("name: work\nresident:\n  on:\n"
+            f'    schedule: {{workflow: self, cron: "{cron}", timezone: UTC}}\n'
+            "    request: {workflow: self}\nstages: []\n")
+
+
+def _save_spec(who, world, body, base_version):
+    response = _post(who, f"/api/workflows/{world.workflow}", {"body": body, "base_version": base_version})
+    assert response.status_code == 200, response.text
+
+
+def _resident_spec(sqlite_engine, clock, world, admin, *, enabled=True):
+    """The workflow saved as a resident with a schedule — the save that materializes its trigger —
+    with residents enabled on the instance unless a test asks them off."""
+    _save_spec(admin, world, _resident_body(), 1)
+    with sqlite_engine.begin() as conn:
+        if enabled:
+            conn.execute(insert(settings).values(key=residents.ENABLED_KEY, value=True))
+    with sqlite_engine.connect() as conn:
+        return conn.execute(select(triggers).where(triggers.c.workflow_id == world.workflow,
+                                                   triggers.c.kind == "schedule")).one()
+
+
+def _ensure(sqlite_engine, clock, world, instance_key=""):
+    with sqlite_engine.begin() as conn:
+        return residents.ensure(conn, team_id=world.team, project_id=world.project,
+                                workflow_id=world.workflow, instance_key=instance_key, now=clock())
+
+
+def _events(sqlite_engine):
+    with sqlite_engine.connect() as conn:
+        return conn.execute(select(resident_events.c.kind, resident_events.c.dedupe_key,
+                                   resident_events.c.payload, resident_rows.c.instance_key)
+                            .select_from(resident_events.join(
+                                resident_rows, resident_rows.c.id == resident_events.c.resident_id))
+                            .order_by(resident_rows.c.instance_key, resident_events.c.seq)).all()
+
+
+def test_a_saved_schedule_materializes_its_trigger_and_a_plain_version_retracts_it(
+        sqlite_engine, keyring, clock, world, admin):
+    _save_spec(admin, world, _resident_body(), 1)
+    with sqlite_engine.connect() as conn:
+        [row] = conn.execute(select(triggers).where(triggers.c.workflow_id == world.workflow)).all()
+    assert (row.kind, row.enabled, row.team_id) == ("schedule", True, world.team)
+    assert row.config == {"resident": True, "cron": "*/5 * * * *", "timezone": "UTC"}
+    assert _state(sqlite_engine, row.id).next_run_at == datetime(2026, 10, 23, 12, 5, tzinfo=UTC)
+    _save_spec(admin, world, _resident_body(), 2)  # the same schedule saved again makes no second trigger
+    _save_spec(admin, world, _resident_body("*/10 * * * *"), 3)  # a new cron moves the next run
+    with sqlite_engine.connect() as conn:
+        [row] = conn.execute(select(triggers).where(triggers.c.workflow_id == world.workflow)).all()
+    assert row.config["cron"] == "*/10 * * * *"
+    assert _state(sqlite_engine, row.id).next_run_at == datetime(2026, 10, 23, 12, 10, tzinfo=UTC)
+    _save_spec(admin, world, BODY, 4)  # a version with no on.schedule takes the trigger away
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(triggers).where(triggers.c.workflow_id == world.workflow)).all() == []
+        assert conn.execute(select(trigger_state)).all() == []
+
+
+def test_a_resident_schedule_fires_an_event_on_every_open_instance(sqlite_engine, keyring, clock, world, admin):
+    trigger = _resident_spec(sqlite_engine, clock, world, admin)
+    for key in ("", "acme", "wait", "gone"):
+        _ensure(sqlite_engine, clock, world, key)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.instance_key == "wait")
+                     .values(state="paused", close_reason="ops"))
+        conn.execute(update(resident_rows).where(resident_rows.c.instance_key == "gone")
+                     .values(state="closed", close_reason="done"))
+    due = _state(sqlite_engine, trigger.id).next_run_at
+    result = pollers.run(sqlite_engine, keyring, trigger.id, now=due, due=due)
+    assert result["status"] == "ok" and result["fired"] == 3  # keyed residents fan out; closed gets none
+    events = _events(sqlite_engine)
+    assert sorted(e.instance_key for e in events) == ["", "acme", "wait"]
+    assert all(e.kind == "schedule" for e in events)
+    assert all(e.payload == {"scheduled_at": due.isoformat()} for e in events)
+    assert {job.kind for job in _jobs(sqlite_engine)} == {"resident"}  # no workflow job: only turns woke
+
+
+def test_a_resident_schedule_is_inert_while_residents_are_off(sqlite_engine, keyring, clock, world, admin):
+    trigger = _resident_spec(sqlite_engine, clock, world, admin, enabled=False)
+    _ensure(sqlite_engine, clock, world)
+    due = _state(sqlite_engine, trigger.id).next_run_at
+    result = pollers.run(sqlite_engine, keyring, trigger.id, now=due, due=due)
+    assert result["status"] == "skipped" and "not enabled" in result["error"]
+    assert _events(sqlite_engine) == []
+    [poll] = _polls(sqlite_engine, trigger.id)
+    assert poll.status == "skipped" and poll.error == result["error"]
+    assert _state(sqlite_engine, trigger.id).last_status == "skipped"
+
+
+def test_a_jira_poll_opting_into_residents_routes_each_new_issue_once(
+        sqlite_engine, keyring, clock, world, admin, jira):
+    _resident_spec(sqlite_engine, clock, world, admin)
+    poll = _create(sqlite_engine, clock, world, seed_first=False, resident=True)
+    jira.keys = ["ENG-1"]
+    assert _run(sqlite_engine, keyring, clock, poll, jira)["new_keys"] == []  # no instance: nothing eaten
+    assert _seen(sqlite_engine, poll.id) == {}
+    _ensure(sqlite_engine, clock, world)
+    assert _run(sqlite_engine, keyring, clock, poll, jira)["new_keys"] == ["ENG-1"]
+    [event] = _events(sqlite_engine)
+    assert (event.kind, event.dedupe_key, event.payload["key"]) == ("request", "ENG-1", "ENG-1")
+    assert _seen(sqlite_engine, poll.id)["ENG-1"].outcome == "queued"
+    # a second resident trigger routing the same issue collapses into the one event
+    second = _create(sqlite_engine, clock, world, seed_first=False, resident=True)
+    assert _run(sqlite_engine, keyring, clock, second, jira)["new_keys"] == []
+    assert len(_events(sqlite_engine)) == 1
+
+
+def test_a_resident_poll_is_inert_while_residents_are_off(sqlite_engine, keyring, clock, world, admin, jira):
+    _resident_spec(sqlite_engine, clock, world, admin, enabled=False)
+    poll = _create(sqlite_engine, clock, world, seed_first=False, resident=True)
+    _ensure(sqlite_engine, clock, world)
+    jira.keys = ["ENG-1"]
+    result = _run(sqlite_engine, keyring, clock, poll, jira)
+    assert result["status"] == "skipped" and "not enabled" in result["error"]
+    assert _seen(sqlite_engine, poll.id) == {} and _events(sqlite_engine) == []  # the issue waits, not eaten
+    assert _state(sqlite_engine, poll.id).last_status == "skipped"
+
+
+def test_two_servers_fire_one_resident_schedule_once(sqlite_engine, keyring, clock, world, admin):
+    trigger = _resident_spec(sqlite_engine, clock, world, admin)
+    _ensure(sqlite_engine, clock, world)
+    _ensure(sqlite_engine, clock, world, "acme")
+    due = _state(sqlite_engine, trigger.id).next_run_at
+    clock.now = due
+    first, second = (pollers.Scheduler(sqlite_engine, keyring, clock=clock) for _ in range(2))
+    assert first.claim_due(clock()) == [(trigger.id, due)]  # the claim paces the fan-out inside it
+    assert second.claim_due(clock()) == []
+    assert pollers.run(sqlite_engine, keyring, trigger.id, now=clock(), due=due)["fired"] == 2
+    assert len(_events(sqlite_engine)) == 2  # one schedule event per open instance, fired once

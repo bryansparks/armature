@@ -26,7 +26,7 @@ from croniter import CroniterError, croniter
 from sqlalchemy import Connection, Engine, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import audit, connections, webhooks, worker
+from armature.server import audit, connections, residents, webhooks, worker
 from armature.server import secrets as secret_store
 from armature.server.crypto import Keyring, SealError
 from armature.server.db import new_id, utcnow
@@ -39,6 +39,7 @@ from armature.server.db.schema import (
     triggers,
     workflows,
 )
+from armature.server.db.schema import residents as resident_rows
 from armature.server.defs import detach_triggers
 from armature.server.vendors import Item, VendorError, jira, linear
 
@@ -63,10 +64,10 @@ CRON_MIN_GAP = timedelta(minutes=5)
 CRON_GAPS = 48
 CONFIG_KEYS = {
     "jira_poll": ("name", "connection_id", "jql", "interval_minutes", "max_results", "inputs", "project_id",
-                  "seed_first", "shadow", "secrets"),
+                  "seed_first", "shadow", "resident", "secrets"),
     "linear_poll": ("name", "connection_id", "team", "states", "assignee", "label", "interval_minutes",
-                    "max_results", "inputs", "project_id", "seed_first", "shadow", "secrets"),
-    "schedule": ("name", "cron", "timezone", "inputs", "project_id", "secrets"),
+                    "max_results", "inputs", "project_id", "seed_first", "shadow", "resident", "secrets"),
+    "schedule": ("name", "cron", "timezone", "inputs", "project_id", "resident", "secrets"),
 }
 BACKOFF_MAX = timedelta(minutes=30)
 TICK_S = 15.0
@@ -81,6 +82,7 @@ CHECK_EVERY = timedelta(seconds=10)
 DAY = timedelta(days=1)
 ERROR_MAX = 2000
 MISSED = "Missed runs while no server was running. Ran once now."
+RESIDENTS_OFF = "Residents are not enabled on this instance."
 NOT_RETURNED = {
     "jira_poll": "The JQL doesn't return it. With sprint in openSprints(), an issue outside an open sprint never "
                  "matches, and one pulled into a sprint later matches on the next poll.",
@@ -198,13 +200,14 @@ def check_config(kind: str, config: Any, now: datetime) -> dict[str, Any]:
             raise TriggerError(400, "project_id must be a project id.")
         out["project_id"] = config["project_id"]
     if kind == "schedule":
-        return {**out, **_cron(config, now)}
+        return {**out, **_cron(config, now), "resident": _flag(config, "resident", False)}
     if not isinstance(config.get("connection_id"), str):
         raise TriggerError(400, "connection_id names the connection to poll with.")
     return {**out, "connection_id": config["connection_id"], **_query(kind, config),
             "interval_minutes": _whole(config, "interval_minutes", DEFAULT_INTERVAL, 1, INTERVAL_MAX),
             "max_results": _whole(config, "max_results", MAX_RESULTS, 1, MAX_RESULTS),
-            "seed_first": _flag(config, "seed_first", True), "shadow": _flag(config, "shadow", False)}
+            "seed_first": _flag(config, "seed_first", True), "shadow": _flag(config, "shadow", False),
+            "resident": _flag(config, "resident", False)}
 
 
 def _connection(conn: Connection, trigger: Any) -> Any:
@@ -365,6 +368,11 @@ def run(engine: Engine, keyring: Keyring, trigger_id: str, *, now: datetime, due
     def ms() -> int:
         return int((time.monotonic() - clock) * 1000)
 
+    if config.get("resident"):  # the rollback gate, read before any vendor call is spent
+        with engine.connect() as conn:
+            if not residents.enabled(conn):
+                return _inert(engine, trigger, started=started, now=now, ms=ms)
+
     try:
         with engine.connect() as conn:
             connection = _connection(conn, trigger) if trigger.kind != "schedule" else None
@@ -390,7 +398,10 @@ def run(engine: Engine, keyring: Keyring, trigger_id: str, *, now: datetime, due
                          .values(seeded_at=now, seeded_count=seeded))
     else:
         for item in fresh:
-            taken = _take(engine, trigger, project_id, item, now)
+            if config.get("resident"):
+                taken = _take_resident(engine, trigger, item, now)
+            else:
+                taken = _take(engine, trigger, project_id, item, now)
             if taken is not None:
                 new_keys.append(item.key)
                 if taken[1]:
@@ -409,10 +420,77 @@ def run(engine: Engine, keyring: Keyring, trigger_id: str, *, now: datetime, due
     return {"status": "ok", "error": error, "matched": len(items), "new_keys": new_keys, "seeded": seeded}
 
 
+def _fan_out(conn: Connection, trigger: Any, kind: str, payload: Any, *, now: datetime,
+             dedupe_key: str | None = None) -> int:
+    """Enqueue one event on every open instance of the trigger's workflow. The count is events enqueued.
+
+    Existing instances only — a poller reaches the live, it never provisions one, as a webhook
+    delivery does. A closed instance is skipped by the read; one that a close races between the read
+    and the enqueue is skipped too, as enqueue's 409 is a skip here, not a failure. A duplicate
+    ``dedupe_key`` enqueues nothing and counts nothing.
+    """
+    fired = 0
+    for resident_id in conn.execute(select(resident_rows.c.id).where(
+            resident_rows.c.workflow_id == trigger.workflow_id,
+            resident_rows.c.state.in_(("idle", "paused")))
+            .order_by(resident_rows.c.created_at, resident_rows.c.id)).scalars():
+        try:
+            if residents.enqueue(conn, resident_id, kind, payload, source={"trigger_id": trigger.id},
+                                 dedupe_key=dedupe_key, now=now) is not None:
+                fired += 1
+        except residents.ResidentError as exc:
+            if exc.status != 409:
+                raise
+            log.info("trigger %s skipped resident %s: %s", trigger.id, resident_id, exc.message)
+    return fired
+
+
+def _inert(engine: Engine, trigger: Any, *, started: datetime, now: datetime,
+           ms: Callable[[], int]) -> dict[str, Any]:
+    """Record a resident trigger's run as a no-op while residents are disabled on the instance.
+
+    Nothing is marked and nothing is routed, so an issue or schedule that came due while the
+    setting was off is picked up by the first run after it comes back on — the rollback gate,
+    the same one a resident webhook rule rides.
+    """
+    with engine.begin() as conn:
+        _record(conn, trigger.id, started=started, now=now, status="skipped", error=RESIDENTS_OFF,
+                matched=0, duration_ms=ms())
+        conn.execute(update(trigger_state).where(trigger_state.c.trigger_id == trigger.id).values(
+            last_run_at=now, last_status="skipped", last_error=RESIDENTS_OFF, last_matched=0, last_new=0))
+    return {"status": "skipped", "error": RESIDENTS_OFF, "matched": 0, "new_keys": []}
+
+
+def _take_resident(engine: Engine, trigger: Any, item: Item, now: datetime) -> tuple[str, str] | None:
+    """Mark one new key and enqueue it on the workflow's open instances, in one transaction.
+
+    Its outcome and any problem, or None when seen — or when no instance was open to take it, in
+    which case the mark rolls back with the routing and the key stays fresh for the next poll:
+    the seen table queues once ever, and a poller never creates an instance, so an issue that
+    arrives before its instance does must not be eaten by it. A shadow marks and routes nothing,
+    as it queues nothing.
+    """
+    shadow = bool((trigger.config or {}).get("shadow"))
+    with engine.begin() as conn:
+        mark = conn.begin_nested()
+        if not _mark(conn, trigger.id, item.key, "shadow" if shadow else "queued", now):
+            return None
+        if shadow:
+            mark.commit()
+            return "shadow", ""
+        if _fan_out(conn, trigger, "request", item.fields, dedupe_key=item.key, now=now):
+            mark.commit()
+            return "queued", ""
+        mark.rollback()
+        return None
+
+
 def _fire(engine: Engine, trigger: Any, project_id: str | None, *, started: datetime, now: datetime,
           due: datetime | None, ms: Callable[[], int]) -> dict[str, Any]:
     config = trigger.config or {}
     late = due is not None and next_cron(config["cron"], config.get("timezone") or "UTC", due) <= now
+    if config.get("resident"):
+        return _fire_residents(engine, trigger, started=started, now=now, due=due, late=late, ms=ms)
     with engine.begin() as conn:
         if late:
             _record(conn, trigger.id, started=due, now=now, status="skipped", error=MISSED)
@@ -431,6 +509,26 @@ def _fire(engine: Engine, trigger: Any, project_id: str | None, *, started: date
             last_run_at=now, last_status=status, last_error=error, last_matched=1, last_new=1 if job_id else 0,
             failures=0))
     return {"status": status, "error": error, "matched": 1, "new_keys": [], "job_id": job_id}
+
+
+def _fire_residents(engine: Engine, trigger: Any, *, started: datetime, now: datetime,
+                    due: datetime | None, late: bool, ms: Callable[[], int]) -> dict[str, Any]:
+    """Fire a resident schedule: one schedule event on every open instance, and no job.
+
+    The claim that let this server in is the only pacing — the fan-out runs inside it, so two
+    servers fire once. The singleton hits its one row and keyed instances fan out; a paused
+    instance keeps its event for the resume.
+    """
+    with engine.begin() as conn:
+        if late:
+            _record(conn, trigger.id, started=due, now=now, status="skipped", error=MISSED)
+        fired = _fan_out(conn, trigger, "schedule", {"scheduled_at": (due or now).isoformat()}, now=now)
+        _record(conn, trigger.id, started=started, now=now, status="ok", matched=fired, new_keys=[],
+                duration_ms=ms())
+        conn.execute(update(trigger_state).where(trigger_state.c.trigger_id == trigger.id).values(
+            last_run_at=now, last_status="ok", last_error=None, last_matched=fired, last_new=fired,
+            failures=0))
+    return {"status": "ok", "error": None, "matched": fired, "new_keys": [], "fired": fired}
 
 
 def due(conn: Connection, now: datetime) -> list[Any]:
@@ -635,6 +733,54 @@ def remove(conn: Connection, row: Any, *, actor_id: str, ip: str | None) -> None
     conn.execute(delete(triggers).where(triggers.c.id == row.id))
     audit.record(conn, action="trigger.delete", actor_id=actor_id, team_id=row.team_id, target_kind="trigger",
                  target_id=row.id, detail={"kind": row.kind, "name": (row.config or {}).get("name")}, ip=ip)
+
+
+def sync_resident_schedule(conn: Connection, *, workflow_id: str, schedule: tuple[str, str] | None,
+                           now: datetime) -> None:
+    """Keep the workflow's materialized schedule trigger true to its current version's resident block.
+
+    A version's ``resident.on.schedule`` becomes the workflow's one resident schedule trigger —
+    config ``{"resident": true, "cron": ..., "timezone": ...}`` — which the ``trigger_state`` claim
+    machinery paces like any other. There is no uniqueness to lean on, so the row is found, not
+    re-made: saving the same schedule again changes nothing, a new cron moves the next run, and a
+    version whose spec carries no schedule takes the trigger away. Only the current version's spec
+    fires, so nothing else is consulted. ``resident.enabled`` is not read here: the setting makes
+    firing inert, it doesn't unmake the trigger. A schedule that names no next run is left
+    unmaterialized and logged, not refused — the spec's own validation owns that verdict.
+    """
+    team_id = conn.execute(select(workflows.c.team_id).where(workflows.c.id == workflow_id)).scalar()
+    if team_id is None:
+        return
+    ours = next((row for row in conn.execute(select(triggers).where(
+        triggers.c.workflow_id == workflow_id, triggers.c.kind == "schedule")).all()
+        if (row.config or {}).get("resident")), None)
+    if schedule is None:
+        if ours is not None:
+            remove(conn, ours, actor_id=None, ip=None)
+        return
+    cron, timezone = schedule
+    config = {"resident": True, "cron": cron, "timezone": timezone}
+    if ours is not None and (ours.config or {}) == config:
+        return
+    try:
+        at = next_cron(cron, timezone, now)
+    except (TriggerError, ValueError, KeyError) as exc:
+        log.warning("workflow %s: its resident.on.schedule names no next run (%s)", workflow_id, exc)
+        return
+    if ours is None:
+        trigger_id = new_id()
+        conn.execute(insert(triggers).values(id=trigger_id, team_id=team_id, workflow_id=workflow_id,
+                                             kind="schedule", config=config, enabled=True, created_at=now))
+        conn.execute(insert(trigger_state).values(trigger_id=trigger_id, failures=0, next_run_at=at))
+        audit.record(conn, action="trigger.create", actor_id=None, team_id=team_id, target_kind="trigger",
+                     target_id=trigger_id, ip=None,
+                     detail={"kind": "schedule", "resident": True, "workflow_id": workflow_id})
+        return
+    conn.execute(update(triggers).where(triggers.c.id == ours.id).values(config=config))
+    conn.execute(update(trigger_state).where(trigger_state.c.trigger_id == ours.id)
+                 .values(next_run_at=at, failures=0))
+    audit.record(conn, action="trigger.update", actor_id=None, team_id=team_id, target_kind="trigger",
+                 target_id=ours.id, ip=None, detail={"changed": ["config"], "resident": True})
 
 
 def _poll_trigger(row: Any) -> None:
