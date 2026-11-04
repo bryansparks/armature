@@ -532,6 +532,21 @@ def test_save_route_rejects_gated_handler(db, keyring):
     assert _count_versions(db, db.workflow_id) == 1
 
 
+def test_create_route_rejects_gated_handler(db, keyring):
+    client = make_client(db.engine, keyring, db.clock)
+    user_id, _ = add_user(db.engine, keyring, db.clock, "root", is_admin=True)
+    csrf = sign_in_as(client, db.engine, keyring, db.clock, user_id)
+    with db.engine.connect() as conn:
+        before = conn.execute(select(func.count()).select_from(workflows)).scalar_one()
+    created = client.post("/api/workflows", json={"name": "gated_bot", "scope_kind": "project",
+                                                  "scope_id": db.project, "body": GATED_SELF},
+                          headers=mutation(csrf))
+    assert created.status_code == 400
+    assert "human gate" in created.text  # the save path's stall guard, on version 1 too
+    with db.engine.connect() as conn:  # the refusal rolled the create back — no row survives
+        assert conn.execute(select(func.count()).select_from(workflows)).scalar_one() == before
+
+
 def test_wake_marks_kind_without_handler_skipped(db):
     # The default spec has no handler for a bare custom or an unnamed custom.<name>: both drain as
     # skipped — handled with no job — and the next-oldest event is what turns.

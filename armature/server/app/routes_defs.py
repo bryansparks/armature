@@ -219,6 +219,10 @@ def _create(request: Request, session: Session, kind: defs.Kind, payload: Create
                                       ip=client_ip(request), doc_kind=payload.kind,
                                       catalog=_catalog(request))
         if kind is defs.WORKFLOW:
+            try:  # the save path's stall guard — a resident handler with a human gate
+                residents.check_handlers(conn, payload.body, row.id)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
             _sync_schedule(conn, row, srv.now())
         return {kind.object_kind: _item(conn, kind, row, access),
                 "version": defs.version_detail(conn, kind, row.id, row.current_version),
