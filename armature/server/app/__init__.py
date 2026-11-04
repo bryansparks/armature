@@ -29,6 +29,7 @@ from armature.server.app import (
     routes_live,
     routes_oidc,
     routes_packs,
+    routes_residents,
     routes_runner,
     routes_stats,
     routes_status,
@@ -121,7 +122,7 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
                    routes_assist.router, routes_dryrun.router, routes_stats.router, routes_subjects.router,
                    routes_actions.router, routes_status.router, routes_webhooks.router, routes_jobs.router,
                    routes_environments.router, routes_connections.router, routes_tools.router, routes_gates.router,
-                   routes_conversations.router, routes_triggers.router,
+                   routes_conversations.router, routes_residents.router, routes_triggers.router,
                    static.router):
         app.include_router(router, prefix=base)
 

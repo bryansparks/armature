@@ -1,12 +1,16 @@
 """Residents and their event queue: the tables, and the jobs column that links a run to one."""
+import contextlib
 import json
 import re
+import threading
+import time
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, insert, inspect, select, update
+from sqlalchemy.exc import OperationalError
 
 from armature.server import defs, residents, worker
 from armature.server.config import ServerConfig
@@ -27,7 +31,14 @@ from armature.server.db.schema import (
 from armature.server.db.schema import (
     residents as resident_rows,
 )
-from tests.server.app_support import Clock, add_user, make_client, mutation, sign_in_as
+from tests.server.app_support import (
+    Clock,
+    add_membership,
+    add_user,
+    make_client,
+    mutation,
+    sign_in_as,
+)
 
 
 def test_resident_tables_exist(engine):
@@ -1052,3 +1063,327 @@ def test_pack_validates(db):
     assert cat.errors == []
     pack = cat.pack("resident")
     assert pack.builtin and {f"resident.{name}" for name in pack.adapters} == set(residents.TOOLS)
+
+
+# The resident API: read without a run, ask that turns, signals, and the admin acts.
+
+APIBOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+    ask: {workflow: answer}
+    signal: {workflow: self}
+  state:
+    publish: [metrics]
+stages: []
+"""
+
+# A later version whose schema wants a key the instance's data doesn't have.
+SCHEMA_BOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+    ask: {workflow: answer}
+    signal: {workflow: self}
+  state:
+    schema:
+      type: object
+      required: [mood]
+      properties:
+        mood: {type: string}
+        metrics: {type: object}
+    publish: [metrics]
+stages: []
+"""
+
+
+@pytest.fixture
+def web(sqlite_engine, keyring):
+    clock = Clock()
+    team, project = new_id(), new_id()
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", created_at=clock()))
+        conn.execute(insert(projects).values(id=project, team_id=team, name="app", created_at=clock()))
+        conn.execute(insert(settings).values(team_id=None, key="worker.enabled", value=False))
+        conn.execute(insert(settings).values(key=residents.ENABLED_KEY, value=True))
+    workflow_id, answer_id = new_id(), new_id()
+    with sqlite_engine.begin() as conn:
+        for id_, name, body in ((workflow_id, "bot", APIBOT), (answer_id, "answer", ANSWER)):
+            conn.execute(insert(workflows).values(id=id_, name=name, current_version=1, team_id=team,
+                                                 project_id=project, scope=project, created_at=clock(),
+                                                 updated_at=clock()))
+            defs._add_version(conn, defs.WORKFLOW, id_, 1, body, "seed", None, clock())
+    users_ = {}
+    for name, kind, scope, role in (("lead", "project", project, "project_lead"),
+                                    ("viewer", "project", project, "viewer")):
+        users_[name] = add_user(sqlite_engine, keyring, clock, name)[0]
+        add_membership(sqlite_engine, clock, users_[name], kind, scope, role)
+    users_["admin"] = add_user(sqlite_engine, keyring, clock, "admin", is_admin=True)[0]
+    users_["stranger"] = add_user(sqlite_engine, keyring, clock, "stranger")[0]
+    client = make_client(sqlite_engine, keyring, clock, require_totp=False)
+    return SimpleNamespace(engine=sqlite_engine, keyring=keyring, clock=clock, team=team, project=project,
+                           workflow_id=workflow_id, answer_id=answer_id, users=users_, client=client)
+
+
+def _as(web, user):
+    return mutation(sign_in_as(web.client, web.engine, web.keyring, web.clock, web.users[user]))
+
+
+def _web_resident(web, *, instance_key="", data=None, **values):
+    with web.engine.begin() as conn:
+        row = residents.ensure(conn, team_id=web.team, project_id=web.project,
+                               workflow_id=web.workflow_id, instance_key=instance_key, now=web.clock())
+        updates = {"data": data, "data_version": 1 if data is not None else 0, **values}
+        conn.execute(update(resident_rows).where(resident_rows.c.id == row.id).values(**updates))
+    return row
+
+
+def _web_find(web, instance_key=""):
+    with web.engine.connect() as conn:
+        return conn.execute(select(resident_rows).where(
+            resident_rows.c.workflow_id == web.workflow_id,
+            resident_rows.c.instance_key == instance_key)).one()
+
+
+def _web_row(web, resident_id):
+    with web.engine.connect() as conn:
+        return conn.execute(select(resident_rows).where(resident_rows.c.id == resident_id)).one()
+
+
+def _web_job(web, job_id):
+    with web.engine.connect() as conn:
+        return conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+
+
+def _counts(web):
+    """The jobs and runs the invariant tests compare: a read must move neither."""
+    with web.engine.connect() as conn:
+        return (conn.execute(select(func.count()).select_from(jobs)).scalar_one(),
+                conn.execute(select(func.count()).select_from(runs)).scalar_one())
+
+
+def _audited(web, action, actor):
+    with web.engine.connect() as conn:
+        return conn.execute(select(audit_rows.c.target_id).where(
+            audit_rows.c.action == action, audit_rows.c.actor_id == web.users[actor])).all()
+
+
+def test_read_serves_published_metrics_and_spends_nothing(web):
+    _web_resident(web, data={"metrics": {"waiting": 3}, "notes": "hidden"},
+                  turns=2, last_turn_at=web.clock(), spent_usd_day=1_500_000)
+    before = _counts(web)
+    read = web.client.get(f"/api/residents/{web.workflow_id}/read", headers=_as(web, "lead"))
+    assert read.status_code == 200, read.text
+    shown = read.json()["resident"]
+    assert shown["data"] == {"metrics": {"waiting": 3}}  # only the published key
+    assert (shown["data_version"], shown["turns"], shown["state"], shown["inbox"]) == (1, 2, "idle", 0)
+    assert shown["last_turn_at"] == web.clock().isoformat().replace("+00:00", "Z")
+    assert shown["spent_usd_today"] == 1.5  # micro-dollars, served as dollars
+    filtered = web.client.get(f"/api/residents/{web.workflow_id}/read",
+                              params={"keys": "metrics,notes"}).json()["resident"]["data"]
+    assert filtered == {"metrics": {"waiting": 3}}  # the filter can't reach past publish
+    assert web.client.get(f"/api/residents/{web.workflow_id}/read",
+                          headers=_as(web, "viewer")).status_code == 200  # read is a view permission
+    assert web.client.get(f"/api/residents/{web.workflow_id}/read",
+                          headers=_as(web, "stranger")).status_code == 404
+    assert _counts(web) == before  # no job, no run, only rows read
+    assert _audited(web, "resident.read", "lead")
+
+
+def test_a_keyed_instance_is_addressed_by_its_key(web):
+    keyed = _web_resident(web, instance_key="acme", data={"metrics": {"open": 1}})
+    _web_resident(web)  # the singleton beside it
+    lead = _as(web, "lead")
+    listed = web.client.get(f"/api/residents/{web.workflow_id}", headers=lead).json()["residents"]
+    assert {r["instance_key"] for r in listed} == {"", "acme"}
+    read = web.client.get(f"/api/residents/{web.workflow_id}/acme/read", headers=lead).json()["resident"]
+    assert (read["id"], read["data"]) == (keyed.id, {"metrics": {"open": 1}})
+    assert web.client.get(f"/api/residents/{web.workflow_id}/nobody/read",
+                         headers=lead).status_code == 404  # reading never creates
+    assert web.client.get(f"/api/residents/{web.workflow_id}",
+                          headers=_as(web, "stranger")).status_code == 404
+
+
+def test_ask_async_returns_the_event_and_turns_the_instance(web):
+    lead = _as(web, "lead")
+    posted = web.client.post(f"/api/residents/{web.workflow_id}/ask",
+                             json={"question": "how many are waiting?"}, headers=lead)
+    assert posted.status_code == 200, posted.text
+    seq, job_id = posted.json()["event_seq"], posted.json()["job_id"]
+    resident = _web_find(web)  # the ask created the singleton
+    assert (seq, resident.active_job_id) == (1, job_id)  # the ask's own event, the turn it woke
+    job = _web_job(web, job_id)
+    assert (job.kind, job.resident_id, job.inputs["kind"]) == \
+        (residents.RESIDENT_JOB_KIND, resident.id, "ask")
+    [event] = _events(web, resident.id)
+    assert (event.kind, event.payload) == ("ask", {"text": "how many are waiting?"})
+    assert event.reply_to == {"channel": "api", "user_id": web.users["lead"]}
+    assert web.client.post(f"/api/residents/{web.workflow_id}/ask", json={"question": "mine?"},
+                           headers=_as(web, "viewer")).status_code == 403  # asking is a run permission
+    assert web.client.post(f"/api/residents/{web.workflow_id}/ask", json={"question": "mine?"},
+                          headers=_as(web, "stranger")).status_code == 404
+    assert _audited(web, "resident.ask", "lead")
+
+
+def _reply_later(web, instance_key, seq, text):
+    """A turn's resident.reply, from a thread: the ask is waiting in another one."""
+    def run():
+        for _ in range(1000):
+            with contextlib.suppress(OperationalError), web.engine.begin() as conn:  # writers serialize
+                rid = conn.execute(select(resident_rows.c.id).where(
+                    resident_rows.c.workflow_id == web.workflow_id,
+                    resident_rows.c.instance_key == instance_key)).scalar()
+                if rid is not None:
+                    wrote = conn.execute(update(resident_events).where(
+                        resident_events.c.resident_id == rid, resident_events.c.seq == seq,
+                        resident_events.c.reply.is_(None)
+                    ).values(reply={"text": text, "at": web.clock().isoformat()})).rowcount
+                    if wrote:
+                        return
+            time.sleep(0.01)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def test_ask_sync_waits_for_the_turns_reply(web):
+    lead = _as(web, "lead")
+    _reply_later(web, "", 1, "42")
+    answered = web.client.post(f"/api/residents/{web.workflow_id}/ask", params={"wait": 5},
+                               json={"question": "how many?"}, headers=lead)
+    assert answered.status_code == 200, answered.text
+    assert answered.json() == {"event_seq": 1, "reply": {"text": "42", "at": web.clock().isoformat()}}
+    silent = web.client.post(f"/api/residents/{web.workflow_id}/ask", params={"wait": 1},
+                             json={"question": "and now?"}, headers=lead)
+    assert silent.status_code == 200, silent.text
+    assert silent.json() == {"event_seq": 2, "reply": None}  # no answer came: poll the event
+
+
+def test_signal_enqueues_plain_and_named_events(web):
+    lead = _as(web, "lead")
+    posted = web.client.post(f"/api/residents/{web.workflow_id}/signal",
+                             json={"payload": {"pr": 7}}, headers=lead)
+    assert posted.status_code == 200, posted.text
+    assert posted.json()["event_seq"] == 1
+    named = web.client.post(f"/api/residents/{web.workflow_id}/signal",
+                            json={"name": "pr-merged", "payload": {"pr": 7}}, headers=lead)
+    assert named.status_code == 200, named.text
+    resident = _web_resident(web)  # the signal created the singleton
+    assert [(e.kind, e.name) for e in _events(web, resident.id)] == \
+        [("signal", None), ("custom", "pr-merged")]
+    for bad in ("custom.beep", "Beep", "no spaces", "b" * 65):
+        refused = web.client.post(f"/api/residents/{web.workflow_id}/signal",
+                                  json={"name": bad, "payload": {}}, headers=lead)
+        assert refused.status_code == 400, bad  # a bare name only, in the on-key vocabulary
+    assert web.client.post(f"/api/residents/{web.workflow_id}/signal", json={},
+                           headers=_as(web, "viewer")).status_code == 403
+    assert web.client.post(f"/api/residents/{web.workflow_id}/signal", json={},
+                           headers=_as(web, "stranger")).status_code == 404
+    assert _audited(web, "resident.signal", "lead")
+
+
+def test_off_means_no_turns_not_even_rows(web):
+    with web.engine.begin() as conn:
+        conn.execute(update(settings).where(settings.c.key == residents.ENABLED_KEY).values(value=False))
+    lead = _as(web, "lead")
+    asked = web.client.post(f"/api/residents/{web.workflow_id}/ask",
+                            json={"question": "anyone?"}, headers=lead)
+    assert asked.status_code == 503
+    assert web.client.post(f"/api/residents/{web.workflow_id}/signal",
+                           json={"payload": {}}, headers=lead).status_code == 503
+    with web.engine.connect() as conn:  # the gate comes before the create
+        assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 0
+    _web_resident(web, data={"metrics": {"waiting": 0}})  # reading still works when off
+    assert web.client.get(f"/api/residents/{web.workflow_id}/read",
+                          headers=lead).status_code == 200
+    assert web.client.get(f"/api/residents/{web.workflow_id}/events",
+                          headers=lead).status_code == 200
+    paused = web.client.post(f"/api/residents/{web.workflow_id}/pause", headers=_as(web, "admin"))
+    assert paused.status_code == 200  # admin acts only write rows: never gated
+
+
+def test_the_events_timeline_and_one_event(web):
+    resident = _web_resident(web, data={"metrics": {"seen": 1}})
+    with web.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "ask", payload={"text": "hi"},
+                           reply_to={"channel": "api", "user_id": "u1"}, now=web.clock())
+        residents.enqueue(conn, resident.id, "signal", payload={"pr": 7}, now=web.clock())
+        conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id,
+                                                   resident_events.c.seq == 1)
+                     .values(handled=True, attempts=2,
+                             reply={"text": "hi yourself", "at": web.clock().isoformat()}))
+    lead = _as(web, "lead")
+    listed = web.client.get(f"/api/residents/{web.workflow_id}/events", headers=lead).json()["events"]
+    assert [e["seq"] for e in listed] == [2, 1]  # newest first
+    waiting = web.client.get(f"/api/residents/{web.workflow_id}/events",
+                             params={"unhandled": 1}, headers=lead).json()["events"]
+    assert [e["seq"] for e in waiting] == [2]  # the inbox, oldest first
+    one = web.client.get(f"/api/residents/{web.workflow_id}/events/1", headers=lead).json()["event"]
+    assert (one["kind"], one["attempts"], one["reply"]["text"]) == ("ask", 2, "hi yourself")
+    assert one["payload"] == {"text": "hi"} and one["handled"] is True
+    assert web.client.get(f"/api/residents/{web.workflow_id}/events/9",
+                          headers=lead).status_code == 404
+    assert web.client.get(f"/api/residents/{web.workflow_id}/events",
+                          headers=_as(web, "stranger")).status_code == 404
+    assert _audited(web, "resident.read", "lead")
+
+
+def test_admin_pause_resume_and_close(web):
+    resident = _web_resident(web)
+    assert web.client.post(f"/api/residents/{web.workflow_id}/pause",
+                           headers=_as(web, "lead")).status_code == 403  # admin acts are admin-only
+    paused = web.client.post(f"/api/residents/{web.workflow_id}/pause", headers=_as(web, "admin"))
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["resident"]["state"] == "paused"
+    with web.engine.begin() as conn:  # a paused instance keeps its events for the resume
+        residents.enqueue(conn, resident.id, "request", now=web.clock())
+    resumed = web.client.post(f"/api/residents/{web.workflow_id}/resume", headers=_as(web, "admin"))
+    assert resumed.status_code == 200, resumed.text
+    row = _web_row(web, resident.id)
+    assert (row.state, row.close_reason) == ("idle", None)
+    assert row.active_job_id is not None  # resumed, then woken: the waiting event turns
+    assert web.client.post(f"/api/residents/{web.workflow_id}/resume",
+                           headers=_as(web, "admin")).status_code == 409  # nothing is paused
+    closed = web.client.post(f"/api/residents/{web.workflow_id}/close",
+                             json={"reason": "all done"}, headers=_as(web, "admin"))
+    assert closed.status_code == 200, closed.text
+    row = _web_row(web, resident.id)
+    assert (row.state, row.close_reason, row.closed_at) == ("closed", "all done", web.clock())
+    assert web.client.post(f"/api/residents/{web.workflow_id}/close",
+                          json={"reason": "again"}, headers=_as(web, "admin")).status_code == 409
+    assert web.client.post(f"/api/residents/{web.workflow_id}/ask",
+                           json={"question": "still there?"},
+                           headers=_as(web, "lead")).status_code == 409
+    for action in ("pause", "resume", "close"):
+        assert _audited(web, f"resident.{action}", "admin")
+
+
+def test_upgrade_repins_or_pauses_on_schema(web):
+    resident = _web_resident(web, data={"metrics": {"waiting": 0}})
+    _version(web, web.workflow_id, SCHEMA_BOT, 2)  # wants a mood the data doesn't have
+    assert web.client.post(f"/api/residents/{web.workflow_id}/upgrade",
+                           headers=_as(web, "lead")).status_code == 403
+    admin = _as(web, "admin")
+    refused = web.client.post(f"/api/residents/{web.workflow_id}/upgrade", headers=admin)
+    assert refused.status_code == 200, refused.text
+    shown = refused.json()["resident"]
+    assert (shown["state"], shown["close_reason"], shown["workflow_version"]) == \
+        ("paused", "state_schema", 2)  # paused for a migrate, not closed
+    with web.engine.begin() as conn:  # the migrated state the new schema accepts
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id)
+                     .values(data={"mood": "calm", "metrics": {"waiting": 0}}))
+    upgraded = web.client.post(f"/api/residents/{web.workflow_id}/upgrade", headers=admin)
+    assert upgraded.status_code == 200, upgraded.text
+    shown = upgraded.json()["resident"]
+    assert (shown["state"], shown["close_reason"], shown["workflow_version"]) == ("idle", None, 2)
+    with web.engine.begin() as conn:  # a live turn: the pin never moves under it
+        residents.enqueue(conn, resident.id, "request", now=web.clock())
+    assert web.client.post(f"/api/residents/{web.workflow_id}/upgrade",
+                          headers=admin).status_code == 409
+    with web.engine.begin() as conn:  # the turn ended; the lock is free again
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(active_job_id=None))
+    _version(web, web.workflow_id, "name: bot\nstages: []\n", 3)  # the block is gone
+    assert web.client.post(f"/api/residents/{web.workflow_id}/upgrade",
+                          headers=admin).status_code == 409
+    assert len(_audited(web, "resident.upgrade", "admin")) == 2
