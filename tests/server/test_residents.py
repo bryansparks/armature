@@ -1200,6 +1200,9 @@ def test_a_keyed_instance_is_addressed_by_its_key(web):
     assert {r["instance_key"] for r in listed} == {"", "acme"}
     read = web.client.get(f"/api/residents/{web.workflow_id}/acme/read", headers=lead).json()["resident"]
     assert (read["id"], read["data"]) == (keyed.id, {"metrics": {"open": 1}})
+    aliased = web.client.get(f"/api/residents/{web.workflow_id}/read",
+                             params={"instance_key": "acme"}, headers=lead).json()["resident"]
+    assert aliased["instance_key"] == "" and aliased["id"] != keyed.id  # the singleton path is pinned
     assert web.client.get(f"/api/residents/{web.workflow_id}/nobody/read",
                          headers=lead).status_code == 404  # reading never creates
     assert web.client.get(f"/api/residents/{web.workflow_id}",
@@ -1290,8 +1293,10 @@ def test_off_means_no_turns_not_even_rows(web):
     asked = web.client.post(f"/api/residents/{web.workflow_id}/ask",
                             json={"question": "anyone?"}, headers=lead)
     assert asked.status_code == 503
+    assert web.client.post(f"/api/residents/{web.workflow_id}/ask", json={"question": "anyone?"},
+                           headers=_as(web, "stranger")).status_code == 404  # RBAC first: no feature oracle
     assert web.client.post(f"/api/residents/{web.workflow_id}/signal",
-                           json={"payload": {}}, headers=lead).status_code == 503
+                           json={"payload": {}}, headers=_as(web, "lead")).status_code == 503
     with web.engine.connect() as conn:  # the gate comes before the create
         assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 0
     _web_resident(web, data={"metrics": {"waiting": 0}})  # reading still works when off
@@ -1345,6 +1350,10 @@ def test_admin_pause_resume_and_close(web):
     assert row.active_job_id is not None  # resumed, then woken: the waiting event turns
     assert web.client.post(f"/api/residents/{web.workflow_id}/resume",
                            headers=_as(web, "admin")).status_code == 409  # nothing is paused
+    too_long = web.client.post(f"/api/residents/{web.workflow_id}/close",
+                               json={"reason": "r" * 33}, headers=_as(web, "admin"))
+    assert too_long.status_code == 422, too_long.text  # a 32-char column: refuse, don't truncate
+    assert _web_row(web, resident.id).state == "idle"  # nothing was written
     closed = web.client.post(f"/api/residents/{web.workflow_id}/close",
                              json={"reason": "all done"}, headers=_as(web, "admin"))
     assert closed.status_code == 200, closed.text

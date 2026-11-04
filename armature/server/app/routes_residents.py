@@ -1,10 +1,11 @@
 """Residents over HTTP: reading an instance, asking it, signaling it, and the admin acts.
 
 Reading is a pure database read — a dashboard may poll it without spending a turn — while
-ask and signal enqueue events that turn. ``resident.enabled`` gates those two, before any
-row is written, so the feature is inert until it is turned on; the admin actions only
-write rows and stay available either way, as reading does. Every call is audited with the
-signed-in user as its actor (``resident.read|ask|signal|pause|resume|close|upgrade``).
+ask and signal enqueue events that turn. ``resident.enabled`` gates those two, once the
+caller's access to the workflow is proven and before any row is written, so the feature
+is inert until it is turned on and never leaks its state to a stranger; the admin actions
+only write rows and stay available either way, as reading does. Every call is audited with
+the signed-in user as its actor (``resident.read|ask|signal|pause|resume|close|upgrade``).
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import asyncio
 import re
 import time
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -55,8 +57,8 @@ class CloseBody(BaseModel):
     reason: str
 
 
-def _throttle(request: Request, session: Session, key: str, limit: int) -> None:
-    srv = server(request)
+def _throttle(srv: Any, session: Session, key: str, limit: int) -> None:
+    """``count_call`` is two transactions: call it from a worker thread, never the loop."""
     try:
         count_call(srv.engine, key=key, limit=limit, now=srv.now(), window=timedelta(hours=1))
     except AuthError as exc:
@@ -80,6 +82,17 @@ def _instance(conn: Connection, workflow_id: str, instance_key: str) -> Any:
     resident = conn.execute(select(resident_rows).where(
         resident_rows.c.workflow_id == workflow_id,
         resident_rows.c.instance_key == instance_key)).first()
+    if resident is None:
+        raise ApiError(404, "No such resident instance.")
+    return resident
+
+
+def _locked_instance(conn: Connection, workflow_id: str, instance_key: str) -> Any:
+    """The instance row held under the transaction's lock: a wake committed between an act's
+    check and its write would re-pin a live turn, so the lock comes before the checks."""
+    resident = conn.execute(select(resident_rows).where(
+        resident_rows.c.workflow_id == workflow_id,
+        resident_rows.c.instance_key == instance_key).with_for_update()).first()
     if resident is None:
         raise ApiError(404, "No such resident instance.")
     return resident
@@ -141,8 +154,8 @@ def _checked_name(name: str | None) -> str | None:
 @router.get("/api/residents/{workflow_id}")
 def list_instances(workflow_id: str, request: Request,
                    session: Session = Depends(signed_in)) -> dict[str, Any]:
-    _throttle(request, session, f"resident:{session.user_id}", READS_PER_HOUR)
     srv = server(request)
+    _throttle(srv, session, f"resident:{session.user_id}", READS_PER_HOUR)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "viewer")
         rows = conn.execute(select(resident_rows).where(resident_rows.c.workflow_id == row.id)
@@ -154,13 +167,12 @@ def list_instances(workflow_id: str, request: Request,
 
 
 @router.get("/api/residents/{workflow_id}/{instance_key}/read")
-@router.get("/api/residents/{workflow_id}/read")
-def read(workflow_id: str, request: Request, instance_key: str = "",
+def read(instance_key: str, workflow_id: str, request: Request,
          keys: str | None = Query(None, max_length=191),
          session: Session = Depends(signed_in)) -> dict[str, Any]:
     """The instance's published metrics, straight from the row: no job, no run, no cost."""
-    _throttle(request, session, f"resident:{session.user_id}", READS_PER_HOUR)
     srv = server(request)
+    _throttle(srv, session, f"resident:{session.user_id}", READS_PER_HOUR)
     wanted = [key.strip() for key in keys.split(",") if key.strip()] if keys else None
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "viewer")
@@ -170,11 +182,18 @@ def read(workflow_id: str, request: Request, instance_key: str = "",
         return {"resident": _public(conn, resident, _published(conn, resident, wanted))}
 
 
+# The singleton registration pins the empty key as a fixed argument: ``instance_key`` is not
+# a parameter of the partial, so a query param of that name binds nothing and can never
+# alias the bare path onto a keyed instance.
+router.get("/api/residents/{workflow_id}/read")(partial(read, ""))
+
+
 def _ask(srv: Any, session: Session, workflow_id: str, instance_key: str, question: str) \
         -> tuple[str, int, str | None]:
+    _throttle(srv, session, f"resident_ask:{session.user_id}", ASKS_PER_HOUR)
     with srv.engine.begin() as conn:
-        _check_enabled(conn)
         row = _workflow(conn, session, workflow_id, "contributor")
+        _check_enabled(conn)  # after access: a stranger learns nothing about the feature's state
         resident = residents.ensure(conn, team_id=row.team_id, project_id=row.project_id,
                                     workflow_id=row.id, instance_key=instance_key, now=srv.now())
         try:
@@ -216,14 +235,12 @@ async def _await_reply(engine: Any, resident_id: str, seq: int, seconds: int) ->
 
 
 @router.post("/api/residents/{workflow_id}/{instance_key}/ask")
-@router.post("/api/residents/{workflow_id}/ask")
-async def ask(workflow_id: str, body: AskBody, request: Request, instance_key: str = "",
+async def ask(instance_key: str, workflow_id: str, body: AskBody, request: Request,
               wait: int | None = Query(None),
               session: Session = Depends(signed_in)) -> dict[str, Any]:
     """Enqueue an ask the instance's turn answers; ``wait`` blocks for the reply."""
-    _throttle(request, session, f"resident_ask:{session.user_id}", ASKS_PER_HOUR)
-    srv = server(request)
     question = _check_text(body.question, "question")
+    srv = server(request)
     resident_id, seq, job_id = await asyncio.to_thread(
         _ask, srv, session, workflow_id, instance_key, question)
     seconds = wait if wait is not None else body.wait
@@ -233,17 +250,19 @@ async def ask(workflow_id: str, body: AskBody, request: Request, instance_key: s
         srv.engine, resident_id, seq, min(WAIT_MAX_S, seconds if seconds > 0 else WAIT_DEFAULT_S))}
 
 
+router.post("/api/residents/{workflow_id}/ask")(partial(ask, ""))
+
+
 @router.post("/api/residents/{workflow_id}/{instance_key}/signal")
-@router.post("/api/residents/{workflow_id}/signal")
-def signal(workflow_id: str, body: SignalBody, request: Request, instance_key: str = "",
+def signal(instance_key: str, workflow_id: str, body: SignalBody, request: Request,
            session: Session = Depends(signed_in)) -> dict[str, Any]:
     """A plain signal, or a custom one when ``name`` gives its bare name."""
-    _throttle(request, session, f"resident_ask:{session.user_id}", ASKS_PER_HOUR)
     srv = server(request)
+    _throttle(srv, session, f"resident_ask:{session.user_id}", ASKS_PER_HOUR)
     name = _checked_name(body.name)
     with srv.engine.begin() as conn:
-        _check_enabled(conn)
         row = _workflow(conn, session, workflow_id, "contributor")
+        _check_enabled(conn)  # after access: a stranger learns nothing about the feature's state
         resident = residents.ensure(conn, team_id=row.team_id, project_id=row.project_id,
                                     workflow_id=row.id, instance_key=instance_key, now=srv.now())
         try:
@@ -260,14 +279,16 @@ def signal(workflow_id: str, body: SignalBody, request: Request, instance_key: s
         return {"event_seq": seq, "job_id": job_id}
 
 
+router.post("/api/residents/{workflow_id}/signal")(partial(signal, ""))
+
+
 @router.get("/api/residents/{workflow_id}/{instance_key}/events")
-@router.get("/api/residents/{workflow_id}/events")
-def events(workflow_id: str, request: Request, instance_key: str = "",
+def events(instance_key: str, workflow_id: str, request: Request,
            unhandled: int = Query(0, ge=0, le=1), limit: int = Query(LISTED, ge=1, le=EVENTS_LIMIT_MAX),
            session: Session = Depends(signed_in)) -> dict[str, Any]:
     """The instance's inbox, newest first — or, with ``unhandled``, the waiting events oldest first."""
-    _throttle(request, session, f"resident:{session.user_id}", READS_PER_HOUR)
     srv = server(request)
+    _throttle(srv, session, f"resident:{session.user_id}", READS_PER_HOUR)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "viewer")
         resident = _instance(conn, row.id, instance_key)
@@ -282,12 +303,14 @@ def events(workflow_id: str, request: Request, instance_key: str = "",
         return {"events": [_event(r) for r in rows]}
 
 
+router.get("/api/residents/{workflow_id}/events")(partial(events, ""))
+
+
 @router.get("/api/residents/{workflow_id}/{instance_key}/events/{seq}")
-@router.get("/api/residents/{workflow_id}/events/{seq}")
-def one_event(workflow_id: str, seq: int, request: Request, instance_key: str = "",
+def one_event(instance_key: str, workflow_id: str, seq: int, request: Request,
               session: Session = Depends(signed_in)) -> dict[str, Any]:
-    _throttle(request, session, f"resident:{session.user_id}", READS_PER_HOUR)
     srv = server(request)
+    _throttle(srv, session, f"resident:{session.user_id}", READS_PER_HOUR)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "viewer")
         resident = _instance(conn, row.id, instance_key)
@@ -302,16 +325,18 @@ def one_event(workflow_id: str, seq: int, request: Request, instance_key: str = 
         return {"event": _event(event)}
 
 
+router.get("/api/residents/{workflow_id}/events/{seq}")(partial(one_event, ""))
+
+
 # The admin acts: they only write rows, so they work whether the feature is enabled or not.
 
 @router.post("/api/residents/{workflow_id}/{instance_key}/pause")
-@router.post("/api/residents/{workflow_id}/pause")
-def pause(workflow_id: str, request: Request, instance_key: str = "",
+def pause(instance_key: str, workflow_id: str, request: Request,
           session: Session = Depends(signed_in)) -> dict[str, Any]:
     srv = server(request)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "admin")
-        resident = _instance(conn, row.id, instance_key)
+        resident = _locked_instance(conn, row.id, instance_key)
         if resident.state == "closed":
             raise ApiError(409, "instance is closed")
         conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
@@ -322,15 +347,17 @@ def pause(workflow_id: str, request: Request, instance_key: str = "",
                                     _published(conn, resident))}
 
 
+router.post("/api/residents/{workflow_id}/pause")(partial(pause, ""))
+
+
 @router.post("/api/residents/{workflow_id}/{instance_key}/resume")
-@router.post("/api/residents/{workflow_id}/resume")
-def resume(workflow_id: str, request: Request, instance_key: str = "",
+def resume(instance_key: str, workflow_id: str, request: Request,
            session: Session = Depends(signed_in)) -> dict[str, Any]:
     """A paused instance back to idle, then woken: an event that waited out the pause turns."""
     srv = server(request)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "admin")
-        resident = _instance(conn, row.id, instance_key)
+        resident = _locked_instance(conn, row.id, instance_key)
         if resident.state != "paused":
             raise ApiError(409, "instance is not paused")
         conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
@@ -342,15 +369,19 @@ def resume(workflow_id: str, request: Request, instance_key: str = "",
                                     _published(conn, resident))}
 
 
+router.post("/api/residents/{workflow_id}/resume")(partial(resume, ""))
+
+
 @router.post("/api/residents/{workflow_id}/{instance_key}/close")
-@router.post("/api/residents/{workflow_id}/close")
-def close(workflow_id: str, body: CloseBody, request: Request, instance_key: str = "",
+def close(instance_key: str, workflow_id: str, body: CloseBody, request: Request,
           session: Session = Depends(signed_in)) -> dict[str, Any]:
     srv = server(request)
-    reason = _check_text(body.reason, "reason")[:32]
+    reason = _check_text(body.reason, "reason")
+    if len(reason) > 32:  # the column's width: refuse the write, never truncate silently
+        raise ApiError(422, "reason is longer than the 32 characters a resident keeps.")
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "admin")
-        resident = _instance(conn, row.id, instance_key)
+        resident = _locked_instance(conn, row.id, instance_key)
         if resident.state == "closed":
             raise ApiError(409, "instance is closed")
         conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
@@ -359,6 +390,9 @@ def close(workflow_id: str, body: CloseBody, request: Request, instance_key: str
                      target_kind="resident", target_id=resident.id, detail={"reason": reason})
         return {"resident": _public(conn, _instance(conn, row.id, instance_key),
                                     _published(conn, resident))}
+
+
+router.post("/api/residents/{workflow_id}/close")(partial(close, ""))
 
 
 def _current_spec(conn: Connection, workflow_id: str) -> tuple[int, ResidentCfg | None]:
@@ -375,8 +409,7 @@ def _current_spec(conn: Connection, workflow_id: str) -> tuple[int, ResidentCfg 
 
 
 @router.post("/api/residents/{workflow_id}/{instance_key}/upgrade")
-@router.post("/api/residents/{workflow_id}/upgrade")
-def upgrade(workflow_id: str, request: Request, instance_key: str = "",
+def upgrade(instance_key: str, workflow_id: str, request: Request,
             session: Session = Depends(signed_in)) -> dict[str, Any]:
     """Re-pin the instance to the workflow's current version (docs: Version pinning).
 
@@ -387,7 +420,7 @@ def upgrade(workflow_id: str, request: Request, instance_key: str = "",
     srv = server(request)
     with srv.engine.begin() as conn:
         row = _workflow(conn, session, workflow_id, "admin")
-        resident = _instance(conn, row.id, instance_key)
+        resident = _locked_instance(conn, row.id, instance_key)
         if resident.state == "closed":
             raise ApiError(409, "instance is closed")
         if resident.active_job_id is not None:
@@ -413,3 +446,6 @@ def upgrade(workflow_id: str, request: Request, instance_key: str = "",
             residents.wake(conn, resident.id, srv.now())
         return {"resident": _public(conn, _instance(conn, row.id, instance_key),
                                     _published(conn, resident))}
+
+
+router.post("/api/residents/{workflow_id}/upgrade")(partial(upgrade, ""))
