@@ -1,6 +1,6 @@
 import { api, ApiError, listOf } from '../api.js';
 import { assistantPanel, describePanel, proposeBody, startedByCard, summaryView, testRunPanel } from '../assistant.js';
-import { card, clear, confirmDialog, element, empty, errorBox, link, loading, meta, pageHeader, table, when } from '../dom.js';
+import { card, clear, confirmDialog, element, empty, errorBox, link, loading, meta, pageHeader, table, tabs, when } from '../dom.js';
 import { codeEditor, debounce } from '../editor.js';
 import { diffView } from '../diff.js';
 import { frontMatter, SHOWN_FIELDS } from '../frontmatter.js';
@@ -8,6 +8,7 @@ import { navigate, protect, release } from '../guard.js';
 import { hashFor } from '../router.js';
 import { ALL_TEAMS_LABEL, creatableScopes, findScope, sameScope, scopeKey } from '../scopes.js';
 import { canManageTeam, currentSession, isAdmin } from '../session.js';
+import { residentsTab } from './residents.js';
 import { stepsPanel } from './steps.js';
 
 export const KIND_LABEL = { role: 'Role', prompt: 'Prompt', mission: 'Mission', skill: 'Skill' };
@@ -587,15 +588,33 @@ export async function detailPage(root, config, id, mode) {
     } catch {}
   }
 
-  if (editing) root.append(editPane(config, record, version, status, refreshVersions));
-  else if (!version) root.append(card(empty('This has no saved version.')));
-  else if (config.describe) root.append(...describedView(config, record, payload, editable));
-  else {
-    if (config.frontMatter) root.append(card(element('h2', { class: 'inline' }, 'Front matter'), frontMatterView(version.body)));
-    root.append(sourceCard(config.format, version.body));
-    if (config.testRun) root.append(testRunPanel(record));
+  if (editing) {
+    root.append(editPane(config, record, version, status, refreshVersions), versions.root);
+    return;
   }
-  root.append(versions.root);
+  // The workflow page tabs between its overview and its resident instances. Each tab is its own
+  // hash route (dom.js tabs), so #/workflow/{id}/residents is linkable and the back button works.
+  const content = element('div');
+  if (!version) content.append(card(empty('This has no saved version.')));
+  else if (config === WORKFLOW && mode === 'residents') content.append(residentsTab(record));
+  else {
+    if (config.describe) content.append(...describedView(config, record, payload, editable));
+    else {
+      if (config.frontMatter) content.append(card(element('h2', { class: 'inline' }, 'Front matter'), frontMatterView(version.body)));
+      content.append(sourceCard(config.format, version.body));
+      if (config.testRun) content.append(testRunPanel(record));
+    }
+    content.append(versions.root);
+  }
+  if (config === WORKFLOW && version) {
+    const sections = tabs(hashFor(config.route, [record.id]), [{ id: 'overview', label: 'Overview' },
+      { id: 'residents', label: 'Residents' }], mode === 'residents' ? 'residents' : 'overview',
+      { label: 'Workflow sections' });
+    sections.panel.append(content);
+    root.append(sections.tablist, sections.panel);
+  } else {
+    root.append(content);
+  }
 }
 
 export async function newPage(root, config, kind, wantedScope, describeText) {

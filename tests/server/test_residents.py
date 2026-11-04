@@ -1396,3 +1396,23 @@ def test_upgrade_repins_or_pauses_on_schema(web):
     assert web.client.post(f"/api/residents/{web.workflow_id}/upgrade",
                           headers=admin).status_code == 409
     assert len(_audited(web, "resident.upgrade", "admin")) == 2
+
+
+# The UI: a Residents tab on the workflow page and an instance page, client-rendered ES modules
+# served as static assets over the endpoints above. Two light tests hold the wiring in place:
+# the module must be served, and the workflow page's tab set (definition.js) plus the view
+# registry (app.js) must both reach it.
+
+def test_resident_view_module_is_served(sqlite_engine, keyring):
+    client = make_client(sqlite_engine, keyring, Clock())
+    response = client.get("/static/views/residents.js")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/javascript")
+
+
+def test_workflow_page_lists_the_resident_tab(sqlite_engine, keyring):
+    client = make_client(sqlite_engine, keyring, Clock())
+    definition = client.get("/static/views/definition.js")
+    assert definition.status_code == 200
+    assert "'Residents'" in definition.text  # the tab on the workflow page's tab row
+    assert "views/residents.js" in client.get("/static/app.js").text  # the instance page's route

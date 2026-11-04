@@ -72,6 +72,7 @@ const VIEW_LOADERS = {
   trigger: () => import('./views/triggers.js'),
   workflows: () => import('./views/workflows.js'),
   workflow: () => import('./views/workflows.js'),
+  resident: () => import('./views/residents.js'),
   'new-workflow': () => import('./views/workflows.js'),
   'workflow-guide': () => import('./views/guide.js'),
   roles: () => import('./views/roles.js'),
@@ -83,7 +84,7 @@ const VIEW_LOADERS = {
   account: () => import('./views/account.js'),
 };
 
-const NAV_PARENT = { team: 'teams', project: 'projects', run: 'runs', subject: 'subjects', workflow: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks', trigger: 'triggers' };
+const NAV_PARENT = { team: 'teams', project: 'projects', run: 'runs', subject: 'subjects', workflow: 'workflows', resident: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks', trigger: 'triggers' };
 
 let allowedViews = [];
 let renderSequence = 0;
