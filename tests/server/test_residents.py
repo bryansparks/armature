@@ -1,4 +1,6 @@
 """Residents and their event queue: the tables, and the jobs column that links a run to one."""
+import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,7 @@ from armature.server.db.schema import (
     jobs,
     projects,
     resident_events,
+    runs,
     teams,
     workflows,
 )
@@ -312,3 +315,162 @@ def test_enqueue_wakes_the_instance(db):
     job = _job(db, row.active_job_id)
     assert (job.kind, job.inputs["event_seq_from"], job.inputs["event_seq_to"],
             job.inputs["kind"]) == ("resident", 1, 1, "request")
+
+
+def _stage(db, resident_id, staged):
+    with db.engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident_id).values(staged=staged))
+
+
+def _finish(db, job_id, status="succeeded", cost=None):
+    with db.engine.begin() as conn:
+        run_id = new_id()
+        conn.execute(insert(runs).values(id=run_id, team_id=db.team, status=status, started_at=db.clock(),
+                                         cost_usd=Decimal(str(cost)) if cost is not None else None))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(status=status, run_id=run_id))
+
+
+def _settle(db):
+    with db.engine.begin() as conn:
+        return residents.settle(conn, db.clock())
+
+
+def test_settle_success_applies_staged_and_marks_handled(db):
+    resident = _ensure(db, instance_key="acme")
+    _add_events(db, resident.id, ["request", "request"])
+    job_id = _wake(db, resident.id)  # the batch (1, 2)
+    _stage(db, resident.id, {"state": {"mood": "calm"}, "idle_nothing_to_do": False})
+    db.clock.advance(minutes=5)
+    _finish(db, job_id, cost=0.123456)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.data == {"mood": "calm"} and row.data_version == 1  # the staged state became the data
+    assert row.staged is None
+    assert (row.turns, row.turns_day, row.idle_turns_day, row.spent_usd_day) == (1, 1, 0, 123456)
+    assert row.idle_streak == 0
+    assert row.last_turn_at == db.clock()
+    assert row.active_job_id is None  # no events wait, so nothing rewakes
+    assert row.state == "idle"  # the state column is not settle's to touch
+    assert [(e.seq, e.handled, e.handled_by_job) for e in _events(db, resident.id)] == [
+        (1, True, job_id), (2, True, job_id)]
+    with db.engine.connect() as conn:
+        writes = conn.execute(select(audit_rows.c.team_id, audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.state_write")).all()
+    assert writes == [(db.team, resident.id,
+                       {"data_version": 1, "bytes": len(json.dumps({"mood": "calm"}, default=str).encode()),
+                        "keys": ["mood"]})]  # keys, never the staged values
+
+
+def test_settle_failed_turn_reoffers_events_and_discards_staged(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request", "request", "ask"])
+    job_id = _wake(db, resident.id)  # the batch (1, 2); the ask breaks it
+    _stage(db, resident.id, {"state": {"mood": "calm"}, "idle_nothing_to_do": True})
+    db.clock.advance(minutes=5)
+    _finish(db, job_id, status="failed", cost=0.5)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.staged is None and row.data == {} and row.data_version == 0  # a failed turn stages nothing
+    assert (row.turns, row.turns_day, row.spent_usd_day, row.idle_streak) == (0, 0, 0, 0)
+    assert row.last_turn_at == db.clock()
+    assert [(e.seq, e.attempts, e.handled) for e in _events(db, resident.id)] == [
+        (1, 1, False), (2, 1, False), (3, 0, False)]  # the batch counts one attempt; the ask none yet
+    assert row.active_job_id not in (None, job_id)  # the failed batch is re-offered at once
+    job = _job(db, row.active_job_id)
+    assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"], job.inputs["kind"]) == (1, 2, "request")
+
+
+def test_poison_event_given_up_after_max_attempts(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    job_ids = [_wake(db, resident.id)]
+    for attempt in range(1, residents.MAX_ATTEMPTS + 1):
+        _finish(db, job_ids[-1], status="failed")
+        assert _settle(db) == [resident.id]
+        event = _events(db, resident.id)[0]
+        assert event.attempts == attempt
+        active = _resident(db, resident.id).active_job_id
+        if attempt < residents.MAX_ATTEMPTS:
+            assert event.handled is False and active not in (None,) + tuple(job_ids)
+            job_ids.append(active)
+        else:
+            assert event.handled is True and event.handled_by_job == job_ids[-1]  # given up as poison
+            assert active is None  # nothing is re-offered past the cap
+    with db.engine.connect() as conn:
+        poison = conn.execute(select(audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.event_poison")).scalars().all()
+    assert poison == [{"job_id": job_ids[-1], "seq": [1]}]
+
+
+def test_settle_lost_turn_behaves_like_failed(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    job_id = _wake(db, resident.id)
+    _stage(db, resident.id, {"state": {"mood": "calm"}})
+    _finish(db, job_id, status="lost")
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.staged is None and row.turns == 0 and row.last_turn_at == db.clock()
+    [event] = _events(db, resident.id)
+    assert (event.attempts, event.handled, event.handled_by_job) == (1, False, None)
+    assert row.active_job_id not in (None, job_id)  # lost or not, the events are re-offered
+
+
+def test_settle_unknown_cost_counts_turn_but_not_spend(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    job_id = _wake(db, resident.id)
+    _finish(db, job_id)  # the run exists but never reported a cost
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert (row.turns_day, row.spent_usd_day, row.turns) == (1, 0, 1)  # the turn counts, the spend does not
+
+
+def test_settle_reschedules_and_rewakes(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request", "ask"])
+    first = _wake(db, resident.id)  # the ask breaks the batch, so only the request turns
+    assert (_job(db, first).inputs["event_seq_from"], _job(db, first).inputs["event_seq_to"]) == (1, 1)
+    _finish(db, first)
+    assert _settle(db) == [resident.id]
+    second = _resident(db, resident.id).active_job_id
+    assert second not in (None, first)  # the ask's turn queues immediately
+    job = _job(db, second)
+    assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"], job.inputs["kind"]) == (2, 2, "ask")
+    row = _resident(db, resident.id)
+    assert (row.state, row.data, row.data_version) == ("idle", {}, 0)  # nothing staged, nothing written
+
+
+def test_settle_idle_turn_counts_idle_day(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["idle", "idle"])
+    job_id = _wake(db, resident.id)  # idle events with no real one behind still turn
+    assert _job(db, job_id).inputs["kind"] == "idle"
+    _stage(db, resident.id, {"idle_nothing_to_do": True})
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert (row.turns_day, row.idle_turns_day) == (1, 1)
+    assert row.idle_streak == 1  # nothing to do: the streak starts
+    assert row.data_version == 0  # no staged state, so no write is audited
+
+
+def test_budget_day_resets_at_utc_boundary(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    with db.engine.begin() as conn:  # the day before the clock's start, counters still on the books
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            spent_usd_day=987654, turns_day=9, idle_turns_day=4, emits_day=6, spent_day="2026-10-22"))
+    job_id = _wake(db, resident.id)  # wake resets today's counters before any budget check
+    row = _resident(db, resident.id)
+    assert (row.spent_usd_day, row.turns_day, row.idle_turns_day, row.emits_day) == (0, 0, 0, 0)
+    assert row.spent_day == db.clock().date().isoformat()
+    with db.engine.begin() as conn:  # the instance spends through its turn's day
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            spent_usd_day=111111, turns_day=2, idle_turns_day=1, emits_day=3))
+    db.clock.advance(days=1)  # the turn ends past the UTC midnight
+    _finish(db, job_id, cost=0.25)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert (row.turns_day, row.spent_usd_day, row.idle_turns_day, row.emits_day) == (1, 250000, 0, 0)
+    assert row.spent_day == db.clock().date().isoformat()  # settled into the new day's budget, not yesterday's

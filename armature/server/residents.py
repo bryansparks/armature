@@ -10,6 +10,7 @@ one refuses them. What a turn may do with an event is decided in code, never by 
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from armature.server import audit, worker
 from armature.server.db import new_id
-from armature.server.db.schema import jobs, resident_events, residents, workflows
+from armature.server.db.schema import jobs, resident_events, residents, runs, workflows
 
 log = logging.getLogger(__name__)
 
@@ -132,6 +133,19 @@ def _unhandled(conn: Connection, resident_id: str) -> list[Any]:
         .order_by(resident_events.c.seq)).all()
 
 
+def _day_reset(conn: Connection, resident: Any, now: datetime) -> bool:
+    """Zero today's counters when the day rolled over, so later budget checks compare against today.
+
+    Returns whether the reset ran; the row it was given still carries yesterday's values.
+    """
+    today = now.date().isoformat()
+    if resident.spent_day == today:
+        return False
+    conn.execute(update(residents).where(residents.c.id == resident.id).values(
+        spent_usd_day=0, turns_day=0, idle_turns_day=0, emits_day=0, spent_day=today))
+    return True
+
+
 def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
     """Queue the instance's next turn: one job over the oldest unhandled events. Returns the job id, or None.
 
@@ -145,6 +159,7 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
     resident = _locked(conn, resident_id)
     if resident is None:
         return None
+    _day_reset(conn, resident, now)
     if resident.state != "idle" or resident.active_job_id is not None:
         return None
     if resident.turns >= MAX_TURNS:
@@ -187,3 +202,78 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
         conn.execute(delete(jobs).where(jobs.c.id == job_id))
         return None
     return job_id
+
+
+def settle(conn: Connection, now: datetime) -> list[str]:
+    """Settle every turn whose job finished, then wake each instance for whatever events still wait.
+
+    A succeeded turn's staged state becomes the resident's data — the whole doc, as its turn read and
+    rewrote it under the one-turn lock — and its events are handled by its job. Any other end discards
+    what was staged, counts one attempt against the batch's events, and gives an event up as poison
+    past ``MAX_ATTEMPTS``, handled and audited. The turn's cost lands on today's counters, which roll
+    over first; the state column is never touched, so a pause or close set mid-turn survives. Returns
+    the resident ids settled.
+    """
+    ended = conn.execute(select(residents.c.id, jobs.c.id.label("job_id"), jobs.c.status, jobs.c.inputs,
+                                jobs.c.run_id)
+                         .select_from(residents.join(jobs, jobs.c.id == residents.c.active_job_id))
+                         .where(jobs.c.status.not_in(OPEN_TURN))).all()
+    done = []
+    for row in ended:
+        resident = _locked(conn, row.id)
+        if resident is None or resident.active_job_id != row.job_id:
+            continue
+        fresh = _day_reset(conn, resident, now)
+        inputs = row.inputs or {}
+        staged = resident.staged or {}
+        values: dict[str, Any] = {"staged": None, "last_turn_at": now, "active_job_id": None, "updated_at": now}
+        if row.status == "succeeded":
+            upto = inputs.get("event_seq_to")
+            if isinstance(upto, int):
+                conn.execute(update(resident_events).where(
+                    resident_events.c.resident_id == resident.id, resident_events.c.seq <= upto,
+                    resident_events.c.handled.is_(False)).values(handled=True, handled_by_job=row.job_id))
+            state = staged.get("state")
+            if isinstance(state, dict):
+                data = dict(state)
+                previous = resident.data or {}
+                audit.record(conn, action="resident.state_write", actor_id=None, team_id=resident.team_id,
+                             target_kind="resident", target_id=resident.id,
+                             detail={"data_version": resident.data_version + 1,
+                                     "bytes": len(json.dumps(data, default=str).encode("utf-8")),
+                                     "keys": sorted(k for k in set(previous) | set(data)
+                                                    if previous.get(k) != data.get(k))})
+                values["data"] = data
+                values["data_version"] = resident.data_version + 1
+            values["turns"] = resident.turns + 1
+            values["turns_day"] = (0 if fresh else resident.turns_day) + 1
+            if inputs.get("kind") == "idle":
+                values["idle_turns_day"] = (0 if fresh else resident.idle_turns_day) + 1
+            cost = conn.execute(select(runs.c.cost_usd).where(runs.c.id == row.run_id)).scalar() \
+                if row.run_id else None
+            values["spent_usd_day"] = (0 if fresh else resident.spent_usd_day) \
+                + int(round(float(cost or 0) * 1_000_000))
+            values["idle_streak"] = 1 if staged.get("idle_nothing_to_do") else 0
+        else:
+            seq_from, seq_to = inputs.get("event_seq_from"), inputs.get("event_seq_to")
+            if isinstance(seq_from, int) and isinstance(seq_to, int):
+                conn.execute(update(resident_events).where(
+                    resident_events.c.resident_id == resident.id, resident_events.c.seq >= seq_from,
+                    resident_events.c.seq <= seq_to, resident_events.c.handled.is_(False)
+                ).values(attempts=resident_events.c.attempts + 1))
+                poison = list(conn.execute(select(resident_events.c.seq).where(
+                    resident_events.c.resident_id == resident.id, resident_events.c.seq >= seq_from,
+                    resident_events.c.seq <= seq_to, resident_events.c.handled.is_(False),
+                    resident_events.c.attempts >= MAX_ATTEMPTS)).scalars())
+                if poison:
+                    conn.execute(update(resident_events).where(
+                        resident_events.c.resident_id == resident.id, resident_events.c.seq.in_(poison),
+                        resident_events.c.handled.is_(False)).values(handled=True, handled_by_job=row.job_id))
+                    audit.record(conn, action="resident.event_poison", actor_id=None, team_id=resident.team_id,
+                                 target_kind="resident", target_id=resident.id,
+                                 detail={"job_id": row.job_id, "seq": poison})
+        conn.execute(update(residents).where(residents.c.id == resident.id,
+                                             residents.c.active_job_id == row.job_id).values(**values))
+        wake(conn, resident.id, now)
+        done.append(resident.id)
+    return done
