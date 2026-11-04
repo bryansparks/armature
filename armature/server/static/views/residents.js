@@ -320,7 +320,8 @@ export async function render(root, { args }) {
       input.value = '';
       clear(askSlot).append(result.reply?.text
         ? element('p', { class: 'pre-line' }, result.reply.text)
-        : element('p', { class: 'note' }, 'No answer in time. It lands on the asking event below once the turn finishes.'));
+        : element('p', { class: 'note' }, 'No answer in time. The reply lands on the asking event once the turn finishes; this page is a snapshot, so reload to see it.'));
+      drawEvents();
     } catch (err) {
       askSlot.append(errorBox(err));
     } finally {
