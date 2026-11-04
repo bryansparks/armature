@@ -4357,7 +4357,8 @@ resident:
 | `state.max_bytes` | 1024–65536 | `16384` |
 | `state.publish` | list of top-level state keys `read` may serve | `[]` |
 | `on.<kind>.workflow` | `self` or a stored workflow name; kinds: `request`, `ask`, `schedule`, `signal`, `custom.<name>` | `self` |
-| `on.schedule.cron` / `.timezone` | five-field cron / zone name | `UTC` |
+| `on.schedule.cron` | five-field cron (required when `on.schedule` is set) | — |
+| `on.schedule.timezone` | zone name | `UTC` |
 | `idle.after` | duration (`30m`, `12h`, `30d`, `1d12h`) | required with `idle:` |
 | `idle.workflow` | `self` or a stored workflow name | `self` |
 | `idle.budget_usd_per_day` / `max_turns_per_day` | number / int | `2.0` / `24` |
@@ -4375,7 +4376,7 @@ Two different operations, deliberately separate:
 - **`read` is free.** It is served straight from the instance row — the keys `state.publish` names, plus `turns`, `data_version`, inbox depth, and state. No job, no run, no model call. Dashboards and analytics polls should hit `read`; spending a run on every refresh is the thing to avoid.
 - **`ask` is a turn.** It enqueues an `ask` event; the instance's turn answers it and the reply is recorded on the event.
 
-A turn is an ordinary job, so grants, sandboxing, safety rules, and traces all apply unchanged. Event payloads reach the model fenced as data, never as instructions. By design, event turns (`request`, `ask`, `signal`) may act on the outside world, while idle turns are kept read-only toward it — they may fetch external state, write their own state and metrics, and ask the owner a question. A turn reaches its instance only through the built-in `resident` pack adapters — `resident/events`, `resident/state.get`, `resident/state.set`, `resident/state.patch`, `resident/metrics.publish`, `resident/reply`, `resident/emit`, `resident/idle.report`, `resident/close` — and only while it holds the instance's one-turn lock. State writes are validated against `state.schema` and `max_bytes`, **staged**, and applied only if the turn succeeds; a failed or lost turn leaves state untouched and its events are re-offered (up to 3 attempts, then the event is given up as poison).
+A turn is an ordinary job, so grants, sandboxing, safety rules, and traces all apply unchanged. Event payloads reach the model fenced as data, never as instructions. By design, event turns (`request`, `ask`, `signal`) may act on the outside world, while idle turns are read-only toward it — they may fetch external state, write their own state and metrics, and ask the owner a question; their one outward write, `resident/emit`, is refused from an idle turn. A turn reaches its instance only through the built-in `resident` pack adapters — `resident/events`, `resident/state.get`, `resident/state.set`, `resident/state.patch`, `resident/metrics.publish`, `resident/reply`, `resident/emit`, `resident/idle.report`, `resident/close` — and only while it holds the instance's one-turn lock. State writes are validated against `state.schema` and `max_bytes`, **staged**, and applied only if the turn succeeds; a failed or lost turn leaves state untouched and its events are re-offered (up to 3 attempts, then the event is given up as poison).
 
 ### API surface
 

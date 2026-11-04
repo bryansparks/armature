@@ -1380,6 +1380,24 @@ def test_emit_from_a_dry_turn_is_dry(db):
     # wakes spends nothing real — the same carry a dry webhook rule gets (Task 12)
 
 
+def test_emit_refused_from_an_idle_turn(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _version(db, db.answer_id, EMITBOT, 2)
+    with db.engine.begin() as conn:  # the turn answers an idle event, not a real one
+        conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id)
+                     .values(kind="idle"))
+    with pytest.raises(residents.ResidentError) as raised:
+        _call(db, run_id, job, "resident.emit", {"resident": "answer", "key": "acme", "kind": "signal"})
+    assert raised.value.status == 400  # idle turns ask; only event turns act outward (decision 2)
+    with db.engine.connect() as conn:
+        assert conn.execute(select(resident_rows.c.id).where(
+            resident_rows.c.workflow_id == db.answer_id)).all() == []  # nothing ensured
+        assert conn.execute(select(func.count()).where(
+            audit_rows.c.action == "resident.emit")).scalar_one() == 0  # nothing audited
+    assert _resident(db, resident.id).emits_day == 0  # and no cap was spent
+
+
 def test_settle_revalidates_staged_state(db):
     resident, job_id, _run_id = _tooled(db)
     _stage(db, resident.id, {"state": {"nope": "not the mood"}})  # schema-invalid: mood is required

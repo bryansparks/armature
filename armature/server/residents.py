@@ -18,7 +18,8 @@ import json
 import logging
 import re
 import secrets
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from datetime import time as dtime
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -30,7 +31,14 @@ from sqlalchemy.exc import IntegrityError
 
 from armature.server import assist, audit, defs, worker
 from armature.server.db import new_id
-from armature.server.db.schema import jobs, resident_events, residents, runs, tool_calls, workflows
+from armature.server.db.schema import (
+    jobs,
+    resident_events,
+    residents,
+    runs,
+    tool_calls,
+    workflows,
+)
 from armature.spec.models import ResidentCfg, ResidentIdleCfg, ResidentStateCfg
 
 log = logging.getLogger(__name__)
@@ -661,7 +669,7 @@ def _run_idle_turns(conn: Connection, now: datetime) -> None:
         residents.c.next_idle_at <= now)
         .order_by(residents.c.next_idle_at).limit(IDLE_SCAN)).scalars().all()
     tomorrow = datetime.combine(now.date() + timedelta(days=1), dtime.min,
-                                tzinfo=now.tzinfo or timezone.utc)
+                                tzinfo=now.tzinfo or UTC)
     for resident_id in due:
         if not _claim_idle(conn, resident_id, now):
             continue  # another server's sweep claimed the turn while this one scanned the row
@@ -861,9 +869,13 @@ def _emit_tool(conn: Connection, resident: Any, job: Any, run_id: str, params: d
     # The chain this turn's own event carries: the hop this emit would add is one deeper. The
     # turn's own dry flag rides the emit too, so a dry turn's fan-out wakes no real spend.
     seq_from = (job.inputs or {}).get("event_seq_from")
-    batch = conn.execute(select(resident_events.c.source, resident_events.c.dry_run).where(
+    batch = conn.execute(select(resident_events.c.source, resident_events.c.dry_run,
+                                resident_events.c.kind).where(
         resident_events.c.resident_id == resident.id,
         resident_events.c.seq == seq_from)).first() if isinstance(seq_from, int) else None
+    if batch is not None and batch.kind == "idle":
+        raise ResidentError(400, "an idle turn is read-only toward the outside world; "
+                                "only event turns act (decision 2).")
     carried = batch.source.get("chain") if batch is not None and isinstance(batch.source, dict) else None
     incoming = carried if isinstance(carried, int) and not isinstance(carried, bool) else 0
     if incoming + 1 > EMIT_CHAIN_MAX:

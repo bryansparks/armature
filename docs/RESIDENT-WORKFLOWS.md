@@ -404,7 +404,7 @@ These are two different operations and must stay separate.
     the reply — or `null` when the wait runs out, leaving the caller to
     poll the event later.
 - **`signal`:** `POST .../signal` with `{name?, payload}` (for a `custom.*` kind
-  or a plain signal). Requires `run` permission on the workflow.
+  or a plain signal). Requires contributor access on the workflow.
 
 All three are audited (`audit.record`, action `resident.read|ask|signal`).
 `read` should be rate-limited per caller but needs no budget.
@@ -635,8 +635,8 @@ does:
 - Two servers running the idle sweep queue one idle turn.
 - A handler with a `human` gate fails validation for `request`, `ask`,
   `signal` and `idle`.
-- A new workflow version is picked up by the next turn. A schema-incompatible
-  version pauses the instance.
+- An instance runs the version it pinned until an upgrade re-pins it
+  (decision 3). A schema-incompatible version pauses the instance.
 - `resident.emit` past the chain depth or fan-out cap is refused and audited.
 - A run that isn't the instance's `active_job_id` is refused by every
   `resident.*` tool.
