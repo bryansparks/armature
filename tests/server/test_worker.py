@@ -10,7 +10,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import func, insert, select, update
 
-from armature.server import defs, dryrun, runners, secrets, worker
+from armature.server import defs, dryrun, residents, runners, secrets, worker
 from armature.server.config import ServerConfig
 from armature.server.db import new_id
 from armature.server.db.schema import (
@@ -21,6 +21,9 @@ from armature.server.db.schema import (
     teams,
     triggers,
     webhooks,
+)
+from armature.server.db.schema import (
+    residents as resident_rows,
 )
 from armature.spec.loader import STORED_WORKFLOW_HEADER
 from tests.server.app_support import (
@@ -171,6 +174,37 @@ def test_claims_stop_at_the_slot_count(sqlite_engine, keyring, clock, world, tmp
         conn.execute(update(settings).where(settings.c.key == worker.SLOTS_KEY).values(value=9))
     w.tick()
     assert _get(sqlite_engine, ids[3]).status == "queued"
+
+
+def test_resident_turns_claim_through_the_real_path(sqlite_engine, keyring, clock, world, tmp_path):
+    _setting(sqlite_engine, residents.ENABLED_KEY, True)
+    with sqlite_engine.begin() as conn:
+        resident = residents.ensure(conn, team_id=world["team"], project_id=world["project"],
+                                    workflow_id=world["workflow"], instance_key="", now=clock())
+        residents.enqueue(conn, resident.id, "request", now=clock())  # enqueue wakes the turn's job
+        job_id = conn.execute(select(resident_rows.c.active_job_id).where(
+            resident_rows.c.id == resident.id)).scalar()
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    assert w.claim(clock()) == job_id  # the claim path takes a resident turn, not only workflow jobs
+    assert _get(sqlite_engine, job_id).status == "claimed"
+
+
+def test_tick_sweeps_residents_behind_the_setting(sqlite_engine, keyring, clock, tmp_path, monkeypatch):
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    swept = []
+    monkeypatch.setattr(residents, "sweep", lambda engine, now: swept.append(now))
+    w.tick()
+    assert swept == []  # off by default: no sweep runs, the resident tables are inert
+    _setting(sqlite_engine, residents.ENABLED_KEY, True)
+    w.tick()
+    assert len(swept) == 1
+
+    def blowing(engine, now):
+        raise residents.ResidentError(500, "the instance vanished mid-sweep")
+
+    monkeypatch.setattr(residents, "sweep", blowing)
+    w.tick()  # a residents failure never stops the claims below
+    assert len(swept) == 1
 
 
 def test_launch_builds_env_from_settings_and_listed_secrets(sqlite_engine, keyring, clock, world, tmp_path,

@@ -58,6 +58,7 @@ from armature.server import (
     gatecards,
     gates,
     llm,
+    residents,
     runners,
 )
 from armature.server import secrets as secret_store
@@ -284,7 +285,7 @@ def meets(requires: Iterable[str] | None, capabilities: Iterable[str] | None) ->
 
 def claimable(conn: Connection, *, capabilities: Iterable[str] | None, allowlist: Iterable[str] | None = None,
               team_id: str | None = None, bound_key: str | None = None, now: datetime | None = None) -> list[str]:
-    """Queued workflow jobs these capabilities may run, oldest first, from the oldest ``CLAIM_SCAN`` queued.
+    """Queued workflow jobs and resident turns these capabilities may run, oldest first, oldest ``CLAIM_SCAN`` queued.
 
     A job whose key is held waits. With ``now``, so does one still in its quiet period.
 
@@ -301,7 +302,8 @@ def claimable(conn: Connection, *, capabilities: Iterable[str] | None, allowlist
         return [r.id for r in rows if meets(r.requires, allowlist)]
     query = (select(jobs.c.id, jobs.c.requires, triggers.c.config)
              .select_from(jobs.outerjoin(triggers, triggers.c.id == jobs.c.trigger_id))
-             .where(jobs.c.status == "queued", jobs.c.kind == JOB_KIND, ready(now)))
+             .where(jobs.c.status == "queued", jobs.c.kind.in_((JOB_KIND, residents.RESIDENT_JOB_KIND)),
+                    ready(now)))
     if team_id is not None:
         query = query.where(jobs.c.team_id == team_id)
     rows = [r for r in conn.execute(query.order_by(jobs.c.created_at, jobs.c.id).limit(CLAIM_SCAN)).all()
@@ -668,6 +670,13 @@ class Worker:
             conversations.sweep(self.engine, self.keyring, now, self.vendor_transport)
         except Exception:
             log.exception("the conversation sweep failed")
+        # Nor may resident housekeeping, which stays off until resident.enabled is set.
+        try:
+            with self.engine.connect() as conn:
+                if _instance_setting(conn, residents.ENABLED_KEY):
+                    residents.sweep(self.engine, now)
+        except Exception:
+            log.exception("the resident sweep failed")
         try:
             gatecards.sync(self.engine, self.keyring, f"{self.cfg.public_origin}{self.cfg.base_path}", now,
                            self.vendor_transport)

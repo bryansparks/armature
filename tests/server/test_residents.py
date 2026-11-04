@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import func, insert, inspect, select, update
 
 from armature.server import defs, residents, worker
+from armature.server.config import ServerConfig
 from armature.server.db import new_id
 from armature.server.db.schema import (
     audit as audit_rows,
@@ -16,6 +17,7 @@ from armature.server.db.schema import (
     projects,
     resident_events,
     runs,
+    settings,
     teams,
     workflows,
 )
@@ -474,3 +476,64 @@ def test_budget_day_resets_at_utc_boundary(db):
     row = _resident(db, resident.id)
     assert (row.turns_day, row.spent_usd_day, row.idle_turns_day, row.emits_day) == (1, 250000, 0, 0)
     assert row.spent_day == db.clock().date().isoformat()  # settled into the new day's budget, not yesterday's
+
+
+def _worker_for(db, keyring, tmp_path):
+    cfg = ServerConfig(database_url=str(db.engine.url), packs_dir="/srv/packs")
+    hub = SimpleNamespace(engine=db.engine, clock=db.clock, running=False, unix_endpoint=None)
+    return worker.Worker(db.engine, keyring, cfg, hub, clock=db.clock, work_dir=tmp_path / "work")
+
+
+def _enable(db, value=True):
+    with db.engine.begin() as conn:
+        conn.execute(insert(settings).values(key=residents.ENABLED_KEY, value=value))
+
+
+def test_sweep_settles_finished_turns(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    job_id = _wake(db, resident.id)
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)  # the turn ended; only the sweep would settle it
+    residents.sweep(db.engine, db.clock())
+    row = _resident(db, resident.id)
+    assert row.active_job_id is None and row.turns == 1  # the sweep settled the finished turn
+    assert [(e.seq, e.handled, e.handled_by_job) for e in _events(db, resident.id)] == [(1, True, job_id)]
+
+
+def test_sweep_disabled_by_default(db, keyring, tmp_path):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    job_id = _wake(db, resident.id)
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)  # the turn ended; only the sweep would settle it
+    w = _worker_for(db, keyring, tmp_path)
+    w.tick()
+    assert _resident(db, resident.id).active_job_id == job_id  # the setting is absent: the tables are inert
+    assert _events(db, resident.id)[0].handled is False
+    _enable(db)
+    w.tick()
+    row = _resident(db, resident.id)
+    assert row.active_job_id is None and row.turns == 1  # on: the tick settles the turn
+    assert _events(db, resident.id)[0].handled is True
+
+
+def test_sweep_resumes_budget_paused_at_day_rollover(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    with db.engine.begin() as conn:  # yesterday's budget closed the instance
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            state="paused", close_reason="budget", spent_day="2026-10-22"))
+    same_day = _ensure(db, instance_key="later")
+    _add_events(db, same_day.id, ["request"])
+    with db.engine.begin() as conn:  # paused today: the day, and so the budget, has not rolled over
+        conn.execute(update(resident_rows).where(resident_rows.c.id == same_day.id).values(
+            state="paused", close_reason="budget", spent_day=db.clock().date().isoformat()))
+    residents.sweep(db.engine, db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("idle", None)  # the daily pause died with its day
+    assert (row.spent_day, row.spent_usd_day, row.turns_day) == (db.clock().date().isoformat(), 0, 0)
+    assert row.active_job_id is not None  # and it woke: the event that waited now turns
+    assert _job(db, row.active_job_id).inputs["kind"] == "request"
+    still = _resident(db, same_day.id)
+    assert (still.state, still.close_reason, still.active_job_id) == ("paused", "budget", None)

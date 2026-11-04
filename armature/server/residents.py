@@ -15,7 +15,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Connection, delete, func, insert, select, update
+from sqlalchemy import Connection, Engine, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from armature.server import audit, worker
@@ -26,6 +26,8 @@ log = logging.getLogger(__name__)
 
 RESIDENT_STATES = ("idle", "paused", "closed")
 RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
+# The jobs.kind of a resident's turn job, claimable like a workflow's own.
+RESIDENT_JOB_KIND = "resident"
 # worker.HELD plus queued and suspended. Spelled out because the worker will import this module.
 OPEN_TURN = ("queued", "suspended", "provisioning", "claimed", "running")
 MAX_ATTEMPTS = 3
@@ -181,7 +183,8 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
     try:
         job_id = worker.queue_job(conn, team_id=resident.team_id, project_id=resident.project_id,
                                   workflow_id=resident.workflow_id, workflow_version=resident.workflow_version,
-                                  kind="resident", resident_id=resident_id, key=f"resident:{resident_id}",
+                                  kind=RESIDENT_JOB_KIND, resident_id=resident_id,
+                                  key=f"resident:{resident_id}",
                                   thread=f"resident:{resident.instance_key}" if resident.instance_key else "resident",
                                   inputs={"resident_id": resident_id, "instance_key": resident.instance_key,
                                           "event_seq_from": batch[0].seq, "event_seq_to": batch[-1].seq,
@@ -277,3 +280,23 @@ def settle(conn: Connection, now: datetime) -> list[str]:
         wake(conn, resident.id, now)
         done.append(resident.id)
     return done
+
+
+def sweep(engine: Engine, now: datetime) -> None:
+    """The resident housekeeping the worker's tick runs: settle finished turns, then resume yesterday's pauses.
+
+    Settle first, so an instance whose turn just ended wakes for whatever still waits before the day pass
+    looks at it. The budget is daily, so the pause is too: an instance paused for ``budget`` resumes as
+    idle when its ``spent_day`` rolls over, and wakes for the events that waited out the pause. The other
+    lifetime closure lives where it belongs — ``max_turns`` in wake — and the idle scheduler slots in here.
+    """
+    with engine.begin() as conn:
+        settle(conn, now)
+        today = now.date().isoformat()
+        paused = conn.execute(select(residents.c.id).where(
+            residents.c.state == "paused", residents.c.close_reason == "budget",
+            residents.c.spent_day != today).with_for_update()).scalars().all()
+        for resident_id in paused:
+            conn.execute(update(residents).where(residents.c.id == resident_id).values(
+                state="idle", close_reason=None, updated_at=now))
+            wake(conn, resident_id, now)  # wake rolls the day's counters over before the turn spends
