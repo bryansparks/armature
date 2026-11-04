@@ -24,6 +24,12 @@ _PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 _RESIDENT_ON_KEYS = frozenset({"request", "ask", "schedule", "signal"})
 _RESIDENT_CUSTOM_ON_RE = re.compile(r"^custom\.[a-z][a-z0-9_.-]{0,63}$")
+# The bare-name half of the same grammar — what _RESIDENT_CUSTOM_ON_RE carries after its
+# `custom.` prefix. The routes' `_checked_name` and the emit tool (server/residents.py NAME_RE)
+# enforce this shape on every name a signal can be delivered as, which is the only thing
+# close_on.signal can ever be compared against. Mirrored here, not imported: the engine-side
+# validator must not depend on the server package.
+_RESIDENT_SIGNAL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 _RESIDENT_INSTANCE_KEY_RE = re.compile(
     r"^\{\{\s*event\.payload([.][A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]|\['[^']+'\])*\s*\}\}$"
 )
@@ -255,8 +261,9 @@ def _resident_errors(spec: HarnessSpec) -> list[SpecError]:
     """
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    from armature.spec.calls import valid_workflow_name
     from croniter import croniter as croniter_cls
+
+    from armature.spec.calls import valid_workflow_name
 
     resident = spec.resident
     if resident is None:
@@ -304,6 +311,20 @@ def _resident_errors(spec: HarnessSpec) -> list[SpecError]:
         add("RESIDENT_INSTANCE_KEY",
             'resident.instance_key must be a dotted reference into '
             'event.payload, such as "{{ event.payload.vendor_id }}"')
+
+    # ── close_on.signal must match the bare-name grammar a signal can arrive as ─
+    # The signal route's `_checked_name` and the emit tool deliver only names matching this
+    # grammar (server/residents.py NAME_RE, mirrored here so the engine stays server-free), and
+    # never the prefixed `custom.` kind itself — so a close_on outside it can never match: the
+    # fleet closure silently never fires, and the instances that should have closed drain their
+    # lifetime instead.
+    close_on = resident.close_on.signal if resident.close_on is not None else None
+    if close_on is not None and (close_on.startswith("custom.")
+                                 or not _RESIDENT_SIGNAL_NAME_RE.fullmatch(close_on)):
+        add("RESIDENT_CLOSE_ON",
+            f"resident.close_on.signal '{close_on}' is not a bare custom name: "
+            "1-64 of lowercase letters, digits, '.', '_' or '-'; only a name a signal can be "
+            "delivered as can ever close the instance on it")
 
     # ── numeric limits (v1) ───────────────────────────────────────────────────
     if resident.concurrency != 1:

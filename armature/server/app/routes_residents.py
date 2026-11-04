@@ -3,8 +3,10 @@
 Reading is a pure database read — a dashboard may poll it without spending a turn — while
 ask and signal enqueue events that turn. ``resident.enabled`` gates those two, once the
 caller's access to the workflow is proven and before any row is written, so the feature
-is inert until it is turned on and never leaks its state to a stranger; the admin actions
-only write rows and stay available either way, as reading does. Every call is audited with
+is inert until it is turned on and never leaks its state to a stranger. The admin actions
+write their rows either way, as reading does; a resume or an upgrade would also wake the
+instance's next turn, and that wake is gated like every turn — with the setting off, the
+waiting events stay in the inbox until it is back on. Every call is audited with
 the signed-in user as its actor (``resident.read|ask|signal|pause|resume|close|upgrade``).
 """
 from __future__ import annotations
@@ -338,7 +340,8 @@ def one_event(instance_key: str, workflow_id: str, seq: int, request: Request,
 router.get("/api/residents/{workflow_id}/events/{seq}")(partial(one_event, ""))
 
 
-# The admin acts: they only write rows, so they work whether the feature is enabled or not.
+# The admin acts: they write their rows whether the feature is enabled or not. Resume and
+# upgrade would also wake a turn, and that wake alone is gated on resident.enabled.
 
 @router.post("/api/residents/{workflow_id}/{instance_key}/pause")
 def pause(instance_key: str, workflow_id: str, request: Request,
@@ -374,7 +377,10 @@ def resume(instance_key: str, workflow_id: str, request: Request,
             state="idle", close_reason=None, updated_at=srv.now()))
         audit.record(conn, action="resident.resume", actor_id=session.user_id,
                      team_id=resident.team_id, target_kind="resident", target_id=resident.id)
-        residents.wake(conn, resident.id, srv.now())
+        # The wake is gated like every turn (the T5 ruling): while resident.enabled is off, the
+        # events stay in the inbox and turn when the setting is back on.
+        if residents.enabled(conn):
+            residents.wake(conn, resident.id, srv.now())
         return {"resident": _public(conn, _instance(conn, row.id, instance_key),
                                     _published(conn, resident))}
 
@@ -452,7 +458,10 @@ def upgrade(instance_key: str, workflow_id: str, request: Request,
         audit.record(conn, action="resident.upgrade", actor_id=session.user_id,
                      team_id=resident.team_id, target_kind="resident", target_id=resident.id,
                      detail={"version": version, "state_schema": schema_failed})
-        if not schema_failed and values.get("state") == "idle":
+        # The re-pin ends with the instance idle only when it may turn again; the wake is gated
+        # like every turn (the T5 ruling) — while resident.enabled is off, the events that
+        # waited stay in the inbox until the setting is back on.
+        if not schema_failed and values.get("state") == "idle" and residents.enabled(conn):
             residents.wake(conn, resident.id, srv.now())
         return {"resident": _public(conn, _instance(conn, row.id, instance_key),
                                     _published(conn, resident))}

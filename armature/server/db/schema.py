@@ -65,6 +65,8 @@ CONVERSATION_KINDS = ("slack", "web")
 CONVERSATION_STATES = ("open", "closed")
 CONVERSATION_AWAITING = ("user", "agent", "none")
 MESSAGE_ROLES = ("user", "assistant", "system")
+# The residents table's CHECK constraints freeze these; residents.py imports them as its
+# runtime allow-lists, so the code and the columns can never disagree.
 RESIDENT_STATES = ("idle", "paused", "closed")
 RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
 TRIGGER_POLL_STATUSES = ("ok", "error", "skipped")

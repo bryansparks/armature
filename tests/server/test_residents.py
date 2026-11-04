@@ -190,6 +190,11 @@ def test_custom_kind_stores_custom_and_name(db):
         assert residents.enqueue(conn, resident.id, "custom", name="dune", now=db.clock()) == 2
     kinds = [(e.kind, e.name) for e in _events(db, resident.id)]
     assert kinds == [("custom", "beach"), ("custom", "dune")]
+    with db.engine.begin() as conn:
+        with pytest.raises(residents.ResidentError) as raised:  # defensive: routes and the emit tool
+            # validate the whole grammar, but the column's width alone would break the insert
+            residents.enqueue(conn, resident.id, "custom", name="b" * 65, now=db.clock())
+        assert raised.value.status == 400
 
 def _wake(db, resident_id):
     with db.engine.begin() as conn:
@@ -250,6 +255,17 @@ def test_wake_lock_is_atomic(db):
     assert _wake(db, resident.id) is None
     assert _jobs_count(db) == 1  # no second job was queued
     assert _resident(db, resident.id).active_job_id == first
+
+
+def test_wake_bounds_the_thread_label_at_the_columns_width(db):
+    resident = _ensure(db, instance_key="k" * residents.KEY_MAX)  # the widest key the column holds
+    _add_events(db, resident.id, ["request"])
+    job_id = _wake(db, resident.id)
+    assert job_id is not None  # the key asks at its full width; only the derived label is bounded
+    assert len(_job(db, job_id).thread) <= 191  # jobs.thread is String(191): the label is a grouping
+    # hint, not identity — active_job_id and concurrency_key keep the instance distinct — so MySQL
+    # strict mode never refuses the queue_job INSERT the way an unbounded "resident:" + 191-char
+    # key would
 
 
 def test_wake_lost_race_deletes_job(db, monkeypatch):
@@ -836,6 +852,10 @@ def test_sweep_resumes_budget_paused_at_day_rollover(db):
     assert _job(db, row.active_job_id).inputs["kind"] == "request"
     still = _resident(db, same_day.id)
     assert (still.state, still.close_reason, still.active_job_id) == ("paused", "budget", None)
+    with db.engine.connect() as conn:  # the auto-resume is a governed act, audited like the rest
+        resumed = conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.resumed")).all()
+    assert resumed == [(resident.id, {"reason": "budget"})]
 
 
 # ── The idle loop: scheduled idle turns, backoff, daily caps, one claim per turn ──
@@ -1673,6 +1693,54 @@ def test_off_means_no_turns_not_even_rows(web):
         assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 0
 
 
+def _residents_off(web):
+    with web.engine.begin() as conn:
+        conn.execute(update(settings).where(settings.c.key == residents.ENABLED_KEY).values(value=False))
+
+
+def _jobs_total(web):
+    with web.engine.connect() as conn:
+        return conn.execute(select(func.count()).select_from(jobs)).scalar_one()
+
+
+def test_resume_while_off_writes_the_row_but_wakes_nothing(web):
+    resident = _web_resident(web)
+    admin = _as(web, "admin")
+    assert web.client.post(f"/api/residents/{web.workflow_id}/pause",
+                           headers=admin).status_code == 200
+    with web.engine.begin() as conn:  # an event waits out the pause
+        residents.enqueue(conn, resident.id, "request", now=web.clock())
+    _residents_off(web)
+    resumed = web.client.post(f"/api/residents/{web.workflow_id}/resume", headers=admin)
+    assert resumed.status_code == 200, resumed.text  # the row write is the act's own and stays;
+    # the wake it would start is gated like every turn (the T5 ruling: no new turns while off)
+    row = _web_row(web, resident.id)
+    assert (row.state, row.active_job_id) == ("idle", None)
+    assert _events(web, resident.id)[0].handled is False  # the event stays in the inbox
+    assert _jobs_total(web) == 0
+    assert _audited(web, "resident.resume", "admin")  # the act itself is still audited
+
+
+def test_upgrade_while_off_repins_but_wakes_nothing(web):
+    resident = _web_resident(web)
+    _version(web, web.workflow_id, SCHEMA_BOT, 2)  # wants a mood the data doesn't have
+    admin = _as(web, "admin")
+    assert web.client.post(f"/api/residents/{web.workflow_id}/upgrade",
+                           headers=admin).status_code == 200  # paused for the migrate, no turn
+    with web.engine.begin() as conn:  # the migrate lands; an event waits meanwhile
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id)
+                     .values(data={"mood": "calm", "metrics": {}}))
+        residents.enqueue(conn, resident.id, "request", now=web.clock())
+    _residents_off(web)
+    upgraded = web.client.post(f"/api/residents/{web.workflow_id}/upgrade", headers=admin)
+    assert upgraded.status_code == 200, upgraded.text
+    row = _web_row(web, resident.id)
+    assert (row.state, row.workflow_version) == ("idle", 2)  # re-pin and un-pause: rows, written
+    assert row.active_job_id is None  # but the wake is gated: no new turns while off
+    assert _events(web, resident.id)[0].handled is False  # the waiting event stays in the inbox
+    assert _jobs_total(web) == 0
+
+
 def test_an_over_length_key_answers_404_and_writes_nothing(web):
     lead = _as(web, "lead")
     for path, body in (("ask", {"question": "anyone?"}), ("signal", {"payload": {}})):
@@ -1687,13 +1755,16 @@ def test_an_over_length_key_answers_404_and_writes_nothing(web):
     assert posted.status_code == 200, posted.text
     with web.engine.connect() as conn:
         assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 1
+    job_id = _web_find(web, instance_key=fits).active_job_id
+    assert len(_web_job(web, job_id).thread) <= 191  # the MySQL matrix's regression guard: the
+    # derived label is bounded even at the key's full width, or strict mode rolls the ask back
     _web_resident(web, data={"metrics": {"waiting": 0}})  # reading still works when off
     assert web.client.get(f"/api/residents/{web.workflow_id}/read",
                           headers=lead).status_code == 200
     assert web.client.get(f"/api/residents/{web.workflow_id}/events",
                           headers=lead).status_code == 200
     paused = web.client.post(f"/api/residents/{web.workflow_id}/pause", headers=_as(web, "admin"))
-    assert paused.status_code == 200  # admin acts only write rows: never gated
+    assert paused.status_code == 200  # the admin row-write stays ungated
 
 
 def test_the_events_timeline_and_one_event(web):

@@ -1180,6 +1180,7 @@ stages:
 | `RESIDENT_SCHEDULE` | `resident.on.schedule.cron` needs five valid cron fields, such as `30 6 * * 1-5` |
 | `RESIDENT_TIMEZONE` | `resident.on.schedule.timezone` must be a zone name such as America/Denver |
 | `RESIDENT_INSTANCE_KEY` | `resident.instance_key` must be a dotted reference into `event.payload` |
+| `RESIDENT_CLOSE_ON` | `resident.close_on.signal` must be a bare custom name (1-64 of lowercase letters, digits, `.`, `_`, `-`) — the only shape a delivered signal can have |
 | `RESIDENT_CONCURRENCY` | `resident.concurrency` must be 1 in v1 |
 | `RESIDENT_BATCH` | `resident.batch` must be a whole number from 1 to 100 |
 | `RESIDENT_STATE_MAX_BYTES` | `resident.state.max_bytes` must be from 1024 to 65536 |

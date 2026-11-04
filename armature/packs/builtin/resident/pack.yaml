@@ -90,7 +90,7 @@ adapters:
         resident: {type: string, minLength: 1}
         key: {type: string, maxLength: 191}
         kind: {type: string, minLength: 1}
-        name: {type: string}
+        name: {type: string, maxLength: 64}
         payload: {}
   idle.report:
     description: >-

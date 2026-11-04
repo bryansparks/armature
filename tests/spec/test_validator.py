@@ -927,6 +927,20 @@ def test_resident_indexed_instance_key_accepted():
     assert not _resident_errors(spec)
 
 
+def test_resident_close_on_signal_outside_the_name_grammar_rejected():
+    # close_on can only ever match a signal the routes and the emit tool deliver, and those
+    # never leave the bare-name grammar — a close_on outside it is a silently dead fleet
+    # closure (I2).
+    for bad in ["Pr Merged", "custom.pr_merged", "PR", "", "no spaces", "b" * 65]:
+        errors = _resident_errors(_resident_spec(close_on={"signal": bad}))
+        assert codes(errors) == {"RESIDENT_CLOSE_ON"}, bad
+
+
+def test_resident_close_on_valid_signal_accepted():
+    spec = _resident_spec(close_on={"signal": "pr_merged"})
+    assert not _resident_errors(spec)
+
+
 def test_resident_workflow_name_validated():
     errors = _resident_errors(_resident_spec(on={"request": {"workflow": "bad name!"}}))
     assert "RESIDENT_WORKFLOW" in codes(errors)

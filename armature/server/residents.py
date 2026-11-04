@@ -31,7 +31,13 @@ from sqlalchemy.exc import IntegrityError
 
 from armature.server import assist, audit, defs, worker
 from armature.server.db import new_id
+
+# The resident grammars live once in the schema, where the CHECK constraints freeze them, and are
+# re-exported here so the runtime allow-lists can never drift from what the columns accept
+# (final review, parked #4).
 from armature.server.db.schema import (
+    RESIDENT_EVENT_KINDS,
+    RESIDENT_STATES,  # noqa: F401 — re-exported
     jobs,
     resident_events,
     residents,
@@ -43,8 +49,6 @@ from armature.spec.models import ResidentCfg, ResidentIdleCfg, ResidentStateCfg
 
 log = logging.getLogger(__name__)
 
-RESIDENT_STATES = ("idle", "paused", "closed")
-RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
 # The jobs.kind of a resident's turn job, claimable like a workflow's own.
 RESIDENT_JOB_KIND = "resident"
 # An event name's grammar (the routes' _checked_name enforces the same one): a bare custom name,
@@ -182,6 +186,10 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
         name = name or suffix or None
     if kind not in RESIDENT_EVENT_KINDS:
         raise ResidentError(400, f"kind is one of {', '.join(RESIDENT_EVENT_KINDS)}.")
+    if name is not None and (not isinstance(name, str) or len(name) > 64):
+        # Defensive, like the other param guards: routes and the emit tool validate the whole
+        # grammar, but the column's width alone would break the insert.
+        raise ResidentError(400, "name is a string of at most 64 characters.")
     if dedupe_key is not None and conn.execute(select(resident_events.c.id).where(
             resident_events.c.resident_id == resident_id,
             resident_events.c.dedupe_key == dedupe_key)).first():
@@ -478,7 +486,12 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
                                       workflow_id=workflow_id, workflow_version=version,
                                       kind=RESIDENT_JOB_KIND, resident_id=resident_id,
                                       key=f"resident:{resident_id}",
-                                      thread=f"resident:{resident.instance_key}" if resident.instance_key else "resident",
+                                      # jobs.thread is String(191); a KEY_MAX key would make this
+                                      # label 201 chars and MySQL strict mode roll the turn back.
+                                      # A grouping hint only — active_job_id and concurrency_key
+                                      # keep the instance distinct — so the label is bounded here
+                                      # where the key itself never is.
+                                      thread=(f"resident:{resident.instance_key}")[:191] if resident.instance_key else "resident",
                                       inputs=_inputs(resident, batch),
                                       dry_run=batch[0].dry_run, now=now)
             break
@@ -579,7 +592,10 @@ def settle(conn: Connection, now: datetime) -> list[str]:
     ended = conn.execute(select(residents.c.id, jobs.c.id.label("job_id"), jobs.c.status, jobs.c.inputs,
                                 jobs.c.run_id)
                          .select_from(residents.join(jobs, jobs.c.id == residents.c.active_job_id))
-                         .where(jobs.c.status.not_in(OPEN_TURN))).all()
+                         .where(jobs.c.status.not_in(OPEN_TURN))
+                         # id order, so two servers settle the same set of rows in the same
+                         # lock order (the sweep's FOR UPDATE mirrors this).
+                         .order_by(residents.c.id)).all()
     done = []
     for row in ended:
         resident = _locked(conn, row.id)
@@ -709,13 +725,17 @@ def sweep(engine: Engine, now: datetime) -> None:
     with engine.begin() as conn:
         settle(conn, now)
         today = now.date().isoformat()
-        paused = conn.execute(select(residents.c.id).where(
+        # id order, so two servers sweeping the same set lock it in the same order (no AB-BA).
+        paused = conn.execute(select(residents.c.id, residents.c.team_id).where(
             residents.c.state == "paused", residents.c.close_reason == "budget",
-            residents.c.spent_day != today).with_for_update()).scalars().all()
-        for resident_id in paused:
-            conn.execute(update(residents).where(residents.c.id == resident_id).values(
+            residents.c.spent_day != today).with_for_update()
+            .order_by(residents.c.id)).all()
+        for row in paused:
+            conn.execute(update(residents).where(residents.c.id == row.id).values(
                 state="idle", close_reason=None, updated_at=now))
-            wake(conn, resident_id, now)  # wake rolls the day's counters over before the turn spends
+            audit.record(conn, action="resident.resumed", actor_id=None, team_id=row.team_id,
+                         target_kind="resident", target_id=row.id, detail={"reason": "budget"})
+            wake(conn, row.id, now)  # wake rolls the day's counters over before the turn spends
         _run_idle_turns(conn, now)
 
 

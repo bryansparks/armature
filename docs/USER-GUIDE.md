@@ -4378,6 +4378,8 @@ Two different operations, deliberately separate:
 
 A turn is an ordinary job, so grants, sandboxing, safety rules, and traces all apply unchanged. Event payloads reach the model fenced as data, never as instructions. By design, event turns (`request`, `ask`, `signal`) may act on the outside world, while idle turns are read-only toward it — they may fetch external state, write their own state and metrics, and ask the owner a question; their one outward write, `resident/emit`, is refused from an idle turn. A turn reaches its instance only through the built-in `resident` pack adapters — `resident/events`, `resident/state.get`, `resident/state.set`, `resident/state.patch`, `resident/metrics.publish`, `resident/reply`, `resident/emit`, `resident/idle.report`, `resident/close` — and only while it holds the instance's one-turn lock. State writes are validated against `state.schema` and `max_bytes`, **staged**, and applied only if the turn succeeds; a failed or lost turn leaves state untouched and its events are re-offered (up to 3 attempts, then the event is given up as poison).
 
+Turns are claimable only by the instance runner, not by provisioned environments: a resident handler's `requires:` must name capabilities the instance runner carries. An environment-only capability (an `ec2-linux` or `ec2-mac` runner, say) never provisions for a turn, so a handler whose `requires:` needs one queues forever without a signal.
+
 ### API surface
 
 All endpoints are audited and RBAC-checked; `ask` and `signal` additionally require the server setting `resident.enabled` (the feature's rollback gate).
@@ -4403,7 +4405,7 @@ curl ".../events?unhandled=1"     # waiting events, oldest first
 curl ".../events/{seq}"           # one event, with its reply when the turn answered
 ```
 
-Admin actions (`pause`, `resume`, `close`, `upgrade`) write rows directly and work whether the feature is enabled or not. Dropping the `/…/{instance_key}/` path segment addresses the singleton instance.
+Admin actions (`pause`, `resume`, `close`, `upgrade`) write rows directly and work whether the feature is enabled or not; `resume` and `upgrade` would also wake the instance's next turn, and that wake, like every turn, waits for `resident.enabled` — with the setting off, the waiting events stay in the inbox and turn once it is back on. Dropping the `/…/{instance_key}/` path segment addresses the singleton instance.
 
 ### The idle loop
 

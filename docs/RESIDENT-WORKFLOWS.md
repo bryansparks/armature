@@ -447,7 +447,7 @@ state = 'idle' AND active_job_id IS NULL AND next_idle_at <= now
 ```
 
 When an instance settles with an empty inbox, `next_idle_at` is set to
-`last_activity + idle.after * factor^idle_streak`, capped at `backoff.max`.
+`last_activity + idle.after * factor^idle_streak`, capped at `backoff_max`.
 
 For each candidate (claimed with a compare-and-set on `next_idle_at`, as
 pollers claim `next_run_at`, so two servers can't both queue it):
