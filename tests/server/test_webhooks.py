@@ -2,12 +2,14 @@ import hashlib
 import hmac
 import json
 from datetime import timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
+from armature.server import defs, residents
 from armature.server import secrets as secret_store
 from armature.server import webhooks as hooks
 from armature.server.db import new_id
@@ -15,12 +17,17 @@ from armature.server.db.schema import (
     audit,
     jobs,
     projects,
+    resident_events,
     runs,
+    settings,
     teams,
     triggers,
     webhook_deliveries,
     webhooks,
     workflows,
+)
+from armature.server.db.schema import (
+    residents as resident_rows,
 )
 from tests.server.app_support import (
     ORIGIN,
@@ -1645,3 +1652,253 @@ def test_the_pull_request_quiet_period_defaults_only_for_supersede():
     assert hooks.check_rule({**events, "concurrency": "supersede"})["debounce_seconds"] == hooks.PR_QUIET_S
     assert "debounce_seconds" not in hooks.check_rule({**events, "concurrency": "queue"})
     assert "debounce_seconds" not in hooks.check_rule(events)
+
+
+# resident routing — config.resident turns a delivery into a request event on an instance
+
+# A keyed resident: the template names the payload path the instance key renders from. The singleton
+# spec omits instance_key, so every delivery routes to the workflow's one unnamed instance.
+KEYED = """\
+name: keyed
+resident:
+  instance_key: "{{ event.payload.item }}"
+  on:
+    request: {workflow: self}
+stages: []
+"""
+SINGLETON = """\
+name: singleton
+resident:
+  on:
+    request: {workflow: self}
+stages: []
+"""
+
+
+def _resident_spec(sqlite_engine, clock, world, body=KEYED, *, enabled=True):
+    """The team's workflow at a real version — a resident spec — with residents enabled unless asked off."""
+    with sqlite_engine.begin() as conn:
+        defs._add_version(conn, defs.WORKFLOW, world.wf, 3, body, "seed", None, clock())
+        if enabled:
+            conn.execute(insert(settings).values(key=residents.ENABLED_KEY, value=True))
+
+
+def _resident_rows(engine):
+    with engine.connect() as conn:
+        return conn.execute(select(resident_rows).order_by(resident_rows.c.created_at, resident_rows.c.id)).all()
+
+
+def _inbox(engine, resident_id):
+    with engine.connect() as conn:
+        return conn.execute(select(resident_events).where(resident_events.c.resident_id == resident_id)
+                            .order_by(resident_events.c.seq)).all()
+
+
+def _end_turn(engine, clock, team, job_id, status="succeeded"):
+    with engine.begin() as conn:
+        run_id = new_id()
+        conn.execute(insert(runs).values(id=run_id, team_id=team, status=status, started_at=clock(),
+                                         cost_usd=Decimal("0.01")))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(status=status, run_id=run_id))
+
+
+def test_a_rule_resident_flag_is_a_boolean_and_never_a_conversation():
+    assert "resident" not in hooks.check_rule({})
+    assert hooks.check_rule({"resident": True})["resident"] is True
+    for config, message in (({"resident": "yes"}, "true or false"),
+                           ({"resident": True, "conversation": True}, "not both"),
+                           ({"key": ["a"], "cancel_only": True, "resident": True}, "resident")):
+        with pytest.raises(hooks.WebhookError, match=message):
+            hooks.check_rule(config)
+
+
+def test_a_resident_rule_needs_a_workflow_that_is_a_resident(lead, world):
+    hook = _hook(lead, world)
+    response = lead.client.post(f"/api/webhooks/{hook['id']}/rules",
+                                json={"workflow_id": world.wf, "config": {"resident": True}}, headers=lead.headers)
+    assert response.status_code == 400 and "resident" in response.json()["error"]
+
+
+def test_a_resident_rule_matches_only_a_workflow_that_still_is_one(sqlite_engine, world, clock):
+    with sqlite_engine.begin() as conn:  # a plain spec the rule was saved against, by direct insert
+        defs._add_version(conn, defs.WORKFLOW, world.wf, 3, "name: plain\nstages: []\n", "seed", None, clock())
+    [decision] = _decide(sqlite_engine, world, [{"resident": True}], {"item": "one"})
+    assert decision["matched"] is False
+    assert decision["reason"] == "the workflow's current version has no resident: block"
+
+
+def test_a_resident_rule_routes_a_delivery_as_a_request_event(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"item": "widget-7", "n": 1})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == {"status": "accepted", "jobs": 1}
+    [delivery] = _deliveries(sqlite_engine)
+    [resident] = _resident_rows(sqlite_engine)
+    assert (resident.workflow_id, resident.instance_key, resident.state) == (world.wf, "widget-7", "idle")
+    [event] = _inbox(sqlite_engine, resident.id)
+    assert (event.kind, event.payload, event.dedupe_key, event.dry_run) == \
+        ("request", {"item": "widget-7", "n": 1}, delivery.id, False)
+    assert event.source == {"delivery_id": delivery.id, "trigger_id": delivery.matched[0]["trigger_id"]}
+    [job] = _jobs(sqlite_engine)  # the turn wake queued, not the rule
+    assert job.kind == "resident" and resident.active_job_id == job.id
+    assert delivery.matched == [{"trigger_id": delivery.matched[0]["trigger_id"], "workflow_id": world.wf,
+                                 "job_id": job.id, "shadow": False, "resident": True,
+                                 "resident_id": resident.id, "instance_key": "widget-7", "event_seq": 1}]
+
+
+def test_a_keyed_rule_creates_one_instance_per_key(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    for item, delivery in (("one", "d-1"), ("two", "d-2")):
+        raw = _body({"item": item})
+        assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery=delivery)).json()["jobs"] == 1
+    rows = _resident_rows(sqlite_engine)
+    assert sorted(r.instance_key for r in rows) == ["one", "two"]
+    assert all(len(_inbox(sqlite_engine, r.id)) == 1 for r in rows)
+    assert {j.kind for j in _jobs(sqlite_engine)} == {"resident"}
+
+
+def test_a_replayed_delivery_id_routes_only_once(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"item": "one"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [delivery] = _deliveries(sqlite_engine)
+    with sqlite_engine.begin() as conn:  # a replay runs the same delivery row again, as approve does
+        status, count = hooks.dispatch(conn, hooks.get(conn, hook["id"]), delivery.id, delivery.event,
+                                      json.loads(delivery.payload), clock())
+    assert (status, count) == ("accepted", 0)  # the delivery is recorded; nothing routes a second time
+    [resident] = _resident_rows(sqlite_engine)
+    assert len(_inbox(sqlite_engine, resident.id)) == 1
+    [delivery] = _deliveries(sqlite_engine)  # the replay's run replaced the row's matched list
+    assert (delivery.matched[0]["event_seq"], delivery.matched[0]["job_id"]) == (None, None)
+
+
+def test_a_shadow_resident_rule_decides_only(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, shadow=True)
+    raw = _body({"item": "one"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == {"status": "accepted", "jobs": 0}
+    assert _resident_rows(sqlite_engine) == [] and _jobs(sqlite_engine) == []
+    [delivery] = _deliveries(sqlite_engine)
+    assert delivery.matched == [{"trigger_id": delivery.matched[0]["trigger_id"], "workflow_id": world.wf,
+                                 "job_id": None, "shadow": True}]
+
+
+def test_a_resident_rule_is_inert_while_residents_are_off(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, enabled=False)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"item": "one"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == {"status": "accepted", "jobs": 0}
+    assert _resident_rows(sqlite_engine) == [] and _jobs(sqlite_engine) == []
+    [delivery] = _deliveries(sqlite_engine)
+    # the rule records the match it would have routed — the rollback gate — and routes nothing
+    assert (delivery.matched[0]["instance_key"], delivery.matched[0]["job_id"]) == ("one", None)
+    assert delivery.matched[0]["inert"] == "residents are not enabled on this instance"
+
+
+def test_a_dry_resident_rules_event_runs_a_dry_turn(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, dry=True)
+    raw = _body({"item": "one"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    [event] = _inbox(sqlite_engine, resident.id)
+    [job] = _jobs(sqlite_engine)
+    assert event.dry_run is True and job.dry_run is True and job.kind == "resident"
+
+
+def test_an_instance_key_that_renders_empty_routes_nothing(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"other": "x"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == {"status": "ignored", "jobs": 0}
+    assert _resident_rows(sqlite_engine) == []  # never an instance with key "" for a keyed resident
+    [delivery] = _deliveries(sqlite_engine)
+    assert delivery.status == "ignored" and delivery.reason == "no rule matched"
+
+
+def test_a_rule_for_a_resident_without_an_instance_key_routes_the_singleton(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, body=SINGLETON)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"whatever": 1})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    assert resident.instance_key == "" and len(_inbox(sqlite_engine, resident.id)) == 1
+
+
+def test_a_delivery_to_a_closed_instance_records_a_skip(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    raw = _body({"item": "one"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id)
+                     .values(state="closed", close_reason="closed_for_test", closed_at=clock()))
+    raw = _body({"item": "one"})
+    response = lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2"))
+    assert response.json() == {"status": "accepted", "jobs": 0}  # the delivery is not failed for a closed target
+    [delivery] = [d for d in _deliveries(sqlite_engine) if d.delivery_key == "d-2"]
+    assert delivery.matched[0]["skipped"] == "instance is closed"
+    assert len(_inbox(sqlite_engine, resident.id)) == 1
+
+
+def _slack_event(event_id, text, thread="1700000000.000100", ts=None):
+    return _body({"type": "event_callback", "event_id": event_id,
+                  "event": {"type": "message", "channel": "C0", "ts": ts or thread, "thread_ts": thread,
+                            "user": "U1", "text": text}})
+
+
+def test_the_beach_pattern_a_reply_resumes_a_keyed_instance(sqlite_engine, lead, world, clock):
+    """The asking turn ends — state staged, lock released — and the Slack reply is a new event and turn.
+
+    The phase-5 flagship (docs/RESIDENT-WORKFLOWS.md, decision 2): no run is ever open while the
+    instance waits for its answer.
+    """
+    body = ('name: beach\n'
+            'resident:\n'
+            '  instance_key: "{{ event.payload.event.thread_ts }}"\n'
+            '  on:\n'
+            '    request: {workflow: self}\n'
+            'stages: []\n')
+    _resident_spec(sqlite_engine, clock, world, body=body)
+    hook = _hook(lead, world, "slack")
+    _rule(lead, hook, world.wf, resident=True)
+    # the question: a Slack message in a thread starts the keyed instance's first turn
+    raw = _slack_event("Ev1", "what is the vendor's tax id?")
+    assert lead.client.post(_path(hook), content=raw, headers=_slack(raw, clock)).json() == {"status": "accepted", "jobs": 1}
+    [resident] = _resident_rows(sqlite_engine)
+    assert resident.instance_key == "1700000000.000100"
+    first_job = resident.active_job_id
+    assert first_job is not None and _jobs(sqlite_engine)[0].kind == "resident"
+    # the asking turn ends: state staged, the run finished, settle applies the write and releases the lock
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id)
+                     .values(staged={"state": {"question": "tax id", "asked": True}}))
+    _end_turn(sqlite_engine, clock, world.team, first_job)
+    with sqlite_engine.begin() as conn:
+        assert residents.settle(conn, clock()) == [resident.id]
+    [resident] = _resident_rows(sqlite_engine)
+    assert resident.active_job_id is None and len(_jobs(sqlite_engine)) == 1  # the beach: no run is open
+    assert resident.data == {"question": "tax id", "asked": True}
+    # hours later, the answer arrives as a reply in the same thread: a new event and a new turn
+    clock.advance(hours=3)
+    raw = _slack_event("Ev2", "EIN 12-3456789", ts="1700030000.000200")
+    assert lead.client.post(_path(hook), content=raw, headers=_slack(raw, clock)).json() == {"status": "accepted", "jobs": 1}
+    [resident] = _resident_rows(sqlite_engine)  # still one instance for the thread
+    second_job = resident.active_job_id
+    assert second_job not in (None, first_job)
+    [job] = [j for j in _jobs(sqlite_engine) if j.id == second_job]
+    assert job.kind == "resident" and job.inputs["_resident"]["state"] == {"question": "tax id", "asked": True}
+    assert [(e.seq, e.kind, e.payload["event"]["text"]) for e in _inbox(sqlite_engine, resident.id)] == [
+        (1, "request", "what is the vendor's tax id?"), (2, "request", "EIN 12-3456789")]

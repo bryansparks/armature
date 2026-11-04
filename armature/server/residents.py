@@ -238,6 +238,15 @@ def _spec(conn: Connection, resident: Any) -> ResidentCfg | None:
     return _cfg(_resident_block(_pinned_body(conn, resident)))
 
 
+def spec_of(conn: Connection, workflow_id: str, version: int) -> ResidentCfg | None:
+    """The resident config a workflow version carries, or None when it has none to route to.
+
+    The router reads the workflow's current version here, as a delivery routes to the instance
+    ``ensure`` would create at that version.
+    """
+    return _cfg(_resident_block(defs.body_of(conn, defs.WORKFLOW, workflow_id, version)))
+
+
 def _handler(spec: ResidentCfg, event: Any) -> Any:
     """The handler config an event's kind maps to, or None when the spec names none for it.
 

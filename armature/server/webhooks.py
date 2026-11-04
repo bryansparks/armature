@@ -33,7 +33,9 @@ from armature.server import (
     conversations,
     gatecards,
     rbac,
+    residents,
     threads,
+    worker,
 )
 from armature.server import secrets as secret_store
 from armature.server.auth import safe_equal
@@ -48,6 +50,9 @@ from armature.server.db.schema import (
     webhook_deliveries,
     webhooks,
     workflows,
+)
+from armature.server.db.schema import (
+    residents as resident_rows,
 )
 from armature.server.defs import WORKFLOW, body_of, detach_triggers
 from armature.server.dryrun import INPUT_NAME
@@ -85,7 +90,7 @@ OPS = ("eq", "ne", "in", "not_in", "starts_with", "contains", "exists", "missing
 VALUE_OPS = ("eq", "ne", "in", "not_in", "starts_with", "contains")
 TEXT_OPS = ("starts_with", "contains")
 RULE_KEYS = ("order", "stop", "shadow", "dry", "events", "event_from", "conditions", "project_from", "inputs",
-             "secrets", "thread", "conversation", "import_hash", "key", "concurrency", "debounce_seconds",
+             "secrets", "thread", "conversation", "resident", "import_hash", "key", "concurrency", "debounce_seconds",
              "cancel_running", "sticky", "cancel_only")
 IMPORT_HASH = re.compile(r"^[0-9a-f]{64}$")
 CONCURRENCY = ("none", "queue", "supersede")
@@ -357,12 +362,16 @@ def check_rule(config: Any) -> dict[str, Any]:
     if not isinstance(order, int) or isinstance(order, bool):
         raise WebhookError(400, "order must be an integer.")
     out: dict[str, Any] = {"order": order}
-    for flag in ("stop", "shadow", "dry", "conversation"):
+    for flag in ("stop", "shadow", "dry", "conversation", "resident"):
         if not isinstance(config.get(flag, False), bool):
             raise WebhookError(400, f"{flag} must be true or false.")
         out[flag] = config.get(flag, False)
     if not out["conversation"]:
         del out["conversation"]
+    if not out["resident"]:
+        del out["resident"]
+    if out.get("conversation") and out.get("resident"):
+        raise WebhookError(400, "A rule routes to a conversation or a resident, not both.")
     events = config.get("events", [])
     if not isinstance(events, list) or len(events) > EVENTS_MAX or not all(
             isinstance(e, str) and 0 < len(e) <= EVENT_MAX for e in events):
@@ -430,8 +439,8 @@ def _check_concurrency(config: dict[str, Any], out: dict[str, Any]) -> dict[str,
     if config.get("cancel_only"):
         if "key" not in found:
             raise WebhookError(400, "cancel_only needs a key.")
-        if config.get("conversation"):
-            raise WebhookError(400, "cancel_only can't be a conversation rule.")
+        if config.get("conversation") or config.get("resident"):
+            raise WebhookError(400, "cancel_only can't be a conversation or resident rule.")
         found["cancel_only"] = True
     if sticky:
         found["sticky"] = sticky
@@ -513,6 +522,32 @@ def ordered(rules: list[Any]) -> list[Any]:
     return sorted(rules, key=lambda r: ((r.config or {}).get("order", 0), r.created_at, r.id))
 
 
+def _resident_target(conn: Connection, workflow_id: str, version: int, payload: Any) -> dict[str, Any] | str:
+    """A resident rule's routing target for one delivery, or the reason the delivery doesn't match.
+
+    The workflow's current version carries the ``resident:`` block whose ``instance_key`` template
+    names the instance, rendered against ``event.payload`` in the same sandbox the trigger path
+    renders its templates in. A template that renders empty routes nothing — a keyed resident never
+    collapses onto the singleton at key ``""`` — and a spec with no ``instance_key`` routes every
+    delivery to the singleton by design. With ``resident.enabled`` off the rule still matches and
+    records its decision but routes nothing: the rollback gate.
+    """
+    cfg = residents.spec_of(conn, workflow_id, version)
+    if cfg is None:
+        return "the workflow's current version has no resident: block"
+    key = ""
+    if cfg.instance_key:
+        try:
+            key = text_env(ChainableUndefined).from_string(cfg.instance_key).render(
+                {"event": {"payload": payload if isinstance(payload, dict) else {}}}).strip()
+        except (TemplateError, TypeError, ValueError):
+            key = ""
+        if not key:
+            return "its instance_key rendered empty for this payload"
+    return {"enabled": bool(worker._instance_setting(conn, residents.ENABLED_KEY)),
+            "instance_key": key, "payload": payload}
+
+
 def _decide(conn: Connection, team_id: str, source: str, rule: Any, event: str | None,
             payload: Any) -> dict[str, Any]:
     config = rule.config or {}
@@ -567,6 +602,16 @@ def _decide(conn: Connection, team_id: str, source: str, rule: Any, event: str |
                     thread=render_thread(config.get("thread"), payload, source))
     if message is not None:
         decision["conversation"] = message
+    if config.get("resident"):
+        target = _resident_target(conn, rule.workflow_id, workflow.current_version, payload)
+        if isinstance(target, str):
+            decision["matched"] = False
+            decision["reason"] = target
+            return decision
+        decision["resident"] = target
+        if not target["enabled"]:
+            decision["reason"] = "residents are not enabled on this instance"
+            return decision
     head = lookup(payload, PR_HEAD) if workflow.kind == "review" else None
     if isinstance(head, str) and marks.mark_of(conn, project_id, head) is not None:
         # The review's own review.marked step checks again against GitHub, so a stale payload only costs a run.
@@ -583,7 +628,11 @@ def _decide(conn: Connection, team_id: str, source: str, rule: Any, event: str |
 
 def evaluate(conn: Connection, team_id: str, source: str, rules: list[Any], event: str | None,
              payload: Any) -> list[dict[str, Any]]:
-    """One decision per rule, in rule order. Rules after a matching stop rule are skipped, unless it is in shadow."""
+    """One decision per rule, in rule order. Rules after a matching stop rule are skipped, unless it is in shadow.
+
+    A resident rule that matched while residents are off is inert — it records its decision and
+    routes nothing — so it stops nothing either, exactly as a shadow rule stops nothing.
+    """
     decisions = []
     stopped = False
     for rule in ordered(rules):
@@ -596,7 +645,8 @@ def evaluate(conn: Connection, team_id: str, source: str, rules: list[Any], even
             continue
         decision = _decide(conn, team_id, source, rule, event, payload)
         decisions.append(decision)
-        stopped = decision["matched"] and decision["stop"] and not decision["shadow"]
+        inert = decision.get("resident", {}).get("enabled") is False
+        stopped = decision["matched"] and decision["stop"] and not decision["shadow"] and not inert
     return decisions
 
 
@@ -616,6 +666,39 @@ def started_by(conn: Connection, workflow_id: str, access: rbac.Access) -> list[
              "shadow": bool((r.config or {}).get("shadow")),
              "enabled": bool(r.enabled and r.webhook_enabled and r.approval == "approved")}
             for r in rows if rbac.sees_team(access, r.team_id)]
+
+
+def _resident_delivery(conn: Connection, *, team_id: str, delivery_id: str, decision: dict[str, Any],
+                       now: datetime) -> dict[str, Any]:
+    """What a resident rule's delivery records: the event it routed, or why it routed nothing.
+
+    The delivery becomes a ``request`` event on the instance its key names, ensured at the
+    workflow's current version; ``wake`` may queue the turn, which is the job the entry records,
+    as a conversation's entry records its turn. A duplicate delivery id collapses in the inbox, a
+    closed instance skips the delivery rather than failing it, and with residents disabled on the
+    instance the rule records its match and routes nothing — the rollback gate.
+    """
+    target = decision["resident"]
+    entry = {"trigger_id": decision["trigger_id"], "workflow_id": decision["workflow_id"],
+             "job_id": None, "shadow": False, "resident": True, "instance_key": target["instance_key"]}
+    if not target["enabled"]:
+        entry["inert"] = "residents are not enabled on this instance"
+        return entry
+    try:
+        resident = residents.ensure(conn, team_id=team_id, project_id=decision["project_id"],
+                                    workflow_id=decision["workflow_id"], instance_key=target["instance_key"],
+                                    now=now)
+        seq = residents.enqueue(conn, resident.id, "request", payload=target["payload"],
+                                source={"delivery_id": delivery_id, "trigger_id": decision["trigger_id"]},
+                                dedupe_key=delivery_id, dry_run=decision.get("dry", False), now=now)
+    except residents.ResidentError as exc:
+        entry["skipped"] = exc.message
+        return entry
+    entry.update(resident_id=resident.id, event_seq=seq)
+    if seq is not None:
+        entry["job_id"] = conn.execute(select(resident_rows.c.active_job_id).where(
+            resident_rows.c.id == resident.id)).scalar()
+    return entry
 
 
 def enqueue(conn: Connection, *, team_id: str, delivery_id: str, decisions: list[dict[str, Any]],
@@ -650,6 +733,10 @@ def enqueue(conn: Connection, *, team_id: str, delivery_id: str, decisions: list
                             "conversation_id": accepted["conversation_id"] if accepted else None,
                             "pending": bool(accepted and accepted.get("pending")),
                             "capped": bool(accepted and accepted.get("capped"))})
+            continue
+        if decision.get("resident") and not decision["shadow"]:
+            matched.append(_resident_delivery(conn, team_id=team_id, delivery_id=delivery_id,
+                                              decision=decision, now=now))
             continue
         if not decision["shadow"]:
             try:
@@ -1229,11 +1316,20 @@ def _check_conversation(conn: Connection, workflow_id: str, config: dict[str, An
         raise WebhookError(400, conversations.GATED)
 
 
+def _check_resident(conn: Connection, workflow_id: str, config: dict[str, Any]) -> None:
+    if config.get("resident"):
+        version = conn.execute(select(workflows.c.current_version).where(
+            workflows.c.id == workflow_id)).scalar()
+        if version is None or residents.spec_of(conn, workflow_id, version) is None:
+            raise WebhookError(400, "The workflow's current version has no resident: block.")
+
+
 def create_rule(conn: Connection, hook: Any, *, body: dict[str, Any], actor_id: str, now: datetime,
                 ip: str | None) -> Any:
     workflow = _check_workflow(conn, hook.team_id, body.get("workflow_id"))
     config = rule_config(body)
     _check_conversation(conn, workflow.id, config)
+    _check_resident(conn, workflow.id, config)
     rule_id = new_id()
     conn.execute(insert(triggers).values(id=rule_id, team_id=hook.team_id, workflow_id=workflow.id, kind=KIND,
                                          config=config, enabled=_check_enabled(body.get("enabled", True)),
@@ -1252,6 +1348,7 @@ def update_rule(conn: Connection, rule: Any, *, body: dict[str, Any], actor_id: 
     if "enabled" in body:
         values["enabled"] = _check_enabled(body["enabled"])
     _check_conversation(conn, values.get("workflow_id", rule.workflow_id), values.get("config", rule.config) or {})
+    _check_resident(conn, values.get("workflow_id", rule.workflow_id), values.get("config", rule.config) or {})
     if values:
         conn.execute(update(triggers).where(triggers.c.id == rule.id).values(**values))
         audit.record(conn, action="webhook.rule_update", actor_id=actor_id, team_id=rule.team_id,
