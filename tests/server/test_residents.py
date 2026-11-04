@@ -328,6 +328,52 @@ def test_wake_uses_instance_version_not_current(db):
     assert job.inputs["kind"] == "request"  # dispatched by the pinned spec, not the current one
 
 
+GATED = "stages:\n  - id: hold\n    gate: human\n"
+
+
+def test_wake_pauses_when_a_handler_is_gated_at_dispatch(db):
+    # The save gate can be bypassed (a gate saved onto the named handler after the spec, a gated
+    # version rolled back in): dispatch is the backstop that never runs a gated turn.
+    resident = _ensure(db)  # the default spec hands ask to the answer workflow
+    _version(db, db.answer_id, "name: answer\n" + GATED, 2)  # the gate arrives after the spec was saved
+    _add_events(db, resident.id, ["ask"])
+    assert _wake(db, resident.id) is None
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("paused", "handler_gated")
+    assert _events(db, resident.id)[0].handled is False  # kept for when the handler is ungated
+    assert _jobs_count(db) == 0
+    _version(db, db.workflow_id, "name: bot\nresident:\n  on:\n    request: {workflow: self}\n" + GATED, 2)
+    pinned = _ensure(db, instance_key="acme")  # a new instance pins the gated version directly
+    _add_events(db, pinned.id, ["request"])
+    assert _wake(db, pinned.id) is None
+    assert (_resident(db, pinned.id).state,
+            _resident(db, pinned.id).close_reason) == ("paused", "handler_gated")
+    assert _jobs_count(db) == 0
+
+
+def test_unresolvable_handler_poisons_and_drains(db):
+    # A handler naming no workflow in scope counts one attempt per wake, and past MAX_ATTEMPTS
+    # the batch is given up as poison — handled, audited — so the events behind it still turn.
+    _version(db, db.workflow_id,
+             "name: bot\nresident:\n  on:\n    request: {workflow: ghost}\n"
+             "    signal: {workflow: self}\nstages: []\n", 2)
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request", "signal"])
+    for attempt in range(1, residents.MAX_ATTEMPTS):
+        assert _wake(db, resident.id) is None
+        assert _events(db, resident.id)[0].attempts == attempt
+    job_id = _wake(db, resident.id)  # the last attempt poisons the batch; the signal behind turns
+    job = _job(db, job_id)
+    assert (job.inputs["kind"], job.inputs["event_seq_from"]) == ("signal", 2)
+    events = _events(db, resident.id)
+    assert (events[0].kind, events[0].attempts, events[0].handled) == ("request", residents.MAX_ATTEMPTS, True)
+    assert events[1].handled is False  # the signal is turned by the job, not skipped
+    with db.engine.connect() as conn:
+        poison = conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.event_poison")).all()
+    assert poison == [(resident.id, {"job_id": None, "seq": [1]})]
+
+
 def test_inputs_carry_event_and_resident_snapshot(db):
     resident = _ensure(db)
     with db.engine.begin() as conn:
@@ -364,6 +410,32 @@ def test_budget_pause_when_spent_exceeds_usd_per_day(db):
             spent_usd_day=9_876_543, spent_day="2026-10-22"))
     assert _wake(db, yesterday.id) is not None
     assert _resident(db, yesterday.id).state == "idle"
+
+
+def test_budget_pause_survives_enqueue_until_the_sweep_resumes(db):
+    # An event landing on a paused instance must not roll its budget day over: the sweep finds
+    # the pause through yesterday's spent_day stamp, so the enqueue-triggered wake leaves it be.
+    body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+            "  budget: {usd_per_day: 1.0}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request"])
+    with db.engine.begin() as conn:  # yesterday's budget closed the instance
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            state="paused", close_reason="budget", spent_usd_day=1_500_000,
+            spent_day=db.clock().date().isoformat()))
+    db.clock.advance(days=1)
+    with db.engine.begin() as conn:  # a new event lands before the sweep runs
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("paused", "budget")
+    assert row.spent_day != db.clock().date().isoformat()  # the stale stamp is what the sweep matches on
+    residents.sweep(db.engine, db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("idle", None)  # the sweep resumed it
+    assert row.active_job_id is not None  # and the events that waited out the pause now turn
+    job = _job(db, row.active_job_id)
+    assert (job.inputs["kind"], job.inputs["event_seq_from"], job.inputs["event_seq_to"]) == ("request", 1, 2)
 
 
 def test_close_after_idle_closes(db):

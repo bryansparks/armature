@@ -170,6 +170,11 @@ def _pause(conn: Connection, resident: Any, reason: str, now: datetime) -> None:
                  target_kind="resident", target_id=resident.id, detail={"reason": reason})
 
 
+def _pinned_body(conn: Connection, resident: Any) -> str | None:
+    """The workflow body an instance is pinned to — the spec its turns read and run."""
+    return defs.body_of(conn, defs.WORKFLOW, resident.workflow_id, resident.workflow_version)
+
+
 def _spec(conn: Connection, resident: Any) -> ResidentCfg | None:
     """The instance's resident config, read from the workflow version it is pinned to. Or None.
 
@@ -177,8 +182,7 @@ def _spec(conn: Connection, resident: Any) -> ResidentCfg | None:
     or never parsed — and an instance that would turn on it pauses until a version brings the
     block back; it never guesses a handler.
     """
-    body = defs.body_of(conn, defs.WORKFLOW, resident.workflow_id, resident.workflow_version)
-    block = _resident_block(body)
+    block = _resident_block(_pinned_body(conn, resident))
     if block is None:
         return None
     try:
@@ -284,15 +288,20 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
     pinned at its current version like a call), how many events one turn batches, and the
     lifetime and budget caps, which close or pause with a reason as they fire. A kind with no
     handler drains as skipped — handled, never turned — so the inbox always moves. An instance
-    whose pinned version lost its resident: block pauses until a version brings it back; a
-    callee that doesn't resolve counts one attempt against the batch and turns nothing.
+    whose pinned version lost its resident: block pauses until a version brings it back. A
+    handler with a human gate pauses the instance instead of turning (the save path refuses
+    one, but a gate can arrive after the spec); a handler that doesn't resolve counts one
+    attempt against the batch, and past ``MAX_ATTEMPTS`` the batch is given up as poison and
+    the events behind it turn.
     """
     resident = _locked(conn, resident_id)
     if resident is None:
         return None
-    fresh = _day_reset(conn, resident, now)
+    # The day's counters roll over only for an instance that may turn: a paused row keeps its
+    # stale spent_day stamp, which is exactly what the sweep's budget resume matches on.
     if resident.state != "idle" or resident.active_job_id is not None:
         return None
+    fresh = _day_reset(conn, resident, now)
     events = _unhandled(conn, resident_id)
     if not events:
         return None
@@ -318,42 +327,63 @@ def wake(conn: Connection, resident_id: str, now: datetime) -> str | None:
     if cap is not None and spent >= round(cap * 1_000_000):
         _pause(conn, resident, "budget", now)  # the sweep resumes it when the day rolls over
         return None
-    while events:  # kinds with no handler drain as skipped, so the next-oldest event turns
-        handler = _handler(spec, events[0])
-        if handler is not None:
+    while True:
+        while events:  # kinds with no handler drain as skipped, so the next-oldest event turns
+            handler = _handler(spec, events[0])
+            if handler is not None:
+                break
+            conn.execute(update(resident_events).where(
+                resident_events.c.id == events[0].id).values(handled=True))
+            events = events[1:]
+        if not events:
+            return None
+        batch = [events[0]]
+        for event in events[1:]:
+            following = _handler(spec, event)
+            if len(batch) >= spec.batch or following is None or following.workflow != handler.workflow:
+                break
+            batch.append(event)
+        where = _handler_key(batch[0])
+        try:
+            if handler.workflow == "self":
+                if worker.gated(_pinned_body(conn, resident)):  # the body this turn would run
+                    _pause(conn, resident, "handler_gated", now)
+                    return None
+                workflow_id, version = resident.workflow_id, resident.workflow_version
+            else:
+                scope = conn.execute(select(workflows.c.scope).where(
+                    workflows.c.id == resident.workflow_id)).scalar()
+                workflow_id = _named(conn, scope, handler.workflow, where)
+                if _gated_now(conn, workflow_id):  # the version queue_job would pin
+                    _pause(conn, resident, "handler_gated", now)
+                    return None
+                version = None
+            job_id = worker.queue_job(conn, team_id=resident.team_id, project_id=resident.project_id,
+                                      workflow_id=workflow_id, workflow_version=version,
+                                      kind=RESIDENT_JOB_KIND, resident_id=resident_id,
+                                      key=f"resident:{resident_id}",
+                                      thread=f"resident:{resident.instance_key}" if resident.instance_key else "resident",
+                                      inputs=_inputs(resident, batch),
+                                      dry_run=batch[0].dry_run, now=now)
             break
-        conn.execute(update(resident_events).where(
-            resident_events.c.id == events[0].id).values(handled=True))
-        events = events[1:]
-    if not events:
-        return None
-    batch = [events[0]]
-    for event in events[1:]:
-        following = _handler(spec, event)
-        if len(batch) >= spec.batch or following is None or following.workflow != handler.workflow:
-            break
-        batch.append(event)
-    where = _handler_key(batch[0])
-    try:
-        if handler.workflow == "self":
-            workflow_id, version = resident.workflow_id, resident.workflow_version
-        else:
-            scope = conn.execute(select(workflows.c.scope).where(
-                workflows.c.id == resident.workflow_id)).scalar()
-            workflow_id, version = _named(conn, scope, handler.workflow, where), None
-        job_id = worker.queue_job(conn, team_id=resident.team_id, project_id=resident.project_id,
-                                  workflow_id=workflow_id, workflow_version=version,
-                                  kind=RESIDENT_JOB_KIND, resident_id=resident_id,
-                                  key=f"resident:{resident_id}",
-                                  thread=f"resident:{resident.instance_key}" if resident.instance_key else "resident",
-                                  inputs=_inputs(resident, batch),
-                                  dry_run=batch[0].dry_run, now=now)
-    except ValueError:
-        log.warning("resident %s: its handler for %s doesn't resolve", resident_id, where)
-        conn.execute(update(resident_events).where(
-            resident_events.c.id.in_([e.id for e in batch])).values(
-            attempts=resident_events.c.attempts + 1))
-        return None
+        except ValueError:
+            log.warning("resident %s: its handler for %s doesn't resolve", resident_id, where)
+            conn.execute(update(resident_events).where(
+                resident_events.c.id.in_([e.id for e in batch])).values(
+                attempts=resident_events.c.attempts + 1))
+            poison = list(conn.execute(select(resident_events.c.seq).where(
+                resident_events.c.id.in_([e.id for e in batch]),
+                resident_events.c.attempts >= MAX_ATTEMPTS)).scalars())
+            if not poison:
+                return None
+            conn.execute(update(resident_events).where(
+                resident_events.c.id.in_([e.id for e in batch]),
+                resident_events.c.seq.in_(poison),
+                resident_events.c.handled.is_(False)).values(handled=True))
+            audit.record(conn, action="resident.event_poison", actor_id=None, team_id=resident.team_id,
+                         target_kind="resident", target_id=resident.id,
+                         detail={"job_id": None, "seq": poison})
+            events = _unhandled(conn, resident_id)  # the poison drained; the next-oldest turns
     # Changing updated_at too keeps the guard a real change, as MySQL counts only changed rows.
     taken = conn.execute(update(residents).where(residents.c.id == resident_id,
                                                  residents.c.active_job_id.is_(None),
