@@ -449,9 +449,10 @@ def _inert(engine: Engine, trigger: Any, *, started: datetime, now: datetime,
            ms: Callable[[], int]) -> dict[str, Any]:
     """Record a resident trigger's run as a no-op while residents are disabled on the instance.
 
-    Nothing is marked and nothing is routed, so an issue or schedule that came due while the
-    setting was off is picked up by the first run after it comes back on — the rollback gate,
-    the same one a resident webhook rule rides.
+    Nothing is marked and nothing is routed. An issue stays unseen, so the first poll after the
+    setting comes back picks it up; a schedule's due occurrence is not made up — the claim that
+    let this run in already moved next_run_at past it, so it is skipped, the same one-shot
+    contract any firing owes. The rollback gate, the same one a resident webhook rule rides.
     """
     with engine.begin() as conn:
         _record(conn, trigger.id, started=started, now=now, status="skipped", error=RESIDENTS_OFF,
@@ -891,8 +892,11 @@ def requeue(engine: Engine, keyring: Keyring, row: Any, *, key: Any, actor_id: s
     """Queue a seen key again, as ops re-queues parked work past its mark."""
     _poll_trigger(row)
     key = _check_key(key)
-    if (row.config or {}).get("shadow"):
+    config = row.config or {}
+    if config.get("shadow"):
         raise TriggerError(409, "A shadow trigger queues nothing. Turn shadow off first.")
+    if config.get("resident"):
+        raise TriggerError(409, "A resident trigger routes its issues to resident instances, not jobs.")
     throttle(row.id, now)
     connection = _connected(engine, row)
     found = _vendor(lambda: fetch(keyring, connection, row, only=key, transport=transport))

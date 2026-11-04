@@ -262,6 +262,8 @@ def _fork(request: Request, session: Session, kind: defs.Kind, object_id: str, p
         require_step_up(request, session)
         forked = defs.fork(conn, kind, row, access=access, dest=dest, name=payload.name, actor_id=session.user_id,
                            now=srv.now(), ip=client_ip(request), catalog=_catalog(request))
+        if kind is defs.WORKFLOW:
+            _sync_schedule(conn, forked, srv.now())
         return {kind.object_kind: _item(conn, kind, forked, access)}
 
 

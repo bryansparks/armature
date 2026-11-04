@@ -682,3 +682,36 @@ def test_two_servers_fire_one_resident_schedule_once(sqlite_engine, keyring, clo
     assert second.claim_due(clock()) == []
     assert pollers.run(sqlite_engine, keyring, trigger.id, now=clock(), due=due)["fired"] == 2
     assert len(_events(sqlite_engine)) == 2  # one schedule event per open instance, fired once
+
+
+def _fork(who, world, name):
+    response = _post(who, f"/api/workflows/{world.workflow}/fork",
+                     {"scope_kind": "project", "scope_id": world.project, "name": name})
+    assert response.status_code == 201, response.text
+    return response.json()["workflow"]["id"]
+
+
+def test_a_fork_carries_its_parents_schedule_and_a_plain_fork_carries_none(
+        sqlite_engine, keyring, clock, world, admin):
+    plain = _fork(admin, world, "plain")
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(triggers).where(triggers.c.workflow_id == plain)).all() == []
+    _resident_spec(sqlite_engine, clock, world, admin)
+    forked = _fork(admin, world, "forked")
+    with sqlite_engine.connect() as conn:
+        [row] = conn.execute(select(triggers).where(triggers.c.workflow_id == forked)).all()
+    assert row.kind == "schedule" and row.team_id == world.team
+    assert row.config == {"resident": True, "cron": "*/5 * * * *", "timezone": "UTC"}
+    assert _state(sqlite_engine, row.id).next_run_at == datetime(2026, 10, 23, 12, 5, tzinfo=UTC)
+
+
+def test_requeue_is_refused_on_a_resident_trigger(sqlite_engine, keyring, clock, world, admin, jira):
+    _resident_spec(sqlite_engine, clock, world, admin)
+    poll = _create(sqlite_engine, clock, world, seed_first=False, resident=True)
+    _ensure(sqlite_engine, clock, world)
+    jira.keys = ["ENG-1"]
+    _run(sqlite_engine, keyring, clock, poll, jira)
+    clock.advance(seconds=11)
+    response = _post(admin, f"/api/triggers/{poll.id}/requeue", {"key": "ENG-1"})
+    assert response.status_code == 409, response.text
+    assert "resident" in response.json()["error"]
