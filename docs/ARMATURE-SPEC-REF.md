@@ -17,6 +17,7 @@ closure:                     # optional: name the stage whose output declares th
   stage: final_report
 mission_source: static       # static | work_unit — where the mission context renders from
 requires: [llm, git]         # optional: runner capabilities a server job needs (llm, git, claude-code, platform:ios)
+resident:                    # optional: long-lived instances + idle loop (server) — see `resident:` below
 ```
 
 ---
@@ -1036,6 +1037,83 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 
 ---
 
+## resident:
+
+```yaml
+resident:                          # omit → a plain run-once workflow (all defaults moot)
+  instance_key: "{{ event.payload.vendor_id }}"
+                                   # a stored template of dotted refs into event.payload
+                                   # (dotted or indexed only — the sandboxed-template rule);
+                                   # omit → one singleton instance with the empty key
+  concurrency: 1                    # turns per instance at once; 1 is the default and the v1 limit
+  batch: 10                         # max events one turn handles; whole numbers 1–100
+  state:
+    schema:                         # optional inline JSON-Schema dict (not a filename);
+      type: object                  # validated on every staged write and again at settle
+      required: [vendor_id]
+      properties:
+        vendor_id: {type: string}
+    max_bytes: 16384                # state size cap; 1024–65536
+    publish: [metrics]              # top-level keys `read` serves; default []
+  on:                               # event kind → handler; keys: request | ask | schedule |
+    request:  { workflow: self }     # signal | custom.<name> (idle lives under idle:, not on:)
+    ask:      { workflow: intake-answer }   # "self" or a stored workflow name,
+    schedule: { cron: "0 6 * * *", timezone: America/Denver, workflow: self }
+                                    # cron: five fields; timezone: a zone name, default UTC
+    signal:   { workflow: self }
+    custom.merged: { workflow: self }
+  idle:                             # omit → the instance never turns between events
+    after: 30m                      # required; durations: 30m | 12h | 30d | 1d12h
+    workflow: self                  # the idle handler; "self" or a stored workflow name
+    budget_usd_per_day: 2.0         # idle spend cap per UTC day
+    max_turns_per_day: 24           # idle turn cap per UTC day
+    backoff_factor: 2.0             # nothing_to_do widens the gap: after × factor^streak
+    backoff_max: 12h                # required; the widened gap never passes it
+  lifetime:
+    close_after_idle: 30d           # no real events this long → closed
+    max_turns: 5000                 # turns cap; the server caps at 5000 when unset
+  close_on:
+    signal: pr_merged               # a named signal/custom event that closes the instance
+                                    # with no turn spent (close_reason "close_on")
+  budget:
+    usd_per_day: 25.00              # all turns of one instance per UTC day; default none
+```
+
+Every sub-block forbids extra fields, so a typo fails the load instead of
+configuring nothing. Server-side, on save: no handler — self, named, or the
+idle workflow — may have a `human` gate (a turn must end when it answers), and
+a named handler must resolve in the workflow's own scope (it is pinned like a
+`call:`). Design, behavior, and the API surface: `docs/RESIDENT-WORKFLOWS.md`
+and the user guide's resident section.
+
+Worked example (`examples/residents/housekeeping.yml`, trimmed — a singleton
+whose idle handler keeps its published metrics fresh, so `read` stays free):
+
+```yaml
+name: housekeeping
+resident:
+  state:
+    max_bytes: 4096
+    publish: [metrics]     # the keys `read` serves; housekeeping's whole point
+  idle:
+    after: 30m             # inbox empty this long → an idle turn may run
+    backoff_max: 12h        # nothing_to_do reports widen the gap, never past this
+    budget_usd_per_day: 0.50
+    max_turns_per_day: 24
+
+stages:
+  - id: refresh_metrics
+    adapter: resident/state.patch
+    with:
+      patch:
+        metrics:
+          turns: "{{ _resident.meta.turns }}"
+          idle_streak: "{{ _resident.meta.idle_streak }}"
+    depends_on: []
+```
+
+---
+
 ## Validation Error Codes
 
 | Code | Fix |
@@ -1097,6 +1175,14 @@ Used by `armature improve` and `SelfImproveRunner`. Set `n_proposals` on `SelfIm
 | `WORKFLOW_NOT_REGISTERED` | mission validation: a path-like `workflow:` doesn't resolve |
 | `WORKFLOW_UNVERIFIED_NAME` *(warning)* | mission validation: bare workflow name resolves at the executor |
 | `MISSION_FIELD_INVALID` | mission validation: blank unit id, `max_attempts < 1`, or negative `timeout_hours` / `max_budget_usd` / `budget_usd` |
+| `RESIDENT_ON_KEY` | `resident.on` keys are request, ask, schedule, signal, or custom.\<name\> (idle lives under `resident.idle`) |
+| `RESIDENT_WORKFLOW` | a `resident.on`/`idle` handler must be `self` or a valid workflow name |
+| `RESIDENT_SCHEDULE` | `resident.on.schedule.cron` needs five valid cron fields, such as `30 6 * * 1-5` |
+| `RESIDENT_TIMEZONE` | `resident.on.schedule.timezone` must be a zone name such as America/Denver |
+| `RESIDENT_INSTANCE_KEY` | `resident.instance_key` must be a dotted reference into `event.payload` |
+| `RESIDENT_CONCURRENCY` | `resident.concurrency` must be 1 in v1 |
+| `RESIDENT_BATCH` | `resident.batch` must be a whole number from 1 to 100 |
+| `RESIDENT_STATE_MAX_BYTES` | `resident.state.max_bytes` must be from 1024 to 65536 |
 
 ---
 

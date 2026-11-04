@@ -80,6 +80,7 @@ This guide covers everything you need to build agentic workflows with Armature: 
 40. [Context governance](#40-context-governance)
 41. [Workflow packs (pack adapters)](#41-workflow-packs-pack-adapters)
 42. [Test runs and dry runs (server)](#42-test-runs-and-dry-runs-server)
+43. [Resident workflows (server)](#43-resident-workflows-server)
 
 ---
 
@@ -4309,6 +4310,143 @@ The platform server can execute a workflow's steps without doing real work, so a
 **Dry runs (server UI).** A **Dry run** button on a workflow page starts a test run (`POST /api/workflows/{id}/test`) that replays a past run's step outputs — plus any you supply — through stub mode. Dry-live runs execute read-only tools for real and record only writes, so the review specialists actually run and a dry run never opens a fix session. Runs stream live with a "Dry run" badge; `dry_run.max_active` (default 8) caps concurrent test runs per server.
 
 Full walkthrough: `docs/platform/DEMO.md`; deployment and reverse-proxy setup: `docs/platform/DEPLOY.md`.
+
+---
+
+## 43. Resident workflows (server)
+
+**Problem.** Some workflows should exist for a long time instead of for one run: an intake triage that answers "how many vendor contracts are waiting this week?" without rerunning anything, or one agent per PR, per issue, or per customer that wakes when work arrives and goes back to waiting. A run-per-request design spends a run every time a dashboard refreshes; a process that stays running fights the harness at every point (grants expire, crashes lose memory, idle context degrades and costs).
+
+**Solution.** A **resident workflow** is a workflow whose spec carries a `resident:` block. The server gives it a durable **instance**: an identity, bounded state that survives across runs, and an inbox of events. Every unit of work is still an ordinary, short, ephemeral run — a **turn** — and there is no long-running process: the worker's sweep settles finished turns, queues the next, and schedules housekeeping when the inbox stays empty. Design and decision record: `docs/RESIDENT-WORKFLOWS.md`.
+
+### The grammar
+
+```yaml
+name: vendor-intake
+resident:
+  instance_key: "{{ event.payload.vendor_id }}"   # omit → one singleton instance
+  batch: 10                                       # max events one turn handles
+  state:
+    max_bytes: 16384
+    publish: [metrics]                            # the top-level keys `read` serves
+  on:
+    request:  { workflow: self }                   # this workflow's own stages handle it
+    ask:      { workflow: vendor-intake-answer }   # a named stored workflow, pinned like a call
+    schedule: { cron: "0 6 * * *", timezone: America/Denver, workflow: self }
+    custom.escalated: { workflow: self }
+  idle:
+    after: 30m                                    # inbox empty this long → an idle turn may run
+    backoff_factor: 2                              # nothing_to_do reports widen the gap…
+    backoff_max: 12h                               # …never past this
+    budget_usd_per_day: 2.00
+    max_turns_per_day: 24
+  lifetime:
+    close_after_idle: 30d                          # no real events this long → closed
+    max_turns: 5000
+  close_on: { signal: pr_merged }                  # a matching signal closes the instance, no turn spent
+  budget:
+    usd_per_day: 25.00                             # all turns of one instance
+```
+
+| Field | Valid values | Default |
+|---|---|---|
+| `instance_key` | a stored template of dotted refs into `event.payload`, e.g. `"{{ event.payload.vendor_id }}"` | omitted → singleton |
+| `concurrency` | `1` (v1 limit — one turn per instance at a time) | `1` |
+| `batch` | 1–100 | `10` |
+| `state.schema` | inline JSON-Schema dict; validated on every write | none |
+| `state.max_bytes` | 1024–65536 | `16384` |
+| `state.publish` | list of top-level state keys `read` may serve | `[]` |
+| `on.<kind>.workflow` | `self` or a stored workflow name; kinds: `request`, `ask`, `schedule`, `signal`, `custom.<name>` | `self` |
+| `on.schedule.cron` / `.timezone` | five-field cron / zone name | `UTC` |
+| `idle.after` | duration (`30m`, `12h`, `30d`, `1d12h`) | required with `idle:` |
+| `idle.workflow` | `self` or a stored workflow name | `self` |
+| `idle.budget_usd_per_day` / `max_turns_per_day` | number / int | `2.0` / `24` |
+| `idle.backoff_factor` / `backoff_max` | number / duration | `2.0` / required with `idle:` |
+| `lifetime.close_after_idle` / `max_turns` | duration / int | none / server cap of 5000 |
+| `close_on.signal` | a named signal or custom-event name | — |
+| `budget.usd_per_day` | number | none |
+
+All `resident:` sub-blocks forbid extra fields, so a typo fails the load instead of configuring nothing. `armature validate` checks the grammar (`RESIDENT_*` codes); the server's save path adds the checks that need it (a handler with a `human` gate is refused — a turn must end when it answers — and named handlers must resolve in the workflow's own scope).
+
+### read vs ask
+
+Two different operations, deliberately separate:
+
+- **`read` is free.** It is served straight from the instance row — the keys `state.publish` names, plus `turns`, `data_version`, inbox depth, and state. No job, no run, no model call. Dashboards and analytics polls should hit `read`; spending a run on every refresh is the thing to avoid.
+- **`ask` is a turn.** It enqueues an `ask` event; the instance's turn answers it and the reply is recorded on the event.
+
+A turn is an ordinary job, so grants, sandboxing, safety rules, and traces all apply unchanged. Event payloads reach the model fenced as data, never as instructions. By design, event turns (`request`, `ask`, `signal`) may act on the outside world, while idle turns are kept read-only toward it — they may fetch external state, write their own state and metrics, and ask the owner a question. A turn reaches its instance only through the built-in `resident` pack adapters — `resident/events`, `resident/state.get`, `resident/state.set`, `resident/state.patch`, `resident/metrics.publish`, `resident/reply`, `resident/emit`, `resident/idle.report`, `resident/close` — and only while it holds the instance's one-turn lock. State writes are validated against `state.schema` and `max_bytes`, **staged**, and applied only if the turn succeeds; a failed or lost turn leaves state untouched and its events are re-offered (up to 3 attempts, then the event is given up as poison).
+
+### API surface
+
+All endpoints are audited and RBAC-checked; `ask` and `signal` additionally require the server setting `resident.enabled` (the feature's rollback gate).
+
+```bash
+# read: no job, no run, no cost
+curl /api/residents/{workflow}/{instance_key}/read          # published keys + counters
+curl /api/residents/{workflow}/{instance_key}/read?keys=metrics
+curl /api/residents/{workflow}                               # list instances
+
+# ask: a turn
+curl -X POST /api/residents/{workflow}/{instance_key}/ask \
+     -d '{"question": "How many contracts are waiting?"}'            # async: {event_seq, job_id}
+curl -X POST ".../ask?wait=60" -d '{"question": "…", "wait": 30}'   # sync: waits for the reply
+                                                                     # (default 30s, capped at 60s)
+
+# signal: a plain signal or a custom.* event, also a turn
+curl -X POST ".../signal" -d '{"name": "pr_merged", "payload": {...}}'
+
+# the inbox
+curl ".../events"                 # newest first
+curl ".../events?unhandled=1"     # waiting events, oldest first
+curl ".../events/{seq}"           # one event, with its reply when the turn answered
+```
+
+Admin actions (`pause`, `resume`, `close`, `upgrade`) write rows directly and work whether the feature is enabled or not. Dropping the `/…/{instance_key}/` path segment addresses the singleton instance.
+
+### The idle loop
+
+An instance with an `idle:` policy turns between events. When its inbox has fully drained, the sweep schedules the next idle turn at `last activity + after × backoff_factor^idle_streak`, capped at `backoff_max`; the slot is claimed with a compare-and-set so two servers never queue it twice. An idle turn that calls `resident/idle.report` with `nothing_to_do: true` grows the streak (longer gaps); any other report — or a real event — resets it. `budget_usd_per_day` and `max_turns_per_day` cap the loop per UTC day (past a cap the next turn is pushed to tomorrow, not dropped). Idle events never touch the lifetime counters, so `close_after_idle` fires on real silence, however healthy the idle cadence. Real work always comes first: a pending idle event is dropped when real events are waiting, and budgets fire only when a turn would actually run — a paused or over-budget instance simply holds its events.
+
+A starter resident whose idle handler refreshes its published `metrics` lives at `examples/residents/housekeeping.yml`:
+
+```yaml
+name: housekeeping
+resident:
+  state:
+    max_bytes: 4096
+    publish: [metrics]     # the keys `read` serves; housekeeping's whole point
+  idle:
+    after: 30m             # inbox empty this long → an idle turn may run
+    backoff_max: 12h        # nothing_to_do reports widen the gap, never past this
+    budget_usd_per_day: 0.50
+    max_turns_per_day: 24
+
+stages:
+  - id: refresh_metrics
+    adapter: resident/state.patch
+    with:
+      patch:
+        metrics:
+          turns: "{{ _resident.meta.turns }}"
+          idle_streak: "{{ _resident.meta.idle_streak }}"
+    depends_on: []
+```
+
+### Per-instance version pinning
+
+An instance runs the workflow version it was pinned to at its creation; later saves change nothing for it. In-flight instances drain on their own version and close on their own, and new instances pick up a newly saved version — so there is no state migration to do. The escape hatch is the admin **upgrade** action, which re-pins one instance to the workflow's current version; if the new version's `state.schema` rejects the instance's data, it is pinned and left `paused` with a migrate/reset action, never closed.
+
+### The beach pattern: ask, then wait
+
+A turn must end when it answers, so the flagship interaction never holds a slot while waiting. A keyed instance's asking turn ends — state staged, lock released, no run open — and the answer arrives hours later as a **new event**: a Slack reply, a webhook delivery routed by a rule with `resident: true`, or another workflow's `resident/emit`. That event starts a new turn, which picks up from the staged state. Because no run is ever open while waiting, grant expiry, held slots, and lock starvation are all moot.
+
+### Routing events in
+
+- **Webhook rules:** `config.resident: true` on a rule routes each delivery as a `request` event on the instance the spec's `instance_key` template names (deduped by delivery id). A rule that routes to a resident locks only the delivery row — the instance's own one-turn lock is the real serialization.
+- **Schedules:** a spec's `resident.on.schedule` is materialized as the workflow's schedule trigger automatically on every save, create, fork, and rollback — spec-owned, never edited by hand. When it fires, each open instance gets a `schedule` event.
+- **Jira/Linear polls:** the same `resident` option, with the issue key as the dedupe key.
+- **Other workflows:** the `resident/emit` adapter queues an event on another resident's instance — a bounded fan-out (chain depth 5, 10 emits per run, 50 per instance per day; refusals are audited). `close_on` closes the instance on a matching named signal with no turn spent, so a fleet closes for free when its work item closes.
 
 ---
 

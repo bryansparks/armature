@@ -1,6 +1,7 @@
 # Resident workflows: long-lived workflow instances and the idle loop
 
-Status: proposed 2026-11-03; reviewed and decided 2026-11-03 (see "Decision
+Status: implemented 2026-11-04 — phases 1–5 complete (phases 6–7 remain
+open). Proposed 2026-11-03; reviewed and decided 2026-11-03 (see "Decision
 record"). Owner: Bryan Sparks.
 
 This document is written to be handed to a planning session. It states the
@@ -183,7 +184,11 @@ resident:
   concurrency: 1                                  # turns per instance at once; 1 is the default and the v1 limit
   batch: 10                                       # max events one turn handles
   state:
-    schema: state.schema.json                     # optional JSON Schema; validated on every write
+    schema:                                     # optional inline JSON Schema; validated on every write
+      type: object
+      required: [vendor_id]
+      properties:
+        vendor_id: {type: string}
     max_bytes: 16384
     publish: [metrics]                            # top-level keys served by `read`
   on:
@@ -196,11 +201,13 @@ resident:
     workflow: vendor-intake-housekeeping
     budget_usd_per_day: 2.00
     max_turns_per_day: 24
-    backoff: { factor: 2, max: 12h }              # applied when an idle turn reports nothing_to_do
+    backoff_factor: 2                             # applied when an idle turn reports nothing_to_do
+    backoff_max: 12h                              # …and never past this
   lifetime:
     close_after_idle: 30d                         # no REAL events for this long → closed
     max_turns: 5000
-  close_on: { signal: pr_merged }                 # proposed (decision 1): matching signal closes without a turn
+  close_on: { signal: pr_merged }                 # a matching named signal/custom event closes the
+                                                  # instance with no turn spent (close_reason "close_on")
   budget:
     usd_per_day: 25.00                            # all turns of one instance
 ```
@@ -389,10 +396,13 @@ These are two different operations and must stay separate.
   metrics, for the UI.
 - **`ask`: a turn.** `POST /api/residents/{workflow}/{instance_key}/ask` with
   `{question}` enqueues an `ask` event with `reply_to` set to the request.
-  - Sync mode waits up to N seconds on the live broker (`live.py`) for
-    `resident.reply`.
-  - Async mode returns `{event_seq, job_id}` and the caller polls
-    `GET .../events/{seq}`.
+  - Async mode returns `{event_seq, job_id}` at once; the caller polls
+    `GET .../events/{seq}` for the reply the turn records, reconciling on
+    reload.
+  - Sync mode (`?wait=N`, default 30s, capped at 60s) polls the asking
+    event's row for the `resident.reply` the turn's tool writes and returns
+    the reply — or `null` when the wait runs out, leaving the caller to
+    poll the event later.
 - **`signal`:** `POST .../signal` with `{name?, payload}` (for a `custom.*` kind
   or a plain signal). Requires `run` permission on the workflow.
 
@@ -407,14 +417,20 @@ All three are audited (`audit.record`, action `resident.read|ask|signal`).
   `residents.enqueue(kind="request", dedupe_key=delivery_id)` instead of
   `queue_job`. Shadow and dry rules behave as today: shadow records the decision
   only; dry enqueues an event whose turn runs as a dry run (copy `dry_run` onto
-  the event and through to the job).
+  the event and through to the job). A resident rule locks only the delivery
+  row, so rule-level `concurrency` config means nothing for residents; the
+  instance's own one-turn lock (`active_job_id`) is the real serialization.
 - **Pollers** (`pollers.py`): a `schedule` from a resident's `on.schedule` is
   materialized as a `triggers` row of kind `schedule` with
   `config.resident = true` when the workflow version is saved or activated, so
   it reuses `trigger_state` claiming. When it fires, it enqueues a `schedule`
   event on each **open** instance (keyed residents) or the singleton. Jira and
   Linear polls get the same `config.resident` option, with the issue key as the
-  `dedupe_key`.
+  `dedupe_key`. A resident schedule trigger is **spec-owned**: the save path
+  (`routes_defs._sync_schedule`) materializes, updates, or removes it whenever
+  a version with a `resident.on.schedule` is saved, created, forked, or rolled
+  back, so users never create or edit one by hand — and requeue on a resident
+  trigger is refused (409), as its issues route to instances, not jobs.
 - **Other workflows:** the `resident.emit` tool, and a declarative stage
   `emit: {resident: vendor-intake, key: "{{ vendor_id }}", kind: signal}` if the
   plan finds that cleaner than a tool. Bounded by a per-run emit cap.
@@ -524,7 +540,9 @@ that needs a human mid-flight asks through the owner channel instead
   schema-checked. A run can't write another instance's state; `resident.emit`
   only enqueues an event, and the other instance decides what to do with it.
 - Budgets are enforced by the server in `wake()` and the idle sweep, not by the
-  model.
+  model. They fire only when a turn would actually run: a paused or
+  over-budget instance holds its events, and nothing fires on an event's
+  arrival alone.
 - `emit` fan-out is capped per run and per instance per day, to stop residents
   from waking each other in a loop. Record the causal chain in `source`, and
   refuse an event whose chain is deeper than N (default 5).
@@ -555,7 +573,7 @@ the SQL calls the engine-side tools need.
 ## Phases
 
 Each phase ends with something that runs on a live instance and has a named
-rollback, per `DESIGN.md`.
+rollback, per `DESIGN.md`. Phases 1–5 shipped 2026-11-04; 6–7 remain open.
 
 0. **Spike and decisions (no shipped code).** *Done 2026-11-03* — the decision
    record below settles the open questions; the code anchors were verified

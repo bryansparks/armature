@@ -8,6 +8,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Resident workflows.** A workflow spec can declare a `resident:` block
+  and become a long-lived **instance** on the platform server: durable
+  state, an inbox of events, and one short run — a **turn** — per batch
+  of events. There is no long-running process; the worker's sweep
+  settles finished turns, queues the next, and schedules **idle turns**
+  when the inbox stays empty (bounded by backoff and per-day budgets,
+  claimed so two servers never queue one). Turns reach their instance
+  only through the new built-in `resident` pack — events (fenced as
+  data), staged state writes validated against an inline JSON Schema
+  and applied only on success, reply, emit, idle report, close. The
+  API splits **read** (free, served from the row, for dashboards) from
+  **ask** and **signal** (turns), with keyed instances from the start
+  (one per PR, issue, vendor), admin pause/resume/close/upgrade, and
+  per-instance version pinning: an instance runs the version it was
+  created with; the admin upgrade re-pins it, pausing for a migrate
+  when the new version's state schema rejects its data. The flagship
+  "beach pattern" lands with it: a turn that asks a question ends with
+  state staged and the lock released, and the answer arrives hours
+  later as a new event that starts a new turn — no run ever open while
+  waiting. Routing: webhook rules with `resident: true` route each
+  delivery as a request event on the keyed instance, a spec's
+  `resident.on.schedule` is materialized as its schedule trigger
+  automatically (spec-owned; requeue refused), Jira/Linear polls get
+  the same option, `resident.emit` fans out to other instances under
+  chain/run/day caps, and `close_on` closes a fleet of instances on a
+  matching signal with no turn spent. Enabled by the server's
+  `resident.enabled` setting. Design: `docs/RESIDENT-WORKFLOWS.md`.
+
 ## [0.10.1] - 2026-11-02
 
 ### Changed
