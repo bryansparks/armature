@@ -16,7 +16,7 @@ from pydantic import BaseModel, StrictInt
 from sqlalchemy import Connection, and_, func, select
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import calls, defs, rbac, summary, webhooks, worker
+from armature.server import calls, defs, rbac, residents, summary, webhooks, worker
 from armature.server.app.deps import (
     Granted,
     by_project,
@@ -228,6 +228,11 @@ def _save(request: Request, session: Session, kind: defs.Kind, object_id: str, p
     with _refusals(), srv.engine.begin() as conn:
         access = _load_access(conn, session)
         row = defs.readable_row(conn, kind, object_id, access)
+        if kind is defs.WORKFLOW:
+            try:  # a resident handler with a human gate would wake a turn that can never end
+                residents.check_handlers(conn, payload.body, row.id)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
         row, validation = defs.save(conn, kind, row, access=access, body=payload.body, note=payload.note,
                                     base_version=payload.base_version, actor_id=session.user_id, now=srv.now(),
                                     ip=client_ip(request), catalog=_catalog(request))

@@ -178,7 +178,12 @@ def test_claims_stop_at_the_slot_count(sqlite_engine, keyring, clock, world, tmp
 
 def test_resident_turns_claim_through_the_real_path(sqlite_engine, keyring, clock, world, tmp_path):
     _setting(sqlite_engine, residents.ENABLED_KEY, True)
-    with sqlite_engine.begin() as conn:
+    with sqlite_engine.begin() as conn:  # the pinned version needs a resident: block to wake a turn
+        defs._add_version(conn, defs.WORKFLOW, world["workflow"], 2,
+                          "name: review\nresident:\n  on:\n    request: {workflow: self}\nstages: []\n",
+                          "seed", None, clock())
+        conn.execute(update(defs.WORKFLOW.table).where(
+            defs.WORKFLOW.table.c.id == world["workflow"]).values(current_version=2))
         resident = residents.ensure(conn, team_id=world["team"], project_id=world["project"],
                                     workflow_id=world["workflow"], instance_key="", now=clock())
         residents.enqueue(conn, resident.id, "request", now=clock())  # enqueue wakes the turn's job

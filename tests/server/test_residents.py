@@ -1,5 +1,6 @@
 """Residents and their event queue: the tables, and the jobs column that links a run to one."""
 import json
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -19,12 +20,13 @@ from armature.server.db.schema import (
     runs,
     settings,
     teams,
+    versions,
     workflows,
 )
 from armature.server.db.schema import (
     residents as resident_rows,
 )
-from tests.server.app_support import Clock
+from tests.server.app_support import Clock, add_user, make_client, mutation, sign_in_as
 
 
 def test_resident_tables_exist(engine):
@@ -39,23 +41,51 @@ def test_resident_tables_exist(engine):
     assert "resident_id" in jobs_cols
 
 
+# The workflow every fixture resident is pinned to: request/schedule/signal turn on the instance's
+# own workflow, ask hands off to the separate `answer` workflow, and custom kinds have no handler
+# until a spec says otherwise (so the skip filter has something to skip in tests).
+BOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+    ask: {workflow: answer}
+    schedule: {workflow: self}
+    signal: {workflow: self}
+  idle: {after: 30m, backoff_max: 12h}
+stages: []
+"""
+ANSWER = "name: answer\nstages: []\n"
+
+
 @pytest.fixture
 def db(engine):
     clock = Clock()
-    team, project, workflow_id = new_id(), new_id(), new_id()
+    team, project, workflow_id, answer_id = new_id(), new_id(), new_id(), new_id()
     with engine.begin() as conn:
         conn.execute(insert(teams).values(id=team, name="own", created_at=clock()))
         conn.execute(insert(projects).values(id=project, team_id=team, name="app", created_at=clock()))
-        conn.execute(insert(workflows).values(id=workflow_id, name="bot", current_version=1,
-                                             team_id=team, project_id=project, scope=project,
-                                             created_at=clock(), updated_at=clock()))
-    return SimpleNamespace(engine=engine, clock=clock, team=team, project=project, workflow_id=workflow_id)
+        for id_, name, body in ((workflow_id, "bot", BOT), (answer_id, "answer", ANSWER)):
+            conn.execute(insert(workflows).values(id=id_, name=name, current_version=1,
+                                                 team_id=team, project_id=project, scope=project,
+                                                 created_at=clock(), updated_at=clock()))
+            defs._add_version(conn, defs.WORKFLOW, id_, 1, body, "seed", None, clock())
+    return SimpleNamespace(engine=engine, clock=clock, team=team, project=project,
+                           workflow_id=workflow_id, answer_id=answer_id)
 
 
-def _ensure(db, *, instance_key=""):
+def _ensure(db, *, instance_key="", workflow_id=None):
     with db.engine.begin() as conn:
         return residents.ensure(conn, team_id=db.team, project_id=db.project,
-                                workflow_id=db.workflow_id, instance_key=instance_key, now=db.clock())
+                                workflow_id=workflow_id or db.workflow_id, instance_key=instance_key,
+                                now=db.clock())
+
+
+def _version(db, workflow_id, body, version):
+    """Save a new workflow version and make it current, so the next _ensure pins to its spec."""
+    with db.engine.begin() as conn:
+        defs._add_version(conn, defs.WORKFLOW, workflow_id, version, body, "seed", None, db.clock())
+        conn.execute(update(workflows).where(workflows.c.id == workflow_id).values(current_version=version))
 
 
 def _events(db, resident_id):
@@ -181,10 +211,17 @@ def test_wake_queues_turn_for_oldest_event(db):
     job_id = _wake(db, resident.id)
     assert job_id is not None
     job = _job(db, job_id)
-    assert (job.kind, job.resident_id, job.workflow_version) == ("resident", resident.id, 1)
+    assert (job.kind, job.resident_id, job.workflow_id, job.workflow_version) == (
+        "resident", resident.id, db.workflow_id, 1)
     assert (job.concurrency_key, job.thread) == (f"resident:{resident.id}", "resident:acme")
     assert job.inputs == {"resident_id": resident.id, "instance_key": "acme", "event_seq_from": 1,
-                          "event_seq_to": 2, "kind": "request"}
+                          "event_seq_to": 2, "kind": "request",
+                          "_event": {"kind": "request", "name": None,
+                                     "is": {"request": True, "ask": False, "schedule": False,
+                                            "signal": False, "idle": False, "custom": False}},
+                          "_resident": {"state": {}, "meta": {"turns": 0,
+                                                              "created_at": db.clock().isoformat(),
+                                                              "last_turn_at": None, "idle_streak": 0}}}
     assert _resident(db, resident.id).active_job_id == job_id
 
 
@@ -254,16 +291,174 @@ def test_wake_pins_instance_version(db):
     assert _job(db, job_id).workflow_version == 1
 
 
-def test_wake_marks_unhandled_kinds_skipped(db):
-    # Phase 1 handles every kind with the instance's own workflow; the skip filter arrives with
-    # the spec's on: handlers (Task 7). The kinds after the oldest still break the batch.
-    resident = _ensure(db)
-    _add_events(db, resident.id, ["signal", "custom", "ask"])
+def test_wake_dispatches_named_handler(db):
+    _version(db, db.answer_id, ANSWER, 3)  # the handler's current version moves on after creation
+    resident = _ensure(db)  # the default spec hands ask to the answer workflow
+    _add_events(db, resident.id, ["ask"])
     job_id = _wake(db, resident.id)
-    assert job_id is not None
     job = _job(db, job_id)
-    assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"], job.inputs["kind"]) == (1, 1, "signal")
-    assert [e.handled for e in _events(db, resident.id)] == [False, False, False]
+    assert (job.kind, job.resident_id, job.workflow_id, job.workflow_version) == (
+        "resident", resident.id, db.answer_id, 3)  # pinned to the named workflow's current version
+    assert (job.concurrency_key, job.inputs["kind"], job.inputs["_event"]["is"]["ask"]) == (
+        f"resident:{resident.id}", "ask", True)
+
+
+def test_wake_custom_kind_uses_custom_handler(db):
+    body = ("name: bot\nresident:\n  on:\n"
+            "    request: {workflow: self}\n    custom.beach: {workflow: answer}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "custom.beach", now=db.clock())
+    job = _job(db, _resident(db, resident.id).active_job_id)
+    assert (job.workflow_id, job.inputs["kind"]) == (db.answer_id, "custom")
+    assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"]) == (1, 1)
+    assert (job.inputs["_event"]["name"], job.inputs["_event"]["is"]["custom"]) == ("beach", True)
+
+
+def test_wake_uses_instance_version_not_current(db):
+    v2 = "name: bot\nresident:\n  on:\n    request: {workflow: answer}\nstages: []\n"
+    v3 = "name: bot\nresident:\n  on:\n    request: {workflow: self}\nstages: []\n"
+    _version(db, db.workflow_id, v2, 2)
+    resident = _ensure(db)  # pins version 2, whose request handler is the answer workflow
+    _version(db, db.workflow_id, v3, 3)  # the current version now handles requests itself
+    _add_events(db, resident.id, ["request"])
+    job = _job(db, _wake(db, resident.id))
+    assert (job.workflow_id, job.workflow_version) == (db.answer_id, 1)
+    assert job.inputs["kind"] == "request"  # dispatched by the pinned spec, not the current one
+
+
+def test_inputs_carry_event_and_resident_snapshot(db):
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            data={"mood": "calm"}, turns=4, idle_streak=2, last_turn_at=db.clock()))
+    _add_events(db, resident.id, ["request"])
+    inputs = _job(db, _wake(db, resident.id)).inputs
+    assert inputs["_event"] == {"kind": "request", "name": None,
+                                "is": {"request": True, "ask": False, "schedule": False,
+                                       "signal": False, "idle": False, "custom": False}}
+    assert inputs["_resident"] == {"state": {"mood": "calm"},
+                                   "meta": {"turns": 4, "created_at": db.clock().isoformat(),
+                                            "last_turn_at": db.clock().isoformat(), "idle_streak": 2}}
+
+
+def test_budget_pause_when_spent_exceeds_usd_per_day(db):
+    body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+            "  budget: {usd_per_day: 1.0}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    spent = _ensure(db)
+    _add_events(db, spent.id, ["request"])
+    with db.engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == spent.id).values(
+            spent_usd_day=1_500_000, spent_day=db.clock().date().isoformat()))
+    assert _wake(db, spent.id) is None
+    row = _resident(db, spent.id)
+    assert (row.state, row.close_reason) == ("paused", "budget")
+    assert _jobs_count(db) == 0
+    assert _events(db, spent.id)[0].handled is False  # the event waits out the pause for the sweep's resume
+    yesterday = _ensure(db, instance_key="acme")
+    _add_events(db, yesterday.id, ["request"])
+    with db.engine.begin() as conn:  # yesterday's spend is not today's: the day reset runs before the check
+        conn.execute(update(resident_rows).where(resident_rows.c.id == yesterday.id).values(
+            spent_usd_day=9_876_543, spent_day="2026-10-22"))
+    assert _wake(db, yesterday.id) is not None
+    assert _resident(db, yesterday.id).state == "idle"
+
+
+def test_close_after_idle_closes(db):
+    body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+            "  lifetime: {close_after_idle: 30d}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    resident = _ensure(db, instance_key="acme")
+    with db.engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            last_event_at=db.clock() - timedelta(days=31)))
+    _add_events(db, resident.id, ["idle"])  # a waiting idle event: lifetime measures real events only
+    assert _wake(db, resident.id) is None
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason, row.closed_at) == ("closed", "lifetime_idle", db.clock())
+    assert _jobs_count(db) == 0
+    assert _events(db, resident.id)[0].handled is False  # never turned, just outlived
+    recent = _ensure(db, instance_key="live")  # same spec, a fresh instance: turns fine
+    _add_events(db, recent.id, ["request"])
+    assert _wake(db, recent.id) is not None
+    assert _resident(db, recent.id).state == "idle"
+
+
+def test_spec_removed_pauses_instances(db):
+    plain = new_id()  # a workflow whose current version carries no resident: block
+    with db.engine.begin() as conn:
+        conn.execute(insert(workflows).values(id=plain, name="plain", current_version=1,
+                                              team_id=db.team, project_id=db.project, scope=db.project,
+                                              created_at=db.clock(), updated_at=db.clock()))
+        defs._add_version(conn, defs.WORKFLOW, plain, 1, "name: plain\nstages: []\n",
+                          "seed", None, db.clock())
+    resident = _ensure(db, workflow_id=plain)
+    _add_events(db, resident.id, ["request"])
+    assert _wake(db, resident.id) is None
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("paused", "spec_removed")
+    assert _events(db, resident.id)[0].handled is False  # kept for a version that brings the block back
+    assert _jobs_count(db) == 0
+    assert _wake(db, resident.id) is None  # already paused: waking again changes nothing
+
+
+GATED_SELF = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+              "stages:\n  - id: hold\n    gate: human\n")
+
+
+def _count_versions(db, workflow_id):
+    with db.engine.connect() as conn:
+        return conn.execute(select(func.count()).select_from(versions).where(
+            versions.c.object_kind == "workflow", versions.c.object_id == workflow_id)).scalar_one()
+
+
+def test_save_rejects_human_gate_handler(db):
+    with db.engine.begin() as conn:
+        residents.check_handlers(conn, BOT, db.workflow_id)  # ungated handlers save clean
+    with db.engine.begin() as conn, pytest.raises(ValueError, match="human gate"):
+        residents.check_handlers(conn, GATED_SELF, db.workflow_id)  # self: the gate is on the spec saved
+    with db.engine.begin() as conn:  # named: the gate is on the handler's current version
+        defs._add_version(conn, defs.WORKFLOW, db.answer_id, 2,
+                          "name: answer\nstages:\n  - id: hold\n    gate: human\n",
+                          "seed", None, db.clock())
+        conn.execute(update(workflows).where(workflows.c.id == db.answer_id).values(current_version=2))
+        with pytest.raises(ValueError, match="human gate"):
+            residents.check_handlers(
+                conn, "name: bot\nresident:\n  on:\n    ask: {workflow: answer}\nstages: []\n",
+                db.workflow_id)
+        with pytest.raises(ValueError, match="not in the caller"):  # a handler naming no real workflow
+            residents.check_handlers(
+                conn, "name: bot\nresident:\n  on:\n    ask: {workflow: ghost}\nstages: []\n",
+                db.workflow_id)
+
+
+def test_save_route_rejects_gated_handler(db, keyring):
+    client = make_client(db.engine, keyring, db.clock)
+    user_id, _ = add_user(db.engine, keyring, db.clock, "root", is_admin=True)
+    csrf = sign_in_as(client, db.engine, keyring, db.clock, user_id)
+    saved = client.post(f"/api/workflows/{db.workflow_id}",
+                        json={"body": GATED_SELF, "base_version": 1}, headers=mutation(csrf))
+    assert saved.status_code == 400
+    assert "human gate" in saved.text  # the route's own refusal, before any version is written
+    assert _count_versions(db, db.workflow_id) == 1
+
+
+def test_wake_marks_kind_without_handler_skipped(db):
+    # The default spec has no handler for a bare custom or an unnamed custom.<name>: both drain as
+    # skipped — handled with no job — and the next-oldest event is what turns.
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "custom", now=db.clock())
+        residents.enqueue(conn, resident.id, "custom.unhandled", now=db.clock())
+    assert _resident(db, resident.id).active_job_id is None  # nothing turned: no handler anywhere
+    assert [(e.kind, e.name, e.handled, e.handled_by_job) for e in _events(db, resident.id)] == [
+        ("custom", None, True, None), ("custom", "unhandled", True, None)]
+    _add_events(db, resident.id, ["signal"])
+    job_id = _wake(db, resident.id)
+    job = _job(db, job_id)
+    assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"], job.inputs["kind"]) == (3, 3, "signal")
 
 
 def test_wake_batch_cap_and_contiguity(db):
@@ -296,10 +491,10 @@ def test_wake_max_turns_closes(db):
 
 
 def test_wake_counts_attempts_when_a_callee_wont_resolve(db):
-    body = "name: bot\nstages:\n  - id: call\n    call: {workflow: missing}\n"
-    with db.engine.begin() as conn:
-        defs._add_version(conn, defs.WORKFLOW, db.workflow_id, 1, body, "seed", None, db.clock())
-    resident = _ensure(db)  # pinned to version 1, whose call does not resolve
+    body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+            "stages:\n  - id: call\n    call: {workflow: missing}\n")
+    _version(db, db.workflow_id, body, 2)
+    resident = _ensure(db)  # pinned to version 2, whose call does not resolve
     _add_events(db, resident.id, ["request", "request", "ask"])
     assert _wake(db, resident.id) is None
     assert _jobs_count(db) == 0
@@ -431,7 +626,7 @@ def test_settle_unknown_cost_counts_turn_but_not_spend(db):
 def test_settle_reschedules_and_rewakes(db):
     resident = _ensure(db)
     _add_events(db, resident.id, ["request", "ask"])
-    first = _wake(db, resident.id)  # the ask breaks the batch, so only the request turns
+    first = _wake(db, resident.id)  # the ask breaks the batch (its handler differs), so only the request turns
     assert (_job(db, first).inputs["event_seq_from"], _job(db, first).inputs["event_seq_to"]) == (1, 1)
     _finish(db, first)
     assert _settle(db) == [resident.id]
@@ -439,6 +634,7 @@ def test_settle_reschedules_and_rewakes(db):
     assert second not in (None, first)  # the ask's turn queues immediately
     job = _job(db, second)
     assert (job.inputs["event_seq_from"], job.inputs["event_seq_to"], job.inputs["kind"]) == (2, 2, "ask")
+    assert job.workflow_id == db.answer_id  # the default spec hands ask to the answer workflow
     row = _resident(db, resident.id)
     assert (row.state, row.data, row.data_version) == ("idle", {}, 0)  # nothing staged, nothing written
 
