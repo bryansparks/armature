@@ -1,8 +1,10 @@
 from __future__ import annotations
 import re
+import warnings
+from datetime import timedelta
 from enum import Enum
 from typing import Annotated, Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationInfo, model_validator
 from pydantic_core import PydanticCustomError
 
 
@@ -577,6 +579,108 @@ class ClosureConfig(BaseModel):
     stage: str
 
 
+# ── Resident workflows: the `resident:` spec grammar ──────────────────────────
+# Design: docs/RESIDENT-WORKFLOWS.md. All config classes forbid extra fields so
+# typos surface at load time instead of silently configuring nothing.
+
+_DURATION_RE = re.compile(r"^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$")
+
+
+def parse_duration(value: str) -> timedelta:
+    """Parse `30m`, `12h`, `30d`, and combinations like `1d12h` into a timedelta.
+
+    The single duration grammar for the resident block (`idle.after`,
+    `idle.backoff_max`, `lifetime.close_after_idle`). Raises ValueError for
+    anything else.
+    """
+    m = _DURATION_RE.fullmatch(value.strip())
+    if m is None or m.groups() == (None, None, None):
+        raise ValueError(
+            f"invalid duration {value!r}: use forms like 30m, 12h, 30d, or 1d12h"
+        )
+    days, hours, minutes = (int(g) if g else 0 for g in m.groups())
+    return timedelta(days=days, hours=hours, minutes=minutes)
+
+
+ResidentDuration = Annotated[
+    timedelta,
+    BeforeValidator(lambda v: parse_duration(v) if isinstance(v, str) else v),
+]
+
+
+# `schema` is the grammar's field name (docs/RESIDENT-WORKFLOWS.md). It shadows
+# pydantic's deprecated BaseModel.schema method, whose only remaining job is to
+# warn — silence that one warning at class creation, not for anything else.
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", UserWarning)
+    class ResidentStateCfg(BaseModel):
+        """Durable instance state: validated on every write, published read-only."""
+        model_config = ConfigDict(extra="forbid")
+
+        schema: dict | None = None    # inline JSON Schema; validated on every state write
+        max_bytes: int = 16384
+        publish: list[str] = Field(default_factory=list)  # top-level keys served by `read`
+
+
+class ResidentHandlerCfg(BaseModel):
+    """One event kind → the workflow that handles it."""
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: str = "self"        # "self" or a stored workflow name (pinned like a call)
+    cron: str | None = None       # schedule only: five-field cron expression
+    timezone: str = "UTC"         # schedule only: zone name such as America/Denver
+
+
+class ResidentIdleCfg(BaseModel):
+    """The idle loop: bounded background turns when the inbox stays empty."""
+    model_config = ConfigDict(extra="forbid")
+
+    after: ResidentDuration       # inbox empty this long → an idle turn may run
+    workflow: str = "self"
+    budget_usd_per_day: float = 2.0
+    max_turns_per_day: int = 24
+    backoff_factor: float = 2.0   # applied when an idle turn reports nothing_to_do
+    backoff_max: ResidentDuration
+
+
+class ResidentLifetimeCfg(BaseModel):
+    """When an instance closes on its own."""
+    model_config = ConfigDict(extra="forbid")
+
+    close_after_idle: ResidentDuration | None = None  # no REAL events this long → closed
+    max_turns: int | None = None
+
+
+class ResidentCloseOnCfg(BaseModel):
+    """A matching signal closes the instance without spending a turn."""
+    model_config = ConfigDict(extra="forbid")
+
+    signal: str
+
+
+class ResidentBudgetCfg(BaseModel):
+    """Spending cap across all of one instance's turns."""
+    model_config = ConfigDict(extra="forbid")
+
+    usd_per_day: float | None = None
+
+
+class ResidentCfg(BaseModel):
+    """The top-level `resident:` block (docs/RESIDENT-WORKFLOWS.md). Omit it and
+    the spec stays a plain run-once workflow."""
+    model_config = ConfigDict(extra="forbid")
+
+    instance_key: str | None = None  # omit → singleton; a stored template over event.payload
+    concurrency: int = 1              # turns per instance at once; 1 is the v1 limit
+    batch: int = 10                   # max events one turn handles
+    state: ResidentStateCfg = Field(default_factory=ResidentStateCfg)
+    on: dict[str, ResidentHandlerCfg] = Field(default_factory=dict)
+    idle: ResidentIdleCfg | None = None
+    lifetime: ResidentLifetimeCfg = Field(default_factory=ResidentLifetimeCfg)
+    close_on: ResidentCloseOnCfg | None = None
+    budget: ResidentBudgetCfg = Field(default_factory=ResidentBudgetCfg)
+
+
 class HarnessSpec(BaseModel):
     name: str
     version: str = "1.0"
@@ -609,6 +713,7 @@ class HarnessSpec(BaseModel):
     self_improvement: SelfImprovementConfig = Field(default_factory=SelfImprovementConfig)
     destinations: SpecDestinations | None = None  # run destinations; None → package builder infers
     closure: ClosureConfig | None = None
+    resident: ResidentCfg | None = None  # long-lived instances + idle loop; None → run-once
     # work_unit: render the mission context layer from the injected work record
     # (design §4) — slice 2 wires the runtime; the grammar lands here
     mission_source: Literal["static", "work_unit"] = "static"

@@ -20,6 +20,14 @@ if TYPE_CHECKING:
 
 _PARTITION_VAR_RE = re.compile(r"\s*\{\{\s*([A-Za-z_][A-Za-z0-9_]*)")
 
+# ── resident: block grammar (docs/RESIDENT-WORKFLOWS.md) ──────────────────────
+
+_RESIDENT_ON_KEYS = frozenset({"request", "ask", "schedule", "signal"})
+_RESIDENT_CUSTOM_ON_RE = re.compile(r"^custom\.[a-z][a-z0-9_.-]{0,63}$")
+_RESIDENT_INSTANCE_KEY_RE = re.compile(
+    r"^\{\{\s*event\.payload([.][A-Za-z_][A-Za-z0-9_]*|\[[0-9]+\]|\['[^']+'\])*\s*\}\}$"
+)
+
 
 @dataclass
 class SpecError:
@@ -238,6 +246,79 @@ def _agent_errors(spec: HarnessSpec, skill_names: Iterable[str] | None) -> list[
     return errors
 
 
+def _resident_errors(spec: HarnessSpec) -> list[SpecError]:
+    """Grammar checks for the optional `resident:` block.
+
+    Deliberately NOT checked here: named handler workflows are resolved and
+    pinned via the queue_job call path, and `human` gates need server-side
+    handler bodies (Task 7's check_handlers). Non-resident specs return [].
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    from armature.spec.calls import valid_workflow_name
+    from croniter import croniter as croniter_cls
+
+    resident = spec.resident
+    if resident is None:
+        return []
+    errors: list[SpecError] = []
+
+    def add(code: str, message: str) -> None:
+        errors.append(SpecError(code=code, message=message, stage_id=None))
+
+    # ── on: keys come from a closed set (+ custom.<name>); idle lives elsewhere ──
+    for key in resident.on:
+        if key in _RESIDENT_ON_KEYS or _RESIDENT_CUSTOM_ON_RE.fullmatch(key):
+            continue
+        hint = "; idle is configured under resident.idle, not resident.on" if key == "idle" else ""
+        add("RESIDENT_ON_KEY",
+            f"resident.on key '{key}' is not one of request, ask, schedule, "
+            f"signal, or custom.<name>{hint}")
+
+    # ── handler workflows: "self" or a valid workflow name ────────────────────
+    handlers: list[tuple[str, str]] = [(f"on.{k}", h.workflow) for k, h in resident.on.items()]
+    if resident.idle is not None:
+        handlers.append(("idle", resident.idle.workflow))
+    for where, workflow in handlers:
+        if workflow != "self" and not valid_workflow_name(workflow):
+            add("RESIDENT_WORKFLOW",
+                f"resident.{where} names workflow '{workflow}', which is not "
+                f"'self' or a valid workflow name")
+
+    # ── schedule needs a five-field cron and a real timezone ──────────────────
+    schedule = resident.on.get("schedule")
+    if schedule is not None:
+        if not isinstance(schedule.cron, str) or len(schedule.cron.split()) != 5 \
+                or not croniter_cls.is_valid(schedule.cron):
+            add("RESIDENT_SCHEDULE",
+                "resident.on.schedule needs a cron with five fields, such as '30 6 * * 1-5'")
+        try:
+            ZoneInfo(schedule.timezone)
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            add("RESIDENT_TIMEZONE",
+                f"resident.on.schedule timezone '{schedule.timezone}' is not a "
+                f"zone name such as America/Denver")
+
+    # ── instance_key is a stored template over event.payload ──────────────────
+    if resident.instance_key is not None and not _RESIDENT_INSTANCE_KEY_RE.fullmatch(resident.instance_key):
+        add("RESIDENT_INSTANCE_KEY",
+            'resident.instance_key must be a dotted reference into '
+            'event.payload, such as "{{ event.payload.vendor_id }}"')
+
+    # ── numeric limits (v1) ───────────────────────────────────────────────────
+    if resident.concurrency != 1:
+        add("RESIDENT_CONCURRENCY",
+            f"resident.concurrency must be 1 in v1 (one turn per instance at "
+            f"a time), got {resident.concurrency}")
+    if not 1 <= resident.batch <= 100:
+        add("RESIDENT_BATCH",
+            f"resident.batch must be a whole number from 1 to 100, got {resident.batch}")
+    if not 1024 <= resident.state.max_bytes <= 65536:
+        add("RESIDENT_STATE_MAX_BYTES",
+            f"resident.state.max_bytes must be from 1024 to 65536, got {resident.state.max_bytes}")
+    return errors
+
+
 def validate_spec(spec: HarnessSpec, *, strict: bool = True,
                   call_resolver: "CallResolver | None" = None,
                   skill_names: Iterable[str] | None = None) -> list[SpecError]:
@@ -305,6 +386,7 @@ def validate_spec(spec: HarnessSpec, *, strict: bool = True,
     errors.extend(_adapter_cmd_errors(spec))
     errors.extend(_call_errors(spec, call_resolver))
     errors.extend(_agent_errors(spec, skill_names))
+    errors.extend(_resident_errors(spec))
 
     # ── Stage has no execution type ────────────────────────────────────────
     for stage in spec.stages:

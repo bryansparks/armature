@@ -754,3 +754,229 @@ def test_memory_index_in_harness_keys_when_navigation_tools():
     spec.stages.append(st)
     errors = validate_spec(spec, strict=False)
     assert "UNDEFINED_SIGNATURE_INPUT" not in codes(errors)
+
+
+# ── resident: grammar + validation ────────────────────────────────────────────
+
+def _resident_spec(**overrides) -> HarnessSpec:
+    """A minimal valid spec plus a resident block; overrides land in resident."""
+    block = {
+        "instance_key": "{{ event.payload.vendor_id }}",
+        "on": {"request": {"workflow": "self"}},
+    }
+    block.update(overrides)
+    return HarnessSpec.model_validate({
+        "name": "wf", "stages": [{"id": "s", "tool_call": {"name": "t"}}],
+        "resident": block,
+    })
+
+
+def _resident_errors(spec: HarnessSpec) -> list[SpecError]:
+    return [e for e in validate_spec(spec, strict=False) if e.code.startswith("RESIDENT_")]
+
+
+def test_parse_duration_accepts_documented_forms():
+    from datetime import timedelta
+    from armature.spec.models import parse_duration
+    assert parse_duration("30m") == timedelta(minutes=30)
+    assert parse_duration("12h") == timedelta(hours=12)
+    assert parse_duration("30d") == timedelta(days=30)
+    assert parse_duration("1d12h") == timedelta(days=1, hours=12)
+    assert parse_duration("1d12h30m") == timedelta(days=1, hours=12, minutes=30)
+
+
+def test_parse_duration_rejects_garbage():
+    from armature.spec.models import parse_duration
+    for bad in ["30x", "", "m", "1.5d", "12 h", "d"]:
+        with pytest.raises(ValueError):
+            parse_duration(bad)
+
+
+def test_resident_full_block_parses():
+    """The design doc's vendor-intake example, with state.schema inline (not a
+    filename) and the flat backoff fields the brief defines."""
+    from armature.spec.models import ResidentCfg
+    block = {
+        "instance_key": "{{ event.payload.vendor_id }}",
+        "concurrency": 1,
+        "batch": 10,
+        "state": {
+            "schema": {"type": "object",
+                       "properties": {"queue": {"type": "array"}},
+                       "required": ["queue"]},
+            "max_bytes": 16384,
+            "publish": ["metrics"],
+        },
+        "on": {
+            "request": {"workflow": "self"},
+            "ask": {"workflow": "vendor-intake-answer"},
+            "schedule": {"cron": "0 6 * * *", "timezone": "America/Denver",
+                          "workflow": "vendor-intake-rollup"},
+            "signal": {"workflow": "self"},
+        },
+        "idle": {
+            "after": "30m",
+            "workflow": "vendor-intake-housekeeping",
+            "budget_usd_per_day": 2.0,
+            "max_turns_per_day": 24,
+            "backoff_factor": 2.0,
+            "backoff_max": "12h",
+        },
+        "lifetime": {"close_after_idle": "30d", "max_turns": 5000},
+        "close_on": {"signal": "pr_merged"},
+        "budget": {"usd_per_day": 25.0},
+    }
+    spec = HarnessSpec.model_validate({
+        "name": "vendor-intake",
+        "stages": [{"id": "s", "tool_call": {"name": "t"}}],
+        "resident": block,
+    })
+    assert isinstance(spec.resident, ResidentCfg)
+    from datetime import timedelta
+    assert spec.resident.idle.after == timedelta(minutes=30)
+    assert spec.resident.idle.backoff_max == timedelta(hours=12)
+    assert spec.resident.lifetime.close_after_idle == timedelta(days=30)
+    assert not _resident_errors(spec)
+
+
+def test_resident_defaults():
+    spec = _resident_spec()
+    r = spec.resident
+    assert r.concurrency == 1
+    assert r.batch == 10
+    assert r.state.max_bytes == 16384
+    assert r.state.publish == []
+    assert r.state.schema is None
+    assert r.on["request"].workflow == "self"
+    assert r.on["request"].cron is None
+    assert r.on["request"].timezone == "UTC"
+    assert r.idle is None
+    assert r.lifetime.close_after_idle is None
+    assert r.lifetime.max_turns is None
+    assert r.close_on is None
+    assert r.budget.usd_per_day is None
+
+
+def test_resident_absent_is_none():
+    assert _valid_spec().resident is None
+    assert not _resident_errors(_valid_spec())
+
+
+def test_resident_concurrency_above_one_rejected():
+    errors = _resident_errors(_resident_spec(concurrency=2))
+    assert codes(errors) == {"RESIDENT_CONCURRENCY"}
+
+
+def test_resident_idle_is_not_an_on_key():
+    errors = _resident_errors(_resident_spec(on={"idle": {"workflow": "self"}}))
+    assert "RESIDENT_ON_KEY" in codes(errors)
+
+
+def test_resident_unknown_on_key_rejected():
+    errors = _resident_errors(_resident_spec(on={"webhook": {"workflow": "self"}}))
+    assert "RESIDENT_ON_KEY" in codes(errors)
+
+
+def test_resident_custom_on_keys_accepted():
+    spec = _resident_spec(on={"custom.vendor_ping": {"workflow": "self"}})
+    assert not _resident_errors(spec)
+
+
+def test_resident_bad_custom_on_key_rejected():
+    errors = _resident_errors(_resident_spec(on={"custom.": {"workflow": "self"}}))
+    assert "RESIDENT_ON_KEY" in codes(errors)
+
+
+def test_resident_bad_cron_rejected():
+    for cron in ["0 6 * *", "not a cron", "0 6 * * * *"]:
+        errors = _resident_errors(
+            _resident_spec(on={"schedule": {"cron": cron, "workflow": "self"}}))
+        assert "RESIDENT_SCHEDULE" in codes(errors), cron
+
+
+def test_resident_schedule_requires_cron():
+    errors = _resident_errors(_resident_spec(on={"schedule": {"workflow": "self"}}))
+    assert "RESIDENT_SCHEDULE" in codes(errors)
+
+
+def test_resident_bad_timezone_rejected():
+    errors = _resident_errors(_resident_spec(
+        on={"schedule": {"cron": "0 6 * * *", "timezone": "Mars/Olympus",
+                         "workflow": "self"}}))
+    assert "RESIDENT_TIMEZONE" in codes(errors)
+
+
+def test_resident_valid_cron_timezone_pass():
+    spec = _resident_spec(on={"schedule": {"cron": "0 6 * * 1-5",
+                                           "timezone": "America/Denver",
+                                           "workflow": "self"}})
+    assert not _resident_errors(spec)
+
+
+def test_resident_bad_instance_key_rejected():
+    for key in ["{{ x }}", "{{ 'a' ~ 'b' }}", "vendor_id",
+                "{{ event.payload.vendor_id }} extra"]:
+        errors = _resident_errors(_resident_spec(instance_key=key))
+        assert "RESIDENT_INSTANCE_KEY" in codes(errors), key
+
+
+def test_resident_indexed_instance_key_accepted():
+    spec = _resident_spec(instance_key="{{ event.payload['vendor id'] }}")
+    assert not _resident_errors(spec)
+    spec = _resident_spec(instance_key="{{event.payload.rows[0].id}}")
+    assert not _resident_errors(spec)
+
+
+def test_resident_workflow_name_validated():
+    errors = _resident_errors(_resident_spec(on={"request": {"workflow": "bad name!"}}))
+    assert "RESIDENT_WORKFLOW" in codes(errors)
+    errors = _resident_errors(_resident_spec(
+        idle={"after": "30m", "workflow": "nope!!", "backoff_max": "12h"}))
+    assert "RESIDENT_WORKFLOW" in codes(errors)
+
+
+def test_resident_named_handler_workflow_accepted():
+    # engine-side does NOT resolve named handlers; the name grammar is enough
+    spec = _resident_spec(on={"request": {"workflow": "vendor-intake-answer"}})
+    assert not _resident_errors(spec)
+
+
+def test_resident_batch_bounds():
+    for bad in [0, 101]:
+        errors = _resident_errors(_resident_spec(batch=bad))
+        assert "RESIDENT_BATCH" in codes(errors), bad
+    for good in [1, 100]:
+        assert not _resident_errors(_resident_spec(batch=good))
+
+
+def test_resident_max_bytes_bounds():
+    for bad in [1023, 65537]:
+        errors = _resident_errors(_resident_spec(state={"max_bytes": bad}))
+        assert "RESIDENT_STATE_MAX_BYTES" in codes(errors), bad
+    for good in [1024, 65536]:
+        assert not _resident_errors(_resident_spec(state={"max_bytes": good}))
+
+
+def test_resident_unknown_field_rejected():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        HarnessSpec.model_validate({
+            "name": "wf", "stages": [{"id": "s", "tool_call": {"name": "t"}}],
+            "resident": {"retries": 3},
+        })
+    with pytest.raises(ValidationError):
+        HarnessSpec.model_validate({
+            "name": "wf", "stages": [{"id": "s", "tool_call": {"name": "t"}}],
+            "resident": {"idle": {"after": "30m", "factor": 2}},
+        })
+
+
+def test_resident_bad_duration_string_rejected_at_load():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        _resident_spec(idle={"after": "30x", "backoff_max": "12h"})
+
+
+def test_resident_strict_mode_raises():
+    with pytest.raises(SpecValidationError):
+        validate_spec(_resident_spec(concurrency=2), strict=True)
