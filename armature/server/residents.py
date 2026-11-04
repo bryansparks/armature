@@ -6,14 +6,18 @@ across later workflow upgrades. Events land in the inbox ordered by ``seq``, ass
 row lock exactly as conversation messages are; a duplicate ``dedupe_key`` collapses to nothing.
 Every real event refreshes the instance's lifetime: ``last_event_at`` moves up, the idle streak
 and its next idle run are cleared. A paused instance keeps its events for the resume; a closed
-one refuses them. What a turn may do with an event is decided in code, never by the model.
+one refuses them. What a turn may do with an event is decided in code, never by the model. An
+instance whose spec has an ``idle:`` policy also turns between events: the sweep schedules each
+idle turn through a compare-and-set claim, backs off while the turns report nothing to do, and
+caps the loop per UTC day — all without touching the lifetime counters, which real events
+alone keep fresh.
 """
 from __future__ import annotations
 
 import json
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -26,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from armature.server import assist, audit, defs, worker
 from armature.server.db import new_id
 from armature.server.db.schema import jobs, resident_events, residents, runs, workflows
-from armature.spec.models import ResidentCfg, ResidentStateCfg
+from armature.spec.models import ResidentCfg, ResidentIdleCfg, ResidentStateCfg
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +44,8 @@ MAX_ATTEMPTS = 3
 ENABLED_KEY = "resident.enabled"
 # The lifetime cap that closes an instance when its spec's lifetime.max_turns is unset.
 MAX_TURNS = 5000
+# How many due idle candidates one sweep pass considers, so a fleet-wide due moment stays bounded.
+IDLE_SCAN = 100
 # The tools a turn's steps call through the broker; resident.emit joins them in a later slice.
 TOOLS = ("resident.events", "resident.state.get", "resident.state.set", "resident.state.patch",
          "resident.metrics.publish", "resident.reply", "resident.idle.report", "resident.close")
@@ -76,12 +82,31 @@ def _locked(conn: Connection, resident_id: str) -> Any:
     return conn.execute(select(residents).where(residents.c.id == resident_id).with_for_update()).first()
 
 
+def _cfg(block: dict | None) -> ResidentCfg | None:
+    """The resident config a parsed ``resident:`` mapping carries, or None when it doesn't read."""
+    if block is None:
+        return None
+    try:
+        return ResidentCfg.model_validate(block)
+    except ValidationError:
+        return None
+
+
+def _version_idle(conn: Connection, workflow_id: str, version: int) -> ResidentIdleCfg | None:
+    """The idle policy of one workflow version, or None when the version carries none to run."""
+    body = defs.body_of(conn, defs.WORKFLOW, workflow_id, version)
+    cfg = _cfg(_resident_block(body))
+    return cfg.idle if cfg is not None else None
+
+
 def ensure(conn: Connection, *, team_id: str, project_id: str | None, workflow_id: str,
            instance_key: str = "", now: datetime) -> Any:
     """The workflow's resident for this key, created idle at the workflow's current version if absent.
 
     Two first events at once both try the insert, and the one that loses reads the winner's row.
-    Only a new row is audited, as the instance's creation is a governed act.
+    Only a new row is audited, as the instance's creation is a governed act. A version whose
+    resident block has an ``idle:`` policy starts its idle cadence at once: the first idle turn
+    is scheduled ``after`` the instance's creation.
     """
     row = _instance(conn, workflow_id, instance_key)
     if row is not None:
@@ -90,6 +115,7 @@ def ensure(conn: Connection, *, team_id: str, project_id: str | None, workflow_i
         workflows.c.id == workflow_id)).scalar()
     if version is None:
         raise ResidentError(404, "No such workflow.")
+    idle = _version_idle(conn, workflow_id, version)
     resident_id = new_id()
     created = False
     try:
@@ -97,7 +123,9 @@ def ensure(conn: Connection, *, team_id: str, project_id: str | None, workflow_i
             conn.execute(insert(residents).values(
                 id=resident_id, team_id=team_id, project_id=project_id, workflow_id=workflow_id,
                 workflow_version=version, instance_key=instance_key, state="idle", data={},
-                turns=0, idle_streak=0, created_at=now, updated_at=now))
+                turns=0, idle_streak=0,
+                next_idle_at=(now + idle.after) if idle is not None else None,
+                created_at=now, updated_at=now))
         created = True
     except IntegrityError:
         pass
@@ -142,6 +170,23 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
     conn.execute(update(residents).where(residents.c.id == resident_id).values(
         last_event_at=now, idle_streak=0, next_idle_at=None, updated_at=now))
     wake(conn, resident_id, now)
+    return seq
+
+
+def _enqueue_idle(conn: Connection, resident_id: str, payload: Any, *, now: datetime) -> int:
+    """Add an idle event at the next seq, on the one path that never touches the instance's lifetime.
+
+    ``enqueue``'s mirror without its side effects: no ``last_event_at`` bump, no ``idle_streak``
+    reset, no ``next_idle_at`` clear, no wake. A real event keeps an instance alive and its
+    backoff short; an idle turn is housekeeping and must do neither, or the backoff could never
+    grow past one factor and ``close_after_idle`` could never fire. The caller holds the
+    instance's row lock, as ``enqueue`` does, so the seq cannot race another insert.
+    """
+    seq = conn.execute(select(func.coalesce(func.max(resident_events.c.seq), 0)).where(
+        resident_events.c.resident_id == resident_id)).scalar_one() + 1
+    conn.execute(insert(resident_events).values(
+        id=new_id(), resident_id=resident_id, seq=seq, kind="idle", payload=payload,
+        created_at=now))
     return seq
 
 
@@ -190,13 +235,7 @@ def _spec(conn: Connection, resident: Any) -> ResidentCfg | None:
     or never parsed — and an instance that would turn on it pauses until a version brings the
     block back; it never guesses a handler.
     """
-    block = _resident_block(_pinned_body(conn, resident))
-    if block is None:
-        return None
-    try:
-        return ResidentCfg.model_validate(block)
-    except ValidationError:
-        return None
+    return _cfg(_resident_block(_pinned_body(conn, resident)))
 
 
 def _handler(spec: ResidentCfg, event: Any) -> Any:
@@ -424,6 +463,38 @@ def _reoffer(conn: Connection, resident: Any, inputs: dict, job_id: str) -> None
                          detail={"job_id": job_id, "seq": poison})
 
 
+def _next_idle_delay(idle: ResidentIdleCfg, streak: int) -> timedelta:
+    """``after × factor^streak``, capped at ``backoff_max`` — a streak of nothing-to-do widens the gap."""
+    try:
+        delay = idle.after * idle.backoff_factor ** streak
+    except OverflowError:  # a long streak can outrun the calendar before the cap catches it
+        return idle.backoff_max
+    return min(delay, idle.backoff_max)
+
+
+def _schedule_next_idle(conn: Connection, resident_id: str, now: datetime) -> None:
+    """Set the instance's next idle turn, once its inbox has fully drained and no turn runs.
+
+    Settle calls this when its re-wake comes back empty: the instance is quiescent, so the
+    sweep finds it again at ``activity + after × factor^streak``. The streak is read as settle
+    stored it; activity is the last turn, or failing that the last real event, or the creation.
+    A wake that paused or closed the instance schedules nothing — a quiet row, not a live one.
+    """
+    resident = _locked(conn, resident_id)
+    if resident is None or resident.state != "idle" or resident.active_job_id is not None:
+        return
+    if conn.execute(select(func.count()).where(
+            resident_events.c.resident_id == resident_id,
+            resident_events.c.handled.is_(False))).scalar_one():
+        return  # events still wait: real work decides when the next idle turn may run
+    spec = _spec(conn, resident)
+    if spec is None or spec.idle is None:
+        return
+    activity = resident.last_turn_at or resident.last_event_at or resident.created_at
+    conn.execute(update(residents).where(residents.c.id == resident_id).values(
+        next_idle_at=activity + _next_idle_delay(spec.idle, resident.idle_streak), updated_at=now))
+
+
 def settle(conn: Connection, now: datetime) -> list[str]:
     """Settle every turn whose job finished, then wake each instance for whatever events still wait.
 
@@ -491,24 +562,78 @@ def settle(conn: Connection, now: datetime) -> list[str]:
                 if row.run_id else None
             values["spent_usd_day"] = (0 if fresh else resident.spent_usd_day) \
                 + int(round(float(cost or 0) * 1_000_000))
-            values["idle_streak"] = 1 if staged.get("idle_nothing_to_do") else 0
+            # Nothing to do grows the streak the turn ran under — the backoff widens each time;
+            # anything else resets it, so the next idle turn returns to the base gap.
+            values["idle_streak"] = resident.idle_streak + 1 if staged.get("idle_nothing_to_do") else 0
         else:
             _reoffer(conn, resident, inputs, row.job_id)
         conn.execute(update(residents).where(residents.c.id == resident.id,
                                              residents.c.active_job_id == row.job_id).values(**values))
         if resident.state != "closed":  # a close set mid-turn is final: settle clears the lock, nothing more
-            wake(conn, resident.id, now)
+            if wake(conn, resident.id, now) is None:  # nothing turned: the idle cadence carries on from here
+                _schedule_next_idle(conn, resident.id, now)
         done.append(resident.id)
     return done
 
 
-def sweep(engine: Engine, now: datetime) -> None:
-    """The resident housekeeping the worker's tick runs: settle finished turns, then resume yesterday's pauses.
+def _claim_idle(conn: Connection, resident_id: str, now: datetime) -> bool:
+    """Take a due idle turn's slot, if no other server took it first (the pollers' claim pattern)."""
+    return conn.execute(update(residents).where(residents.c.id == resident_id,
+                                                residents.c.next_idle_at <= now)
+                        .values(next_idle_at=None, updated_at=now)).rowcount == 1
 
-    Settle first, so an instance whose turn just ended wakes for whatever still waits before the day pass
-    looks at it. The budget is daily, so the pause is too: an instance paused for ``budget`` resumes as
-    idle when its ``spent_day`` rolls over, and wakes for the events that waited out the pause. The other
-    lifetime closure lives where it belongs — ``max_turns`` in wake — and the idle scheduler slots in here.
+
+def _run_idle_turns(conn: Connection, now: datetime) -> None:
+    """Queue one idle turn for every instance whose next idle time has come due.
+
+    Each candidate is claimed with a compare-and-set on ``next_idle_at`` — two servers sweeping
+    together queue one turn, never two. The claim won, today's counters roll over before the
+    idle policy's own caps are read: past ``budget_usd_per_day`` or ``max_turns_per_day``, the
+    turn is pushed to the next UTC day, not dropped. Under the caps, the idle event is written
+    on the path that touches no lifetime counter, and wake queues the turn — where the lifetime
+    closures still get their say, as they do for any turn.
+    """
+    due = conn.execute(select(residents.c.id).where(
+        residents.c.state == "idle", residents.c.active_job_id.is_(None),
+        residents.c.next_idle_at <= now)
+        .order_by(residents.c.next_idle_at).limit(IDLE_SCAN)).scalars().all()
+    tomorrow = datetime.combine(now.date() + timedelta(days=1), dtime.min,
+                                tzinfo=now.tzinfo or timezone.utc)
+    for resident_id in due:
+        if not _claim_idle(conn, resident_id, now):
+            continue  # another server's sweep claimed the turn while this one scanned the row
+        resident = _locked(conn, resident_id)
+        if resident is None or resident.state != "idle" or resident.active_job_id is not None:
+            continue  # the row moved between the scan and the claim; its next settle reschedules it
+        spec = _spec(conn, resident)
+        if spec is None or spec.idle is None:  # the pinned version carries no idle policy to run
+            continue
+        fresh = _day_reset(conn, resident, now)  # today's counters before the day's caps are read
+        if ((0 if fresh else resident.spent_usd_day) >= round(spec.idle.budget_usd_per_day * 1_000_000)
+                or (0 if fresh else resident.idle_turns_day) >= spec.idle.max_turns_per_day):
+            conn.execute(update(residents).where(residents.c.id == resident_id).values(
+                next_idle_at=tomorrow, updated_at=now))  # the caps reset with the UTC day
+            continue
+        _enqueue_idle(conn, resident_id, {
+            "idle_streak": resident.idle_streak,
+            "since_last_event": (resident.last_event_at or resident.created_at).isoformat(),
+            "inbox_depth": conn.execute(select(func.count()).where(
+                resident_events.c.resident_id == resident_id,
+                resident_events.c.handled.is_(False))).scalar_one()}, now=now)
+        wake(conn, resident_id, now)
+
+
+def sweep(engine: Engine, now: datetime) -> None:
+    """The resident housekeeping the worker's tick runs: settle finished turns, resume yesterday's
+    pauses, then queue the idle turns that have come due.
+
+    Settle first, so an instance whose turn just ended wakes for whatever still waits before the
+    day pass looks at it. The budget is daily, so the pause is too: an instance paused for
+    ``budget`` resumes as idle when its ``spent_day`` rolls over, and wakes for the events that
+    waited out the pause. The idle scheduler runs last, so the resumed and the freshly settled
+    are idle again by then — an instance due an idle turn gets exactly one, claimed so two
+    servers never queue it twice. The other lifetime closure lives where it belongs —
+    ``max_turns`` and ``close_after_idle`` in wake.
     """
     with engine.begin() as conn:
         settle(conn, now)
@@ -520,6 +645,7 @@ def sweep(engine: Engine, now: datetime) -> None:
             conn.execute(update(residents).where(residents.c.id == resident_id).values(
                 state="idle", close_reason=None, updated_at=now))
             wake(conn, resident_id, now)  # wake rolls the day's counters over before the turn spends
+        _run_idle_turns(conn, now)
 
 
 # The tools a turn's steps call through the broker.

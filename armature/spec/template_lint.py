@@ -26,7 +26,9 @@ from armature.spec.models import HarnessSpec
 from armature.spec.validator import SpecError
 
 ALLOWED_FILTERS = frozenset({"default", "length", "lower", "upper", "trim", "int", "string", "tojson"})
-ALLOWED_PRIVATE_NAMES = frozenset({"_result", "_iteration"})
+# The harness-injected keys: fan-out's _result/_iteration and a resident turn's _event/_resident
+# (docs/RESIDENT-WORKFLOWS.md names them, so the lint lets specs reference them).
+ALLOWED_PRIVATE_NAMES = frozenset({"_result", "_iteration", "_event", "_resident"})
 
 _ALLOWED_NODES = (
     nodes.Template,

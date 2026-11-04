@@ -4,8 +4,9 @@ import json
 import re
 import threading
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,8 @@ from sqlalchemy.exc import OperationalError
 from armature.server import defs, residents, worker
 from armature.server.config import ServerConfig
 from armature.server.db import new_id
+from armature.spec.loader import load_spec
+from armature.spec.validator import validate_spec
 from armature.server.db.schema import (
     audit as audit_rows,
 )
@@ -817,6 +820,152 @@ def test_sweep_resumes_budget_paused_at_day_rollover(db):
     assert _job(db, row.active_job_id).inputs["kind"] == "request"
     still = _resident(db, same_day.id)
     assert (still.state, still.close_reason, still.active_job_id) == ("paused", "budget", None)
+
+
+# ── The idle loop: scheduled idle turns, backoff, daily caps, one claim per turn ──
+
+
+def test_idle_not_queued_before_next_idle_at(db):
+    resident = _ensure(db)
+    assert _resident(db, resident.id).next_idle_at == db.clock() + timedelta(minutes=30)  # ensure scheduled it
+    db.clock.advance(minutes=29)
+    residents.sweep(db.engine, db.clock())  # not due yet: the sweep queues nothing
+    row = _resident(db, resident.id)
+    assert row.next_idle_at == db.clock() + timedelta(minutes=1)  # the schedule stands untouched
+    assert row.active_job_id is None
+    assert _events(db, resident.id) == []
+
+
+def test_idle_backs_off_on_nothing_to_do(db):
+    resident = _ensure(db)
+    db.clock.advance(minutes=30)
+    residents.sweep(db.engine, db.clock())  # the first idle turn is due
+    job_id = _resident(db, resident.id).active_job_id
+    assert _job(db, job_id).inputs["kind"] == "idle"
+    _stage(db, resident.id, {"idle_nothing_to_do": True})
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.idle_streak == 1  # nothing to do: the streak starts
+    assert row.next_idle_at == db.clock() + timedelta(minutes=60)  # after × 2¹: the gap doubles
+    db.clock.advance(minutes=60)
+    residents.sweep(db.engine, db.clock())  # the second idle turn comes due at the doubled gap
+    job_id = _resident(db, resident.id).active_job_id
+    _stage(db, resident.id, {"idle_nothing_to_do": True})
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.idle_streak == 2
+    assert row.next_idle_at == db.clock() + timedelta(minutes=120)  # after × 2²: twice the doubled gap
+
+
+def test_real_event_resets_backoff(db):
+    resident = _ensure(db)
+    db.clock.advance(minutes=30)
+    residents.sweep(db.engine, db.clock())  # the first idle turn, with nothing to do
+    job_id = _resident(db, resident.id).active_job_id
+    _stage(db, resident.id, {"idle_nothing_to_do": True})
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)
+    _settle(db)
+    assert _resident(db, resident.id).next_idle_at == db.clock() + timedelta(minutes=60)
+    db.clock.advance(minutes=10)  # a real event lands mid-backoff
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    row = _resident(db, resident.id)
+    assert (row.idle_streak, row.next_idle_at) == (0, None)  # the streak and its schedule died with it
+    job_id = row.active_job_id
+    assert _job(db, job_id).inputs["kind"] == "request"
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)
+    _settle(db)
+    # the next idle turn goes back to the base gap: 30m, not the doubled 60m
+    assert _resident(db, resident.id).next_idle_at == db.clock() + timedelta(minutes=30)
+
+
+def test_idle_stops_at_daily_budget(db):
+    body = ("name: bot\nresident:\n  idle: {after: 10m, backoff_max: 12h, "
+            "budget_usd_per_day: 1.0, max_turns_per_day: 2}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    spent = _ensure(db)
+    capped = _ensure(db, instance_key="acme")
+    with db.engine.begin() as conn:  # today's idle spend and turn count already at their caps
+        conn.execute(update(resident_rows).where(resident_rows.c.id == spent.id).values(
+            spent_usd_day=1_000_000, spent_day=db.clock().date().isoformat()))
+        conn.execute(update(resident_rows).where(resident_rows.c.id == capped.id).values(
+            idle_turns_day=2, spent_day=db.clock().date().isoformat()))
+    db.clock.advance(minutes=10)
+    residents.sweep(db.engine, db.clock())  # due, but the day's caps are spent
+    tomorrow = datetime(2026, 10, 24, tzinfo=UTC)
+    for row_id in (spent.id, capped.id):
+        row = _resident(db, row_id)
+        assert row.active_job_id is None
+        assert row.next_idle_at == tomorrow  # pushed past the rollover, not dropped
+        assert _events(db, row_id) == []
+    db.clock.advance(hours=12)  # the day rolls over, and the caps with it
+    residents.sweep(db.engine, db.clock())
+    assert _resident(db, spent.id).active_job_id is not None  # the idle turn finally runs
+    assert _job(db, _resident(db, spent.id).active_job_id).inputs["kind"] == "idle"
+
+
+def test_two_servers_sweep_one_idle_turn(db):
+    resident = _ensure(db)
+    with db.engine.begin() as conn:  # the idle turn came due between sweeps
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id)
+                     .values(next_idle_at=db.clock() - timedelta(minutes=1)))
+    now = db.clock()
+    with db.engine.begin() as conn:  # server one claims the due idle turn
+        assert residents._claim_idle(conn, resident.id, now) is True
+    with db.engine.begin() as conn:  # server two races the same row: the claim is already taken
+        assert residents._claim_idle(conn, resident.id, now) is False
+    assert _resident(db, resident.id).next_idle_at is None
+
+
+def test_idle_event_does_not_touch_lifetime_counters(db):
+    body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
+            "  idle: {after: 30m, backoff_max: 12h}\n"
+            "  lifetime: {close_after_idle: 30d}\nstages: []\n")
+    _version(db, db.workflow_id, body, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())  # one real event
+    _finish(db, _resident(db, resident.id).active_job_id)
+    _settle(db)
+    last_real = _resident(db, resident.id).last_event_at
+    with db.engine.begin() as conn:  # the idle loop has backed off since
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            idle_streak=3, next_idle_at=db.clock() + timedelta(minutes=30)))
+    db.clock.advance(minutes=30)
+    residents.sweep(db.engine, db.clock())  # the idle turn is due; the scheduler queues it
+    row = _resident(db, resident.id)
+    assert row.last_event_at == last_real  # the idle event bumped nothing
+    assert row.idle_streak == 3  # and reset nothing
+    job_id = row.active_job_id
+    job = _job(db, job_id)
+    assert (job.inputs["kind"], job.inputs["_resident"]["meta"]["idle_streak"]) == ("idle", 3)
+    event = _events(db, resident.id)[-1]  # the request's event is handled history; the idle event waits
+    assert (event.kind, event.payload["idle_streak"],
+            event.payload["since_last_event"], event.payload["inbox_depth"]) == (
+        "idle", 3, last_real.isoformat(), 0)
+    db.clock.advance(days=31)  # the idle cadence stays healthy; no real event ever comes
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    db.clock.advance(minutes=30)  # the next idle turn comes due — and finds the instance outlived
+    residents.sweep(db.engine, db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("closed", "lifetime_idle")  # lifetime measures real events only
+
+
+def test_housekeeping_example_spec_validates():
+    example = Path(__file__).parent.parent.parent / "examples" / "residents" / "housekeeping.yml"
+    assert example.exists(), "The starter resident spec is missing"
+    spec = load_spec(example)
+    assert spec.resident is not None and spec.resident.idle is not None
+    assert spec.resident.state.publish == ["metrics"]  # read serves the metrics the idle turn recomputes
+    assert [stage.adapter for stage in spec.stages] == ["resident/state.patch"]
+    assert not [e for e in validate_spec(spec, strict=False) if e.severity == "error"]
 
 
 # The resident.* tools: a turn's only reach into its instance, staged and validated.

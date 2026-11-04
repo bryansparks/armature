@@ -1,0 +1,41 @@
+# A starter resident: one singleton instance that keeps its published metrics fresh
+# from idle turns, so `read` stays free (docs/RESIDENT-WORKFLOWS.md, The idle loop).
+#
+#   armature validate examples/residents/housekeeping.yml
+#
+# On the server, save this as the workflow's spec, set the `resident.enabled` setting, and the
+# sweep does the rest: the first idle turn runs `after` the instance is created, and each one
+# after that settles into the next slot — backing off while the handler keeps reporting
+# nothing to do, and stopping for the UTC day at the idle budget.
+name: housekeeping
+version: "1.0"
+description: >
+  A singleton resident whose idle handler recomputes the published `metrics` key, so reads
+  never spend a run. The idle loop is bounded: 30m between turns, doubled on each
+  nothing-to-do report up to 12h, and at most 24 turns or $0.50 per UTC day.
+
+resident:
+  state:
+    max_bytes: 4096
+    publish: [metrics]     # the keys `read` serves; housekeeping's whole point
+  idle:
+    after: 30m             # inbox empty this long → an idle turn may run
+    backoff_max: 12h       # nothing_to_do reports widen the gap, never past this
+    budget_usd_per_day: 0.50
+    max_turns_per_day: 24
+
+# The idle handler defaults to `workflow: self`, so this one stage is the whole turn: it
+# patches the `metrics` key from the instance's own turn context (the event payload itself
+# is read through `resident.events`, fenced as data). A real housekeeping handler would
+# recompute the metrics from state and handled events; this starter shows the wiring —
+# one stage, one staged state write, applied by settle only if it succeeds.
+stages:
+  - id: refresh_metrics
+    adapter: resident/state.patch
+    with:
+      patch:
+        metrics:
+          turns: "{{ _resident.meta.turns }}"
+          idle_streak: "{{ _resident.meta.idle_streak }}"
+          last_turn_at: "{{ _resident.meta.last_turn_at }}"
+    depends_on: []
