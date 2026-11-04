@@ -42,13 +42,13 @@ def server(monkeypatch):
 def test_the_builtin_packs_load_and_every_cmd_is_the_tool_cli():
     cat = catalog([BUILTIN_DIR])
     assert cat.errors == [] and [p.name for p in cat.packs()] == ["conversation", "github", "jira", "linear",
-                                                                  "review", "slack"]
+                                                                  "resident", "review", "slack"]
     for pack in cat.packs():
         assert pack.builtin and is_builtin(pack.dir)
         for name, adapter in pack.adapters.items():
             assert adapter.cmd == f"armature tool {pack.name}.{name}"
             assert adapter.writes == (name not in {"checkout", "history", "risk", "marked", "pushable", "get-issue",
-                                                        "permission", "pr-diff", "context"})
+                                                        "permission", "pr-diff", "context", "events", "state.get"})
 
 
 def test_a_tool_posts_its_with_and_prints_only_the_result(server, monkeypatch, capsys):
@@ -66,6 +66,14 @@ def test_a_refusal_fails_the_step_and_a_bad_name_never_reaches_the_server(server
     assert tool_cli.main(["jira.comment"]) == 1
     assert "HTTP 403: nope" in capsys.readouterr().err
     assert tool_cli.main(["../runs"]) == 2 and len(server) == 1
+
+
+def test_a_dotted_tool_name_reaches_the_server(server, monkeypatch, capsys):
+    monkeypatch.setenv(tool_cli.WITH_ENV, json.dumps({"state": {"mood": "calm"}}))
+    assert tool_cli.main(["resident.state.set"]) == 1  # the fake broker refuses it, but it reached the server
+    assert "HTTP 403: nope" in capsys.readouterr().err
+    [request] = server
+    assert str(request.url) == "https://arm.test/base/api/tools/resident.state.set"
 
 
 def test_without_a_grant_a_tool_says_it_needs_a_server_job(monkeypatch, capsys):

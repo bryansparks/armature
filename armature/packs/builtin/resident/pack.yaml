@@ -1,0 +1,101 @@
+name: resident
+version: 1.0.0
+description: >-
+  The resident instance whose turn this run is, through the server. A turn reaches only its own instance,
+  and only while it holds the turn lock. Event payloads are fenced as data, and state writes are staged,
+  validated against the spec, and applied only when the turn succeeds.
+adapters:
+  events:
+    description: >-
+      The turn's events, each payload fenced as data under a tag no event sender sees, plus the last N
+      handled ones when include_handled asks. Event payloads never reach the model unfenced.
+    cmd: armature tool resident.events
+    writes: false
+    params:
+      type: object
+      additionalProperties: false
+      properties:
+        include_handled: {type: integer, minimum: 1}
+  state.get:
+    description: >-
+      The instance's state and its data_version. A turn that staged a write reads its own write back,
+      before settle ever applies it.
+    cmd: armature tool resident.state.get
+    writes: false
+    params:
+      type: object
+      additionalProperties: false
+      properties: {}
+  state.set:
+    description: >-
+      Replace the instance's state, validated against the spec's state.schema and max_bytes. The write
+      is staged and applied by settle only if the turn succeeds; data never changes mid-turn.
+    cmd: armature tool resident.state.set
+    writes: true
+    params:
+      type: object
+      required: [state]
+      additionalProperties: false
+      properties:
+        state: {type: object}
+  state.patch:
+    description: >-
+      Merge a JSON merge patch (RFC 7386) into the instance's state: objects merge recursively, null
+      deletes a key, and anything else replaces. Validated and staged like state.set.
+    cmd: armature tool resident.state.patch
+    writes: true
+    params:
+      type: object
+      required: [patch]
+      additionalProperties: false
+      properties:
+        patch: {type: object}
+  metrics.publish:
+    description: >-
+      Merge values into the state keys the spec's state.publish names, staged like a state write. A key
+      outside the published set is refused.
+    cmd: armature tool resident.metrics.publish
+    writes: true
+    params:
+      type: object
+      required: [values]
+      additionalProperties: false
+      properties:
+        values: {type: object}
+  reply:
+    description: >-
+      Answer one event of this turn's batch, if it was sent somewhere to answer (reply_to). The reply is
+      recorded on the event for whoever asked to collect.
+    cmd: armature tool resident.reply
+    writes: true
+    params:
+      type: object
+      required: [event_seq, text]
+      additionalProperties: false
+      properties:
+        event_seq: {type: integer, minimum: 1}
+        text: {type: string, minLength: 1}
+  idle.report:
+    description: >-
+      Tell the idle policy how the idle turn went: nothing_to_do true backs the idle loop off, false
+      resets it. Staged with the turn, like a state write.
+    cmd: armature tool resident.idle.report
+    writes: true
+    params:
+      type: object
+      required: [nothing_to_do]
+      additionalProperties: false
+      properties:
+        nothing_to_do: {type: boolean}
+  close:
+    description: >-
+      Close this instance with a reason. The running turn finishes; settle clears the lock without
+      waking another, and no event turns again.
+    cmd: armature tool resident.close
+    writes: true
+    params:
+      type: object
+      required: [reason]
+      additionalProperties: false
+      properties:
+        reason: {type: string, minLength: 1, maxLength: 32}

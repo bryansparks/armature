@@ -34,7 +34,8 @@ GIT_TIMEOUT_S = 540
 GIT_HOST = "github.com"
 REMOTE_PROTOCOL = "https"
 PUSH_REF = "refs/heads/armature-push"
-TOOL = re.compile(r"^[a-z]+\.[a-z][a-z-]{0,62}$")
+# One or more dot-separated groups, so resident.state.set is as reachable as slack.post.
+TOOL = re.compile(r"^[a-z]+(?:\.[a-z][a-z-]{0,62})+$")
 REF = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$")
 DIR = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,100}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")

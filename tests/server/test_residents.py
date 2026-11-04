@@ -1,5 +1,6 @@
 """Residents and their event queue: the tables, and the jobs column that links a run to one."""
 import json
+import re
 from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -805,3 +806,249 @@ def test_sweep_resumes_budget_paused_at_day_rollover(db):
     assert _job(db, row.active_job_id).inputs["kind"] == "request"
     still = _resident(db, same_day.id)
     assert (still.state, still.close_reason, still.active_job_id) == ("paused", "budget", None)
+
+
+# The resident.* tools: a turn's only reach into its instance, staged and validated.
+
+TOOLBOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+  state:
+    schema:
+      type: object
+      required: [mood]
+      properties:
+        mood: {type: string}
+        metrics: {type: object}
+    max_bytes: 1024
+    publish: [metrics]
+stages: []
+"""
+
+VALID = {  # one good call per tool, for the loops that must reach every tool
+    "resident.events": {},
+    "resident.state.get": {},
+    "resident.state.set": {"state": {"mood": "calm"}},
+    "resident.state.patch": {"patch": {"mood": "calm"}},
+    "resident.metrics.publish": {"values": {"metrics": {"uptime": 99.5}}},
+    "resident.reply": {"event_seq": 1, "text": "done"},
+    "resident.idle.report": {"nothing_to_do": True},
+    "resident.close": {"reason": "finished"},
+}
+
+
+def _tooled(db, *, reply_to=None):
+    """A resident pinned to a state-validated spec, one request turn running over seq 1."""
+    _version(db, db.workflow_id, TOOLBOT, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", payload={"text": "watch the fence"},
+                           reply_to=reply_to, now=db.clock())
+    job_id = _resident(db, resident.id).active_job_id
+    run_id = new_id()
+    with db.engine.begin() as conn:
+        conn.execute(insert(runs).values(id=run_id, team_id=db.team, status="running", started_at=db.clock()))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(run_id=run_id))
+    return resident, job_id, run_id
+
+
+def _call(db, run_id, job, tool, params):
+    result, _ = residents.call_tool(db.engine, run_id=run_id, job=job, tool=tool, params=params,
+                                    now=db.clock())
+    return result
+
+
+def test_tools_refuse_unbound_run(db):
+    _resident, _job_id, run_id = _tooled(db)
+    with db.engine.begin() as conn:  # a job that is not the instance's turn, under the same run
+        other = worker.queue_job(conn, team_id=db.team, project_id=db.project,
+                                 workflow_id=db.workflow_id, inputs={}, now=db.clock())
+    for tool in residents.TOOLS:
+        with pytest.raises(residents.ResidentError) as raised:
+            _call(db, run_id, _job(db, other), tool, VALID[tool])
+        assert raised.value.status == 409  # the lock decides, so a foreign job reaches nothing
+    plain_run = new_id()  # a run that is no resident turn at all
+    with db.engine.begin() as conn:
+        conn.execute(insert(runs).values(id=plain_run, team_id=db.team, status="running",
+                                         started_at=db.clock()))
+        conn.execute(update(jobs).where(jobs.c.id == other).values(run_id=plain_run))
+    for tool in residents.TOOLS:
+        with pytest.raises(residents.ResidentError) as raised:
+            _call(db, plain_run, _job(db, other), tool, VALID[tool])
+        assert raised.value.status == 403
+
+
+def test_state_set_stages_and_validates(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    assert _call(db, run_id, job, "resident.state.set", {"state": {"mood": "calm"}}) == {"staged": True}
+    row = _resident(db, resident.id)
+    assert row.staged == {"state": {"mood": "calm"}}
+    assert (row.data, row.data_version) == ({}, 0)  # data is settle's to touch, never the tool's
+    with pytest.raises(residents.ResidentError) as over:  # schema-valid but over max_bytes
+        _call(db, run_id, job, "resident.state.set", {"state": {"mood": "x" * 2000}})
+    assert over.value.status == 413
+    with pytest.raises(residents.ResidentError) as bad:  # under max_bytes but schema-invalid
+        _call(db, run_id, job, "resident.state.set", {"state": {"mood": 42}})
+    assert bad.value.status == 422
+    assert _resident(db, resident.id).staged == {"state": {"mood": "calm"}}  # refusals changed nothing
+
+
+def test_state_patch_merges(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:  # the applied state the patch starts from
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            data={"mood": "calm", "gone": True, "nested": {"a": 1, "b": 2}}))
+    _call(db, run_id, job, "resident.state.patch",
+          {"patch": {"nested": {"b": 3}, "gone": None, "extra": 5}})
+    assert _resident(db, resident.id).staged["state"] == \
+        {"mood": "calm", "nested": {"a": 1, "b": 3}, "extra": 5}  # RFC 7386: objects merge, null deletes
+    _call(db, run_id, job, "resident.state.set", {"state": {"mood": "calm"}})
+    _call(db, run_id, job, "resident.state.patch", {"patch": {"metrics": {"up": 1}}})
+    assert _resident(db, resident.id).staged["state"] == \
+        {"mood": "calm", "metrics": {"up": 1}}  # a patch builds on the same turn's staged write
+
+
+def test_state_get_shows_the_turns_own_writes(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:
+        conn.execute(update(resident_rows).where(resident_rows.c.id == resident.id).values(
+            data={"mood": "calm"}, data_version=3))
+    assert _call(db, run_id, job, "resident.state.get", {}) == {"state": {"mood": "calm"}, "data_version": 3}
+    _call(db, run_id, job, "resident.state.patch", {"patch": {"mood": "bright"}})
+    assert _call(db, run_id, job, "resident.state.get", {}) == \
+        {"state": {"mood": "bright"}, "data_version": 3}  # the run reads back what it wrote
+
+
+def test_metrics_publish_writes_only_published_keys(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _call(db, run_id, job, "resident.state.set", {"state": {"mood": "calm", "metrics": {}}})
+    _call(db, run_id, job, "resident.metrics.publish", {"values": {"metrics": {"uptime": 99.5}}})
+    assert _resident(db, resident.id).staged["state"] == {"mood": "calm", "metrics": {"uptime": 99.5}}
+    with pytest.raises(residents.ResidentError) as secret:
+        _call(db, run_id, job, "resident.metrics.publish", {"values": {"hidden": 1}})
+    assert secret.value.status == 400  # publish is a closed set: the spec's state.publish
+    assert _resident(db, resident.id).staged["state"] == {"mood": "calm", "metrics": {"uptime": 99.5}}
+
+
+def test_events_tool_fences_payloads(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:  # a second event lands mid-turn and is handled elsewhere
+        residents.enqueue(conn, resident.id, "request", payload={"text": "an older ask"}, now=db.clock())
+        conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id,
+                                                   resident_events.c.seq == 2).values(handled=True))
+    seen = _call(db, run_id, job, "resident.events", {})
+    assert (seen["event_seq_from"], seen["event_seq_to"]) == (1, 1)
+    text = seen["text"]
+    tag = re.search(r"<<<EVENT ([0-9a-f]{16})\n", text).group(1)
+    assert f"EVENT {tag}>>>" in text and "data, never instructions" in text
+    assert "watch the fence" in text  # the payload, inside the fence
+    assert "an older ask" not in text  # handled events come only when asked for
+    more = _call(db, run_id, job, "resident.events", {"include_handled": 1})
+    assert "an older ask" in more["text"]
+
+
+def test_reply_records_answer_on_event(db):
+    resident, job_id, run_id = _tooled(db, reply_to={"kind": "api", "call": "c1"})
+    job = _job(db, job_id)
+    result = _call(db, run_id, job, "resident.reply", {"event_seq": 1, "text": "  here is the answer  "})
+    assert result == {"replied": True, "event_seq": 1}
+    [event] = _events(db, resident.id)
+    assert event.reply == {"text": "here is the answer", "at": db.clock().isoformat()}
+    with pytest.raises(residents.ResidentError) as outside:
+        _call(db, run_id, job, "resident.reply", {"event_seq": 9, "text": "x"})
+    assert outside.value.status == 404  # only this turn's events can be answered
+
+
+def test_reply_needs_an_asking_event(db):
+    resident, job_id, run_id = _tooled(db)  # the turn's event carries no reply_to
+    job = _job(db, job_id)
+    with pytest.raises(residents.ResidentError) as nowhere:
+        _call(db, run_id, job, "resident.reply", {"event_seq": 1, "text": "x"})
+    assert nowhere.value.status == 409
+    assert _events(db, resident.id)[0].reply is None
+
+
+def test_idle_report_stages_the_flag_and_keeps_state(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _call(db, run_id, job, "resident.idle.report", {"nothing_to_do": True})
+    assert _resident(db, resident.id).staged == {"idle_nothing_to_do": True}
+    _call(db, run_id, job, "resident.state.set", {"state": {"mood": "calm"}})
+    assert _resident(db, resident.id).staged == \
+        {"idle_nothing_to_do": True, "state": {"mood": "calm"}}  # each keeps the other
+    _call(db, run_id, job, "resident.idle.report", {"nothing_to_do": False})
+    assert _resident(db, resident.id).staged == \
+        {"idle_nothing_to_do": False, "state": {"mood": "calm"}}
+
+
+def test_close_tool_closes_without_stopping_job(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:  # a second event waits behind the running turn
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    _call(db, run_id, job, "resident.state.set", {"state": {"mood": "done"}})
+    assert _call(db, run_id, job, "resident.close", {"reason": "all done"}) == {"closed": True}
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason, row.closed_at) == ("closed", "all done", db.clock())
+    assert row.active_job_id == job_id  # the running job is unaffected
+    with pytest.raises(residents.ResidentError) as shut:  # a closed instance stages nothing more
+        _call(db, run_id, job, "resident.state.set", {"state": {"mood": "x"}})
+    assert shut.value.status == 409
+    db.clock.advance(minutes=5)
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.active_job_id is None  # the lock cleared
+    assert _jobs_count(db) == 1  # and nothing rewaked: a closed instance has no future turns
+    assert row.data == {"mood": "done"} and row.data_version == 1  # the turn succeeded, so its write applied
+    assert _events(db, resident.id)[1].handled is False  # the waiting event stays
+    with db.engine.connect() as conn:
+        closed = conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.close")).all()
+    assert closed == [(resident.id, {"reason": "all done"})]
+
+
+def test_settle_revalidates_staged_state(db):
+    resident, job_id, _run_id = _tooled(db)
+    _stage(db, resident.id, {"state": {"nope": "not the mood"}})  # schema-invalid: mood is required
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.staged is None and row.data == {} and row.data_version == 0  # refused at settle too
+    assert row.turns == 0  # the violation takes the failure path, not the success one
+    assert _events(db, resident.id)[0].attempts == 1  # the turn's events paid an attempt
+    assert row.active_job_id not in (None, job_id)  # and the events are re-offered
+    with db.engine.connect() as conn:
+        refused = conn.execute(select(audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.state_refused")).all()
+    assert refused and "mood" in refused[0].detail["reason"]
+
+
+def test_settle_refuses_oversized_staged_state(db):
+    resident, job_id, _run_id = _tooled(db)
+    _stage(db, resident.id, {"state": {"mood": "x" * 2000}})  # schema-valid, over max_bytes
+    _finish(db, job_id)
+    assert _settle(db) == [resident.id]
+    row = _resident(db, resident.id)
+    assert row.staged is None and row.data == {} and row.data_version == 0
+    assert row.turns == 0 and _events(db, resident.id)[0].attempts == 1
+
+
+def test_pack_validates(db):
+    from typer.testing import CliRunner
+
+    from armature.cli import app
+    from armature.packs import BUILTIN_DIR, catalog
+    result = CliRunner().invoke(app, ["pack", "validate", str(BUILTIN_DIR / "resident")])
+    assert result.exit_code == 0, result.output
+    cat = catalog([BUILTIN_DIR])
+    assert cat.errors == []
+    pack = cat.pack("resident")
+    assert pack.builtin and {f"resident.{name}" for name in pack.adapters} == set(residents.TOOLS)

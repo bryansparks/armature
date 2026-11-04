@@ -176,7 +176,7 @@ def test_routes_list_packs_adapters_and_errors(sqlite_engine, keyring, tmp_path,
     body = client.get("/api/packs").json()
     [pack] = [p for p in body["packs"] if not p["builtin"]]
     assert {p["name"] for p in body["packs"] if p["builtin"]} == {"conversation", "github", "jira", "linear",
-                                                                    "review", "slack"}
+                                                                    "resident", "review", "slack"}
     assert (pack["name"], pack["version"], pack["source"], pack["pinned_ref"]) == ("hello", "5.0.0", None, None)
     errors = {e["pack"]: e["message"] for e in body["errors"]}
     assert set(errors) == {"broken", "hello"}

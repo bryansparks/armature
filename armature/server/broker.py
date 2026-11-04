@@ -36,6 +36,7 @@ from armature.server import (
     conversations,
     defs,
     ingest,
+    residents,
     runners,
     webhooks,
     worker,
@@ -421,6 +422,8 @@ def call_tool(engine: Engine, keyring: Keyring, *, public_url: str, token: Any, 
         raise BrokerError(403, f"This step's grant doesn't cover {tool}.")
     if tool in conversations.TOOLS:
         return _conversation_tool(engine, grant, tool, _checked(tool, params), now, ip, packs_dir)
+    if tool in residents.TOOLS:
+        return _resident_tool(engine, grant, tool, _checked(tool, params), now, ip, packs_dir)
     spec = registry().get(tool)
     if spec is None or spec.run is None:
         raise BrokerError(404, f"{tool} has no broker call. Git asks for its credential itself.")
@@ -498,6 +501,21 @@ def _conversation_tool(engine: Engine, grant: Grant, tool: str, params: dict[str
     outcome = "approved" if result.get("go") is True else "ok"
     _record(engine, grant, job, tool, "live", outcome, conversation_id,
             {"action": result["action"]} if "action" in result else None, now, ip)
+    return result
+
+
+def _resident_tool(engine: Engine, grant: Grant, tool: str, params: dict[str, Any], now: datetime,
+                   ip: str | None, packs_dir: str | None) -> dict[str, Any]:
+    """A resident tool, on the instance whose turn this run is. A staged state write applies at settle."""
+    with engine.connect() as conn:
+        _, job = _run_job(conn, grant.run_id)
+    try:
+        result, resident_id = residents.call_tool(engine, run_id=grant.run_id, job=job, tool=tool,
+                                                  params=params, now=now)
+    except residents.ResidentError as exc:
+        _record(engine, grant, job, tool, "live", "refused", None, {"error": exc.message}, now, ip)
+        raise BrokerError(exc.status, exc.message) from exc
+    _record(engine, grant, job, tool, "live", "ok", resident_id, None, now, ip)
     return result
 
 
