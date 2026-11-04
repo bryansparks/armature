@@ -75,6 +75,23 @@ adapters:
       properties:
         event_seq: {type: integer, minimum: 1}
         text: {type: string, minLength: 1}
+  emit:
+    description: >-
+      Queue an event on another resident instance: the workflow named in this team or project, ensured
+      at its key, with this run as the event's source. Fan-out is bounded — chain depth, per run, and
+      per instance per day — and a refused emit is audited and reaches nothing.
+    cmd: armature tool resident.emit
+    writes: true
+    params:
+      type: object
+      required: [resident, key, kind]
+      additionalProperties: false
+      properties:
+        resident: {type: string, minLength: 1}
+        key: {type: string, maxLength: 191}
+        kind: {type: string, minLength: 1}
+        name: {type: string}
+        payload: {}
   idle.report:
     description: >-
       Tell the idle policy how the idle turn went: nothing_to_do true backs the idle loop off, false

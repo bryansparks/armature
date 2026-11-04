@@ -29,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from armature.server import assist, audit, defs, worker
 from armature.server.db import new_id
-from armature.server.db.schema import jobs, resident_events, residents, runs, workflows
+from armature.server.db.schema import jobs, resident_events, residents, runs, tool_calls, workflows
 from armature.spec.models import ResidentCfg, ResidentIdleCfg, ResidentStateCfg
 
 log = logging.getLogger(__name__)
@@ -50,9 +50,15 @@ KEY_MAX = 191
 MAX_TURNS = 5000
 # How many due idle candidates one sweep pass considers, so a fleet-wide due moment stays bounded.
 IDLE_SCAN = 100
-# The tools a turn's steps call through the broker; resident.emit joins them in a later slice.
+# The fan-out caps on resident.emit: one emit is the next link of a chain at most this deep, one run
+# emits at most this many times, and one instance spends at most this many emits a day.
+EMIT_CHAIN_MAX = 5
+EMIT_CAP_RUN = 10
+EMIT_CAP_DAY = 50
+# The tools a turn's steps call through the broker.
 TOOLS = ("resident.events", "resident.state.get", "resident.state.set", "resident.state.patch",
-         "resident.metrics.publish", "resident.reply", "resident.idle.report", "resident.close")
+         "resident.metrics.publish", "resident.reply", "resident.emit", "resident.idle.report",
+         "resident.close")
 # A closed instance still answers its own turn's reads, as a conversation answers history.
 READS = ("resident.events", "resident.state.get")
 REPLY_MAX = 8 * 1024
@@ -150,7 +156,8 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
     A custom kind arrives as ``custom.<name>`` or as ``custom`` with ``name``, and is stored as
     ``kind="custom"`` with its name. A real event keeps the instance's lifetime fresh and wakes
     the instance for its next turn; a paused instance keeps its events for the resume, a closed
-    one refuses them.
+    one refuses them. A signal the pinned spec's ``close_on`` names closes the instance instead:
+    the event lands handled and no turn is queued, as a fleet closure spends nothing.
     """
     resident = _locked(conn, resident_id)
     if resident is None:
@@ -166,6 +173,19 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
             resident_events.c.resident_id == resident_id,
             resident_events.c.dedupe_key == dedupe_key)).first():
         return None
+    if name is not None and kind in ("signal", "custom"):
+        # The pinned spec's close_on closes the instance on its matching signal, without a turn —
+        # a fleet closure spends nothing (docs/RESIDENT-WORKFLOWS.md, decision 1).
+        spec = _spec(conn, resident)
+        if spec is not None and spec.close_on is not None and spec.close_on.signal == name:
+            seq = conn.execute(select(func.coalesce(func.max(resident_events.c.seq), 0)).where(
+                resident_events.c.resident_id == resident_id)).scalar_one() + 1
+            conn.execute(insert(resident_events).values(
+                id=new_id(), resident_id=resident_id, seq=seq, kind=kind, name=name, payload=payload,
+                source=source, reply_to=reply_to, dedupe_key=dedupe_key, dry_run=dry_run,
+                handled=True, created_at=now))
+            _close(conn, resident, "close_on", now)
+            return seq
     seq = conn.execute(select(func.coalesce(func.max(resident_events.c.seq), 0)).where(
         resident_events.c.resident_id == resident_id)).scalar_one() + 1
     conn.execute(insert(resident_events).values(
@@ -796,6 +816,77 @@ def _reply(conn: Connection, resident: Any, job: Any, params: dict, now: datetim
     return {"replied": True, "event_seq": seq}
 
 
+def _emit_refused(conn: Connection, resident: Any, reason: str, detail: dict) -> None:
+    """Audit an emit the caps refused, as its own row — the cap that fired is a governed act."""
+    audit.record(conn, action="resident.emit", actor_id=None, team_id=resident.team_id,
+                 target_kind="resident", target_id=resident.id, detail={"refused": reason, **detail})
+
+
+def _emit_tool(conn: Connection, resident: Any, job: Any, run_id: str, params: dict,
+               now: datetime) -> tuple[dict, tuple[int, str] | None]:
+    """Queue an event on another instance: a bounded fan-out that spends a turn nowhere here.
+
+    The target is a workflow name resolved in the instance's own scope, ensured at the given key.
+    The causal chain is recorded in the event's ``source`` — this run emitted it, one link deeper
+    than the event this turn answers — and three caps bound the fan-out: the chain depth, this run's
+    recorded emit calls, and the emitting instance's emits today. A cap's refusal is audited and
+    spends nothing; it is returned for the caller to raise once this transaction commits, so the
+    audit row survives it. A successful emit is audited and queued with no dedupe key.
+    """
+    target, key, kind = params.get("resident"), params.get("key"), params.get("kind")
+    name = params.get("name")
+    if not isinstance(target, str) or not target.strip():
+        raise ResidentError(400, "resident is a workflow name.")
+    if not isinstance(key, str) or len(key) > KEY_MAX:
+        raise ResidentError(400, f"key is a string of at most {KEY_MAX} characters.")
+    if not isinstance(kind, str) or not kind.strip():
+        raise ResidentError(400, "kind is required.")
+    kind = kind.strip()
+    if kind.startswith("custom."):
+        kind, _, suffix = kind.partition(".")
+        name = name or suffix or None
+    if kind not in RESIDENT_EVENT_KINDS:
+        raise ResidentError(400, f"kind is one of {', '.join(RESIDENT_EVENT_KINDS)}.")
+    if name is not None and not isinstance(name, str):
+        raise ResidentError(400, "name is a string.")
+    # The chain this turn's own event carries: the hop this emit would add is one deeper.
+    seq_from = (job.inputs or {}).get("event_seq_from")
+    source = conn.execute(select(resident_events.c.source).where(
+        resident_events.c.resident_id == resident.id,
+        resident_events.c.seq == seq_from)).scalar() if isinstance(seq_from, int) else None
+    carried = source.get("chain") if isinstance(source, dict) else None
+    incoming = carried if isinstance(carried, int) and not isinstance(carried, bool) else 0
+    if incoming + 1 > EMIT_CHAIN_MAX:
+        _emit_refused(conn, resident, "chain", {"target": target, "key": key, "chain": incoming + 1})
+        return None, (429, f"the emit chain is capped at {EMIT_CHAIN_MAX}.")
+    prior = conn.execute(select(func.count()).where(
+        tool_calls.c.run_id == run_id, tool_calls.c.tool == "resident.emit")).scalar_one()
+    if prior >= EMIT_CAP_RUN:
+        _emit_refused(conn, resident, "run_cap", {"target": target, "key": key})
+        return None, (429, f"this run has reached its cap of {EMIT_CAP_RUN} emits.")
+    fresh = _day_reset(conn, resident, now)
+    if (0 if fresh else resident.emits_day) >= EMIT_CAP_DAY:
+        _emit_refused(conn, resident, "day_cap", {"target": target, "key": key})
+        return None, (429, f"the instance has reached its cap of {EMIT_CAP_DAY} emits today.")
+    scope = conn.execute(select(workflows.c.scope).where(
+        workflows.c.id == resident.workflow_id)).scalar()
+    row = conn.execute(select(workflows.c.id, workflows.c.name).where(
+        workflows.c.scope == scope, workflows.c.name == target)).first()
+    if row is None or row.name != target:  # MySQL compares names without case, so match again
+        raise ResidentError(404, f"No workflow '{target}' in this team or project.")
+    target_resident = ensure(conn, team_id=resident.team_id, project_id=resident.project_id,
+                             workflow_id=row.id, instance_key=key, now=now)
+    seq = enqueue(conn, target_resident.id, kind, payload=params.get("payload"), name=name,
+                  source={"emitted_by": run_id, "chain": incoming + 1}, now=now)
+    conn.execute(update(residents).where(residents.c.id == resident.id).values(
+        emits_day=(0 if fresh else resident.emits_day) + 1, updated_at=now))
+    audit.record(conn, action="resident.emit", actor_id=None, team_id=resident.team_id,
+                 target_kind="resident", target_id=target_resident.id,
+                 detail={"seq": seq, "kind": kind, "name": name, "chain": incoming + 1})
+    return {"emitted": True, "target_resident_id": target_resident.id, "event_seq": seq,
+            "chain": incoming + 1}, None
+
+
 def call_tool(engine: Engine, *, run_id: str, job: Any, tool: str, params: dict,
               now: datetime) -> tuple[dict, str]:
     """Run one resident tool for the turn this run is. Returns the result and the resident id.
@@ -803,10 +894,12 @@ def call_tool(engine: Engine, *, run_id: str, job: Any, tool: str, params: dict,
     Only the instance whose ``active_job_id`` is this job's id is reached, and only the spec the
     instance is pinned to decides what a write must satisfy — the turn runs under it, so a spec that
     no longer reads is an error rather than a guess. State writes are staged and validated here, and
-    settle validates them again with the same code before applying.
+    settle validates them again with the same code before applying. A cap's refusal of an emit is
+    raised after the transaction commits, so the audit row the refusal wrote survives it.
     """
     if tool not in TOOLS:
         raise ResidentError(404, "No such tool.")
+    refusal: tuple[int, str] | None = None
     with engine.begin() as conn:
         resident = bound(conn, run_id)
         if resident is None:
@@ -843,6 +936,8 @@ def call_tool(engine: Engine, *, run_id: str, job: Any, tool: str, params: dict,
             result = {"staged": True}
         elif tool == "resident.reply":
             result = _reply(conn, resident, job, params, now)
+        elif tool == "resident.emit":
+            result, refusal = _emit_tool(conn, resident, job, run_id, params, now)
         elif tool == "resident.idle.report":
             staged = dict(resident.staged or {})
             staged["idle_nothing_to_do"] = bool(params.get("nothing_to_do"))
@@ -855,4 +950,7 @@ def call_tool(engine: Engine, *, run_id: str, job: Any, tool: str, params: dict,
                 raise ResidentError(400, "reason is required.")
             _close(conn, resident, reason.strip()[:32], now)
             result = {"closed": True}
-        return result, resident.id
+        if refusal is None:
+            return result, resident.id
+    # A cap's refusal is raised only once its audit row has committed — a rollback would take it.
+    raise ResidentError(*refusal)

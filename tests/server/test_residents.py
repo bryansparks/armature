@@ -28,6 +28,7 @@ from armature.server.db.schema import (
     runs,
     settings,
     teams,
+    tool_calls,
     versions,
     workflows,
 )
@@ -1009,6 +1010,7 @@ VALID = {  # one good call per tool, for the loops that must reach every tool
     "resident.state.patch": {"patch": {"mood": "calm"}},
     "resident.metrics.publish": {"values": {"metrics": {"uptime": 99.5}}},
     "resident.reply": {"event_seq": 1, "text": "done"},
+    "resident.emit": {"resident": "answer", "key": "acme", "kind": "signal"},
     "resident.idle.report": {"nothing_to_do": True},
     "resident.close": {"reason": "finished"},
 }
@@ -1188,6 +1190,150 @@ def test_close_tool_closes_without_stopping_job(db):
         closed = conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
             audit_rows.c.action == "resident.close")).all()
     assert closed == [(resident.id, {"reason": "all done"})]
+
+
+# A spec whose matching signal closes the instance without spending a turn (the close_on grammar).
+CLOSEBOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+    signal: {workflow: self}
+  close_on: {signal: pr_merged}
+stages: []
+"""
+
+# The workflow an emit targets, with a handler so the emitted event turns.
+EMITBOT = """\
+name: answer
+resident:
+  on:
+    signal: {workflow: self}
+stages: []
+"""
+
+
+def _keyed_turn(db, instance_key):
+    """A second instance of the bot workflow with a running request turn, as _tooled builds the first."""
+    resident = _ensure(db, instance_key=instance_key)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    job_id = _resident(db, resident.id).active_job_id
+    run_id = new_id()
+    with db.engine.begin() as conn:
+        conn.execute(insert(runs).values(id=run_id, team_id=db.team, status="running", started_at=db.clock()))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(run_id=run_id))
+    return resident, job_id, run_id
+
+
+def _emit_audits(db):
+    with db.engine.connect() as conn:
+        return conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.emit")).all()
+
+
+def test_emit_creates_keyed_target_instance(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _version(db, db.answer_id, EMITBOT, 2)
+    result = _call(db, run_id, job, "resident.emit",
+                   {"resident": "answer", "key": "acme", "kind": "signal", "payload": {"pr": 17}})
+    with db.engine.connect() as conn:
+        [target] = conn.execute(select(resident_rows).where(resident_rows.c.workflow_id == db.answer_id)).all()
+    assert result == {"emitted": True, "target_resident_id": target.id, "event_seq": 1, "chain": 1}
+    assert (target.instance_key, target.workflow_version, target.state) == ("acme", 2, "idle")
+    [event] = _events(db, target.id)
+    assert (event.kind, event.payload) == ("signal", {"pr": 17})
+    assert event.source == {"emitted_by": run_id, "chain": 1}  # the causal chain, recorded in the source
+    assert _resident(db, target.id).active_job_id is not None  # the emitted event turned the target
+    assert _resident(db, resident.id).emits_day == 1  # the emitting instance spent one of today's emits
+    assert _emit_audits(db) == [(target.id, {"seq": 1, "kind": "signal", "name": None, "chain": 1})]
+    with pytest.raises(residents.ResidentError) as missing:  # a name no workflow carries reaches nothing
+        _call(db, run_id, job, "resident.emit", {"resident": "nowhere", "key": "", "kind": "signal"})
+    assert missing.value.status == 404
+
+
+def test_emit_caps_chain_depth(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:  # this turn's own event arrived as the chain's fifth link
+        conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id)
+                     .values(source={"emitted_by": new_id(), "chain": residents.EMIT_CHAIN_MAX}))
+    with pytest.raises(residents.ResidentError) as raised:
+        _call(db, run_id, job, "resident.emit", {"resident": "answer", "key": "acme", "kind": "signal"})
+    assert raised.value.status == 429  # the sixth link is refused; five is the cap
+    assert _emit_audits(db) == [(resident.id, {"refused": "chain", "target": "answer",
+                                               "key": "acme", "chain": residents.EMIT_CHAIN_MAX + 1})]
+    with db.engine.connect() as conn:
+        assert conn.execute(select(resident_rows.c.id).where(
+            resident_rows.c.workflow_id == db.answer_id)).all() == []  # nothing was ensured
+    assert len(_events(db, resident.id)) == 1  # and nothing enqueued anywhere
+    assert _resident(db, resident.id).emits_day == 0  # a refused emit spends no cap
+
+
+def test_emit_run_and_day_caps(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    with db.engine.begin() as conn:  # the broker's records of this run's ten prior emits
+        for _ in range(residents.EMIT_CAP_RUN):
+            conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=db.team,
+                                                   step_id="s", tool="resident.emit", mode="live",
+                                                   outcome="ok", created_at=db.clock()))
+    with pytest.raises(residents.ResidentError) as raised:
+        _call(db, run_id, job, "resident.emit", {"resident": "answer", "key": "acme", "kind": "signal"})
+    assert raised.value.status == 429  # one run's fan-out stops at ten
+    assert _emit_audits(db) == [(resident.id, {"refused": "run_cap", "target": "answer", "key": "acme"})]
+    loud, loud_job, loud_run = _keyed_turn(db, "fan")
+    with db.engine.begin() as conn:  # today's fifty emits already spent
+        conn.execute(update(resident_rows).where(resident_rows.c.id == loud.id).values(
+            emits_day=residents.EMIT_CAP_DAY, spent_day=db.clock().date().isoformat()))
+    with pytest.raises(residents.ResidentError) as capped:
+        _call(db, loud_run, _job(db, loud_job), "resident.emit",
+              {"resident": "answer", "key": "acme", "kind": "signal"})
+    assert capped.value.status == 429  # and one instance's daily fan-out stops at fifty
+    assert _emit_audits(db) == [
+        (resident.id, {"refused": "run_cap", "target": "answer", "key": "acme"}),
+        (loud.id, {"refused": "day_cap", "target": "answer", "key": "acme"})]
+    with db.engine.connect() as conn:
+        assert conn.execute(select(resident_rows.c.id).where(
+            resident_rows.c.workflow_id == db.answer_id)).all() == []
+
+
+def test_close_on_closes_without_a_turn(db):
+    _version(db, db.workflow_id, CLOSEBOT, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        seq = residents.enqueue(conn, resident.id, "signal", name="pr_merged", payload={"pr": 17},
+                                now=db.clock())
+    assert seq == 1
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason, row.closed_at) == ("closed", "close_on", db.clock())
+    assert _jobs_count(db) == 0  # fleet closures spend nothing: no turn was queued
+    [event] = _events(db, resident.id)
+    assert event.handled is True  # the closing event lands handled; the timeline keeps it
+    keyed = _ensure(db, instance_key="fan")
+    with db.engine.begin() as conn:  # a custom kind closes on its bare name too
+        residents.enqueue(conn, keyed.id, "custom.pr_merged", now=db.clock())
+    row = _resident(db, keyed.id)
+    assert (row.state, row.close_reason) == ("closed", "close_on")
+    with db.engine.connect() as conn:
+        closed = conn.execute(select(audit_rows.c.target_id, audit_rows.c.detail).where(
+            audit_rows.c.action == "resident.close")).all()
+    assert closed == [(resident.id, {"reason": "close_on"}), (keyed.id, {"reason": "close_on"})]
+
+
+def test_close_on_non_matching_signal_stays_open(db):
+    _version(db, db.workflow_id, CLOSEBOT, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "signal", name="deploy_failed", now=db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.closed_at) == ("idle", None)  # another name is just a signal
+    assert _jobs_count(db) == 1  # it turns like any other
+    assert _events(db, resident.id)[0].handled is False
+    with db.engine.connect() as conn:
+        assert conn.execute(select(func.count()).where(
+            audit_rows.c.action == "resident.close")).scalar_one() == 0
 
 
 def test_settle_revalidates_staged_state(db):
