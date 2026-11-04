@@ -1448,6 +1448,22 @@ def test_off_means_no_turns_not_even_rows(web):
                            json={"payload": {}}, headers=_as(web, "lead")).status_code == 503
     with web.engine.connect() as conn:  # the gate comes before the create
         assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 0
+
+
+def test_an_over_length_key_answers_404_and_writes_nothing(web):
+    lead = _as(web, "lead")
+    for path, body in (("ask", {"question": "anyone?"}), ("signal", {"payload": {}})):
+        posted = web.client.post(f"/api/residents/{web.workflow_id}/{'k' * (residents.KEY_MAX + 1)}/{path}",
+                                 json=body, headers=lead)
+        assert posted.status_code == 404, path  # an over-length key can name no instance
+    with web.engine.connect() as conn:  # sqlite would have stored both: the guard refused, not the DB
+        assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 0
+    fits = "k" * residents.KEY_MAX  # exactly the column's width still asks
+    posted = web.client.post(f"/api/residents/{web.workflow_id}/{fits}/ask",
+                             json={"question": "anyone?"}, headers=lead)
+    assert posted.status_code == 200, posted.text
+    with web.engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(resident_rows)).scalar_one() == 1
     _web_resident(web, data={"metrics": {"waiting": 0}})  # reading still works when off
     assert web.client.get(f"/api/residents/{web.workflow_id}/read",
                           headers=lead).status_code == 200

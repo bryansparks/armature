@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import Connection, func, select, update
 
-from armature.server import audit, conversations, defs, rbac, residents, worker
+from armature.server import audit, conversations, defs, rbac, residents
 from armature.server.app.deps import server, signed_in
 from armature.server.app.http import ApiError
 from armature.server.auth import AuthError, Session, count_call
@@ -130,8 +130,16 @@ def _event(row: Any) -> dict[str, Any]:
 
 def _check_enabled(conn: Connection) -> None:
     """The rollback gate: with ``resident.enabled`` off the API takes no turn and writes no row."""
-    if not worker._instance_setting(conn, residents.ENABLED_KEY):
+    if not residents.enabled(conn):
         raise ApiError(503, "Residents are not enabled on this instance.")
+
+
+def _checked_key(instance_key: str) -> str:
+    """An instance key the column can hold: an over-length key can name no instance, so it answers
+    with the 404 of an unknown one — and never reaches ``ensure``, whose insert it would break."""
+    if len(instance_key) > residents.KEY_MAX:
+        raise ApiError(404, "No such resident instance.")
+    return instance_key
 
 
 def _check_text(value: Any, what: str) -> str:
@@ -195,7 +203,8 @@ def _ask(srv: Any, session: Session, workflow_id: str, instance_key: str, questi
         row = _workflow(conn, session, workflow_id, "contributor")
         _check_enabled(conn)  # after access: a stranger learns nothing about the feature's state
         resident = residents.ensure(conn, team_id=row.team_id, project_id=row.project_id,
-                                    workflow_id=row.id, instance_key=instance_key, now=srv.now())
+                                    workflow_id=row.id, instance_key=_checked_key(instance_key),
+                                    now=srv.now())
         try:
             seq = residents.enqueue(conn, resident.id, "ask", payload={"text": question},
                                      source={"user_id": session.user_id},
@@ -264,7 +273,8 @@ def signal(instance_key: str, workflow_id: str, body: SignalBody, request: Reque
         row = _workflow(conn, session, workflow_id, "contributor")
         _check_enabled(conn)  # after access: a stranger learns nothing about the feature's state
         resident = residents.ensure(conn, team_id=row.team_id, project_id=row.project_id,
-                                    workflow_id=row.id, instance_key=instance_key, now=srv.now())
+                                    workflow_id=row.id, instance_key=_checked_key(instance_key),
+                                    now=srv.now())
         try:
             seq = residents.enqueue(conn, resident.id, f"custom.{name}" if name else "signal",
                                      payload=body.payload, source={"user_id": session.user_id},

@@ -1825,6 +1825,28 @@ def test_an_instance_key_that_renders_empty_routes_nothing(sqlite_engine, lead, 
     assert delivery.status == "ignored" and delivery.reason == "no rule matched"
 
 
+def test_an_instance_key_longer_than_the_column_is_refused_not_truncated(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True)
+    long_item = "x" * (residents.KEY_MAX + 1)
+    [decision] = _decide(sqlite_engine, world, [{"resident": True}], {"item": long_item})
+    assert decision["matched"] is False  # refused, never truncated into a shorter key's instance
+    assert decision["reason"] == (f"its instance_key rendered {len(long_item)} characters for this "
+                                 f"payload, over the {residents.KEY_MAX} an instance key holds")
+    raw = _body({"item": long_item})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == \
+        {"status": "ignored", "jobs": 0}
+    assert _resident_rows(sqlite_engine) == []  # sqlite would store it: the guard refused, not the DB
+    [delivery] = _deliveries(sqlite_engine)      # the delivery row survives the refusal
+    assert delivery.status == "ignored"
+    fits = "y" * residents.KEY_MAX               # exactly the column's width still routes
+    raw = _body({"item": fits})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2")).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    assert resident.instance_key == fits
+
+
 def test_a_rule_for_a_resident_without_an_instance_key_routes_the_singleton(sqlite_engine, lead, world, clock):
     _resident_spec(sqlite_engine, clock, world, body=SINGLETON)
     hook = _hook(lead, world)

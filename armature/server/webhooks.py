@@ -35,7 +35,6 @@ from armature.server import (
     rbac,
     residents,
     threads,
-    worker,
 )
 from armature.server import secrets as secret_store
 from armature.server.auth import safe_equal
@@ -528,9 +527,11 @@ def _resident_target(conn: Connection, workflow_id: str, version: int, payload: 
     The workflow's current version carries the ``resident:`` block whose ``instance_key`` template
     names the instance, rendered against ``event.payload`` in the same sandbox the trigger path
     renders its templates in. A template that renders empty routes nothing — a keyed resident never
-    collapses onto the singleton at key ``""`` — and a spec with no ``instance_key`` routes every
-    delivery to the singleton by design. With ``resident.enabled`` off the rule still matches and
-    records its decision but routes nothing: the rollback gate.
+    collapses onto the singleton at key ``""`` — and neither does one that renders past the
+    instance_key column's width, which is refused rather than truncated (truncation would silently
+    merge distinct instances). A spec with no ``instance_key`` routes every delivery to the
+    singleton by design. With ``resident.enabled`` off the rule still matches and records its
+    decision but routes nothing: the rollback gate.
     """
     cfg = residents.spec_of(conn, workflow_id, version)
     if cfg is None:
@@ -544,8 +545,10 @@ def _resident_target(conn: Connection, workflow_id: str, version: int, payload: 
             key = ""
         if not key:
             return "its instance_key rendered empty for this payload"
-    return {"enabled": bool(worker._instance_setting(conn, residents.ENABLED_KEY)),
-            "instance_key": key, "payload": payload}
+        if len(key) > residents.KEY_MAX:
+            return (f"its instance_key rendered {len(key)} characters for this payload, "
+                    f"over the {residents.KEY_MAX} an instance key holds")
+    return {"enabled": residents.enabled(conn), "instance_key": key, "payload": payload}
 
 
 def _decide(conn: Connection, team_id: str, source: str, rule: Any, event: str | None,

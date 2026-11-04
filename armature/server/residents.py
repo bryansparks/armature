@@ -42,6 +42,10 @@ RESIDENT_JOB_KIND = "resident"
 OPEN_TURN = ("queued", "suspended", "provisioning", "claimed", "running")
 MAX_ATTEMPTS = 3
 ENABLED_KEY = "resident.enabled"
+# The instance_key column's width (db/schema.py). A rendered or posted key longer than this can
+# name no instance; the router and the API refuse it rather than truncate — truncation would
+# silently merge distinct instances.
+KEY_MAX = 191
 # The lifetime cap that closes an instance when its spec's lifetime.max_turns is unset.
 MAX_TURNS = 5000
 # How many due idle candidates one sweep pass considers, so a fleet-wide due moment stays bounded.
@@ -245,6 +249,15 @@ def spec_of(conn: Connection, workflow_id: str, version: int) -> ResidentCfg | N
     ``ensure`` would create at that version.
     """
     return _cfg(_resident_block(defs.body_of(conn, defs.WORKFLOW, workflow_id, version)))
+
+
+def enabled(conn: Connection) -> bool:
+    """Whether resident instances are enabled on this deployment — the rollback gate.
+
+    The one place outside the worker that reads ``resident.enabled``, so no caller reaches into
+    the worker's settings lookup.
+    """
+    return bool(worker._instance_setting(conn, ENABLED_KEY))
 
 
 def _handler(spec: ResidentCfg, event: Any) -> Any:
