@@ -579,6 +579,8 @@ def settle(conn: Connection, now: datetime) -> list[str]:
 def _claim_idle(conn: Connection, resident_id: str, now: datetime) -> bool:
     """Take a due idle turn's slot, if no other server took it first (the pollers' claim pattern)."""
     return conn.execute(update(residents).where(residents.c.id == resident_id,
+                                                residents.c.state == "idle",
+                                                residents.c.active_job_id.is_(None),
                                                 residents.c.next_idle_at <= now)
                         .values(next_idle_at=None, updated_at=now)).rowcount == 1
 

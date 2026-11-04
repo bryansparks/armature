@@ -37,5 +37,5 @@ stages:
         metrics:
           turns: "{{ _resident.meta.turns }}"
           idle_streak: "{{ _resident.meta.idle_streak }}"
-          last_turn_at: "{{ _resident.meta.last_turn_at }}"
+          last_turn_at: "{{ _resident.meta.last_turn_at or '' }}"
     depends_on: []
