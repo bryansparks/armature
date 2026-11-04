@@ -10,7 +10,6 @@ the signed-in user as its actor (``resident.read|ask|signal|pause|resume|close|u
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from datetime import timedelta
 from functools import partial
@@ -39,8 +38,9 @@ WAIT_MAX_S = 60
 WAIT_DEFAULT_S = 30  # ?wait=0 or less: the caller asked to wait but not for how long
 POLL_S = 0.2
 # The shape a bare custom name allows — the same vocabulary resident.on's custom.<name>
-# keys accept (spec/validator.py) — never the prefixed kind itself.
-NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+# keys accept (spec/validator.py) — never the prefixed kind itself. Defined in residents.py,
+# where the emit tool enforces the same grammar.
+NAME_RE = residents.NAME_RE
 
 
 class AskBody(BaseModel):

@@ -1336,6 +1336,50 @@ def test_close_on_non_matching_signal_stays_open(db):
             audit_rows.c.action == "resident.close")).scalar_one() == 0
 
 
+def test_emit_refuses_names_outside_the_grammar(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _version(db, db.answer_id, EMITBOT, 2)
+    for bad in (  # the router's own grammar, on the fan-out path too
+        "x" * 100,          # wider than resident_events.name stores
+        "Not_Lower",        # outside the custom-name vocabulary
+        "custom.deploy",    # the prefixed kind itself, never a bare name
+    ):
+        with pytest.raises(residents.ResidentError) as raised:
+            _call(db, run_id, job, "resident.emit",
+                  {"resident": "answer", "key": "acme", "kind": "signal", "name": bad})
+        assert raised.value.status == 400
+    with pytest.raises(residents.ResidentError) as suffixed:  # a custom.<name> kind carries it too
+        _call(db, run_id, job, "resident.emit",
+              {"resident": "answer", "key": "acme", "kind": f"custom.{'x' * 100}"})
+    assert suffixed.value.status == 400
+    with db.engine.connect() as conn:  # every refusal is validation, not a spend: nothing written
+        assert conn.execute(select(resident_rows.c.id).where(
+            resident_rows.c.workflow_id == db.answer_id)).all() == []
+        assert conn.execute(select(func.count()).where(
+            audit_rows.c.action == "resident.emit")).scalar_one() == 0
+    assert _resident(db, resident.id).emits_day == 0
+
+
+def test_emit_from_a_dry_turn_is_dry(db):
+    resident, job_id, run_id = _tooled(db)
+    job = _job(db, job_id)
+    _version(db, db.answer_id, EMITBOT, 2)
+    with db.engine.begin() as conn:  # the turn's own event arrived as a dry delivery
+        conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id)
+                     .values(dry_run=True))
+    result = _call(db, run_id, job, "resident.emit", {"resident": "answer", "key": "acme",
+                                                     "kind": "signal", "payload": {"pr": 17}})
+    with db.engine.connect() as conn:
+        [target] = conn.execute(select(resident_rows).where(
+            resident_rows.c.workflow_id == db.answer_id)).all()
+    [event] = _events(db, target.id)
+    assert event.dry_run is True  # the fan-out carries the turn's dry flag onto the target
+    assert result["emitted"] is True
+    assert _job(db, _resident(db, target.id).active_job_id).dry_run is True  # ... so the turn it
+    # wakes spends nothing real — the same carry a dry webhook rule gets (Task 12)
+
+
 def test_settle_revalidates_staged_state(db):
     resident, job_id, _run_id = _tooled(db)
     _stage(db, resident.id, {"state": {"nope": "not the mood"}})  # schema-invalid: mood is required

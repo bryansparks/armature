@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Any
@@ -38,6 +39,10 @@ RESIDENT_STATES = ("idle", "paused", "closed")
 RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
 # The jobs.kind of a resident's turn job, claimable like a workflow's own.
 RESIDENT_JOB_KIND = "resident"
+# An event name's grammar (the routes' _checked_name enforces the same one): a bare custom name,
+# 1-64 of a lowercase letter first then lowercase letters, digits, '.', '_' or '-' — the width of
+# resident_events.name, whose stored value close_on and handler resolution match against.
+NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 # worker.HELD plus queued and suspended. Spelled out because the worker will import this module.
 OPEN_TURN = ("queued", "suspended", "provisioning", "claimed", "running")
 MAX_ATTEMPTS = 3
@@ -849,12 +854,17 @@ def _emit_tool(conn: Connection, resident: Any, job: Any, run_id: str, params: d
         raise ResidentError(400, f"kind is one of {', '.join(RESIDENT_EVENT_KINDS)}.")
     if name is not None and not isinstance(name, str):
         raise ResidentError(400, "name is a string.")
-    # The chain this turn's own event carries: the hop this emit would add is one deeper.
+    if name is not None and (name.startswith("custom.")
+                             or not NAME_RE.fullmatch(name)):  # the router's grammar, verbatim
+        raise ResidentError(400, "name is a bare custom name: 1-64 of lowercase letters, "
+                                "digits, '.', '_' or '-'.")
+    # The chain this turn's own event carries: the hop this emit would add is one deeper. The
+    # turn's own dry flag rides the emit too, so a dry turn's fan-out wakes no real spend.
     seq_from = (job.inputs or {}).get("event_seq_from")
-    source = conn.execute(select(resident_events.c.source).where(
+    batch = conn.execute(select(resident_events.c.source, resident_events.c.dry_run).where(
         resident_events.c.resident_id == resident.id,
-        resident_events.c.seq == seq_from)).scalar() if isinstance(seq_from, int) else None
-    carried = source.get("chain") if isinstance(source, dict) else None
+        resident_events.c.seq == seq_from)).first() if isinstance(seq_from, int) else None
+    carried = batch.source.get("chain") if batch is not None and isinstance(batch.source, dict) else None
     incoming = carried if isinstance(carried, int) and not isinstance(carried, bool) else 0
     if incoming + 1 > EMIT_CHAIN_MAX:
         _emit_refused(conn, resident, "chain", {"target": target, "key": key, "chain": incoming + 1})
@@ -877,7 +887,8 @@ def _emit_tool(conn: Connection, resident: Any, job: Any, run_id: str, params: d
     target_resident = ensure(conn, team_id=resident.team_id, project_id=resident.project_id,
                              workflow_id=row.id, instance_key=key, now=now)
     seq = enqueue(conn, target_resident.id, kind, payload=params.get("payload"), name=name,
-                  source={"emitted_by": run_id, "chain": incoming + 1}, now=now)
+                  source={"emitted_by": run_id, "chain": incoming + 1},
+                  dry_run=bool(batch.dry_run) if batch is not None else False, now=now)
     conn.execute(update(residents).where(residents.c.id == resident.id).values(
         emits_day=(0 if fresh else resident.emits_day) + 1, updated_at=now))
     audit.record(conn, action="resident.emit", actor_id=None, team_id=resident.team_id,
