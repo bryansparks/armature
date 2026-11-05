@@ -31,15 +31,25 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from sqlalchemy import Connection, Engine, and_, func, insert, or_, select, update
 
-from armature.events.location import this_machine
-from armature.nodes.gate import GATE_DIR_ENV, GATE_FILE, read_gate
+from armature.events.location import LOCATION_KIND_ENV, LOCATION_LABEL_ENV, this_machine
+from armature.events.redact import REDACT_ENV
+from armature.nodes.gate import (
+    GATE_AUTO_APPROVE_ENV,
+    GATE_DIR_ENV,
+    GATE_FILE,
+    read_gate,
+)
 from armature.nodes.harness import (
+    GIT_CONFIG_ENTRIES,
+    GIT_CONFIG_ENV,
     GIT_HOSTS_ENV,
-    HOST_ONLY_ENV,
+    GIT_VIA_PROXY_ENV,
     MODELS_ENV,
     PROJECT_REPO_ENV,
+    PROXY_ENV,
     ROLES_ENV,
     SKILLS_ENV,
+    host_only,
 )
 from armature.packs import PACKS_PATH_ENV
 from armature.packs.tool import URL_ENV as TOOLS_URL_ENV
@@ -82,9 +92,13 @@ from armature.server.db.schema import (
     workflows,
 )
 from armature.server.ingest import load_summary
-from armature.spec.models import AGENT_HARNESSES
+from armature.spec.models import AGENT_HARNESSES, remote_capabilities
 
 log = logging.getLogger(__name__)
+
+# Only a host sets these, so a team setting or secret of the same name never reaches a bundle.
+HOST_SET_ENV = (GATE_AUTO_APPROVE_ENV, GIT_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV, REDACT_ENV,
+                *GIT_CONFIG_ENV, *PROXY_ENV)
 
 INTERVAL_S = 2.0
 LEASE = timedelta(minutes=2)
@@ -283,6 +297,17 @@ def meets(requires: Iterable[str] | None, capabilities: Iterable[str] | None) ->
     return capabilities is None or set(requires or ()) <= set(capabilities)
 
 
+def takes(requires: Iterable[str] | None, capabilities: Iterable[str] | None) -> bool:
+    """Whether a runner with these capabilities takes a job. One offering a remote capability takes only jobs that
+    require one of its remote capabilities."""
+    if capabilities is not None:
+        capabilities = list(capabilities)
+        remote = remote_capabilities(capabilities)
+        if remote and not set(remote) & set(requires or ()):
+            return False
+    return meets(requires, capabilities)
+
+
 def claimable(conn: Connection, *, capabilities: Iterable[str] | None, allowlist: Iterable[str] | None = None,
               team_id: str | None = None, bound_key: str | None = None, now: datetime | None = None) -> list[str]:
     """Queued workflow jobs and resident turns these capabilities may run, oldest first, oldest ``CLAIM_SCAN`` queued.
@@ -307,7 +332,7 @@ def claimable(conn: Connection, *, capabilities: Iterable[str] | None, allowlist
     if team_id is not None:
         query = query.where(jobs.c.team_id == team_id)
     rows = [r for r in conn.execute(query.order_by(jobs.c.created_at, jobs.c.id).limit(CLAIM_SCAN)).all()
-            if meets(r.requires, capabilities) and meets(r.requires, allowlist)]
+            if takes(r.requires, capabilities) and meets(r.requires, allowlist)]
     if team_id is None:
         return [r.id for r in rows]
     wanted = {r.id: set((r.config or {}).get("secrets") or []) for r in rows}
@@ -569,8 +594,9 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
     roles = bundle_roles(conn, job.team_id, job.project_id,
                          [a["role"] for a in steps if isinstance(a.get("role"), str)])
     # These go in after the trigger's secrets, so a secret of the same name can't widen them.
-    for name in (MODELS_ENV, GIT_HOSTS_ENV, PROJECT_REPO_ENV):
-        secret_values.pop(name, None)
+    for name in [n for n in secret_values if n in (MODELS_ENV, GIT_HOSTS_ENV, PROJECT_REPO_ENV, *HOST_SET_ENV)
+                 or n.startswith(GIT_CONFIG_ENTRIES)]:
+        secret_values.pop(name)
     secret_values.update(agent_models(conn, keyring, job.team_id, job.project_id,
                                       [a["model"] for a in steps if isinstance(a.get("model"), str)],
                                       instance=instance_secrets))
@@ -581,7 +607,8 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
         if repo:
             secret_values[PROJECT_REPO_ENV] = repo
     run_settings = {k: v for k, v in team_env(conn, job.team_id, job.project_id).items()
-                    if k not in (MODELS_ENV, GIT_HOSTS_ENV, PROJECT_REPO_ENV, THREAD_ENV)}
+                    if k not in (MODELS_ENV, GIT_HOSTS_ENV, PROJECT_REPO_ENV, THREAD_ENV, *HOST_SET_ENV)
+                    and not k.startswith(GIT_CONFIG_ENTRIES)}
     checkpoint = {} if gated(body) else None
     if job.resume_of_gate is not None:
         checkpoint = gates.resume_checkpoint(conn, job)
@@ -892,7 +919,7 @@ class Worker:
         write_bundle(workdir, bundle.workflow, bundle.calls, bundle.skills, bundle.checkpoint, bundle.roles)
         launch = dryrun.Launch(bundle.run_id, bundle.token, workdir, bundle.summary, bundle.engine_key)
         # The host's PATH, HOME, and packs path go last, so no setting or secret replaces them.
-        env = {**{k: v for k, v in bundle.env().items() if k not in HOST_ONLY_ENV},
+        env = {**{k: v for k, v in bundle.env().items() if not host_only(k)},
                "PATH": job_path(binary), "HOME": os.environ.get("HOME") or str(Path.home()),
                PACKS_PATH_ENV: dryrun.packs_path(self.cfg.packs_dir),
                TOOLS_URL_ENV: f"{self.cfg.public_origin}{self.cfg.base_path}"}

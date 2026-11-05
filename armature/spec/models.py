@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import warnings
+from collections.abc import Iterable
 from datetime import timedelta
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -23,6 +24,13 @@ class OutputMode(str, Enum):
 
 # A runner capability: `llm`, `git`, `claude-code`, or a qualified one such as `platform:ios`.
 CAPABILITY = re.compile(r"^[a-z][a-z0-9-]{0,31}(:[a-z0-9][a-z0-9._-]{0,63})?$")
+# A runner offering `remote:<name>` takes only jobs whose requires name it.
+REMOTE_PREFIX = "remote:"
+
+
+def remote_capabilities(names: Iterable[str] | None) -> list[str]:
+    """The exclusive `remote:<name>` capabilities among ``names``."""
+    return sorted(name for name in names or () if name.startswith(REMOTE_PREFIX))
 
 
 # ── Mission/work layer (missions design §3): the fixed closure-reason set a

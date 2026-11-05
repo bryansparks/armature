@@ -14,7 +14,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import dispatch, environments, runners, worker
+from armature.runner.client import MAX_SLOTS_HEADER
+from armature.server import dispatch, environments, limits, runners, worker
 from armature.server.app.deps import Granted, by_team, require, server
 from armature.server.app.http import ApiError, client_ip
 from armature.server.app.routes_api import _check_name
@@ -232,6 +233,9 @@ async def runner_claim(request: Request) -> Response:
     srv = server(request)
     key = await runner_key(request, counted=False)
     body = await json_object(request)
+    # Read before the claim commits, so a failed read can't strand a claimed job.
+    cap = await asyncio.to_thread(_max_slots, srv.engine)
+    headers = NO_STORE if cap is None else {**NO_STORE, MAX_SLOTS_HEADER: str(cap)}
     try:
         bundle = await asyncio.to_thread(dispatch.claim, srv.engine, srv.keyring, key=key,
                                          runner_id=body.get("runner_id"), now=srv.now(), lease=worker.LEASE,
@@ -239,9 +243,14 @@ async def runner_claim(request: Request) -> Response:
     except dispatch.RunnerError as exc:
         raise ApiError(exc.status, exc.message) from exc
     if bundle is None:
-        return Response(status_code=204, headers=NO_STORE)
+        return Response(status_code=204, headers=headers)
     live(request).run_started(bundle.summary)
-    return JSONResponse({"job": bundle.payload()}, headers=NO_STORE)
+    return JSONResponse({"job": bundle.payload()}, headers=headers)
+
+
+def _max_slots(engine: Any) -> int | None:
+    with engine.connect() as conn:
+        return limits.max_slots(conn)
 
 
 def _run_status(request: Request, run_id: str | None, stored: str | None) -> str | None:
@@ -259,7 +268,8 @@ async def runner_heartbeat(job_id: str, request: Request) -> dict[str, Any]:
     except dispatch.RunnerError as exc:
         raise ApiError(exc.status, exc.message) from exc
     return {"status": beat["status"], "cancel_requested": beat["cancel_requested"],
-            "run_status": _run_status(request, beat["run_id"], beat["run_status"])}
+            "run_status": _run_status(request, beat["run_id"], beat["run_status"]),
+            **({"max_slots": beat["max_slots"]} if "max_slots" in beat else {})}
 
 
 @router.post("/api/runner/jobs/{job_id}/finish")

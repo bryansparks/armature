@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from armature.events.location import LOCATION_KIND_ENV, LOCATION_LABEL_ENV
+
 MODELS_ENV = "ARMATURE_AGENT_MODELS"
 SKILLS_ENV = "ARMATURE_SKILLS_DIR"
 ROLES_ENV = "ARMATURE_ROLES_DIR"
@@ -14,8 +16,16 @@ SAME_USER_ENV = "ARMATURE_AGENT_SAME_USER"
 SESSIONS_ENV = "ARMATURE_AGENT_SESSIONS"
 GIT_HOSTS_ENV = "ARMATURE_GIT_HOSTS"
 PROJECT_REPO_ENV = "ARMATURE_PROJECT_REPO"
+# Set by a remote runner's launcher when git reaches its hosts through a proxy that adds the credentials.
+GIT_VIA_PROXY_ENV = "ARMATURE_GIT_VIA_PROXY"
+# What git keeps from the host to reach its hosts through a proxy that may trust only its own CA.
+PROXY_ENV = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE",
+             "SSL_CERT_DIR", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+GIT_CONFIG_ENV = ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
+GIT_CONFIG_ENTRIES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 # Only the runner or worker sets these, so a setting or secret of the same name never reaches the run.
-HOST_ONLY_ENV = (AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, SKILLS_ENV, ROLES_ENV)
+HOST_ONLY_ENV = (AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, SKILLS_ENV, ROLES_ENV, GIT_VIA_PROXY_ENV,
+                 LOCATION_KIND_ENV, LOCATION_LABEL_ENV, *GIT_CONFIG_ENV, *PROXY_ENV)
 FILE_TOOLS = ("Read", "Grep", "Glob")
 GIT_READS = ("log", "diff", "show", "status", "blame", "ls-files", "merge-base", "rev-list", "cat-file")
 # Claude Code asks, so a headless session is denied, before any of these reads outside the working and added dirs.
@@ -36,6 +46,11 @@ WRITE_ENV = {"BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "73000
 CLAUDE_CREDENTIALS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "AWS_REGION",
                       "AWS_REGION_NAME", "AWS_BEARER_TOKEN_BEDROCK")
 CODEX_CREDENTIALS = ("OPENAI_API_KEY",)
+
+
+def host_only(name: str) -> bool:
+    """Whether only the runner or worker sets ``name``: one in ``HOST_ONLY_ENV``, or a git config entry."""
+    return name in HOST_ONLY_ENV or name.startswith(GIT_CONFIG_ENTRIES)
 
 
 @dataclass(frozen=True)
