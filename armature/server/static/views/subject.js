@@ -9,7 +9,7 @@ import { resultView } from '../result.js';
 import { hashFor } from '../router.js';
 import { tabIdFor } from '../runpage.js';
 import { openTail } from '../tail.js';
-import { runStatus, verdictChip, verdictTone } from './runs.js';
+import { cancelControl, locationChip, runStatus, verdictChip, verdictTone } from './runs.js';
 
 const PAGE_SIZE = 50;
 const EVENTS_PAGE = 1000;
@@ -157,7 +157,7 @@ function nowSection(detail, display, signal, redraw) {
   const live = ACTIVE.has(run.status);
   const body = element('div', {});
   const section = element('section', { class: 'thread-now card', 'aria-labelledby': 'thread-now-heading' },
-    element('h2', { id: 'thread-now-heading', tabindex: -1 }, live ? 'Running now' : 'Latest result'), body);
+    element('h2', { id: 'thread-now-heading', tabindex: -1 }, live ? 'Running now' : 'Latest result', ' ', cancelControl(run)), body);
   if (live) {
     const tail = openTail({ runId: run.id, run, display, signal, drawnLive: true, label: runLabel(run), color: 'other', title: '',
       subject: null, onEnd: () => redraw() });
@@ -205,7 +205,7 @@ function earlierRuns(detail, current) {
   return element('details', { class: 'card earlier-runs' }, element('summary', {}, `Earlier runs (${earlier.length})`),
     element('p', { class: 'note' }, 'Each later run replaces what the one before it found, so these are usually out of date.'),
     element('ul', { class: 'earlier-list', role: 'list' }, earlier.map((run) => element('li', {},
-      element('div', { class: 'earlier-head' }, link(runHref(run), when(run.started_at)), element('span', {}, runLabel(run)),
+      element('div', { class: 'earlier-head' }, link(runHref(run), when(run.started_at)), element('span', {}, runLabel(run)), cancelControl(run),
         outcomeCapsule(run), riskChip(run.risk, run.risk_reason), run.mode ? element('span', { class: 'chip' }, run.mode) : null,
         run.subject && run.subject !== detail.subject ? element('span', { class: 'muted mono wrap-anywhere' }, run.subject) : null),
       element('p', { class: 'note earlier-what wrap-anywhere' }, [moreThanOutcome(run),
@@ -287,6 +287,19 @@ async function detailPage(root, subject, signal, redraws = { count: 0, last: 0 }
   }, { signal: lifetime.signal });
 }
 
+export const subjectHeaders = (showCost) => ['Title', 'Author', 'Status', 'Work', ...(showCost ? [['Cost', 'num']] : []),
+  'Environment', ['Last activity', 'nowrap']];
+
+// One pull request or issue in the list. Environment is where its latest run executed.
+export function subjectCells(row, showCost) {
+  return [
+    element('div', { class: 'wrap-anywhere' }, link(subjectPageHref(row.subject), row.title || row.subject),
+      row.title ? element('div', { class: 'muted mono wrap-anywhere' }, row.subject) : null),
+    row.author || '—', statusCapsule(row.status), workText(row), ...(showCost ? [money(row.cost_usd)] : []),
+    locationChip(row.location), when(row.last_activity),
+  ];
+}
+
 async function listPage(root, query) {
   const q = query.get('q') || '';
   const team = query.get('team') || '';
@@ -315,11 +328,8 @@ async function listPage(root, query) {
   }
   const rows = listOf(page, 'subjects');
   const sum = totals(rows);
-  clear(body).append(card(rows.length ? table(['Title', 'Status', 'Work', ...(display.show_cost ? [['Cost', 'num']] : []), ['Last activity', 'nowrap']], rows.map((row) => [
-    element('div', { class: 'wrap-anywhere' }, link(subjectPageHref(row.subject), row.title || row.subject),
-      row.title ? element('div', { class: 'muted mono wrap-anywhere' }, row.subject) : null),
-    statusCapsule(row.status), workText(row), ...(display.show_cost ? [money(row.cost_usd)] : []), when(row.last_activity),
-  ])) : empty(q ? 'Nothing matches that search.' : 'No run names a pull request or issue yet.'),
+  clear(body).append(card(rows.length ? table(subjectHeaders(display.show_cost), rows.map((row) => subjectCells(row, display.show_cost)))
+    : empty(q ? 'Nothing matches that search.' : 'No run names a pull request or issue yet.'),
   rows.length ? element('p', { class: 'note' }, [plural(sum.subjects, 'subject'), plural(sum.reviews, 'review'), plural(sum.fixes, 'fix', 'fixes'),
     !display.show_cost || sum.cost === null ? null : `${money(sum.cost)} on this page`].filter(Boolean).join(', ')) : null));
   const pager = element('nav', { class: 'pager', 'aria-label': 'Pages' });

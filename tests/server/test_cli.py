@@ -258,3 +258,74 @@ def test_backfill_locations_marks_unplaceable_runs_unknown_once(tmp_path, monkey
     assert first.exit_code == 0 and "Located 1 run (1 unknown)." in first.output, first.output
     again = CliRunner().invoke(app, ["server", "backfill-locations", "--config", str(config)])
     assert again.exit_code == 0 and "Located 0 runs." in again.output, again.output
+
+
+def test_runs_delete_needs_an_admin_and_can_dry_run(tmp_path, monkeypatch):
+    from sqlalchemy import func, insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import audit, jobs, run_events, runs, teams, workflows
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, ended, running, workflow = new_id(), new_id(), new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", slug="own", created_at=utcnow()))
+        conn.execute(insert(workflows).values(id=workflow, team_id=team, name="test-run", current_version=1,
+                                              created_at=utcnow(), updated_at=utcnow()))
+        conn.execute(insert(users).values(id=new_id(), username="viewer", is_admin=False, disabled=False,
+                                          created_at=utcnow()))
+        for run_id, status in ((ended, "succeeded"), (running, "running")):
+            conn.execute(insert(runs).values(id=run_id, team_id=team, workflow_name="test-run", status=status,
+                                             started_at=utcnow()))
+        conn.execute(insert(jobs).values(id=new_id(), team_id=team, workflow_id=workflow, run_id=ended,
+                                         status="succeeded", created_at=utcnow()))
+        conn.execute(insert(run_events).values(run_id=ended, seq=1, ts=utcnow(), kind="step_start"))
+
+    def delete(*args):
+        return CliRunner().invoke(app, ["server", "runs", "delete", "--config", str(config), *args])
+
+    def count(table):
+        with engine.connect() as conn:
+            return conn.execute(select(func.count()).select_from(table)).scalar()
+
+    assert delete(ended, "--as", "viewer").exit_code == 1
+    refused = delete(ended, running, "--as", "admin")
+    assert refused.exit_code == 1 and f"Run {running} is still open" in refused.output
+    dry = delete(ended, "--as", "admin", "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert f"Would delete run {ended} of test-run and 1 job:" in dry.output and "run_events: 1 row" in dry.output
+    assert count(runs) == 2 and count(run_events) == 1
+    done = delete(ended, "--as", "admin")
+    assert done.exit_code == 0 and f"Deleted run {ended}" in done.output
+    assert count(runs) == 1 and count(run_events) == 0 and count(jobs) == 0 and count(audit) >= 1
+
+
+def test_runs_delete_takes_several_ids(tmp_path, monkeypatch):
+    from sqlalchemy import func, insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import audit, runs, teams
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, ids = new_id(), [new_id() for _ in range(3)]
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", slug="own", created_at=utcnow()))
+        for run_id in [*ids, new_id()]:
+            conn.execute(insert(runs).values(id=run_id, team_id=team, workflow_name="test-run", status="succeeded",
+                                             started_at=utcnow()))
+    more = [new_id() for _ in range(2)]
+    with engine.begin() as conn:
+        for run_id in more:
+            conn.execute(insert(runs).values(id=run_id, team_id=team, workflow_name="test-run", status="succeeded",
+                                             started_at=utcnow()))
+    done = CliRunner().invoke(app, ["server", "runs", "delete", *ids, "--as", "admin", "--config", str(config)])
+    assert done.exit_code == 0, done.output
+    assert all(f"Deleted run {run_id}" in done.output for run_id in ids)
+    joined = CliRunner().invoke(app, ["server", "runs", "delete", f"{more[0]} ,{more[1]}", "--as", "admin",
+                                      "--config", str(config)])
+    assert joined.exit_code == 0, joined.output
+    with engine.connect() as conn:
+        assert conn.execute(select(func.count()).select_from(runs)).scalar() == 1
+        assert conn.execute(select(func.count()).select_from(audit).where(audit.c.action == "run.delete")).scalar() == 5

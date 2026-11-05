@@ -350,3 +350,37 @@ def test_a_thread_shared_with_another_team_never_leaks_its_runs_links_or_finding
     assert viewer["title"] != "Rival issue" and len(viewer["runs"]) == 5
     project = _client(engine, keyring, seeded, "project_viewer").get(_path(ISSUE)).json()["subject"]
     assert [r["id"] for r in project["runs"]] == [seeded["first"]]
+
+
+def test_list_rows_name_the_author_and_the_latest_runs_environment(engine, keyring, seeded):
+    import json
+
+    from armature.server.db.schema import jobs, webhook_deliveries
+    from armature.server.db.schema import webhooks as webhooks_table
+    hook, delivery = new_id(), new_id()
+    payload = {"action": "opened", "pull_request": {"number": 13, "user": {"login": "octocat"}}}
+    with engine.begin() as conn:
+        conn.execute(insert(webhooks_table).values(id=hook, team_id=seeded["own"], name="gh", source="github",
+                                                   path_token=new_id(), secret_name="HOOK", created_at=NOW,
+                                                   updated_at=NOW))
+        conn.execute(insert(webhook_deliveries).values(id=delivery, webhook_id=hook, received_at=NOW, status="accepted",
+                                                       payload=json.dumps(payload)))
+        latest = _run(conn, seeded["own"], "code-review", at(9), OTHER_PR, status="running",
+                      trigger_ref={"delivery_id": delivery})
+        conn.execute(update(runs).where(runs.c.id == latest).values(
+            location={"kind": "aws-linux", "label": "AWS Linux", "instance": "i-1"}))
+        workflow = conn.execute(select(workflows.c.id).where(workflows.c.name == "code-review")).scalar()
+        conn.execute(insert(jobs).values(id=new_id(), team_id=seeded["own"], workflow_id=workflow, run_id=latest,
+                                         status="running", created_at=NOW))
+    client = _client(engine, keyring, seeded, "viewer")
+    rows = {r["subject"]: r for r in client.get("/api/subjects").json()["subjects"]}
+    assert rows[OTHER_PR]["author"] == "octocat"
+    assert rows[OTHER_PR]["location"] == {"kind": "aws-linux", "label": "AWS Linux", "instance": "i-1"}
+    assert rows[PR]["author"] is None and rows[PR]["location"] is None
+    page = client.get(_path(OTHER_PR)).json()["subject"]
+    [current] = [run for run in page["runs"] if run["id"] == latest]
+    assert current["job"]["status"] == "running" and current["job"]["cancel_requested_at"] is None
+    assert current["team_id"] == seeded["own"]
+    assert all(run["job"] is None for run in page["runs"] if run["id"] != latest)
+    listed = {r["id"]: r for r in client.get("/api/runs?every=1").json()["runs"]}
+    assert listed[latest]["job"]["status"] == "running" and listed[seeded["first"]]["job"] is None

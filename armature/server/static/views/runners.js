@@ -1,5 +1,6 @@
 import { api, listOf } from '../api.js';
-import { card, clear, element, empty, errorBox, loading, pageHeader, statusChip, table, when } from '../dom.js';
+import { card, clear, element, empty, errorBox, link, loading, pageHeader, statusChip, table, when } from '../dom.js';
+import { hashFor } from '../router.js';
 
 export const RUNNERS_PATH = '/api/runners';
 const WAITING = ['queued', 'provisioning'];
@@ -32,8 +33,8 @@ export function runnerCells(runner) {
 }
 
 export async function render(root) {
-  root.append(pageHeader('Runners'));
-  root.append(element('p', { class: 'note' }, 'A runner is a host that runs jobs. It takes only the jobs whose needs match what it says it can do. Start one on a host with armature runner and a runner key.'));
+  root.append(pageHeader('Runners', link(hashFor('runner-keys'), 'Add runner', { class: 'btn' })));
+  root.append(element('p', { class: 'note' }, 'A runner is a host that runs jobs. It takes only the jobs whose needs match what it says it can do. Start one on a host with armature runner and a runner key. Create a key for all teams under Runner keys, or for one team on that team\'s Runner keys tab.'));
   const slot = element('div', {}, loading());
   root.append(card(slot));
   let runners;
