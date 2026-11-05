@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-05
+
 ### Added
 
 - **Resident workflows.** A workflow spec can declare a `resident:` block
