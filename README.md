@@ -241,7 +241,7 @@ stages:
 
 A pack's `pack.yaml` declares each adapter's static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for its parameters and outputs, and a timeout. Parameters travel to the script as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never interpolated into the command line. `with:` is checked against the schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/adapter` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
 
-Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` — the first pack under a name wins. The server ships built-in packs (`conversation`, `github`, `jira`, `linear`, `review`, `slack`) that power its review and integration flows.
+Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` — the first pack under a name wins. The server ships built-in packs (`conversation`, `github`, `jira`, `linear`, `resident`, `review`, `slack`) that power its review, integration, and resident flows.
 
 ```bash
 armature pack list                    # every adapter on the pack paths, with its parameter schema
@@ -270,6 +270,15 @@ armature package verify my_pkg                     # nine completeness checks, n
 - **Results.** Each run writes `receipt.json` + declared artifacts + optional `trace.jsonl` to a host `--results` dir.
 
 Three example packages live in `examples/packages/` (`echo-tool`, `topic-researcher`, `sandbox-shell`) and double as the Docker integration test corpus (`pytest -m docker`). Full feature set, the secrets model, the pool-of-worker-containers path, and the test catalog: **[`docs/WORKFLOW-PACKAGES.md`](docs/WORKFLOW-PACKAGES.md)**.
+
+## Resident workflows
+
+On the platform server, a workflow spec can declare a `resident:` block and become a long-lived **instance** — durable state, an inbox of events, and one short run — a **turn** — per batch of events. There is no daemon: an instance is rows plus the worker's sweep. Reading an instance's published state is free (served straight from the row, for dashboards); asking it a question is an asynchronous event. Webhook rules, the Jira/Linear pollers, and schedules route events to **keyed instances** (one per PR, issue, or customer), an idle loop lets an instance maintain itself between events under backoff and per-day budgets, and `resident.emit` fans out between instances under chain/run/day caps. The whole feature ships dark and is switched on with the server's `resident.enabled` setting.
+
+- Design and grammar: **[docs/RESIDENT-WORKFLOWS.md](docs/RESIDENT-WORKFLOWS.md)**
+- What it buys you: **[docs/RESIDENT-WORKFLOWS-BENEFITS.md](docs/RESIDENT-WORKFLOWS-BENEFITS.md)**
+- How it's built: **[docs/RESIDENT-WORKFLOWS-TECHNICAL.md](docs/RESIDENT-WORKFLOWS-TECHNICAL.md)**
+- Worked example: **[`examples/residents/housekeeping.yml`](examples/residents/housekeeping.yml)**
 
 ## Cloud transport
 
@@ -435,6 +444,7 @@ Each loop feeds the next: better traces → better proposals → better specs �
 | **Response stage** | Mark one text-mode LLM stage as `response_stage: true` to enable token streaming; the HTTP service forwards each token to the SSE stream immediately and fires a `response_stage_complete` event so clients can render the answer before background stages finish |
 | **Context filtering** | A stage's `signature.input` declares which context keys appear in its prompt — keeps prompts focused, hides internal state from irrelevant stages |
 | **Cross-run memory** | The `memory:` spec section captures stage outputs across runs and injects them into subsequent runs — lets workflows accumulate knowledge without code changes |
+| **Resident workflow** | A `resident:` block turns the spec into a long-lived instance on the platform server — durable state, an event inbox, one short **turn** per batch of events, an idle loop, and per-day budgets; keyed instances give one per PR, issue, or customer. Gated by the server's `resident.enabled` setting. |
 | **HQS** | Harness Quality Score — Armature's own 5-component quality score: output validity (35%), success rate (25%), quorum score (20%), latency (10%), harness-following rate / HFR (10%). HFR = fraction of stages that succeed without escalation, a metric adapted from [arXiv:2605.30621](https://arxiv.org/abs/2605.30621)v1 |
 | **Leverage stage** | A stage whose per-run signal (quorum score for judge stages, `success × valid` otherwise) is highly correlated (Pearson `r`) with the run's final HQS — improving it moves overall HQS the most. `armature dashboard` shows a per-stage leverage heatmap; `armature improve` weights proposal coverage by leverage once enough runs exist (`min_runs` ≥ 8 and a stage reaches `|r| ≥ 0.4`). Dormant below that guard, so the optimizer is unchanged until traces support the claim. |
 | **Sandbox isolation** | `sandbox.mode: docker` routes shell, file_write, and file_read tool calls through ephemeral Docker containers — network-isolated, CPU/memory bounded, workspace-scoped. Per-stage image overrides with `sandbox_image`. Image content digest recorded on every trace for audit. |
@@ -462,6 +472,7 @@ Each loop feeds the next: better traces → better proposals → better specs �
 | `11_iterative_refinement.yml` | Deliberate iteration with `loop:` and an `until:` stop condition |
 | `starter_template.yml` | **Full-featured reference** — every section documented inline, showing model tiers, context filtering, cross-run memory, safety rules, guided JSON, and a human gate |
 | `decision-typesafe/` | **A/B benchmark: non-LLM decision API vs LLM judge** — script adapters with `parse: json`, fan-out over a 20-item labeled benchmark, measured accuracy/latency/cost in the example README (needs `TYPESAFE_API_KEY` + `OPENROUTER_API_KEY`) |
+| `residents/housekeeping.yml` | **Resident workflow** — a server-side instance with an idle loop and event turns (see the [Resident workflows](#resident-workflows) section) |
 
 ## Templates
 
@@ -506,7 +517,7 @@ armature/
 ├── adapters/       # Observability adapters (LangFuse, LangSmith)
 ├── templates/      # Reusable workflow spec templates
 ├── service/        # FastAPI HTTP service — WorkflowRegistry, build_app(), /workflows API
-├── server/         # The platform server — web UI, teams, stored workflows, runs, webhooks, packs
+├── server/         # The platform server — web UI, teams, stored workflows, runs, webhooks, packs, residents
 ├── transport/      # Cloud transport (optional [cloud] extra) — S3 work store, submit gates, sweep
 └── cli.py          # CLI entry point
 
@@ -555,6 +566,9 @@ docs/               # Full documentation (see index below)
 | [CHECKPOINT-AND-RESUME](docs/CHECKPOINT-AND-RESUME.md) | Execution state persistence and resumption |
 | [CHATBOT-AND-STREAMING](docs/CHATBOT-AND-STREAMING.md) | Chat applications and streaming responses |
 | [HUMAN-IN-THE-LOOP](docs/HUMAN-IN-THE-LOOP.md) | Approval gates and human decision points |
+| [RESIDENT-WORKFLOWS](docs/RESIDENT-WORKFLOWS.md) | Resident workflows — long-lived instances, event turns, idle loop, budgets (design + grammar) |
+| [RESIDENT-WORKFLOWS-BENEFITS](docs/RESIDENT-WORKFLOWS-BENEFITS.md) | What resident workflows buy you — free reads, durable per-object memory, event-driven turns |
+| [RESIDENT-WORKFLOWS-TECHNICAL](docs/RESIDENT-WORKFLOWS-TECHNICAL.md) | How residents are built — rows not processes, the five-function substrate, invariants |
 | [HQS-AND-SELF-IMPROVEMENT](docs/HQS-AND-SELF-IMPROVEMENT.md) | The HQS formula and self-improvement loop |
 
 ### Operations & safety
