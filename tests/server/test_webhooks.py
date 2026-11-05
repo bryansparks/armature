@@ -1924,3 +1924,182 @@ def test_the_beach_pattern_a_reply_resumes_a_keyed_instance(sqlite_engine, lead,
     assert job.kind == "resident" and job.inputs["_resident"]["state"] == {"question": "tax id", "asked": True}
     assert [(e.seq, e.kind, e.payload["event"]["text"]) for e in _inbox(sqlite_engine, resident.id)] == [
         (1, "request", "what is the vendor's tax id?"), (2, "request", "EIN 12-3456789")]
+
+
+CLOSING = """\
+name: keyed
+resident:
+  instance_key: "{{ event.payload.item }}"
+  on:
+    request: {workflow: self}
+    signal: {workflow: self}
+  close_on: {signal: done}
+stages: []
+"""
+PULL = {"item": "acme/widgets#7", "action": "opened",
+        "pull_request": {"number": 7, "draft": False, "head": {"sha": "abc123"}, "title": "Fix the widget"}}
+
+
+def test_a_resident_rule_bakes_declared_scalar_fields_into_the_event(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True,
+          inputs={"number": "$.pull_request.number", "sha": "$.pull_request.head.sha",
+                  "draft": "$.pull_request.draft", "absent": "$.pull_request.merged_by.login"})
+    raw = _body(PULL)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    [event] = _inbox(sqlite_engine, resident.id)
+    fields = {"number": 7, "sha": "abc123", "draft": False}  # a missing path is left out, never an error
+    assert event.source["fields"] == fields and type(event.source["fields"]["number"]) is int
+    assert type(event.source["fields"]["draft"]) is bool
+    [job] = _jobs(sqlite_engine)
+    assert job.inputs["_event"]["fields"] == fields
+
+
+@pytest.mark.parametrize("value,kept", [
+    ({"login": "octo"}, False),
+    (["a", "b"], False),
+    ("x" * (hooks.TEXT_VALUE_MAX + 1), False),
+    ("x" * hooks.TEXT_VALUE_MAX, True),
+    (None, True),
+    (True, True),
+    (7, True),
+    (1.5, False),
+])
+def test_a_resident_rule_keeps_only_short_scalar_fields(sqlite_engine, world, clock, value, kept):
+    _resident_spec(sqlite_engine, clock, world)
+    [decision] = _decide(sqlite_engine, world, [{"resident": True, "inputs": {"v": "$.v", "item": "$.item"}}],
+                         {"item": "one", "v": value})
+    assert decision["matched"] is True
+    expected = {"item": "one", "v": value} if kept else {"item": "one"}
+    assert decision["resident"]["fields"] == expected  # dropped whole, never truncated
+    assert ("dropped input v" in decision["reason"]) is not kept
+
+
+@pytest.mark.parametrize("inputs,message", [
+    ({"whole": "$"}, "Input whole"),
+    ({"fixed": "literal"}, "Input fixed"),
+    ({"count": 3}, "Input count"),
+    ({f"k{i}": f"$.k{i}" for i in range(9)}, "at most 8"),
+])
+def test_a_resident_rule_takes_only_payload_paths_as_inputs(inputs, message):
+    with pytest.raises(hooks.WebhookError, match=message):
+        hooks.check_rule({"resident": True, "inputs": inputs})
+    eight = {f"k{i}": f"$.k{i}" for i in range(8)}
+    assert hooks.check_rule({"resident": True, "inputs": eight})["inputs"] == eight
+    assert hooks.check_rule({"inputs": inputs})  # a plain rule keeps its literals and $
+
+
+@pytest.mark.parametrize("config", [
+    {"signal": "done"},
+    {"signal": "done", "conversation": True},
+    {"signal": "done", "resident": True, "conversation": True},
+    {"signal": "done", "resident": True, "key": ["item"], "cancel_only": True},
+    {"signal": "done", "resident": True, "dry": True},
+    {"signal": "Done", "resident": True},
+    {"signal": "1done", "resident": True},
+    {"signal": "", "resident": True},
+    {"signal": 5, "resident": True},
+])
+def test_a_signal_rule_needs_a_resident_and_an_event_name(config):
+    match = "cancel_only" if config.get("cancel_only") else "dry" if config.get("dry") else \
+        "not both" if config.get("conversation") and config.get("resident") else "signal"
+    with pytest.raises(hooks.WebhookError, match=match) as raised:
+        hooks.check_rule(config)
+    assert raised.value.status == 400
+    assert hooks.check_rule({"signal": "done", "resident": True})["signal"] == "done"
+
+
+def _closing_rules(lead, world, hook):
+    _rule(lead, hook, world.wf, resident=True, order=0,
+          conditions=[{"path": "action", "op": "eq", "value": "opened"}])
+    _rule(lead, hook, world.wf, resident=True, order=1, signal="done",
+          conditions=[{"path": "action", "op": "in", "value": ["opened", "closed"]}])
+
+
+def test_a_signal_rule_closes_the_instance_without_a_turn(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, body=CLOSING)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, signal="done",
+          conditions=[{"path": "action", "op": "eq", "value": "closed"}])
+    raw = _body({**PULL, "action": "closed"})
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == \
+        {"status": "accepted", "jobs": 0}
+    [resident] = _resident_rows(sqlite_engine)
+    assert (resident.state, resident.close_reason) == ("closed", "close_on")
+    assert _jobs(sqlite_engine) == []  # no turn row was ever queued
+    [delivery] = _deliveries(sqlite_engine)
+    [event] = _inbox(sqlite_engine, resident.id)
+    assert (event.kind, event.name, event.dedupe_key, event.handled) == ("signal", "done", f"{delivery.id}:done", True)
+    assert delivery.matched[0]["job_id"] is None
+    raw = _body({**PULL, "action": "closed"})  # a later delivery is skipped, not failed
+    response = lead.client.post(_path(hook), content=raw, headers=_github(raw, delivery="d-2"))
+    assert response.json() == {"status": "accepted", "jobs": 0}
+    [later] = [d for d in _deliveries(sqlite_engine) if d.delivery_key == "d-2"]
+    assert later.status == "accepted" and later.matched[0]["skipped"] == "instance is closed"
+    assert len(_inbox(sqlite_engine, resident.id)) == 1
+
+
+def test_a_non_closing_signal_wakes_a_turn_and_a_replay_routes_once(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, body=CLOSING)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, signal="nudged")
+    raw = _body(PULL)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["jobs"] == 1
+    [resident] = _resident_rows(sqlite_engine)
+    assert (resident.state, resident.close_reason) == ("idle", None)
+    [job] = _jobs(sqlite_engine)
+    assert job.inputs["_event"]["name"] == "nudged"
+    [delivery] = _deliveries(sqlite_engine)
+    with sqlite_engine.begin() as conn:  # a replay runs the same delivery row again, as approve does
+        hooks.dispatch(conn, hooks.get(conn, hook["id"]), delivery.id, delivery.event,
+                       json.loads(delivery.payload), clock())
+    [event] = _inbox(sqlite_engine, resident.id)  # the replay collapsed on its dedupe key
+    assert (event.kind, event.name) == ("signal", "nudged")
+
+
+def test_a_request_and_a_signal_rule_on_one_delivery_both_land(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, body=CLOSING)
+    hook = _hook(lead, world)
+    _closing_rules(lead, world, hook)
+    raw = _body(PULL)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json()["status"] == "accepted"
+    [delivery] = _deliveries(sqlite_engine)
+    [resident] = _resident_rows(sqlite_engine)
+    assert [(e.kind, e.name, e.dedupe_key) for e in _inbox(sqlite_engine, resident.id)] == [
+        ("request", None, delivery.id), ("signal", "done", f"{delivery.id}:done")]
+    assert (resident.state, resident.close_reason) == ("closed", "close_on")
+    assert delivery.matched[1]["job_id"] is None  # the closing entry names no turn
+    [job] = _jobs(sqlite_engine)
+    assert (job.id, job.status) == (delivery.matched[0]["job_id"], "superseded")
+
+
+def test_a_signal_rule_is_inert_while_residents_are_off(sqlite_engine, lead, world, clock):
+    _resident_spec(sqlite_engine, clock, world, body=CLOSING, enabled=False)
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, signal="done")
+    raw = _body(PULL)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == \
+        {"status": "accepted", "jobs": 0}
+    assert _resident_rows(sqlite_engine) == [] and _jobs(sqlite_engine) == []
+    [delivery] = _deliveries(sqlite_engine)
+    assert delivery.matched[0]["inert"] == "residents are not enabled on this instance"
+
+
+@pytest.mark.parametrize("signal", [{"signal": "done"}, {}])
+def test_a_resident_rule_skips_an_instance_of_another_team(sqlite_engine, lead, world, clock, signal):
+    _resident_spec(sqlite_engine, clock, world, body=CLOSING)
+    with sqlite_engine.begin() as conn:
+        resident = residents.ensure(conn, team_id=world.other, project_id=None, workflow_id=world.wf,
+                                    instance_key=PULL["item"], now=clock())
+    hook = _hook(lead, world)
+    _rule(lead, hook, world.wf, resident=True, **signal)
+    raw = _body(PULL)
+    assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == \
+        {"status": "accepted", "jobs": 0}
+    [delivery] = _deliveries(sqlite_engine)
+    assert delivery.matched[0]["skipped"] == "instance belongs to another team"
+    assert _inbox(sqlite_engine, resident.id) == []
+    [row] = _resident_rows(sqlite_engine)
+    assert row.state == "idle"

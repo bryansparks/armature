@@ -8,6 +8,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Resident rule fields and signals.** A resident webhook rule's `inputs`
+  now declare up to 8 scalar fields (`$.path` only) that reach the turn as
+  `_event.fields`, merged over the batch with the newest value winning, and
+  a rule's `signal: <name>` enqueues a named signal so `close_on` closes the
+  instance with no turn and asks its running turn to stop. The rule form
+  sets both and keeps them through a save.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added

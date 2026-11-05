@@ -57,6 +57,11 @@ export function ruleBody(values) {
   if (values.import_hash) config.import_hash = values.import_hash;
   // A rule that only cancels keeps that flag through a save. The form has no control for it.
   if (values.cancel_only) config.cancel_only = true;
+  if (values.conversation) config.conversation = values.conversation;
+  if (values.resident) {
+    config.resident = true;
+    if (values.signal?.trim()) config.signal = values.signal.trim();
+  }
   const key = splitList(values.key);
   if (key.length) config.key = key;
   if (values.concurrency && values.concurrency !== 'none') config.concurrency = values.concurrency;
@@ -337,6 +342,8 @@ function ruleForm(webhook, rule, workflows, onDone, onCancel) {
   const stop = checkbox(`${prefix}-stop`, 'Stop after this rule when it matches', config.stop);
   const shadow = checkbox(`${prefix}-shadow`, 'Shadow: record the decision, queue nothing', config.shadow);
   const dry = checkbox(`${prefix}-dry`, 'Dry: run, but record each tool call instead of sending it', config.dry);
+  const resident = checkbox(`${prefix}-resident`, 'Resident: send each delivery to the workflow’s resident instance', config.resident);
+  const signalInput = textInput(`${prefix}-signal`, config.signal, { placeholder: 'merged' });
   const mappingInput = element('textarea', { id: `${prefix}-mapping`, class: 'mono', rows: 12, spellcheck: 'false', 'aria-describedby': `${prefix}-mapping-help` });
   mappingInput.value = mappingText(config);
   mappingInput.addEventListener('blur', () => { mappingInput.value = prettyMapping(mappingInput.value); });
@@ -355,7 +362,9 @@ function ruleForm(webhook, rule, workflows, onDone, onCancel) {
     element('label', { class: 'stacked', for: concurrencySelect.id }, 'Jobs of one key', concurrencySelect),
     element('label', { class: 'stacked', for: debounceInput.id }, 'Quiet period in seconds before a job starts', debounceInput),
     cancelRunning.root, element('label', { class: 'stacked', for: stickyInput.id }, 'Inputs a newer job keeps from the one it replaces, comma-separated', stickyInput),
-    enabled.root, stop.root, shadow.root, dry.root,
+    enabled.root, stop.root, shadow.root, dry.root, resident.root,
+    element('label', { class: 'stacked', for: signalInput.id }, 'Signal (optional, resident only)', signalInput,
+      element('span', { class: 'note' }, 'Sends this named signal instead of an event, such as one that closes the instance.')),
     element('label', { class: 'stacked', for: mappingInput.id }, 'Conditions and inputs (YAML or JSON)', mappingInput),
     element('p', { class: 'note', id: `${prefix}-mapping-help` }, 'conditions is a list of {path, op, value}. op is eq, ne, in, not_in, starts_with, contains, exists, or missing. starts_with and contains take text and an optional ignore_case: true. inputs maps each workflow input to "$.payload.path", "$" for the whole payload, or a literal. An optional thread names the thread its runs join, such as "slack:{{ event.channel }}:{{ event.thread_ts or event.ts }}".'),
     status, element('div', { class: 'wf-actions' }, saveButton, element('button', { type: 'button', onclick: onCancel }, 'Cancel')));
@@ -363,8 +372,9 @@ function ruleForm(webhook, rule, workflows, onDone, onCancel) {
     submitEvent.preventDefault();
     const body = ruleBody({
       workflow_id: workflowSelect.value, order: orderInput.value, events: eventsInput.value, event_from: webhook.source === 'generic' ? eventFromInput.value : '',
-      project_from: projectInput.value, secrets: secretsInput.value, enabled: enabled.input.checked, stop: stop.input.checked, shadow: shadow.input.checked, dry: dry.input.checked, import_hash: config.import_hash, cancel_only: config.cancel_only, mapping: mappingInput.value,
+      project_from: projectInput.value, secrets: secretsInput.value, enabled: enabled.input.checked, stop: stop.input.checked, shadow: shadow.input.checked, dry: dry.input.checked, import_hash: config.import_hash, cancel_only: config.cancel_only, conversation: config.conversation, mapping: mappingInput.value,
       key: keyInput.value, concurrency: concurrencySelect.value, debounce_seconds: debounceInput.value, cancel_running: cancelRunning.input.checked, sticky: stickyInput.value,
+      resident: resident.input.checked, signal: signalInput.value,
     });
     const path = rule ? rulePath(rule.id) : `${webhookPath(webhook.id)}/rules`;
     if (await attempt(status, saveButton, () => api(path, { method: 'POST', body }))) onDone(rule ? 'Rule saved.' : 'Rule added.');
@@ -388,7 +398,7 @@ function rulesSection(webhook, rules, workflows, onChanged) {
     });
     return [String(config.order ?? 0), rule.workflow_name || rule.workflow_id, (config.events || []).join(', ') || 'Any',
       conditionsSummary(config.conditions),
-      element('span', { class: 'chips' }, rule.enabled ? null : badge('Disabled'), config.shadow ? badge('Shadow', 'warn') : null, config.dry ? badge('Dry', 'warn') : null, config.cancel_only ? badge('Cancels only') : null, config.stop ? badge('Stop') : null,
+      element('span', { class: 'chips' }, rule.enabled ? null : badge('Disabled'), config.shadow ? badge('Shadow', 'warn') : null, config.dry ? badge('Dry', 'warn') : null, config.cancel_only ? badge('Cancels only') : null, config.resident ? badge('Resident') : null, config.signal ? badge(`Signal: ${config.signal}`) : null, config.stop ? badge('Stop') : null,
         config.concurrency ? badge(CONCURRENCY[config.concurrency]) : null, config.debounce_seconds ? badge(`Quiet ${config.debounce_seconds}s`) : null),
       element('span', { class: 'row-actions' }, editButton, deleteButton)];
   });

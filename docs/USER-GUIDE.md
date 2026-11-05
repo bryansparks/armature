@@ -4446,7 +4446,7 @@ A turn must end when it answers, so the flagship interaction never holds a slot 
 
 ### Routing events in
 
-- **Webhook rules:** `config.resident: true` on a rule routes each delivery as a `request` event on the instance the spec's `instance_key` template names (deduped by delivery id). A rule that routes to a resident locks only the delivery row — the instance's own one-turn lock is the real serialization.
+- **Webhook rules:** `config.resident: true` on a rule routes each delivery as a `request` event on the instance the spec's `instance_key` template names (deduped by delivery id). A rule that routes to a resident locks only the delivery row — the instance's own one-turn lock is the real serialization. The rule's `inputs` declare fields for the turn as `_event.fields`: at most 8, each a `$.path` into the payload, keeping only a string of at most 200 characters, a whole number, `true`, `false`, or `null`. `signal: <name>` enqueues a named signal instead of a request, so `close_on` can close the instance with no turn.
 - **Schedules:** a spec's `resident.on.schedule` is materialized as the workflow's schedule trigger automatically on every save, create, fork, and rollback — spec-owned, never edited by hand. When it fires, each open instance gets a `schedule` event.
 - **Jira/Linear polls:** the same `resident` option, with the issue key as the dedupe key.
 - **Other workflows:** the `resident/emit` adapter queues an event on another resident's instance — a bounded fan-out (chain depth 5, 10 emits per run, 50 per instance per day; refusals are audited). `close_on` closes the instance on a matching named signal with no turn spent, so a fleet closes for free when its work item closes.
