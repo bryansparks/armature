@@ -7,25 +7,11 @@ import { isSso, loginPath, navFor, setSession, ssoStepUpPath, user } from './ses
 
 // Simple 16px outline icons, drawn as SVG so the menu needs no icon font.
 const ICON_PATHS = {
-  home: 'M2 7.5L8 2.5l6 5M3.5 6.5v7h9v-7M6.5 13.5v-4h3v4',
-  list: 'M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01',
-  chart: 'M2 2v12h12M5 11V8M8 11V5M11 11V7',
-  team: 'M2 3h12v10H2zM2 6h12M6 6v7',
-  people: 'M6 7a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM1.5 14c0-2.5 2-4.5 4.5-4.5s4.5 2 4.5 4.5M11 2.5a2.5 2.5 0 0 1 0 4.5M12.5 9.8c1.2.6 2 2 2 4.2',
   flow: 'M3 2.5h4v3H3zM9 10.5h4v3H9zM5 5.5v3.5h6v1.5',
   doc: 'M4 1.5h5.5L12 4v10.5H4zM9.5 1.5V4H12M6 7.5h4M6 10h4',
-  key: 'M10.5 1.5a4 4 0 1 1-3.2 6.4L2 13.2V15h2.5v-1.5H6V12h1.5l1-1A4 4 0 0 1 10.5 1.5zM11.5 4.5h.01',
-  person: 'M8 7.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM2.5 15c0-3 2.5-5.5 5.5-5.5s5.5 2.5 5.5 5.5',
-  box: 'M2 4.5L8 1.5l6 3v7l-6 3-6-3zM2 4.5l6 3 6-3M8 7.5v7',
   gear: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',
   pulse: 'M1.5 8.5h3l2-5 3 9 2-4h3',
   hook: 'M8 1.5v7a3 3 0 1 1-3-3M8 1.5l2 2M8 1.5l-2 2',
-  clock: 'M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 4.5V8l2.5 1.5',
-  server: 'M2 2.5h12v4H2zM2 9.5h12v4H2zM4.5 4.5h.01M4.5 11.5h.01',
-  cloud: 'M4.5 12.5h7.5a2.5 2.5 0 0 0 .3-5 4 4 0 0 0-7.6-1A3 3 0 0 0 4.5 12.5z',
-  folder: 'M1.5 3.5h4.5l1.5 1.5h7v8h-13z',
-  check: 'M2.5 8.5l3.5 3.5 7.5-8',
-  plus: 'M8 2.5v11M2.5 8h11',
   inbox: 'M1.5 9.5l2-6.5h9l2 6.5v4h-13zM1.5 9.5h4l1 2h3l1-2h4',
   menu: 'M2 4h12M2 8h12M2 12h12',
   collapse: 'M10 3L5 8l5 5',
@@ -121,7 +107,7 @@ async function route() {
     const viewModule = await loadView();
     if (sequence !== renderSequence) return;
     const viewRoot = element('div', { class: 'wrap' });
-    const tabs = isAllowed ? tabsFor(name, allowedViews) : null;
+    const tabs = tabsFor(name, allowedViews);
     if (tabs) viewRoot.append(sectionTabs(section, tabs));
     await viewModule.render(viewRoot, { name, args, query, signal: controller.signal });
     if (sequence !== renderSequence) return;
@@ -284,7 +270,8 @@ async function start() {
   document.getElementById('skip').addEventListener('click', () => document.getElementById('content').focus());
   // Safari does not focus a link on click, so the tab that started a route is remembered here.
   document.getElementById('content').addEventListener('click', (clickEvent) => {
-    clickedTabHref = clickEvent.target.closest?.('.section-tabs a')?.getAttribute('href') ?? null;
+    const href = clickEvent.target.closest?.('.section-tabs a')?.getAttribute('href') ?? null;
+    clickedTabHref = href === location.hash ? null : href;
   });
   window.addEventListener('hashchange', leaveThenRoute);
   window.addEventListener('beforeunload', (unloadEvent) => {
