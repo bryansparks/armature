@@ -675,6 +675,8 @@ runners = Table(
     _ts("created_at"),
     _ts("last_seen_at"),
     Column("platform", JSON),
+    # False for a runner that can't pause a run at a gate. None, from a runner that didn't say, means it can.
+    Column("pauses", Boolean),
     UniqueConstraint("runner_key_id", "name"),
 )
 

@@ -24,15 +24,20 @@ from typing import Any
 import httpx
 
 from armature.events.location import this_machine
-from armature.nodes.gate import GATE_DIR_ENV, GATE_FILE, read_gate
+from armature.nodes.gate import (
+    GATE_AUTO_APPROVE_ENV,
+    GATE_DIR_ENV,
+    GATE_FILE,
+    read_gate,
+)
 from armature.nodes.harness import (
     AGENT_DIR_ENV,
     AGENT_USER_ENV,
-    HOST_ONLY_ENV,
     ROLES_ENV,
     SAME_USER_ENV,
     SESSIONS_ENV,
     SKILLS_ENV,
+    host_only,
 )
 from armature.packs import PACKS_PATH_ENV
 from armature.packs.tool import URL_ENV as TOOLS_URL_ENV
@@ -67,6 +72,8 @@ OPEN = ("queued", "running", "lost")
 JOB_PREFIX = "job-"
 LOCK_FILE = ".lock"
 HELD = ("provisioning", "claimed", "running")
+# Every claim answer, the empty 204 included, carries the server's runner.max_slots here when it sets one.
+MAX_SLOTS_HEADER = "X-Armature-Max-Slots"
 
 
 class RunnerLocked(Exception):
@@ -88,13 +95,17 @@ class Client:
         self._key = key
         self._http = httpx.Client(timeout=HTTP_TIMEOUT_S, transport=transport, trust_env=False)
 
-    def post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        """POST to the server. None for 204. Raises ServerError for an error status or no answer."""
+    def post(self, path: str, body: dict[str, Any] | None = None, *,
+             answer_headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+        """POST to the server. None for 204. Raises ServerError for an error status or no answer. The answer's
+        headers, lowercased, go in ``answer_headers``."""
         try:
             response = self._http.post(f"{self.server}{path}", json=body or {},
                                        headers={"Authorization": f"Bearer {self._key}"})
         except httpx.HTTPError as exc:
             raise ServerError(0, str(exc) or exc.__class__.__name__) from exc
+        if answer_headers is not None:
+            answer_headers.update((name.lower(), value) for name, value in response.headers.items())
         if response.status_code == 204:
             return None
         if response.status_code >= 400:
@@ -103,6 +114,17 @@ class Client:
             except ValueError:
                 message = response.reason_phrase
             raise ServerError(response.status_code, message)
+        return response.json()
+
+    def events(self, events_url: str, token: str, body: bytes) -> dict[str, Any]:
+        """Post NDJSON event lines with the run's own token. Raises ServerError for an error status or no answer."""
+        try:
+            response = self._http.post(events_url, content=body, headers={
+                "Authorization": f"Bearer {token}", "Content-Type": "application/x-ndjson"})
+        except httpx.HTTPError as exc:
+            raise ServerError(0, exc.__class__.__name__) from exc
+        if response.status_code >= 400:
+            raise ServerError(response.status_code, response.reason_phrase)
         return response.json()
 
     def end_run(self, events_url: str, token: str, status: str, error: str) -> None:
@@ -135,11 +157,21 @@ def enroll(server: str, token: str, name: str, *, transport: httpx.BaseTransport
 
 
 class Runner:
+    """Claims jobs and runs each as ``armature run`` on this host.
+
+    A remote provider subclasses it and overrides these: ``platform`` for where its jobs run, ``hello``, ``claim``,
+    and ``beat`` to read what the server answers, ``fill`` to hold back claims, ``clear_leftovers`` for what a
+    stopped runner left, and ``run_job`` to run a claimed job somewhere else. One that can't pause a run at a gate
+    passes ``pauses=False``, and the server then never gives it a job that may pause. ``finish``, ``paused``, ``clock``, and
+    ``stopping``, set once the runner stops, are there for its ``run_job``.
+    """
+
     def __init__(self, client: Client, *, name: str, capabilities: list[str], slots: int, work_dir: Path,
                  binary: str, labels: dict[str, str] | None = None, version: str | None = None,
                  host: str | None = None, poll: float = POLL_S, heartbeat: float = HEARTBEAT_S,
                  clock: Callable[[], float] = time.monotonic, job_user: str | None = None,
-                 agent_user: str | None = None, same_user: bool = False, memory_mb: int = 0):
+                 agent_user: str | None = None, same_user: bool = False, memory_mb: int = 0,
+                 pauses: bool = True):
         self.client = client
         self.name = name
         self.capabilities = capabilities
@@ -151,22 +183,30 @@ class Runner:
         self.host = host
         self.poll = poll
         self.heartbeat = heartbeat
-        self._clock = clock
+        self.clock = clock
         self.job_user = job_user
         self.agent_user = agent_user
         self.same_user = same_user
         self.memory_mb = memory_mb
+        self.pauses = pauses
         self.id: str | None = None
         self.allowed: list[str] = []
         self._jobs: dict[str, threading.Thread] = {}
-        self._stopping = threading.Event()
+        self.stopping = threading.Event()
 
-    def hello(self) -> None:
+    def hello(self) -> dict[str, Any]:
+        """Tell the server who this runner is, and return its answer, which has ``max_slots`` when it sets one."""
         answer = self.client.post("/api/runner/hello", {
             "name": self.name, "capabilities": self.capabilities, "labels": self.labels, "slots": self.slots,
-            "version": self.version, "host": self.host, "platform": this_machine(self.same_user)}) or {}
+            "version": self.version, "host": self.host, "platform": self.platform(),
+            **({} if self.pauses else {"pauses": False})}) or {}
         self.id = answer["runner_id"]
         self.allowed = answer.get("capabilities") or []
+        return answer
+
+    def platform(self) -> dict[str, Any]:
+        """Where this runner's jobs run, as it tells the server at hello."""
+        return this_machine(self.same_user)
 
     @property
     def home(self) -> Path:
@@ -190,33 +230,37 @@ class Runner:
         Raises RunnerLocked when a runner with this name already runs from this work directory.
         """
         lock = self._lock()
-        # A runner that died mid-job left its bundles here, secrets included.
-        for leftover in self.home.glob(f"{JOB_PREFIX}*"):
-            if leftover.is_dir() and not leftover.is_symlink():
-                shutil.rmtree(leftover, ignore_errors=True)
+        self.clear_leftovers()
         try:
             while not stop_event.is_set():
                 try:
                     if self.id is None:
                         self.hello()
                         log.info("runner %s ready with %s", self.name, ", ".join(self.allowed) or "no capabilities")
-                    self._fill()
+                    self.fill()
                 except ServerError as exc:
                     if exc.status == 404:
                         self.id = None
                     log.warning("server: %s", exc.message)
                 stop_event.wait(self.poll)
         finally:
-            self._stopping.set()
+            self.stopping.set()
             for thread in list(self._jobs.values()):
                 thread.join()
             lock.close()
 
-    def _fill(self) -> None:
+    def clear_leftovers(self) -> None:
+        """Remove what a runner that died mid-job left in its home, bundles and secrets included."""
+        for leftover in self.home.glob(f"{JOB_PREFIX}*"):
+            if leftover.is_dir() and not leftover.is_symlink():
+                shutil.rmtree(leftover, ignore_errors=True)
+
+    def fill(self) -> None:
+        """Claim jobs until every slot is busy, starting each on its own thread."""
         for job_id in [j for j, t in self._jobs.items() if not t.is_alive()]:
             del self._jobs[job_id]
-        while len(self._jobs) < self.slots and not self._stopping.is_set():
-            answer = self.client.post("/api/runner/claim", {"runner_id": self.id, "bundle_version": BUNDLE_VERSION})
+        while len(self._jobs) < self.slots and not self.stopping.is_set():
+            answer = self.claim()
             if answer is None:
                 return
             bundle = answer["job"]
@@ -225,14 +269,21 @@ class Runner:
             self._jobs[bundle["job_id"]] = thread
             thread.start()
 
-    def _beat(self, job_id: str) -> dict[str, Any] | None:
+    def claim(self, answer_headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+        """Claim one job. None when there's none. The answer's headers go in ``answer_headers``."""
+        return self.client.post("/api/runner/claim", {"runner_id": self.id, "bundle_version": BUNDLE_VERSION},
+                                answer_headers=answer_headers)
+
+    def beat(self, job_id: str) -> dict[str, Any] | None:
+        """Heartbeat a held job. None when the server can't be reached or refuses."""
         try:
             return self.client.post(f"/api/runner/jobs/{job_id}/heartbeat")
         except ServerError as exc:
             log.warning("heartbeat for job %s failed: %s", job_id, exc.message)
             return None
 
-    def _finish(self, job_id: str, status: str, error: str | None, paused: dict[str, Any] | None = None) -> None:
+    def finish(self, job_id: str, status: str, error: str | None, paused: dict[str, Any] | None = None) -> None:
+        """Report how a job ended, with ``paused`` holding its gate request when it stopped at one."""
         body = {"status": status, "error": error, **(paused or {})}
         try:
             self.client.post(f"/api/runner/jobs/{job_id}/finish", body)
@@ -246,8 +297,8 @@ class Runner:
                "HOME": os.environ.get("HOME") or str(Path.home())}
         if bundle.get("thread"):
             env["ARMATURE_THREAD"] = bundle["thread"]
-        for name in (PACKS_PATH_ENV, *HOST_ONLY_ENV):
-            env.pop(name, None)
+        for name in [n for n in env if n in (PACKS_PATH_ENV, GATE_AUTO_APPROVE_ENV) or host_only(n)]:
+            env.pop(name)
         if os.environ.get(PACKS_PATH_ENV):
             env[PACKS_PATH_ENV] = os.environ[PACKS_PATH_ENV]
         env[TOOLS_URL_ENV] = self.client.server
@@ -284,13 +335,13 @@ class Runner:
             except (OSError, ValueError, KeyError) as exc:
                 error = f"The run could not start: {getattr(exc, 'strerror', None) or exc}."
                 self.client.end_run(bundle["events_url"], bundle["run_token"], "failed", error)
-                self._finish(job_id, "failed", error)
+                self.finish(job_id, "failed", error)
                 return
             status, error = self._watch(bundle, proc, workdir, gate_dir)
-            self._finish(job_id, status, error, {"gate": read_gate(gate_dir)} if status == "suspended" else None)
+            self.finish(job_id, status, error, {"gate": read_gate(gate_dir)} if status == "suspended" else None)
         except Exception:
             log.exception("job %s failed in the runner", job_id)
-            self._finish(job_id, "failed", "The runner failed while running this job.")
+            self.finish(job_id, "failed", "The runner failed while running this job.")
         finally:
             if self.same_user:
                 stop_sessions(workdir / SESSIONS_DIR)
@@ -305,50 +356,50 @@ class Runner:
         A run that paused at a gate left its request in ``gate_dir``, and reports as suspended.
         """
         job_id = bundle["job_id"]
-        next_beat = self._clock() + self.heartbeat
+        next_beat = self.clock() + self.heartbeat
         while True:
             try:
                 proc.wait(WAIT_STEP_S)
                 break
             except subprocess.TimeoutExpired:
                 pass
-            if self._stopping.is_set():
+            if self.stopping.is_set():
                 return self._stop_run(bundle, proc, "failed", "The runner stopped before the run finished.")
-            if self._clock() >= next_beat:
-                next_beat = self._clock() + self.heartbeat
-                beat = self._beat(job_id)
+            if self.clock() >= next_beat:
+                next_beat = self.clock() + self.heartbeat
+                beat = self.beat(job_id)
                 if beat is not None and beat["cancel_requested"]:
                     return self._stop_run(bundle, proc, "canceled", "Canceled.")
                 if beat is not None and beat["status"] not in HELD:
                     return self._stop_run(bundle, proc, "failed", "The server gave this job up.")
-        if gate_dir is not None and (gate_dir / GATE_FILE).is_file() and self._paused(job_id):
+        if gate_dir is not None and (gate_dir / GATE_FILE).is_file() and self.paused(job_id):
             return "suspended", None
         error = f"The run exited with status {proc.returncode} without finishing."
         log_tail = tail(workdir / LOG_FILE)
         if log_tail:
             error += "\n" + log_tail
         # A run_end the process sent may still be on its way, so give it time to land first.
-        deadline = self._clock() + (END_WAIT_S if proc.returncode == 0 else END_GRACE_S)
+        deadline = self.clock() + (END_WAIT_S if proc.returncode == 0 else END_GRACE_S)
         while True:
-            beat = self._beat(job_id)
+            beat = self.beat(job_id)
             run_status = beat["run_status"] if beat is not None else None
             if run_status is not None and run_status not in OPEN:
                 return ("succeeded" if run_status == "succeeded" else "failed"), None
-            if self._clock() >= deadline:
+            if self.clock() >= deadline:
                 break
             time.sleep(END_POLL_S)
         self.client.end_run(bundle["events_url"], bundle["run_token"], "failed", error)
         return "failed", error
 
-    def _paused(self, job_id: str) -> bool:
+    def paused(self, job_id: str) -> bool:
         """Whether the server heard the run's run_suspend. A gate request file alone could come from any step."""
-        deadline = self._clock() + END_WAIT_S
+        deadline = self.clock() + END_WAIT_S
         while True:
-            beat = self._beat(job_id)
+            beat = self.beat(job_id)
             run_status = beat["run_status"] if beat is not None else None
             if run_status == "waiting":
                 return True
-            if (run_status is not None and run_status not in OPEN) or self._clock() >= deadline:
+            if (run_status is not None and run_status not in OPEN) or self.clock() >= deadline:
                 return False
             time.sleep(END_POLL_S)
 

@@ -133,6 +133,9 @@ def test_hello_records_a_runner_and_answers_what_the_key_allows(sqlite_engine, k
     assert row.capabilities == ["claude-code", "git"] and row.labels == {"pool": "warm"} and row.slots == 2
     bad = client.post("/api/runner/hello", json={"name": "x", "capabilities": ["Not Valid"]}, headers=_auth(key))
     assert bad.status_code == 400
+    for slots, status in ((200, 200), (201, 400)):
+        answer = client.post("/api/runner/hello", json={"name": "wide", "slots": slots}, headers=_auth(key))
+        assert answer.status_code == status, slots
     assert client.post("/api/runner/hello", json={"name": "x"}).status_code == 401
 
 
@@ -516,3 +519,118 @@ def test_concurrent_runner_claims_start_one_job_of_a_key(sqlite_engine, keyring,
     assert _get(sqlite_engine, waiting).status == "queued"
     clock.advance(minutes=10)
     assert _claimed(client, key, runner_ids[0]) == waiting
+
+
+def test_a_remote_runner_takes_only_jobs_that_require_its_remote_capability(sqlite_engine, keyring, clock, world,
+                                                                          client):
+    bare = _job(sqlite_engine, clock, world)
+    tools = _job(sqlite_engine, clock, world, requires=["git", "llm"])
+    on_a = _job(sqlite_engine, clock, world, requires=["llm", "remote:a"])
+    on_b = _job(sqlite_engine, clock, world, requires=["git", "remote:b"])
+    key = _key(sqlite_engine, keyring, clock, world["team"])
+    a = _hello(client, key, name="a", capabilities=["claude-code", "git", "llm", "remote:a"])["runner_id"]
+    b = _hello(client, key, name="b", capabilities=["claude-code", "git", "llm", "remote:b"])["runner_id"]
+    assert _claimed(client, key, a) == on_a and _claimed(client, key, a) is None
+    assert _claimed(client, key, b) == on_b and _claimed(client, key, b) is None
+    host = _hello(client, key, name="host", capabilities=["git", "llm"])["runner_id"]
+    assert _claimed(client, key, host) == bare and _claimed(client, key, host) == tools
+    assert _claimed(client, key, host) is None
+
+
+def test_a_remote_capability_in_a_keys_allowlist_only_narrows(sqlite_engine, keyring, clock, world, client):
+    plain = _job(sqlite_engine, clock, world, requires=["git"])
+    remote = _job(sqlite_engine, clock, world, requires=["git", "remote:a"])
+    key = _key(sqlite_engine, keyring, clock, capabilities=["git", "remote:a"])
+    host = _hello(client, key, name="host", capabilities=["git"])["runner_id"]
+    assert _claimed(client, key, host) == plain and _claimed(client, key, host) is None
+    narrow = _key(sqlite_engine, keyring, clock, capabilities=["git"])
+    offered = _hello(client, narrow, name="offered", capabilities=["git", "remote:a"])["runner_id"]
+    assert _claimed(client, narrow, offered) is None
+    assert _get(sqlite_engine, remote).status == "queued"
+    a = _hello(client, key, name="a", capabilities=["git", "remote:a"])["runner_id"]
+    assert _claimed(client, key, a) == remote
+
+
+def test_a_failed_max_slots_read_leaves_the_job_queued(sqlite_engine, keyring, clock, world, client, monkeypatch):
+    from armature.server.app import routes_runner
+
+    job_id = _job(sqlite_engine, clock, world, requires=["remote:a"])
+    key = _key(sqlite_engine, keyring, clock)
+    runner_id = _hello(client, key, capabilities=["remote:a"])["runner_id"]
+
+    def broken(_engine):
+        raise RuntimeError("settings read failed")
+
+    monkeypatch.setattr(routes_runner, "_max_slots", broken)
+    with pytest.raises(RuntimeError, match="settings read failed"):
+        _claim(client, key, runner_id)
+    assert _get(sqlite_engine, job_id).status == "queued"
+
+
+def test_max_slots_is_checked_and_reaches_hello_heartbeat_and_claim_only_when_set(sqlite_engine, keyring, clock,
+                                                                                  world, client):
+    first = _job(sqlite_engine, clock, world, requires=["remote:a"])
+    _job(sqlite_engine, clock, world, requires=["remote:a"])
+    key = _key(sqlite_engine, keyring, clock)
+    hello = _hello(client, key, capabilities=["remote:a"])
+    assert "max_slots" not in hello
+    claimed = _claim(client, key, hello["runner_id"])
+    assert claimed.status_code == 200 and "X-Armature-Max-Slots" not in claimed.headers
+    beat = client.post(f"/api/runner/jobs/{first}/heartbeat", headers=_auth(key)).json()
+    assert "max_slots" not in beat
+    for value in (0, 201, True, "30", 2.5):
+        with sqlite_engine.begin() as conn, pytest.raises(defs.DefError, match="whole number from 1 to 200"):
+            defs.put_setting(conn, team_id=None, key="runner.max_slots", value=value, actor_id=None, now=clock(),
+                             ip=None)
+    with sqlite_engine.begin() as conn, pytest.raises(defs.DefError, match="applies to the whole server"):
+        defs.put_setting(conn, team_id=world["team"], key="runner.max_slots", value=5, actor_id=None, now=clock(),
+                         ip=None)
+    for value in (1, 200, 40):
+        with sqlite_engine.begin() as conn:
+            assert defs.put_setting(conn, team_id=None, key="runner.max_slots", value=value, actor_id=None,
+                                    now=clock(), ip=None)["value"] == value
+    assert _hello(client, key, capabilities=["remote:a"])["max_slots"] == 40
+    claimed = _claim(client, key, hello["runner_id"])
+    assert claimed.status_code == 200 and claimed.headers["X-Armature-Max-Slots"] == "40"
+    empty = _claim(client, key, hello["runner_id"])
+    assert empty.status_code == 204 and empty.headers["X-Armature-Max-Slots"] == "40"
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(settings).where(settings.c.key == "runner.max_slots").values(value=3))
+    beat = client.post(f"/api/runner/jobs/{first}/heartbeat", headers=_auth(key)).json()
+    assert beat["max_slots"] == 3
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(settings).where(settings.c.key == "runner.max_slots").values(value="lots"))
+    assert "max_slots" not in _hello(client, key, capabilities=["remote:a"])
+    assert "X-Armature-Max-Slots" not in _claim(client, key, hello["runner_id"]).headers
+
+
+def test_a_runner_that_cant_pause_never_gets_a_gated_job(sqlite_engine, keyring, clock, world, client):
+    from armature.runner.process import BUNDLE_VERSION
+
+    gated_body = "name: gated\nstages:\n  - id: approve\n    gate: human\n"
+    with sqlite_engine.begin() as conn:
+        defs._add_version(conn, defs.WORKFLOW, world["workflow"], 2, gated_body, "gated", None, clock())
+    gated_remote = _job(sqlite_engine, clock, world, requires=["remote:a"], workflow_version=2)
+    plain_remote = _job(sqlite_engine, clock, world, requires=["remote:a"])
+    key = _key(sqlite_engine, keyring, clock, world["team"])
+
+    def claimed(runner_id):
+        answer = client.post("/api/runner/claim", json={"runner_id": runner_id, "bundle_version": BUNDLE_VERSION},
+                             headers=_auth(key))
+        return None if answer.status_code == 204 else answer.json()["job"]["job_id"]
+
+    hello = client.post("/api/runner/hello", json={"name": "far", "capabilities": ["remote:a"], "pauses": False},
+                        headers=_auth(key))
+    far = hello.json()["runner_id"]
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(dispatch.runners.c.pauses).where(dispatch.runners.c.id == far)).scalar() is False
+    assert claimed(far) == plain_remote and claimed(far) is None
+    assert _get(sqlite_engine, gated_remote).status == "queued"
+    pausing = _hello(client, key, name="pausing", capabilities=["remote:a"])["runner_id"]
+    assert claimed(pausing) == gated_remote
+    gated_host = _job(sqlite_engine, clock, world, requires=["git"], workflow_version=2)
+    host = _hello(client, key, name="host", capabilities=["git"])["runner_id"]
+    assert claimed(host) == gated_host
+    client.post("/api/runner/hello", json={"name": "far", "capabilities": ["remote:a"]}, headers=_auth(key))
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(dispatch.runners.c.pauses).where(dispatch.runners.c.id == far)).scalar() is True

@@ -5,12 +5,14 @@ Each call appends a record to ``calls.jsonl`` beside it and plays the next step 
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
 
 here = os.path.dirname(os.path.abspath(__file__))
 calls = os.path.join(here, "calls.jsonl")
+stdin_is_file = stat.S_ISREG(os.fstat(0).st_mode)
 prompt = sys.stdin.read()
 system = None
 if "--append-system-prompt-file" in sys.argv:
@@ -18,6 +20,7 @@ if "--append-system-prompt-file" in sys.argv:
         system = f.read()
 with open(calls, "a") as f:
     f.write(json.dumps({"argv": sys.argv, "env": dict(os.environ), "cwd": os.getcwd(), "stdin": prompt,
+                        "stdin_is_file": stdin_is_file,
                         "system_prompt": system,
                         "config": sorted(os.path.relpath(os.path.join(d, n), os.environ.get("CLAUDE_CONFIG_DIR", "/"))
                                          for d, _, ns in os.walk(os.environ.get("CLAUDE_CONFIG_DIR", "/nonexistent"))
@@ -46,8 +49,14 @@ if step.get("child"):
     child = subprocess.Popen(["sleep", "60"])
     with open(os.path.join(here, "child.pid"), "w") as f:
         f.write(str(child.pid))
+filler = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 1000}]}})
+time.sleep(step.get("pause", 0))
+for _ in range(step.get("bulk", 0)):
+    sys.stdout.write(filler + "\n")
 for line in step.get("lines", []):
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
 time.sleep(step.get("sleep", 0))
+with open(os.path.join(here, "exited"), "w") as f:
+    f.write(str(time.time()))
 sys.exit(step.get("exit", 0))

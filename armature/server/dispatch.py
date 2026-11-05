@@ -18,7 +18,7 @@ from sqlalchemy import Connection, Engine, func, insert, select, update
 
 from armature.events import location
 from armature.runner.process import BUNDLE_VERSION
-from armature.server import audit, gates, rbac, worker
+from armature.server import audit, gates, limits, rbac, worker
 from armature.server.crypto import Keyring
 from armature.server.db import new_id
 from armature.server.db.schema import (
@@ -40,7 +40,6 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:@-]{0,190}$")
 MAX_CAPABILITIES = 64
 MAX_LABELS = 32
 LABEL_MAX = 191
-MAX_SLOTS = 64
 ERROR_MAX = 10_000
 REPORTED = ("succeeded", "failed", "canceled", "suspended")
 
@@ -87,8 +86,8 @@ def _labels(value: Any) -> dict[str, str]:
 def _slots(value: Any) -> int | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SLOTS:
-        raise RunnerError(400, f"slots is a whole number from 1 to {MAX_SLOTS}.")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= limits.MAX_SLOTS_LIMIT:
+        raise RunnerError(400, f"slots is a whole number from 1 to {limits.MAX_SLOTS_LIMIT}.")
     return value
 
 
@@ -100,6 +99,7 @@ def hello(conn: Connection, *, key: Any, body: dict[str, Any], now: datetime) ->
     values = {"capabilities": capabilities(body.get("capabilities")), "labels": _labels(body.get("labels")),
               "version": _text(body.get("version"), "version", 64), "host": _text(body.get("host"), "host", 191),
               "slots": _slots(body.get("slots")), "platform": location.parse(body.get("platform"), trusted=True),
+              "pauses": body.get("pauses") is not False,
               "state": "online", "last_seen_at": now}
     runner_id = conn.execute(select(runners.c.id).where(runners.c.runner_key_id == key.id,
                                                         runners.c.name == name)).scalar()
@@ -113,7 +113,13 @@ def hello(conn: Connection, *, key: Any, body: dict[str, Any], now: datetime) ->
                  .values(state="ready", ready_at=now))
     allowed = values["capabilities"] if key.capabilities is None else sorted(
         set(values["capabilities"]) & set(key.capabilities))
-    return {"runner_id": runner_id, "capabilities": allowed}
+    return {"runner_id": runner_id, "capabilities": allowed, **_max_slots(conn)}
+
+
+def _max_slots(conn: Connection) -> dict[str, int]:
+    """``max_slots`` for a hello or heartbeat answer, only when the instance sets it."""
+    value = limits.max_slots(conn)
+    return {} if value is None else {"max_slots": value}
 
 
 def _runner(conn: Connection, key: Any, runner_id: Any) -> Any:
@@ -170,7 +176,8 @@ def claim(engine: Engine, keyring: Keyring, *, key: Any, runner_id: Any, now: da
     claims only the job its environment was launched for. A runner that reads call bundles has
     ``worker.CALLS_CAPABILITY``. One that sends no ``bundle_version`` predates them, so it gets no job that calls
     another workflow, not even one queued before jobs required the capability. One older than
-    ``worker.GATES_BUNDLE_VERSION`` gets no job that may pause at a gate or resumes from one.
+    ``worker.GATES_BUNDLE_VERSION`` gets no job that may pause at a gate or resumes from one, and neither does one
+    that said at hello it can't pause.
     """
     version = _bundle_version(bundle_version)
     reads_calls = version >= worker.CALLS_BUNDLE_VERSION
@@ -182,6 +189,7 @@ def claim(engine: Engine, keyring: Keyring, *, key: Any, runner_id: Any, now: da
     with engine.begin() as conn:
         runner = _runner(conn, key, runner_id)
         _seen(conn, runner.id, now)
+        pauses = pauses and runner.pauses is not False
         found = worker.claimable(conn, capabilities=[*(runner.capabilities or []), *extra],
                                  allowlist=None if key.capabilities is None else [*key.capabilities, *extra],
                                  team_id=key.team_id, bound_key=bound, now=now)
@@ -241,8 +249,9 @@ def heartbeat(engine: Engine, *, key: Any, job_id: str, now: datetime, lease: ti
             conn.execute(update(jobs).where(jobs.c.id == job_id, jobs.c.status.in_(worker.HELD))
                          .values(heartbeat_at=now, lease_expires_at=now + lease))
         _seen(conn, row.runner_id, now)
+        cap = _max_slots(conn)
     return {"status": row.status, "cancel_requested": row.cancel_requested_at is not None, "run_id": row.run_id,
-            "run_status": row.run_status}
+            "run_status": row.run_status, **cap}
 
 
 def run_of(engine: Engine, *, key: Any, job_id: str) -> str | None:
