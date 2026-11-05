@@ -2087,13 +2087,14 @@ def test_a_signal_rule_is_inert_while_residents_are_off(sqlite_engine, lead, wor
     assert delivery.matched[0]["inert"] == "residents are not enabled on this instance"
 
 
-def test_a_signal_rule_skips_an_instance_of_another_team(sqlite_engine, lead, world, clock):
+@pytest.mark.parametrize("signal", [{"signal": "done"}, {}])
+def test_a_resident_rule_skips_an_instance_of_another_team(sqlite_engine, lead, world, clock, signal):
     _resident_spec(sqlite_engine, clock, world, body=CLOSING)
     with sqlite_engine.begin() as conn:
         resident = residents.ensure(conn, team_id=world.other, project_id=None, workflow_id=world.wf,
                                     instance_key=PULL["item"], now=clock())
     hook = _hook(lead, world)
-    _rule(lead, hook, world.wf, resident=True, signal="done")
+    _rule(lead, hook, world.wf, resident=True, **signal)
     raw = _body(PULL)
     assert lead.client.post(_path(hook), content=raw, headers=_github(raw)).json() == \
         {"status": "accepted", "jobs": 0}

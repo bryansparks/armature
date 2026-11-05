@@ -437,7 +437,8 @@ All three are audited (`audit.record`, action `resident.read|ask|signal`).
   name instead of a `request`, deduped on `delivery_id:name` so a request
   rule matching the same delivery can't swallow it. When the pinned spec's
   `close_on` names the signal, the instance closes with no turn and its
-  turn ends: a queued one is superseded, a running one is asked to stop.
+  turn ends: a queued one is superseded at no attempt cost, a running one is
+  asked to stop unless it emitted the closing signal itself.
   `signal` needs `resident: true` and can't be `cancel_only` or `dry`.
 - **Pollers** (`pollers.py`): a `schedule` from a resident's `on.schedule` is
   materialized as a `triggers` row of kind `schedule` with

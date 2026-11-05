@@ -730,10 +730,10 @@ def _resident_delivery(conn: Connection, *, team_id: str, delivery_id: str, deci
         resident = residents.ensure(conn, team_id=team_id, project_id=decision["project_id"],
                                     workflow_id=decision["workflow_id"], instance_key=target["instance_key"],
                                     now=now)
-        signal = target.get("signal")
-        if signal and resident.team_id != team_id:
+        if resident.team_id != team_id:
             entry["skipped"] = "instance belongs to another team"
             return entry
+        signal = target.get("signal")
         source = {"delivery_id": delivery_id, "trigger_id": decision["trigger_id"]}
         if target.get("fields"):
             source["fields"] = target["fields"]

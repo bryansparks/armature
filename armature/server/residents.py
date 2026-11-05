@@ -26,7 +26,7 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
-from sqlalchemy import Connection, Engine, delete, func, insert, select, update
+from sqlalchemy import Connection, Engine, delete, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from armature.server import assist, audit, defs, worker
@@ -178,7 +178,8 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
     the instance for its next turn; a paused instance keeps its events for the resume, a closed
     one refuses them. A signal the pinned spec's ``close_on`` names closes the instance instead:
     the event lands handled, no turn is queued, as a fleet closure spends nothing, and the
-    instance's turn ends: a queued one is superseded, a running one is asked to stop.
+    instance's turn ends: a queued one is superseded, a running one is asked to stop unless it
+    emitted the closing signal itself.
     """
     resident = _locked(conn, resident_id)
     if resident is None:
@@ -212,9 +213,12 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
             _close(conn, resident, "close_on", now)
             conn.execute(update(jobs).where(jobs.c.id == resident.active_job_id, jobs.c.status == "queued")
                          .values(status="superseded", finished_at=now, error=CLOSED_ON))
-            conn.execute(update(jobs).where(jobs.c.id == resident.active_job_id, jobs.c.status.in_(worker.HELD),
-                                            jobs.c.cancel_requested_at.is_(None))
-                         .values(cancel_requested_at=now))
+            held = [jobs.c.id == resident.active_job_id, jobs.c.status.in_(worker.HELD),
+                    jobs.c.cancel_requested_at.is_(None)]
+            emitter = source.get("emitted_by") if isinstance(source, dict) else None
+            if emitter:  # a turn that emitted its own close keeps its staged work
+                held.append(or_(jobs.c.run_id.is_(None), jobs.c.run_id != emitter))
+            conn.execute(update(jobs).where(*held).values(cancel_requested_at=now))
             return seq
     seq = conn.execute(select(func.coalesce(func.max(resident_events.c.seq), 0)).where(
         resident_events.c.resident_id == resident_id)).scalar_one() + 1
@@ -665,7 +669,7 @@ def settle(conn: Connection, now: datetime) -> list[str]:
             # Nothing to do grows the streak the turn ran under — the backoff widens each time;
             # anything else resets it, so the next idle turn returns to the base gap.
             values["idle_streak"] = resident.idle_streak + 1 if staged.get("idle_nothing_to_do") else 0
-        else:
+        elif not (row.status == "superseded" and resident.state == "closed"):
             _reoffer(conn, resident, inputs, row.job_id)
         conn.execute(update(residents).where(residents.c.id == resident.id,
                                              residents.c.active_job_id == row.job_id).values(**values))

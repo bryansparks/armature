@@ -1444,6 +1444,43 @@ def test_close_on_leaves_an_earlier_cancel_and_a_finished_turn_alone(db):
     done = _closing_turn(db, "done", status="succeeded")
     assert (done.status, done.cancel_requested_at, done.finished_at) == ("succeeded", None, None)
 
+
+def test_a_turn_superseded_by_its_close_costs_no_attempt(db):
+    _version(db, db.workflow_id, DONEBOT, 2)
+    job = _closing_turn(db, "queued")
+    resident_id = job.resident_id
+    assert _settle(db) == [resident_id]
+    assert [e.attempts for e in _events(db, resident_id)] == [0, 0]
+    assert _resident(db, resident_id).active_job_id is None
+    with db.engine.connect() as conn:
+        assert conn.execute(select(func.count()).where(
+            audit_rows.c.action == "resident.event_poison")).scalar_one() == 0
+
+
+SELFCLOSE = TOOLBOT.replace("stages: []", "  close_on: {signal: done}\nstages: []")
+
+
+def test_a_turn_that_emits_its_own_close_keeps_its_work(db):
+    _version(db, db.workflow_id, SELFCLOSE, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    job_id = _resident(db, resident.id).active_job_id
+    run_id = new_id()
+    with db.engine.begin() as conn:
+        conn.execute(insert(runs).values(id=run_id, team_id=db.team, status="running", started_at=db.clock()))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(run_id=run_id, status="running"))
+    _call(db, run_id, _job(db, job_id), "resident.state.set", {"state": {"mood": "done"}})
+    _call(db, run_id, _job(db, job_id), "resident.emit",
+          {"resident": "bot", "key": "", "kind": "signal", "name": "done"})
+    assert (_resident(db, resident.id).state, _resident(db, resident.id).close_reason) == ("closed", "close_on")
+    assert _job(db, job_id).cancel_requested_at is None  # the emitting turn isn't cancelled by its own close
+    with db.engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.id == run_id).values(status="succeeded"))
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(status="succeeded"))
+    assert _settle(db) == [resident.id]
+    assert _resident(db, resident.id).data == {"mood": "done"}
+
 def test_emit_refuses_names_outside_the_grammar(db):
     resident, job_id, run_id = _tooled(db)
     job = _job(db, job_id)
