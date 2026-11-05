@@ -124,6 +124,21 @@ def test_ensure_creates_once_and_pins_version(db):
     assert created == [(db.team, first.id)]  # only the new row is audited, the second ensure nothing
 
 
+def test_ensure_rereads_with_a_locking_read_after_losing_the_insert_race(db, monkeypatch):
+    first = _ensure(db)
+    calls = []
+    real = residents._instance
+
+    def spy(conn, workflow_id, instance_key, *, lock=False):
+        calls.append(lock)
+        return None if not lock else real(conn, workflow_id, instance_key, lock=lock)
+
+    monkeypatch.setattr(residents, "_instance", spy)
+    second = _ensure(db)  # the first read misses, the unique key rejects the insert, then the winner's row is re-read
+    assert second.id == first.id
+    assert calls == [False, True]
+
+
 def test_enqueue_assigns_monotonic_seq(db):
     resident = _ensure(db)
     with db.engine.begin() as conn:
@@ -237,7 +252,7 @@ def test_wake_queues_turn_for_oldest_event(db):
     assert (job.concurrency_key, job.thread) == (f"resident:{resident.id}", "resident:acme")
     assert job.inputs == {"resident_id": resident.id, "instance_key": "acme", "event_seq_from": 1,
                           "event_seq_to": 2, "kind": "request",
-                          "_event": {"kind": "request", "name": None,
+                          "_event": {"kind": "request", "name": None, "fields": {},
                                      "is": {"request": True, "ask": False, "schedule": False,
                                             "signal": False, "idle": False, "custom": False}},
                           "_resident": {"state": {}, "meta": {"turns": 0,
@@ -413,13 +428,27 @@ def test_inputs_carry_event_and_resident_snapshot(db):
             data={"mood": "calm"}, turns=4, idle_streak=2, last_turn_at=db.clock()))
     _add_events(db, resident.id, ["request"])
     inputs = _job(db, _wake(db, resident.id)).inputs
-    assert inputs["_event"] == {"kind": "request", "name": None,
+    assert inputs["_event"] == {"kind": "request", "name": None, "fields": {},
                                 "is": {"request": True, "ask": False, "schedule": False,
                                        "signal": False, "idle": False, "custom": False}}
     assert inputs["_resident"] == {"state": {"mood": "calm"},
                                    "meta": {"turns": 4, "created_at": db.clock().isoformat(),
                                             "last_turn_at": db.clock().isoformat(), "idle_streak": 2}}
 
+
+
+def test_inputs_merge_event_fields_across_the_batch(db):
+    resident = _ensure(db)
+    _add_events(db, resident.id, ["request", "request", "request"])
+    with db.engine.begin() as conn:
+        for seq, source in ((1, {"delivery_id": "d-1", "fields": {"number": 7, "sha": "old"}}),
+                            (2, {"delivery_id": "d-2", "fields": {"sha": "new", "requester": "octo"}}),
+                            (3, None)):  # a legacy row with no fields gives nothing
+            conn.execute(update(resident_events).where(resident_events.c.resident_id == resident.id,
+                                                       resident_events.c.seq == seq).values(source=source))
+    inputs = _job(db, _wake(db, resident.id)).inputs
+    assert inputs["event_seq_to"] == 3
+    assert inputs["_event"]["fields"] == {"number": 7, "sha": "new", "requester": "octo"}  # newest wins per key
 
 def test_budget_pause_when_spent_exceeds_usd_per_day(db):
     body = ("name: bot\nresident:\n  on:\n    request: {workflow: self}\n"
@@ -1355,6 +1384,65 @@ def test_close_on_non_matching_signal_stays_open(db):
         assert conn.execute(select(func.count()).where(
             audit_rows.c.action == "resident.close")).scalar_one() == 0
 
+
+
+DONEBOT = """\
+name: bot
+resident:
+  on:
+    request: {workflow: self}
+  close_on: {signal: done}
+stages: []
+"""
+
+
+def test_close_on_asks_the_running_turn_to_stop(db):
+    _version(db, db.workflow_id, DONEBOT, 2)
+    resident = _ensure(db)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    job_id = _resident(db, resident.id).active_job_id
+    with db.engine.begin() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == job_id).values(status="running"))
+    db.clock.advance(minutes=5)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "signal", name="done", now=db.clock())
+    row = _resident(db, resident.id)
+    assert (row.state, row.close_reason) == ("closed", "close_on")
+    assert _job(db, job_id).cancel_requested_at == db.clock()
+    assert _jobs_count(db) == 1  # the close queued nothing new
+
+
+def _closing_turn(db, instance_key, **job):
+    resident = _ensure(db, instance_key=instance_key)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "request", now=db.clock())
+    job_id = _resident(db, resident.id).active_job_id
+    if job:
+        with db.engine.begin() as conn:
+            conn.execute(update(jobs).where(jobs.c.id == job_id).values(**job))
+    db.clock.advance(minutes=5)
+    with db.engine.begin() as conn:
+        residents.enqueue(conn, resident.id, "signal", name="done", now=db.clock())
+    assert _resident(db, resident.id).state == "closed"
+    return _job(db, job_id)
+
+
+def test_close_on_ends_a_queued_turn(db):
+    _version(db, db.workflow_id, DONEBOT, 2)
+    job = _closing_turn(db, "queued")
+    assert (job.status, job.finished_at) == ("superseded", db.clock())
+    with db.engine.connect() as conn:
+        assert job.id not in worker.claimable(conn, capabilities=None, now=db.clock())
+
+
+def test_close_on_leaves_an_earlier_cancel_and_a_finished_turn_alone(db):
+    _version(db, db.workflow_id, DONEBOT, 2)
+    earlier = db.clock() - timedelta(hours=1)
+    job = _closing_turn(db, "asked", status="running", cancel_requested_at=earlier)
+    assert (job.status, job.cancel_requested_at) == ("running", earlier)
+    done = _closing_turn(db, "done", status="succeeded")
+    assert (done.status, done.cancel_requested_at, done.finished_at) == ("succeeded", None, None)
 
 def test_emit_refuses_names_outside_the_grammar(db):
     resident, job_id, run_id = _tooled(db)

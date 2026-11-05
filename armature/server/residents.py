@@ -79,6 +79,7 @@ TOOLS = ("resident.events", "resident.state.get", "resident.state.set", "residen
 # A closed instance still answers its own turn's reads, as a conversation answers history.
 READS = ("resident.events", "resident.state.get")
 REPLY_MAX = 8 * 1024
+CLOSED_ON = "cancelled: its resident instance closed on close_on"
 
 _yaml = YAML(typ="safe")
 
@@ -100,9 +101,10 @@ class ResidentError(Exception):
         self.message = message
 
 
-def _instance(conn: Connection, workflow_id: str, instance_key: str) -> Any:
-    return conn.execute(select(residents).where(residents.c.workflow_id == workflow_id,
-                                                residents.c.instance_key == instance_key)).first()
+def _instance(conn: Connection, workflow_id: str, instance_key: str, *, lock: bool = False) -> Any:
+    query = select(residents).where(residents.c.workflow_id == workflow_id,
+                                    residents.c.instance_key == instance_key)
+    return conn.execute(query.with_for_update() if lock else query).first()
 
 
 def _locked(conn: Connection, resident_id: str) -> Any:
@@ -156,7 +158,8 @@ def ensure(conn: Connection, *, team_id: str, project_id: str | None, workflow_i
         created = True
     except IntegrityError:
         pass
-    row = _instance(conn, workflow_id, instance_key)
+    # Locking read: MySQL's REPEATABLE READ snapshot hides the race winner's row.
+    row = _instance(conn, workflow_id, instance_key, lock=True)
     if row is None:
         raise ResidentError(409, "The resident instance could not be created.")
     if created:
@@ -174,7 +177,8 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
     ``kind="custom"`` with its name. A real event keeps the instance's lifetime fresh and wakes
     the instance for its next turn; a paused instance keeps its events for the resume, a closed
     one refuses them. A signal the pinned spec's ``close_on`` names closes the instance instead:
-    the event lands handled and no turn is queued, as a fleet closure spends nothing.
+    the event lands handled, no turn is queued, as a fleet closure spends nothing, and the
+    instance's turn ends: a queued one is superseded, a running one is asked to stop.
     """
     resident = _locked(conn, resident_id)
     if resident is None:
@@ -206,6 +210,11 @@ def enqueue(conn: Connection, resident_id: str, kind: str, payload: Any = None, 
                 source=source, reply_to=reply_to, dedupe_key=dedupe_key, dry_run=dry_run,
                 handled=True, created_at=now))
             _close(conn, resident, "close_on", now)
+            conn.execute(update(jobs).where(jobs.c.id == resident.active_job_id, jobs.c.status == "queued")
+                         .values(status="superseded", finished_at=now, error=CLOSED_ON))
+            conn.execute(update(jobs).where(jobs.c.id == resident.active_job_id, jobs.c.status.in_(worker.HELD),
+                                            jobs.c.cancel_requested_at.is_(None))
+                         .values(cancel_requested_at=now))
             return seq
     seq = conn.execute(select(func.coalesce(func.max(resident_events.c.seq), 0)).where(
         resident_events.c.resident_id == resident_id)).scalar_one() + 1
@@ -385,14 +394,20 @@ def check_handlers(conn: Connection, spec_body: str | None, workflow_id: str) ->
 def _inputs(resident: Any, batch: list[Any]) -> dict[str, Any]:
     """A turn job's inputs: the batch's range and kind, plus the event and instance snapshots.
 
-    Baked at queue time under the lock the turn holds until settle, so they can't drift. Event
-    payloads are not baked; a turn reads them fenced through resident.events.
+    Baked at queue time under the lock the turn holds until settle, so they can't drift. Only the
+    declared scalar fields a webhook rule mapped are baked, merged over the batch in seq order so
+    the newest value wins per key; payloads are not, and a turn reads them fenced through
+    resident.events.
     """
     kind, name = batch[0].kind, batch[0].name
+    fields: dict[str, Any] = {}
+    for event in batch:
+        if isinstance(event.source, dict) and isinstance(event.source.get("fields"), dict):
+            fields.update(event.source["fields"])
     return {
         "resident_id": resident.id, "instance_key": resident.instance_key,
         "event_seq_from": batch[0].seq, "event_seq_to": batch[-1].seq, "kind": kind,
-        "_event": {"kind": kind, "name": name,
+        "_event": {"kind": kind, "name": name, "fields": fields,
                    "is": {k: kind == k for k in RESIDENT_EVENT_KINDS}},
         "_resident": {"state": dict(resident.data) if resident.data else {},
                        "meta": {"turns": resident.turns,
