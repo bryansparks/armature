@@ -859,9 +859,7 @@ class AgentNode:
     async def _session(self, harness: Harness, launch: Launch, env: dict[str, str], cwd: Path, prompt: str) -> str:
         self.sessions += 1
         parser = ClaudeStreamParser(self._emitter, self._step_id, self._fields) if self._emitter else None
-        # The prompt is already there when the session starts, which reads stdin for only a few seconds. Its output
-        # goes to files, since Claude Code drops what it hasn't written to a full pipe when it exits, and a busy
-        # engine can leave the pipe full. None of these files has a name, so no other process can open one.
+        # Unnamed files, since Claude Code drops output still unwritten to a full pipe when it exits.
         out, err = tempfile.TemporaryFile(), tempfile.TemporaryFile()
         try:
             with tempfile.TemporaryFile() as source:

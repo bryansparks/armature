@@ -65,11 +65,13 @@ def make(kind: str, label: Any = None, **fields: Any) -> dict[str, Any]:
 def parse(value: Any, trusted: bool = False) -> dict[str, Any] | None:
     """A location from a sender, rebuilt from its known fields, or None when it isn't one.
 
-    Only a ``trusted`` sender, the runner at hello or its stored record, keeps ``same_user``.
+    Only a ``trusted`` sender, the runner at hello or its stored record, keeps ``same_user`` and a remote label.
     """
     if not isinstance(value, dict) or value.get("kind") not in KINDS:
         return None
-    return make(value["kind"], value.get("label"), **{k: value.get(k) for k in FIELDS},
+    # A run's own events could otherwise name any place, and remote outranks local.
+    label = value.get("label") if trusted or value["kind"] != REMOTE else None
+    return make(value["kind"], label, **{k: value.get(k) for k in FIELDS},
                 same_user=trusted and value.get("same_user") is True)
 
 

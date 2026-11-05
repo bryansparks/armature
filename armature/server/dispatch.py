@@ -193,12 +193,11 @@ def claim(engine: Engine, keyring: Keyring, *, key: Any, runner_id: Any, now: da
         found = worker.claimable(conn, capabilities=[*(runner.capabilities or []), *extra],
                                  allowlist=None if key.capabilities is None else [*key.capabilities, *extra],
                                  team_id=key.team_id, bound_key=bound, now=now)
-        if not reads_calls:
-            found = [job_id for job_id in found if not worker.calls_workflows(conn, job_id)]
-        if not pauses:
-            found = [job_id for job_id in found if not worker.pauses(conn, job_id)]
     for job_id in found:
         with engine.begin() as conn:
+            if (not reads_calls and worker.calls_workflows(conn, job_id)) or (
+                    not pauses and worker.pauses(conn, job_id)):
+                continue
             # A bound key's environment must still be coming up, and goes running with the claim or not at all.
             won = not bound or conn.execute(update(environments).where(
                 environments.c.runner_key_id == key.id, environments.c.job_id == job_id,
