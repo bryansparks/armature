@@ -1,15 +1,9 @@
 import { api, configure, setCsrf, url } from './api.js';
 import { clear, confirmDialog, element, errorBox, loading, pageHeader, stepUpDialog } from './dom.js';
 import { hasUnsaved, mayLeave, release } from './guard.js';
+import { NAV_PARENT, sectionFor, tabsFor, visibleSections } from './nav.js';
 import { parseHash } from './router.js';
 import { isSso, loginPath, navFor, setSession, ssoStepUpPath, user } from './session.js';
-
-const NAV_GROUPS = [
-  ['Work', [['overview', 'Overview', 'home'], ['gates', 'Waiting for you', 'inbox'], ['runs', 'Runs', 'list'], ['subjects', 'Pull requests', 'list'], ['trends', 'Trends', 'chart'], ['teams', 'Teams', 'team'], ['projects', 'Projects', 'folder'], ['status', 'Status', 'pulse']]],
-  ['Definitions', [['workflows', 'Workflows', 'flow'], ['workflow-guide', 'Create a workflow', 'plus'], ['roles', 'Roles and prompts', 'doc'], ['packs', 'Packs', 'box']]],
-  ['Manage', [['setup', 'Setup', 'check'], ['users', 'Users', 'people'], ['secrets', 'Secrets', 'key'], ['runner-keys', 'Runner keys', 'key'], ['runners', 'Runners', 'server'], ['aws', 'AWS', 'cloud'], ['webhooks', 'Webhooks', 'hook'], ['triggers', 'Triggers', 'clock'], ['settings', 'Settings', 'gear']]],
-  ['You', [['account', 'Account', 'person']]],
-];
 
 // Simple 16px outline icons, drawn as SVG so the menu needs no icon font.
 const ICON_PATHS = {
@@ -84,22 +78,30 @@ const VIEW_LOADERS = {
   account: () => import('./views/account.js'),
 };
 
-const NAV_PARENT = { team: 'teams', project: 'projects', run: 'runs', subject: 'subjects', workflow: 'workflows', resident: 'workflows', 'new-workflow': 'workflows', document: 'roles', 'new-document': 'roles', webhook: 'webhooks', trigger: 'triggers' };
-
 let allowedViews = [];
 let renderSequence = 0;
 let viewController = null;
 let shownHash = location.hash;
+let clickedTabHref = null;
+
+function sectionTabs(section, tabs) {
+  return element('nav', { class: 'tabs section-tabs', 'aria-label': `${section.title} pages` }, tabs.map(({ view, label, current }) => element('a',
+    { class: current ? 'tab active' : 'tab', href: `#/${view}`, 'aria-current': current ? 'page' : null }, label)));
+}
 
 async function route() {
   release();
   shownHash = location.hash;
   const parsed = parseHash(location.hash);
   const { name, args, query } = parsed;
+  const fromTab = clickedTabHref === location.hash;
+  clickedTabHref = null;
   closeDrawer();
   const main = document.getElementById('content');
+  const isAllowed = allowedViews.includes(NAV_PARENT[name] || name);
+  const section = isAllowed ? sectionFor(name, allowedViews) : null;
   for (const navLink of document.querySelectorAll('nav.side a[data-view]')) {
-    if (navLink.dataset.view === (NAV_PARENT[name] || name)) navLink.setAttribute('aria-current', 'page');
+    if (navLink.dataset.view === section?.id) navLink.setAttribute('aria-current', 'page');
     else navLink.removeAttribute('aria-current');
   }
   const sequence = ++renderSequence;
@@ -107,7 +109,6 @@ async function route() {
   viewController?.abort();
   const controller = new AbortController();
   viewController = controller;
-  const isAllowed = allowedViews.includes(NAV_PARENT[name] || name);
   const loadView = VIEW_LOADERS[name];
   if (!loadView || !isAllowed) {
     clear(main).append(element('div', { class: 'wrap' }, pageHeader('Not found'), element('p', {}, 'No such page. Pick one from the menu.')));
@@ -120,9 +121,14 @@ async function route() {
     const viewModule = await loadView();
     if (sequence !== renderSequence) return;
     const viewRoot = element('div', { class: 'wrap' });
+    const tabs = isAllowed ? tabsFor(name, allowedViews) : null;
+    if (tabs) viewRoot.append(sectionTabs(section, tabs));
     await viewModule.render(viewRoot, { name, args, query, signal: controller.signal });
     if (sequence !== renderSequence) return;
     clear(main).append(viewRoot);
+    const currentTab = viewRoot.querySelector('.section-tabs [aria-current]');
+    currentTab?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+    if (fromTab) currentTab?.focus();
     document.title = `${viewRoot.querySelector('h1')?.textContent || 'Armature'} | Armature`;
   } catch (err) {
     if (sequence !== renderSequence) return;
@@ -168,13 +174,8 @@ function buildNav() {
   const collapseButton = element('button', { type: 'button', id: 'collapse-button', class: 'icon-button collapse', 'aria-expanded': 'true', 'aria-label': 'Collapse menu' }, icon('collapse'));
   collapseButton.addEventListener('click', () => setCollapsed(!document.getElementById('layout').classList.contains('collapsed')));
   nav.append(element('div', { class: 'brand' }, element('span', { class: 'brand-name' }, 'Armature'), collapseButton));
-  for (const [groupName, items] of NAV_GROUPS) {
-    const shown = items.filter(([view]) => allowedViews.includes(view));
-    if (!shown.length) continue;
-    const list = element('ul', { role: 'list' }, shown.map(([view, label, iconName]) => element('li', {},
-      element('a', { href: `#/${view}`, 'data-view': view, title: label }, icon(iconName), element('span', { class: 'nav-label' }, label)))));
-    nav.append(element('div', { class: 'group' }, element('div', { class: 'group-name' }, groupName), list));
-  }
+  nav.append(element('ul', { role: 'list' }, visibleSections(allowedViews).map(({ id, title, icon: iconName, views }) => element('li', {},
+    element('a', { href: `#/${views[0]}`, 'data-view': id, title, 'aria-label': title }, icon(iconName), element('span', { class: 'nav-label' }, title))))));
   nav.append(element('div', { 'data-theme-toggle': '', class: 'nav-theme' }));
   let isCollapsed = false;
   try {
@@ -281,6 +282,10 @@ async function start() {
   buildTopbar();
   window.armatureThemeToggles?.();
   document.getElementById('skip').addEventListener('click', () => document.getElementById('content').focus());
+  // Safari does not focus a link on click, so the tab that started a route is remembered here.
+  document.getElementById('content').addEventListener('click', (clickEvent) => {
+    clickedTabHref = clickEvent.target.closest?.('.section-tabs a')?.getAttribute('href') ?? null;
+  });
   window.addEventListener('hashchange', leaveThenRoute);
   window.addEventListener('beforeunload', (unloadEvent) => {
     if (hasUnsaved()) unloadEvent.preventDefault();
