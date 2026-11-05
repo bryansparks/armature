@@ -157,6 +157,7 @@ def test_a_remote_location_keeps_its_own_label_and_same_user(monkeypatch):
     assert remote == {"kind": "remote", "label": "Container Cloud", "machine": "x86_64", "same_user": True}
     assert location.parse(remote, trusted=True) == remote
     assert "same_user" not in location.parse(remote)
+    assert location.parse({"kind": "remote", "label": "AWS Linux"})["label"] == "Remote"
     assert not location.better(remote, location.make(location.LOCAL, chip="Apple M1"))
     assert location.better(location.make(location.LOCAL), remote)
     assert location.make(location.REMOTE)["label"] == "Remote"
