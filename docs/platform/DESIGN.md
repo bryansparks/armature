@@ -230,7 +230,8 @@ grant anything. Admin comes from a claim only through an explicit
 `admin_groups` setting.
 
 Sessions are server-side rows keyed by an HMAC of the token, ported from the
-dashboard: 30-minute idle and 12-hour absolute limits, a `__Secure-` cookie,
+dashboard: idle and absolute limits from `session_idle_hours` (24 by default)
+and `session_max_hours` (168 by default), a `__Secure-` cookie,
 an origin check plus a CSRF token on every mutation, and per-IP and per-user
 throttles. One FastAPI dependency per route enforces the role and loads the
 object to check its team or project, never trusting an id in the body. The

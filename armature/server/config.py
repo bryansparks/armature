@@ -139,6 +139,8 @@ class ServerConfig(BaseModel):
     oidc: OIDCConfig | None = None
     password_login: bool = True
     require_totp: bool = False
+    session_idle_hours: float = Field(default=24, gt=0)
+    session_max_hours: float = Field(default=168, gt=0, le=720)
     events_socket: str = "~/.armature/server-events.sock"
     lost_after_minutes: int = Field(default=30, ge=1)
     sse_per_user: int = Field(default=8, ge=1)
@@ -173,6 +175,12 @@ class ServerConfig(BaseModel):
         if len(ids) != len(set(ids)):
             raise ValueError("each action needs its own id")
         return value
+
+    @model_validator(mode="after")
+    def _session_lifetimes(self) -> ServerConfig:
+        if self.session_max_hours < self.session_idle_hours:
+            raise ValueError("session_max_hours must be at least session_idle_hours")
+        return self
 
     @model_validator(mode="after")
     def _loopback_unless_allowed(self) -> ServerConfig:

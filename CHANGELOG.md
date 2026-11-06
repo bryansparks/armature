@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Dashboard sessions now last 24 hours idle and 7 days in all, up from 30 minutes and 12 hours. `session_idle_hours` and `session_max_hours` in `server.yaml` set them, and the session cookie lasts as long as `session_max_hours`.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added

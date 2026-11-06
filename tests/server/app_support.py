@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import insert
 
 from armature.server.app import create_app
-from armature.server.auth import start_session
+from armature.server.auth import Lifetime, start_session
 from armature.server.config import ServerConfig
 from armature.server.db import new_id
 from armature.server.db.schema import memberships, users
@@ -83,6 +83,7 @@ def login(client: TestClient, username: str, code: str | None, password: str = P
 def sign_in_as(client: TestClient, engine, keyring, clock, user_id: str, *, step_up: bool = True) -> str:
     """A session made directly, for tests that are about what a session may do rather than how it starts."""
     with engine.begin() as conn:
-        token, csrf = start_session(conn, keyring, user_id, clock(), ip=None, step_up=step_up)
+        token, csrf = start_session(conn, keyring, user_id, clock(), ip=None, step_up=step_up,
+                                    lifetime=Lifetime.of(ServerConfig()))
     client.cookies.set("__Secure-armature", token, domain="arm.test", path="/")
     return csrf

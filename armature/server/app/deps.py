@@ -14,7 +14,7 @@ from sqlalchemy import Connection, Engine
 
 from armature.server import rbac
 from armature.server.app.http import ApiError
-from armature.server.auth import Session, load_session, safe_equal
+from armature.server.auth import Lifetime, Session, load_session, safe_equal
 from armature.server.config import ServerConfig
 from armature.server.crypto import Keyring
 from armature.server.oidc import Provider
@@ -71,6 +71,10 @@ class Server:
         return LOCAL_STATE_COOKIE if self.insecure_localhost else STATE_COOKIE
 
     @property
+    def session_lifetime(self) -> Lifetime:
+        return Lifetime.of(self.cfg)
+
+    @property
     def cookie_path(self) -> str:
         return self.cfg.base_path or "/"
 
@@ -86,7 +90,8 @@ def current_session(request: Request) -> Session | None:
     if not hasattr(request.state, "session"):
         srv = server(request)
         with srv.engine.begin() as conn:
-            request.state.session = load_session(conn, srv.keyring, request.cookies.get(srv.cookie_name), srv.now())
+            request.state.session = load_session(conn, srv.keyring, request.cookies.get(srv.cookie_name), srv.now(),
+                                                 srv.session_lifetime)
     return request.state.session
 
 

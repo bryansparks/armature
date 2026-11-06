@@ -137,6 +137,21 @@ authenticator, so turning it back on needs no new enrollment. A user who
 first signed in while it was off has no authenticator, so issue them a new
 invite from the Users page after you turn it on.
 
+### Session length
+
+A dashboard session ends after `session_idle_hours` without a request, 24 by
+default, or `session_max_hours` after sign-in however active it is, 168 (7
+days) by default. Set either in `server.yaml`:
+
+```yaml
+session_idle_hours: 24
+session_max_hours: 168
+```
+
+`session_idle_hours` must be above 0, and `session_max_hours` must be at
+least `session_idle_hours` and at most 720 (30 days). The session cookie
+lasts `session_max_hours`. Step-up stays at five minutes.
+
 ## Headers the server sets
 
 Every response carries a strict Content-Security-Policy, `X-Frame-Options:
