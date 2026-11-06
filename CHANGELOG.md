@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added
