@@ -5,7 +5,9 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from armature.events.env import child_env
 from armature.nodes.base import BaseNode
@@ -18,6 +20,35 @@ LOG_LINE_CHARS = 2000
 LOG_LINES_PER_S = 20
 PARTIAL_FLUSH_S = 1.0
 PARTIAL_FLUSH_BYTES = 4096
+# Linux caps one env string at 128 KiB (MAX_ARG_STRLEN), so anything bigger goes through a file.
+INLINE_ENV_MAX = 64 * 1024
+CONTEXT_ENV = "ARMATURE_CONTEXT"
+CONTEXT_FILE_ENV = "ARMATURE_CONTEXT_FILE"
+WITH_ENV = "ARMATURE_WITH"
+WITH_FILE_ENV = "ARMATURE_WITH_FILE"
+
+
+def _spill(text: str, spilled: list[str]) -> str:
+    fd, path = tempfile.mkstemp(prefix="armature-step-", suffix=".json")
+    spilled.append(path)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    return path
+
+
+def _step_env(base: dict[str, str], context: dict[str, Any], spilled: list[str]) -> dict[str, str]:
+    env = child_env(base)
+    for key in (CONTEXT_ENV, CONTEXT_FILE_ENV, WITH_FILE_ENV):
+        env.pop(key, None)
+    encoded = json.dumps(context, default=str)
+    env[CONTEXT_FILE_ENV] = _spill(encoded, spilled)
+    if len(encoded.encode()) <= INLINE_ENV_MAX:
+        env[CONTEXT_ENV] = encoded
+    with_ = base.get(WITH_ENV)
+    if with_ is not None and len(with_.encode()) > INLINE_ENV_MAX:
+        env.pop(WITH_ENV)
+        env[WITH_FILE_ENV] = _spill(with_, spilled)
+    return env
 
 
 class ScriptNode(BaseNode):
@@ -49,33 +80,38 @@ class ScriptNode(BaseNode):
                 "Use a HumanGateNode before this stage or register a pre-tool hook."
             )
 
-        env = child_env({**self._env, "ARMATURE_CONTEXT": json.dumps(context, default=str)})
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
+        spilled: list[str] = []
         try:
-            stdout, stderr = await asyncio.wait_for(self._communicate(proc), timeout=self._adapter.timeout)
-        except asyncio.TimeoutError:
+            env = _step_env(self._env, context, spilled)
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(self._communicate(proc), timeout=self._adapter.timeout)
+            except asyncio.TimeoutError:
+                await self._kill_group(proc)
+                raise subprocess.TimeoutExpired(cmd, self._adapter.timeout)
+            except BaseException:
+                await self._kill_group(proc)
+                raise
+            # A background child the script left must not outlive its step.
             await self._kill_group(proc)
-            raise subprocess.TimeoutExpired(cmd, self._adapter.timeout)
-        except BaseException:
-            await self._kill_group(proc)
-            raise
-        # A background child the script left must not outlive its step.
-        await self._kill_group(proc)
-        envelope = {
-            "stdout": stdout.decode(errors="replace"),
-            "stderr": stderr.decode(errors="replace"),
-            "exit_code": proc.returncode,
-        }
-        if self._adapter.parse == "json":
-            return self._parse_json(envelope)
-        return envelope
+            envelope = {
+                "stdout": stdout.decode(errors="replace"),
+                "stderr": stderr.decode(errors="replace"),
+                "exit_code": proc.returncode,
+            }
+            if self._adapter.parse == "json":
+                return self._parse_json(envelope)
+            return envelope
+        finally:
+            for path in spilled:
+                Path(path).unlink(missing_ok=True)
 
     async def _communicate(self, proc: asyncio.subprocess.Process) -> tuple[bytes, bytes]:
         if self._emit is None:

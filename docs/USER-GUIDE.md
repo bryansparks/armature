@@ -734,12 +734,14 @@ stages:
 |---|---|---|
 | `name` | string | Adapter identifier |
 | `type` | string | `script` or `python` |
-| `cmd` | string | Shell command to run. It may template only `{{ run_id }}`. Read other values from `ARMATURE_CONTEXT` |
+| `cmd` | string | Shell command to run. It may template only `{{ run_id }}`. Read other values from `ARMATURE_CONTEXT` or `ARMATURE_CONTEXT_FILE` |
 | `fn` | string | Python callable path (for `type: python`) |
 | `args` | object | Static arguments merged into context |
 | `parse` | `json`? | Parse stdout as a JSON object and use it as the stage result (see below) |
 
 Script stage output is passed downstream as a dict under the stage's id.
+
+**Large context.** Every script step gets `ARMATURE_CONTEXT_FILE`, the path to a private temp file (mode 0600, removed when the step ends) holding the same JSON as `ARMATURE_CONTEXT`. `ARMATURE_CONTEXT` itself is set only when that JSON is 64 KiB or less, because Linux refuses to start a process with any single environment string over 128 KiB. A pack step's `with:` over 64 KiB likewise arrives through `ARMATURE_WITH_FILE` instead of `ARMATURE_WITH`. Scripts that may run after stages with long outputs should read the files.
 
 **Structured output (`parse: json`).** By default a script stage's result is the envelope `{stdout, stderr, exit_code}` — stdout is a string, which downstream templates can't index into. When the script prints a JSON object on stdout, add `parse: json` and the parsed object becomes the stage result directly: downstream stages can reference `{{ fetch_data.selected }}`, and fan-out stages can partition over `{{ fetch_data.items }}`. Diagnostics go to stderr. A non-zero exit, invalid JSON, or a non-object top level raises, so `on_fail` / `fail_as_value` apply:
 
@@ -4285,7 +4287,7 @@ stages:
     depends_on: []
 ```
 
-A pack is a directory with a `pack.yaml` declaring each adapter: a `description`, a static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for `params` and for `outputs`, and a `timeout`. Parameters reach the script as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never interpolated into the command. `with:` is validated against the adapter's `params` schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/name` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
+A pack is a directory with a `pack.yaml` declaring each adapter: a `description`, a static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for `params` and for `outputs`, and a `timeout`. Parameters reach the script as `ARMATURE_WITH` (or the file named by `ARMATURE_WITH_FILE` when over 64 KiB) and `ARMATURE_CONTEXT["with"]` — never interpolated into the command. `with:` is validated against the adapter's `params` schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/name` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
 
 Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` (first pack under a name wins). The server ships built-in packs — `conversation`, `github`, `jira`, `linear`, `review`, `slack` — that power its review and integration flows.
 

@@ -1,6 +1,6 @@
 """``armature tool``: a built-in pack adapter's step, as a thin client of the server's tool broker.
 
-It reads the step's ``with:`` from $ARMATURE_WITH, sends it with the step's
+It reads the step's ``with:`` from $ARMATURE_WITH (or $ARMATURE_WITH_FILE), sends it with the step's
 grant from $ARMATURE_TOOL_TOKEN, and prints only the result. Checkout and push
 run git here. Git gets its one-repository token from ``armature tool
 git-credential``, which asks the server and answers git on stdout, so the
@@ -29,6 +29,7 @@ from armature.nodes.harness import AGENT_USER_ENV
 TOKEN_ENV = "ARMATURE_TOOL_TOKEN"
 URL_ENV = "ARMATURE_TOOLS_URL"
 WITH_ENV = "ARMATURE_WITH"
+WITH_FILE_ENV = "ARMATURE_WITH_FILE"
 HTTP_TIMEOUT_S = 120.0
 GIT_TIMEOUT_S = 540
 GIT_HOST = "github.com"
@@ -236,7 +237,13 @@ def main(args: list[str]) -> int:
         print(f"armature tool: {name} is not a tool name", file=sys.stderr)
         return 2
     try:
-        params = json.loads(os.environ.get(WITH_ENV) or "{}")
+        raw = os.environ.get(WITH_ENV)
+        if raw is None and os.environ.get(WITH_FILE_ENV):
+            try:
+                raw = Path(os.environ[WITH_FILE_ENV]).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ToolFailed(f"could not read {WITH_FILE_ENV}: {exc}") from exc
+        params = json.loads(raw or "{}")
         if not isinstance(params, dict):
             raise ToolFailed(f"{WITH_ENV} must hold a JSON object")
         if name == "github.checkout":

@@ -315,6 +315,13 @@ rendered value becomes shell syntax. Read inputs and step outputs from the
 Anything else is the `ADAPTER_CMD_INPUT` validation error. Pack commands are
 exempt.
 
+Every script step also gets `ARMATURE_CONTEXT_FILE`, the path to a private
+temp file holding the same context JSON, removed when the step ends.
+`ARMATURE_CONTEXT` itself is set only when the JSON is 64 KiB or less, and
+`ARMATURE_WITH` over 64 KiB moves to a file named by `ARMATURE_WITH_FILE`,
+because Linux refuses to start a process with one environment string over
+128 KiB. A script that may see a large context reads the file.
+
 Fields: `name`, `type` (`script` | `python`), `cmd` (script) or `fn` (python),
 `args` (static dict merged into context), `timeout`, `parse` (`json` — the
 printed JSON object becomes the stage result; non-object top level or non-zero
@@ -345,7 +352,8 @@ with its parameter schema; `armature pack validate <dir>` checks a pack.
 `with:` (also valid on `call:` stages) is checked against the adapter's
 `params` schema when the workflow is validated and again after it renders,
 and may hold only sandbox-safe template references. Values reach the script
-as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never in the command.
+as `ARMATURE_WITH` (or `ARMATURE_WITH_FILE` when over 64 KiB) and
+`ARMATURE_CONTEXT["with"]` — never in the command.
 A `pack/name` adapter no installed pack provides is `UNKNOWN_PACK_ADAPTER`;
 a `with:` that fails the schema (or has no adapter/call to belong to) is
 `INVALID_WITH`, with the field path in the message.

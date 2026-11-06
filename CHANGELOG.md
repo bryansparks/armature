@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Script steps no longer fail with "Argument list too long" on Linux once earlier stages' output passes 128 KiB. Every step gets `ARMATURE_CONTEXT_FILE`, a private temp file with the context JSON, and `ARMATURE_CONTEXT` stays inline only up to 64 KiB. A `with:` over 64 KiB arrives through `ARMATURE_WITH_FILE`, which `armature tool` reads.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added

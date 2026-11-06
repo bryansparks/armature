@@ -2,6 +2,7 @@ import asyncio
 import os
 import pytest
 import subprocess
+import sys
 import time
 from armature.nodes.script import ScriptNode
 from armature.spec.models import Adapter
@@ -331,3 +332,51 @@ async def test_no_emitter_streams_nothing(monkeypatch):
     node = ScriptNode(adapter=_adapter("echo err >&2"))
     result = await node.execute({})
     assert result["stderr"] == "err\n"
+
+
+_ENV_PROBE = """
+import json, os, stat, sys
+path = os.environ.get("ARMATURE_CONTEXT_FILE")
+with open(path, encoding="utf-8") as f:
+    ctx = json.load(f)
+print(json.dumps({"path": path, "mode": stat.S_IMODE(os.stat(path).st_mode), "big": len(ctx.get("big", "")),
+                  "inline": os.environ.get("ARMATURE_CONTEXT"), "longest": max(len(v) for v in os.environ.values())}))
+"""
+
+
+async def test_script_node_passes_a_large_context_through_a_file(tmp_path):
+    probe = tmp_path / "probe.py"
+    probe.write_text(_ENV_PROBE)
+    node = ScriptNode(adapter=_adapter(f"{sys.executable} {probe}", parse="json"))
+    result = await node.execute({"big": "x" * (200 * 1024)})
+    assert result["big"] == 200 * 1024
+    assert result["inline"] is None
+    assert result["longest"] < 128 * 1024
+    assert result["mode"] == 0o600
+    assert not os.path.exists(result["path"])
+
+
+async def test_script_node_keeps_a_small_context_inline(tmp_path):
+    import json
+    probe = tmp_path / "probe.py"
+    probe.write_text(_ENV_PROBE)
+    node = ScriptNode(adapter=_adapter(f"{sys.executable} {probe}", parse="json"))
+    result = await node.execute({"greeting": "hello"})
+    assert json.loads(result["inline"]) == {"greeting": "hello"}
+    assert not os.path.exists(result["path"])
+
+
+async def test_a_large_with_reaches_armature_tool_through_a_file(tmp_path):
+    import json
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, sys\n"
+        "from armature.packs import tool\n"
+        "tool.call = lambda name, params: {'name': name, 'size': len(params['text']),\n"
+        "                                  'inline': 'ARMATURE_WITH' in os.environ}\n"
+        "sys.exit(tool.main(['slack.post']))\n"
+    )
+    big = json.dumps({"channel": "C1", "text": "y" * (200 * 1024)})
+    node = ScriptNode(adapter=_adapter(f"{sys.executable} {child}", parse="json"), env={"ARMATURE_WITH": big})
+    result = await node.execute({})
+    assert result == {"name": "slack.post", "size": 200 * 1024, "inline": False}
