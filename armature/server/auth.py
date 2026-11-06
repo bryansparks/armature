@@ -19,14 +19,13 @@ import pyotp
 from sqlalchemy import Connection, Engine, delete, func, insert, or_, select, update
 
 from armature.server import audit
+from armature.server.config import ServerConfig
 from armature.server.crypto import Keyring, SealError
 from armature.server.db import new_id
 from armature.server.db.schema import login_attempts, sessions, users
 from armature.server.passwords import hash_password, verify_password
 from armature.server.users import USERNAME, normal_username, totp_aad
 
-IDLE = timedelta(minutes=30)
-ABSOLUTE = timedelta(hours=12)
 STEP_UP = timedelta(minutes=5)
 TOUCH = timedelta(seconds=60)
 FAILURE_WINDOW = timedelta(minutes=15)
@@ -49,6 +48,16 @@ class AuthError(Exception):
         self.status = status
         self.message = message
         self.headers = headers or {}
+
+
+@dataclass(frozen=True)
+class Lifetime:
+    idle: timedelta
+    maximum: timedelta
+
+    @classmethod
+    def of(cls, cfg: ServerConfig) -> Lifetime:
+        return cls(idle=timedelta(hours=cfg.session_idle_hours), maximum=timedelta(hours=cfg.session_max_hours))
 
 
 @dataclass(frozen=True)
@@ -143,7 +152,7 @@ def claim_totp_step(conn: Connection, user_id: str, step: int) -> bool:
     return result.rowcount == 1
 
 
-def load_session(conn: Connection, keyring: Keyring, token: str | None, now: datetime,
+def load_session(conn: Connection, keyring: Keyring, token: str | None, now: datetime, lifetime: Lifetime,
                  touch: bool = True) -> Session | None:
     if not valid_token(token):
         return None
@@ -152,7 +161,8 @@ def load_session(conn: Connection, keyring: Keyring, token: str | None, now: dat
     if row is None:
         return None
     user = conn.execute(select(users).where(users.c.id == row.user_id)).first()
-    if now - row.created_at > ABSOLUTE or now - row.last_seen_at > IDLE or user is None or user.disabled:
+    if (now - row.created_at > lifetime.maximum or now - row.last_seen_at > lifetime.idle or user is None
+            or user.disabled):
         conn.execute(delete(sessions).where(sessions.c.token_hmac == digest))
         return None
     last_seen = row.last_seen_at
@@ -164,14 +174,14 @@ def load_session(conn: Connection, keyring: Keyring, token: str | None, now: dat
 
 
 def start_session(conn: Connection, keyring: Keyring, user_id: str, now: datetime, *, ip: str | None,
-                  step_up: bool) -> tuple[str, str]:
+                  step_up: bool, lifetime: Lifetime) -> tuple[str, str]:
     token = _random.token_urlsafe(32)
     csrf = _random.token_urlsafe(32)
     conn.execute(insert(sessions).values(token_hmac=token_hmac(keyring, token), user_id=user_id, csrf=csrf,
                                          created_at=now, last_seen_at=now, step_up_at=now if step_up else None,
                                          ip=(ip or "")[:45] or None))
-    conn.execute(delete(sessions).where(or_(sessions.c.created_at < now - ABSOLUTE,
-                                            sessions.c.last_seen_at < now - IDLE)))
+    conn.execute(delete(sessions).where(or_(sessions.c.created_at < now - lifetime.maximum,
+                                            sessions.c.last_seen_at < now - lifetime.idle)))
     return token, csrf
 
 
@@ -253,7 +263,7 @@ class SignedIn:
 
 
 def login(engine: Engine, keyring: Keyring, *, username: Any, password: Any, code: Any, ip: str, now: datetime,
-          dummy: str, old_token: str | None = None, require_totp: bool = True) -> SignedIn:
+          dummy: str, lifetime: Lifetime, old_token: str | None = None, require_totp: bool = True) -> SignedIn:
     typed = normal_username(username)
     name = typed if USERNAME.fullmatch(typed) else INVALID_USERNAME
     actor_name = None if name == INVALID_USERNAME else name
@@ -282,7 +292,7 @@ def login(engine: Engine, keyring: Keyring, *, username: Any, password: Any, cod
         else:
             if valid_token(old_token):
                 end_session(conn, token_hmac(keyring, old_token))
-            token, csrf = start_session(conn, keyring, user.id, now, ip=ip, step_up=True)
+            token, csrf = start_session(conn, keyring, user.id, now, ip=ip, step_up=True, lifetime=lifetime)
             conn.execute(update(users).where(users.c.id == user.id).values(last_login_at=now))
             audit.record(conn, action="login", actor_id=user.id, ip=ip, target_kind="user", target_id=user.id,
                          detail={"outcome": "ok", "method": "password"})
