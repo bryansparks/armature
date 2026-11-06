@@ -41,19 +41,23 @@ class Call:
 
     @property
     def config(self) -> dict[str, Any]:
-        return self.connection.config or {}
+        return (self.connection.config if self.connection else None) or {}
 
     @property
     def identity(self) -> dict[str, Any]:
-        return self.connection.identity or {}
+        return (self.connection.identity if self.connection else None) or {}
 
 
 @dataclass(frozen=True)
 class Tool:
+    # NONE for a tool that only reads and writes the server's database, so it resolves no connection.
     kind: str
     run: Callable[[Call, dict[str, Any]], dict[str, Any]] | None
     # A dry run calls a tool that only reads for real, so later steps branch on real data. It records every other.
     reads: bool = False
+
+
+NONE = "none"
 
 
 def registry() -> dict[str, Tool]:
@@ -89,6 +93,11 @@ def registry() -> dict[str, Tool]:
         "review.marked": Tool("github_app", marks.marked, reads=True),
         "review.mark": Tool("github_app", marks.mark),
         "review.pushable": Tool("github_app", marks.pushable, reads=True),
-        "review.decisions": Tool("github_app", marks.decisions),
+        "review.decisions": Tool(NONE, marks.decisions),
         "review.context": Tool("github_app", context.context, reads=True),
+        # A pack that makes its own vendor calls reports them here, so the server keeps the record.
+        "review.record-risk": Tool(NONE, marks.record_risk, reads=True),
+        "review.record-post": Tool(NONE, marks.record_post),
+        "review.record-mark": Tool(NONE, marks.record_mark),
+        "review.is-marked": Tool(NONE, marks.is_marked, reads=True),
     }

@@ -2,7 +2,9 @@ name: review
 version: 1.0.0
 description: >-
   The server's side of a code review through the team's GitHub App connection. The server reads the diff and the
-  head commit from GitHub and the run's own record, so a step can't rate or mark a commit it didn't review.
+  head commit from GitHub and the run's own record, so a step can't rate or mark a commit it didn't review. The
+  record-* and is-marked adapters use no connection: a pack that makes its own GitHub calls reports them, and the
+  server keeps the risk, the post, and the mark in its database.
 adapters:
   risk:
     description: >-
@@ -52,7 +54,8 @@ adapters:
   decisions:
     description: >-
       Record the team lead's decisions on this run as findings, each with its decision and reason. With fixed, each
-      is one of this run's findings that its approved push fixed, at the commit the server approved.
+      is one of this run's findings that its approved push fixed, at the commit the server approved. Uses no
+      connection, so connection is ignored.
     cmd: armature tool review.decisions
     writes: true
     params:
@@ -96,3 +99,70 @@ adapters:
         repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
         number: {type: integer, minimum: 1}
         connection: {type: string}
+  record-risk:
+    description: >-
+      For a pack that reads the diff from GitHub itself. Record the higher of the server's path floors on the
+      reported paths and the given level on the run, with the head it rated. The server can't see the diff, so it
+      relies on total, the changed-file count GitHub reports, and truncated to tell a listing cut short, which is
+      high. A level never goes down. Uses no connection. Returns the level, its reasons, the head, and the specialist panel that level runs.
+    cmd: armature tool review.record-risk
+    params:
+      type: object
+      required: [repo, number, head, level, total]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        head: {type: string, pattern: '^[0-9a-f]{40}$'}
+        level: {enum: [low, medium, high]}
+        reasons: {type: array, items: {type: string}, maxItems: 20}
+        paths: {type: array, items: {type: string}, maxItems: 6000}
+        added: {type: array, items: {type: string}, maxItems: 3000}
+        total: {type: integer, minimum: 0}
+        truncated: {type: boolean}
+  record-post:
+    description: >-
+      For a pack that posts its own review. Record that this run posted, or skipped, a review of head and whether
+      it approved it, and set the run's outcome as a live post does. Uses no connection.
+    cmd: armature tool review.record-post
+    writes: true
+    params:
+      type: object
+      required: [repo, number, head, posted, approved]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        head: {type: string, pattern: '^[0-9a-f]{40}$'}
+        posted: {type: boolean}
+        approved: {type: boolean}
+        review_id: {type: [integer, 'null'], minimum: 1}
+  record-mark:
+    description: >-
+      For a pack that sets its own GitHub status. Record the review mark the server trusts for head, with that
+      status's id. Only the head this run reviewed, and whose review this run last recorded as an approval, is
+      marked. Uses no connection.
+    cmd: armature tool review.record-mark
+    writes: true
+    params:
+      type: object
+      required: [repo, number, head, status_id]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        head: {type: string, pattern: '^[0-9a-f]{40}$'}
+        status_id: {type: integer, minimum: 1}
+  is-marked:
+    description: >-
+      For a pack that reads the pull request's head from GitHub itself. Whether the server recorded a review mark
+      for head. Uses no connection, and never asks GitHub.
+    cmd: armature tool review.is-marked
+    params:
+      type: object
+      required: [repo, number, head]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        number: {type: integer, minimum: 1}
+        head: {type: string, pattern: '^[0-9a-f]{40}$'}

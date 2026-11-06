@@ -56,7 +56,7 @@ from armature.server.db.schema import (
     workflows,
 )
 from armature.server.db.schema import runners as runner_rows
-from armature.server.tools import Call, ToolError, marks, registry
+from armature.server.tools import NONE, Call, ToolError, marks, registry
 from armature.server.tools import github as github_tools
 from armature.server.tools import jira as jira_tools
 from armature.server.vendors import VendorError
@@ -76,7 +76,8 @@ WRITE_TOOLS = ("github.push",)
 # Reads a step may make of another project's repository, so long as the project is in the job's team.
 TEAM_READS = ("github.pr-diff",)
 # Tools whose call can change the run's risk or outcome, which open run pages show.
-RUN_TOOLS = ("github.post-review", "github.open-pr", "review.risk", "review.marked", "review.mark")
+RUN_TOOLS = ("github.post-review", "github.open-pr", "review.risk", "review.marked", "review.mark",
+             "review.record-risk", "review.record-post", "review.record-mark", "review.is-marked")
 GIT_HOST = "github.com"
 GIT_TOOL = "github.git-credential"
 DETAIL_MAX = 2000
@@ -288,6 +289,10 @@ def _context(conn: Connection, keyring: Keyring, public_url: str, run: Any, job:
              params: dict[str, Any], now: datetime, transport: httpx.BaseTransport | None,
              tool: str | None = None) -> Call:
     owner, project_id = None, job.project_id
+    if kind == NONE:
+        return Call(run_id=run.id, step_id=grant.step, connection=None, creds={}, now=now,
+                    run_url=f"{public_url}/#/run/{run.id}", project_id=_repo_project(conn, job, params["repo"]),
+                    transport=transport, team_id=job.team_id)
     if kind == "github_app":
         owner = github_tools.split(params["repo"])[0].lower()
         project_id = _team_repo_project(conn, job, params["repo"]) if tool in TEAM_READS \
@@ -471,6 +476,9 @@ def call_tool(engine: Engine, keyring: Keyring, *, public_url: str, token: Any, 
     with engine.begin() as conn:
         if tool == "github.post-review":
             detail = marks.review_detail(params, result)
+            marks.reviewed(conn, grant.run_id, detail)
+        elif tool == "review.record-post":
+            outcome, detail = "ok", marks.post_detail(params)
             marks.reviewed(conn, grant.run_id, detail)
         elif tool == "github.open-pr":
             marks.opened(conn, grant.run_id, result)
