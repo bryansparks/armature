@@ -24,7 +24,7 @@ import httpx
 from armature.events.emitter import plain_http_to_remote
 from armature.events.sign import sign_engine
 from armature.nodes.agent import SAFE_GIT
-from armature.nodes.harness import AGENT_USER_ENV
+from armature.nodes.harness import AGENT_USER_ENV, TOOLS_VIA_PROXY_ENV
 
 TOKEN_ENV = "ARMATURE_TOOL_TOKEN"
 URL_ENV = "ARMATURE_TOOLS_URL"
@@ -55,7 +55,9 @@ def _post(path: str, body: dict[str, Any], token: str | None, *, url: str | None
     if plain_http_to_remote(base):
         raise ToolFailed(f"refusing plain http to a non-loopback host: {base}")
     try:
-        with httpx.Client(timeout=HTTP_TIMEOUT_S, transport=transport, trust_env=False) as http:
+        # The environment's proxy carries the bearer token only where the host said the run has no other way out.
+        proxied = os.environ.get(TOOLS_VIA_PROXY_ENV) == "1"
+        with httpx.Client(timeout=HTTP_TIMEOUT_S, transport=transport, trust_env=proxied) as http:
             response = http.post(f"{base.rstrip('/')}{path}", json=body, headers={"Authorization": f"Bearer {token}"})
     except httpx.HTTPError as exc:
         raise ToolFailed(f"could not reach the server: {exc.__class__.__name__}") from exc

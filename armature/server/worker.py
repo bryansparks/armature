@@ -48,6 +48,7 @@ from armature.nodes.harness import (
     PROJECT_REPO_ENV,
     PROXY_ENV,
     ROLES_ENV,
+    TOOLS_VIA_PROXY_ENV,
     SKILLS_ENV,
     host_only,
 )
@@ -97,8 +98,8 @@ from armature.spec.models import AGENT_HARNESSES, remote_capabilities
 log = logging.getLogger(__name__)
 
 # Only a host sets these, so a team setting or secret of the same name never reaches a bundle.
-HOST_SET_ENV = (GATE_AUTO_APPROVE_ENV, GIT_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV, REDACT_ENV,
-                *GIT_CONFIG_ENV, *PROXY_ENV)
+HOST_SET_ENV = (GATE_AUTO_APPROVE_ENV, GIT_VIA_PROXY_ENV, TOOLS_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV,
+                REDACT_ENV, *GIT_CONFIG_ENV, *PROXY_ENV)
 
 INTERVAL_S = 2.0
 LEASE = timedelta(minutes=2)

@@ -18,6 +18,8 @@ GIT_HOSTS_ENV = "ARMATURE_GIT_HOSTS"
 PROJECT_REPO_ENV = "ARMATURE_PROJECT_REPO"
 # Set by a remote runner's launcher when git reaches its hosts through a proxy that adds the credentials.
 GIT_VIA_PROXY_ENV = "ARMATURE_GIT_VIA_PROXY"
+# Set by a remote runner's launcher when the run reaches the server only through the inherited proxy.
+TOOLS_VIA_PROXY_ENV = "ARMATURE_TOOLS_VIA_PROXY"
 # What git keeps from the host to reach its hosts through a proxy that may trust only its own CA.
 PROXY_ENV = ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "SSL_CERT_FILE",
              "SSL_CERT_DIR", "GIT_SSL_CAINFO", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
@@ -25,7 +27,7 @@ GIT_CONFIG_ENV = ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
 GIT_CONFIG_ENTRIES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 # Only the runner or worker sets these, so a setting or secret of the same name never reaches the run.
 HOST_ONLY_ENV = (AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, SKILLS_ENV, ROLES_ENV, GIT_VIA_PROXY_ENV,
-                 LOCATION_KIND_ENV, LOCATION_LABEL_ENV, *GIT_CONFIG_ENV, *PROXY_ENV)
+                 TOOLS_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV, *GIT_CONFIG_ENV, *PROXY_ENV)
 FILE_TOOLS = ("Read", "Grep", "Glob")
 GIT_READS = ("log", "diff", "show", "status", "blame", "ls-files", "merge-base", "rev-list", "cat-file")
 # Claude Code asks, so a headless session is denied, before any of these reads outside the working and added dirs.

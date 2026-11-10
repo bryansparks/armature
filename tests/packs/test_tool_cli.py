@@ -437,3 +437,21 @@ def test_under_sudo_a_lost_fd_name_still_leaves_stdin_on_dev_null(monkeypatch):
     finally:
         os.dup2(saved, 0)
         os.close(saved)
+
+
+@pytest.mark.parametrize("flag, proxied", [(None, False), ("0", False), ("1", True)])
+def test_the_tool_client_uses_the_environments_proxy_only_when_the_host_says_so(monkeypatch, flag, proxied):
+    made = []
+
+    class Client(httpx.Client):
+        def __init__(self, **kwargs):
+            made.append(kwargs["trust_env"])
+            super().__init__(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True})))
+
+    monkeypatch.setattr(tool_cli.httpx, "Client", Client)
+    if flag is None:
+        monkeypatch.delenv(tool_cli.TOOLS_VIA_PROXY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(tool_cli.TOOLS_VIA_PROXY_ENV, flag)
+    assert tool_cli._post("/x", {}, "t", url="https://armature.example.com") == {"ok": True}
+    assert made == [proxied]
