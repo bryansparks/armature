@@ -20,6 +20,7 @@ from armature.server.db.schema import (
     settings,
     teams,
     triggers,
+    webhook_deliveries,
     webhooks,
 )
 from armature.server.db.schema import (
@@ -741,3 +742,33 @@ def test_a_pull_request_key_becomes_the_runs_subject(sqlite_engine, keyring, clo
     w.tick()
     assert _run(sqlite_engine, _get(sqlite_engine, pulled).run_id).subject == "acme/app#7"
     assert _run(sqlite_engine, _get(sqlite_engine, nightly).run_id).subject is None
+
+
+def _delivery(engine, clock, world, payload):
+    delivery = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(webhook_deliveries).values(id=delivery, webhook_id=world["hook"], received_at=clock(),
+                                                       status="accepted", payload=payload))
+    return delivery
+
+
+def test_a_pull_request_delivery_titles_the_run(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    delivery = _delivery(sqlite_engine, clock, world, json.dumps({"pull_request": {"title": "Fix\nthe  login"}}))
+    titled = _queue(sqlite_engine, clock, world, key="acme/app#7", delivery_id=delivery)
+    pruned = _queue(sqlite_engine, clock, world, key="acme/app#8", delivery_id="gone")
+    bare = _queue(sqlite_engine, clock, world, key="acme/app#9")
+    _setting(sqlite_engine, worker.SLOTS_KEY, 3)
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, titled).run_id).summary == {"title": "Fix the login"}
+    for job_id in (pruned, bare):
+        job = _get(sqlite_engine, job_id)
+        assert job.status == "running" and _run(sqlite_engine, job.run_id).summary is None
+
+
+def test_an_unreadable_delivery_leaves_the_run_untitled(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    bad = _delivery(sqlite_engine, clock, world, "{not json")
+    job_id = _queue(sqlite_engine, clock, world, delivery_id=bad)
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, job_id).run_id).summary is None

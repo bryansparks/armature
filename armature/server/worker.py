@@ -32,6 +32,7 @@ from ruamel.yaml.error import YAMLError
 from sqlalchemy import Connection, Engine, and_, func, insert, or_, select, update
 
 from armature.events.location import this_machine
+from armature.events.summary import summary_patch
 from armature.nodes.gate import GATE_DIR_ENV, GATE_FILE, read_gate
 from armature.nodes.harness import (
     GIT_HOSTS_ENV,
@@ -80,6 +81,7 @@ from armature.server.db.schema import (
     trigger_seen,
     triggers,
     versions,
+    webhook_deliveries,
     workflows,
 )
 from armature.server.ingest import load_summary
@@ -525,6 +527,19 @@ def _pull_subject(key: str | None) -> str | None:
     return key if key and threads.PULL_SUBJECT.fullmatch(key) else None
 
 
+def _pull_title(conn: Connection, job: Any) -> dict[str, Any] | None:
+    """A pull request job's delivery names its title, which the run starts with until a step reports one."""
+    if _pull_subject(job.concurrency_key) is None or job.delivery_id is None:
+        return None
+    payload = conn.execute(select(webhook_deliveries.c.payload)
+                           .where(webhook_deliveries.c.id == job.delivery_id)).scalar()
+    try:
+        title = json.loads(payload or "")["pull_request"]["title"]
+    except (ValueError, TypeError, KeyError):
+        return None
+    return summary_patch({"title": title}) or None
+
+
 def _rerun_ref(conn: Connection, job: Any) -> tuple[str, dict[str, Any]] | None:
     """A rerun starts as the run it reruns did, since the trigger's seen keys still point at that run's job."""
     if job.rerun_of is None:
@@ -606,7 +621,8 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
                                           workflow_version=job.workflow_version, triggered_by=job.requested_by, actor=None,
                                           trigger_kind=trigger_kind, trigger_ref=trigger_ref,
                                           runner_key_id=runner_key_id, thread=job.thread, location=location,
-                                          rerun_of=job.rerun_of, subject=_pull_subject(job.concurrency_key))
+                                          rerun_of=job.rerun_of, subject=_pull_subject(job.concurrency_key),
+                                          summary=_pull_title(conn, job))
         run_id = run_row["id"]
     conn.execute(update(jobs).where(jobs.c.id == job.id).values(
         run_id=run_id, status="running", heartbeat_at=now, lease_expires_at=now + lease))
