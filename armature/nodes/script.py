@@ -183,7 +183,8 @@ class ScriptNode(BaseNode):
         # The shell's children, such as a CLI the script starts, share its session, so killing only the shell would orphan them.
         try:
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+        # Sandboxes such as gVisor answer EPERM for a group that has already exited.
+        except (ProcessLookupError, PermissionError):
             pass
         await proc.wait()
 

@@ -380,3 +380,11 @@ async def test_a_large_with_reaches_armature_tool_through_a_file(tmp_path):
     node = ScriptNode(adapter=_adapter(f"{sys.executable} {child}", parse="json"), env={"ARMATURE_WITH": big})
     result = await node.execute({})
     assert result == {"name": "slack.post", "size": 200 * 1024, "inline": False}
+
+
+async def test_a_sandbox_refusing_killpg_still_returns_the_result(monkeypatch):
+    def refuse(pgid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr("armature.nodes.script.os.killpg", refuse)
+    result = await ScriptNode(adapter=_adapter("echo hello")).execute({})
+    assert result["exit_code"] == 0 and "hello" in result["stdout"]
