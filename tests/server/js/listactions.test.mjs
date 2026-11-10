@@ -59,6 +59,16 @@ test('an open run in a list offers Cancel to those who may cancel it', () => {
   assert.equal(cancelControl({ ...open, job: null }, lead), null);
 });
 
+test('a jobless run the host\'s cancel action can stop offers Cancel to those who may cancel it', () => {
+  const host = { id: 'r2', status: 'running', team_id: 't1', job: null, host_cancel: true };
+  const [button] = cancelControl(host, lead).children;
+  assert.deepEqual(texts(button), ['Cancel']);
+  assert.equal(cancelControl(host, viewer), null);
+  assert.equal(cancelControl({ ...host, host_cancel: false }, lead), null);
+  assert.equal(cancelControl({ ...host, host_cancel: undefined }, lead), null);
+  assert.equal(cancelControl({ ...host, status: 'canceled' }, lead), null);
+});
+
 test('a run whose cancel was asked for says so instead of offering it again', () => {
   const asked = { ...open, job: { ...open.job, cancel_requested_at: '2026-10-30T20:00:00Z' } };
   assert.deepEqual(texts(cancelControl(asked, lead)), ['Cancel requested']);

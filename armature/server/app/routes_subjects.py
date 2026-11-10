@@ -43,7 +43,7 @@ def get_subject(subject: str, request: Request, session: Session = Depends(signe
         raise ApiError(404, "Not found.")
     with server(request).engine.connect() as conn:
         access = rbac.load_access(conn, session.user_id, bool(session.user.is_admin))
-        detail = subjects.subject_detail(conn, rbac.visible_scope(access), subject)
+        detail = subjects.subject_detail(conn, rbac.visible_scope(access), subject, server(request).cfg.actions)
     if detail is None:
         raise ApiError(404, "Not found.")
     return {"subject": detail}

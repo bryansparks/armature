@@ -58,7 +58,7 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
                password_cost: int | None = None, worker_interval: float | None = worker.INTERVAL_S) -> FastAPI:
     hub = LiveHub(engine, keyring, clock, socket_path=cfg.events_socket,
                   lost_after=timedelta(minutes=cfg.lost_after_minutes), sse_per_user=cfg.sse_per_user,
-                  sse_total=cfg.sse_total)
+                  sse_total=cfg.sse_total, actions=cfg.actions)
 
     export = ExportHook(engine, cfg.export_on_change, clock=clock) if cfg.export_on_change else None
     if export is not None:
