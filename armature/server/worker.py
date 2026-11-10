@@ -60,6 +60,7 @@ from armature.server import (
     llm,
     residents,
     runners,
+    threads,
 )
 from armature.server import secrets as secret_store
 from armature.server.config import ServerConfig
@@ -519,6 +520,11 @@ def _trigger_ref(conn: Connection, job: Any, trigger: Any) -> tuple[str, dict[st
                                                         ("trigger_id", job.trigger_id)) if value is not None}
 
 
+def _pull_subject(key: str | None) -> str | None:
+    """A job keyed by a pull request, such as ``owner/repo#12``, names it as the run's subject, which links it."""
+    return key if key and threads.PULL_SUBJECT.fullmatch(key) else None
+
+
 def _rerun_ref(conn: Connection, job: Any) -> tuple[str, dict[str, Any]] | None:
     """A rerun starts as the run it reruns did, since the trigger's seen keys still point at that run's job."""
     if job.rerun_of is None:
@@ -600,7 +606,7 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
                                           workflow_version=job.workflow_version, triggered_by=job.requested_by, actor=None,
                                           trigger_kind=trigger_kind, trigger_ref=trigger_ref,
                                           runner_key_id=runner_key_id, thread=job.thread, location=location,
-                                          rerun_of=job.rerun_of)
+                                          rerun_of=job.rerun_of, subject=_pull_subject(job.concurrency_key))
         run_id = run_row["id"]
     conn.execute(update(jobs).where(jobs.c.id == job.id).values(
         run_id=run_id, status="running", heartbeat_at=now, lease_expires_at=now + lease))

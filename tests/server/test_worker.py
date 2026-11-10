@@ -730,3 +730,14 @@ def test_two_concurrent_claims_of_one_key_start_one_job(sqlite_engine, keyring, 
     with sqlite_engine.connect() as conn:
         held = conn.execute(select(func.count()).select_from(jobs).where(jobs.c.status == "claimed")).scalar()
     assert held == 1
+
+
+def test_a_pull_request_key_becomes_the_runs_subject(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    pulled = _queue(sqlite_engine, clock, world, key="acme/app#7")
+    nightly = _queue(sqlite_engine, clock, world, key="nightly")
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.tick()
+    w.tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, pulled).run_id).subject == "acme/app#7"
+    assert _run(sqlite_engine, _get(sqlite_engine, nightly).run_id).subject is None
