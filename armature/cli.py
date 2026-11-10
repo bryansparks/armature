@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 import typer
@@ -896,6 +897,10 @@ PR_SET_DUMPABLE = 4
 def _undumpable() -> None:
     """Keep other processes of this user, such as a workflow's own scripts, from reading the run's memory."""
     if not sys.platform.startswith("linux"):
+        return
+    from armature.nodes.harness import TOOLS_VIA_PROXY_ENV
+    # A sandbox that admits a connection by reading /proc/<pid>/exe, such as OpenShell, refuses an undumpable one.
+    if os.environ.get(TOOLS_VIA_PROXY_ENV) == "1":
         return
     import ctypes
     ctypes.CDLL(None, use_errno=True).prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
