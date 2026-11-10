@@ -11,17 +11,21 @@ from sqlalchemy import insert, select
 
 from armature.server import actions
 from armature.server import secrets as secret_store
+from armature.server.app.routes_jobs import NOT_SERVER_RUN
 from armature.server.config import ActionConfig, ServerConfig
 from armature.server.db import new_id
 from armature.server.db.schema import (
     audit,
+    jobs,
     operations,
     projects,
     run_steps,
     runner_keys,
     runs,
     teams,
+    workflows,
 )
+from armature.server.ingest import LiveHub, list_row, load_summary
 from tests.server.app_support import (
     Clock,
     add_membership,
@@ -445,3 +449,87 @@ def test_a_rerun_never_ends_a_run(world, engine, keyring, clock, fake):
     run_id = _run(engine, clock, world["team"], status="failed")
     _post(world, engine, keyring, clock, "contributor", run_id, "rerun")
     assert _status(engine, run_id)[0] == "failed"
+
+
+# The list's Cancel
+
+
+def _cancel(world, engine, keyring, clock, name, run_id):
+    client, headers = _as(world, engine, keyring, clock, name)
+    return client.post(f"/api/runs/{run_id}/cancel", headers=headers, json={})
+
+
+def test_a_host_run_without_a_job_is_canceled_through_the_cancel_action(world, engine, keyring, clock, fake):
+    run_id = _run(engine, clock, world["team"], status="running")
+    fake.set(stdout='{"ok": true, "message": "Cancelled the review."}\n')
+    response = _cancel(world, engine, keyring, clock, "contributor", run_id)
+    assert response.status_code == 200, response.text
+    assert response.json()["operation"]["action_id"] == "cancel"
+    assert response.json()["operation"]["outcome"] == "ok"
+    assert _status(engine, run_id) == ("canceled", "Cancelled by contributor.")
+
+
+def test_a_team_key_run_without_a_job_still_cannot_be_canceled(world, engine, keyring, clock, fake):
+    for key in (TEAM_KEY, None):
+        run_id = _run(engine, clock, world["team"], status="running", key=key)
+        response = _cancel(world, engine, keyring, clock, "admin", run_id)
+        assert (response.status_code, response.json()["error"]) == (404, NOT_SERVER_RUN)
+        assert _status(engine, run_id)[0] == "running"
+    assert not fake.ran()
+
+
+def test_a_viewer_cannot_cancel_a_host_run(world, engine, keyring, clock, fake):
+    run_id = _run(engine, clock, world["team"], status="running")
+    assert _cancel(world, engine, keyring, clock, "viewer", run_id).status_code == 403
+    assert not fake.ran() and _status(engine, run_id)[0] == "running"
+
+
+def test_a_host_run_the_action_does_not_fit_says_why(world, engine, keyring, clock, fake):
+    other = _run(engine, clock, world["team"], workflow="repo-review", status="running")
+    assert _cancel(world, engine, keyring, clock, "contributor", other).status_code == 404
+    ended = _run(engine, clock, world["team"], status="failed")
+    response = _cancel(world, engine, keyring, clock, "contributor", ended)
+    assert response.status_code == 409 and "state" in response.json()["error"]
+    assert not fake.ran()
+
+
+def test_a_run_with_a_job_still_cancels_its_job(world, engine, keyring, clock, fake):
+    run_id = _run(engine, clock, world["team"], status="running")
+    workflow, job_id = new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(workflows).values(id=workflow, team_id=world["team"], name="code-review",
+                                              current_version=1, created_at=clock(), updated_at=clock()))
+        conn.execute(insert(jobs).values(id=job_id, team_id=world["team"], workflow_id=workflow, run_id=run_id,
+                                         status="queued", attempts=0, created_at=clock()))
+    response = _cancel(world, engine, keyring, clock, "contributor", run_id)
+    assert response.status_code == 200 and response.json()["job"]["status"] == "canceled"
+    assert not fake.ran()
+
+
+def test_list_rows_say_which_host_runs_the_cancel_action_can_stop(world, engine, keyring, clock, fake):
+    host = _run(engine, clock, world["team"], status="running")
+    forged = _run(engine, clock, world["team"], status="running", key=TEAM_KEY)
+    ended = _run(engine, clock, world["team"], status="failed")
+    other = _run(engine, clock, world["team"], workflow="repo-review", status="running")
+    client, _ = _as(world, engine, keyring, clock, "contributor")
+    rows = {row["id"]: row["host_cancel"] for row in client.get("/api/runs").json()["runs"]}
+    assert rows == {host: True, forged: False, ended: False, other: False}
+    thread = client.get("/api/subjects/fs-eng%2Fapp%2312").json()["subject"]["runs"]
+    assert {row["id"]: row["host_cancel"] for row in thread} == rows
+    configured = [ActionConfig(**action) for action in _actions(fake)]
+    with engine.connect() as conn:
+        assert load_summary(conn, host)["host_run"] is True and load_summary(conn, forged)["host_run"] is False
+        assert list_row(load_summary(conn, host), configured)["host_cancel"] is True
+        assert list_row(load_summary(conn, forged), configured)["host_cancel"] is False
+        assert list_row(load_summary(conn, host))["host_cancel"] is False
+
+
+def test_live_list_rows_carry_the_same_flag(world, engine, keyring, clock, fake):
+    host = _run(engine, clock, world["team"], status="running")
+    hub = LiveHub(engine, keyring, clock, actions=[ActionConfig(**action) for action in _actions(fake)])
+    published = []
+    hub.broker.publish = published.append
+    hub.running = True
+    with engine.connect() as conn:
+        hub.run_started(load_summary(conn, host))
+    assert '"host_cancel":true' in published[0].list_frame

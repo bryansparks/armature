@@ -1,3 +1,4 @@
+import { outcomeText } from '../actions.js';
 import { api, listOf } from '../api.js';
 import { append, attempt, card, clear, confirmDialog, duration, element, empty, errorBox, link, loading, money, pageHeader, secondsBetween, statusText, statusTone, table, tableRow, when } from '../dom.js';
 import { loadDisplay, workflowColor, workflowLabel } from '../display.js';
@@ -5,7 +6,7 @@ import { elapsedSeconds } from '../feed.js';
 import { every, subscribe } from '../live.js';
 import { externalLink, externalLinks } from '../outcome.js';
 import { hashFor } from '../router.js';
-import { canCancel } from '../runpage.js';
+import { canCancel, mayCancel } from '../runpage.js';
 import { currentSession } from '../session.js';
 
 const STATUSES = ['queued', 'running', 'waiting', 'succeeded', 'failed', 'canceled', 'lost'];
@@ -157,7 +158,8 @@ export function locationChip(where) {
 export function cancelControl(run, session = currentSession()) {
   const job = run?.job;
   if (job?.cancel_requested_at && ACTIVE_OR_WAITING.has(run.status)) return element('span', { class: 'muted' }, 'Cancel requested');
-  if (!ACTIVE_OR_WAITING.has(run?.status) || !canCancel(job, run, session)) return null;
+  const offered = job ? canCancel(job, run, session) : run?.host_cancel === true && mayCancel(run, session);
+  if (!ACTIVE_OR_WAITING.has(run?.status) || !offered) return null;
   const button = element('button', { type: 'button', class: 'small' }, 'Cancel');
   const status = element('span', { role: 'status' });
   const slot = element('span', { class: 'row-cancel' }, button, status);
@@ -166,6 +168,7 @@ export function cancelControl(run, session = currentSession()) {
     if (!(await confirmDialog('Cancel this run?', 'Its runner stops it and the run ends as canceled. It cannot be resumed.', 'Cancel run'))) return;
     const answer = await attempt(status, button, () => api(`/api/runs/${encodeURIComponent(run.id)}/cancel`, { method: 'POST', body: {} }));
     if (answer?.job) slot.replaceChildren(element('span', { class: 'muted' }, 'Cancel requested'));
+    if (answer?.operation) slot.replaceChildren(element('span', { class: 'muted' }, answer.operation.outcome === 'ok' ? 'Cancelled' : outcomeText(answer.operation)));
   });
   return slot;
 }

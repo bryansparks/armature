@@ -114,7 +114,11 @@ const CANCEL_ROLES = new Set(['team_lead', 'project_lead', 'contributor']);
 
 // Whether to offer Cancel on a run the job queue started. The server checks the role again.
 export function canCancel(job, run, session) {
-  if (!job || job.cancel_requested_at || !CANCELABLE.has(job.status) || !session?.user) return false;
+  return Boolean(job) && !job.cancel_requested_at && CANCELABLE.has(job.status) && mayCancel(run, session);
+}
+
+export function mayCancel(run, session) {
+  if (!session?.user) return false;
   if (session.user.is_admin) return true;
   return (session.memberships ?? []).some((membership) => CANCEL_ROLES.has(membership.role)
     && ((membership.scope_kind === 'team' && membership.scope_id === run?.team_id)
