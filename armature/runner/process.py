@@ -145,6 +145,7 @@ def stop(proc: subprocess.Popen) -> None:
     """Stop the run's whole process group, politely first."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
         if not signal_group(proc.pid, sig):
+            proc.poll()
             return
         try:
             proc.wait(KILL_GRACE_S)

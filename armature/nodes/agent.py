@@ -962,11 +962,11 @@ class AgentNode:
     async def _kill_group(self, proc: asyncio.subprocess.Process) -> None:
         # The CLI starts its own children, such as Bash tool commands, so the whole session group goes.
         # Under an agent user, only that user may signal them, so the kill runs as that user too.
-        pids = members(proc.pid)
-        if self._user is not None and pids != []:
-            targets = [f"-{proc.pid}"] if pids is None else [str(pid) for pid in pids]
+        if self._user is not None:
+            # The group by its negative pid, and each member /proc lists, for a sandbox that refuses the former.
+            listed = [str(pid) for pid in members(proc.pid) or []]
             killer = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", *targets,
+                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", f"-{proc.pid}", *listed,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await killer.wait()

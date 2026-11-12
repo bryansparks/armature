@@ -2,6 +2,7 @@ import json
 import asyncio
 import os
 import pwd
+import re
 import subprocess
 import sys
 import time
@@ -553,9 +554,10 @@ async def test_timeout_under_an_agent_user_kills_as_that_user(stub, tmp_path, ag
     assert kill[1:4] == ["-n", "-u", agent_user] and kill[4:7] == ["/bin/kill", "-KILL", "--"]
 
 
-@pytest.mark.parametrize(("listed", "targets"), [([4_000_001, 4_000_002], ["4000001", "4000002"]), ([], None)])
-async def test_under_an_agent_user_the_kill_names_each_member_where_proc_lists_them(stub, tmp_path, agent_user,
-                                                                                    monkeypatch, listed, targets):
+@pytest.mark.parametrize(("listed", "named"), [([4_000_001, 4_000_002], ["4000001", "4000002"]), ([], []),
+                                               (None, [])])
+async def test_under_an_agent_user_the_group_kill_also_names_each_member_proc_lists(stub, tmp_path, agent_user,
+                                                                                    monkeypatch, listed, named):
     from armature.nodes import agent
 
     monkeypatch.setattr(agent, "members", lambda pgid: listed)
@@ -563,7 +565,7 @@ async def test_under_an_agent_user_the_kill_names_each_member_where_proc_lists_t
     with pytest.raises(TimeoutError):
         await AgentNode(stage(timeout_s=1), root=tmp_path).execute({})
     kills = [call["argv"] for call in stub.sudo_calls() if "/bin/kill" in call["argv"]]
-    assert [kill[7:] for kill in kills] == ([targets] if targets else [])
+    assert len(kills) == 1 and re.fullmatch(r"-[1-9][0-9]*", kills[0][7]) and kills[0][8:] == named
 
 
 async def test_a_write_session_cannot_poison_the_run_clone(stub, tmp_path, remote, agent_user):

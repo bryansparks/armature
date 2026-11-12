@@ -651,6 +651,16 @@ def test_stop_sessions_skips_the_runners_own_group_and_junk(tmp_path, monkeypatc
     assert signalled == [4242]
 
 
+def test_stop_reaps_a_leader_whose_group_already_exited(monkeypatch):
+    proc = subprocess.Popen(["true"])
+    monkeypatch.setattr(process, "signal_group", lambda pgid, sig: False)
+    deadline = time.monotonic() + 5
+    while proc.returncode is None and time.monotonic() < deadline:
+        process.stop(proc)
+        time.sleep(0.02)
+    assert proc.returncode == 0
+
+
 def test_a_bundle_cant_claim_same_user_mode(world, tmp_path, monkeypatch):
     started = {}
     monkeypatch.setattr(runner_client, "popen", lambda binary, workdir, args, env, **kw: started.update(env=env))
