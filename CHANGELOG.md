@@ -11,6 +11,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
+- `review/record-risk` can size a review's specialist panel from what the diff needs. With a `triggers` list, medium risk runs a core four plus the triggered specialists, a small low-risk change runs one `reviewer`, and dependency or build-configuration paths always add `security` and `compatibility`. Given `since_paths`, a re-review picks its panel from the change since the last full review, while the recorded risk still covers the whole pull request. Workflows that send none of these inputs keep today's panel.
 
 ## [0.11.0] - 2026-11-05
 

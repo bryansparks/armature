@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import insert, select
 
-from armature.server import connections
+from armature.server import connections, risk
 from armature.server.db import new_id
 from armature.server.db.schema import review_marks, runs, settings
 from armature.server.tools import NONE, marks, registry
@@ -144,6 +144,121 @@ def test_record_risk_requires_the_diffs_file_count(app, sqlite_engine, run):
     missing = tool(app, run, "record_risk", "review.record-risk", {**PR, "head": HEAD, "level": "low"})
     assert missing.status_code == 400 and "total" in missing.json()["error"]
     assert _row(sqlite_engine, run.id).risk is None
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_record_risk_without_triggers_runs_the_panel_it_always_did(app, run, level):
+    out = _risk(app, run, level=level, paths=["src/a.swift"], small=True, lines=3)
+    assert out["panel"] == (["correctness", "security", "conventions", "simplicity"] if level == "low"
+                            else list(risk.SPECIALISTS))
+    assert out["triggers"] == {"model": [], "path": []}
+
+
+def test_record_risk_picks_specialists_from_triggers_by_source(app, run):
+    out = _risk(app, run, level="medium", paths=["package.json", "src/a.swift"], triggers=["ui"])
+    assert out["panel"] == ["correctness", "simplicity", "conventions", "test_adequacy", "security", "beauty",
+                            "compatibility"]
+    assert out["triggers"] == {"model": ["ui"], "path": ["security", "compatibility"]}
+    assert out["skipped"] == ["performance", "concurrency"]
+
+
+@pytest.mark.parametrize("path", ["app/build.gradle.kts", "gradle/libs.versions.toml"])
+def test_record_risk_runs_security_on_a_dependency_or_build_change(app, fresh, path):
+    for model in ([], ["performance"]):
+        out = _risk(app, fresh(), level="medium", paths=[path, "src/a.kt"], triggers=model)
+        assert {"security", "compatibility"} <= set(out["panel"]), model
+    plain = _risk(app, fresh(), level="medium", paths=["src/a.kt"], triggers=[])
+    assert plain["panel"] == list(risk.CORE_PANEL)
+
+
+def test_record_risk_runs_the_reviewer_alone_for_a_small_low_change(app, sqlite_engine, keyring, clock, world, run):
+    out = _risk(app, run, paths=["src/a.swift"], triggers=[], small=True, lines=12)
+    assert out["panel"] == [risk.REVIEWER] and out["skipped"] == list(risk.SPECIALISTS)
+    other = start_run(sqlite_engine, keyring, clock, world, risk=None)
+    six = [f"src/{i}.swift" for i in range(6)]
+    assert _risk(app, other, paths=six, triggers=[], small=True, lines=12)["panel"] == \
+        list(risk.DEFAULT_LOW_RISK_PANEL)
+
+
+def test_record_risk_counts_reported_paths_beyond_total(app, run):
+    six = [f"src/{i}.swift" for i in range(6)]
+    out = _risk(app, run, paths=six, total=3, triggers=[], small=True, lines=10)
+    assert out["panel"] == list(risk.DEFAULT_LOW_RISK_PANEL)
+
+
+def test_record_risk_reads_mistyped_trigger_inputs_as_the_larger_panel(app, run):
+    for bad in ({"small": "yes"}, {"small": 1, "lines": 10}, {"small": True, "lines": -1},
+                {"small": True, "lines": 2.5}, {"small": True, "lines": "10"}, {"small": True, "lines": [10]}):
+        out = _risk(app, run, paths=["src/a.swift"], triggers=["performance"], **bad)
+        assert out["panel"] == [*risk.DEFAULT_LOW_RISK_PANEL, "performance"], bad
+    for bad in ("security", [1], {"ui": True}, 3, ["telepathy"]):
+        out = _risk(app, run, level="medium", paths=["src/a.swift"], triggers=bad, small=True, lines=1)
+        assert out["panel"] == list(risk.SPECIALISTS) and out["triggers"] == {"model": [], "path": []}, bad
+    assert _risk(app, run, triggers=None, small=None, lines=None)["panel"] == list(risk.SPECIALISTS)
+
+
+WHOLE = {"paths": ["auth/session.py", "src/a.swift"], "triggers": [], "small": True, "lines": 10}
+
+
+@pytest.fixture
+def fresh(sqlite_engine, keyring, clock, world):
+    return lambda: start_run(sqlite_engine, keyring, clock, world, risk=None)
+
+
+@pytest.mark.parametrize("since", [{"since_paths": None}, {"since_paths": "src/a.swift"}, {"since_paths": [1]},
+                                   {"since_paths": {"src/a.swift": 1}}, {"since_added": ["src/a.swift"]},
+                                   {"since_paths": ["src/a.swift"], "since_added": "src/a.swift"},
+                                   {"since_paths": ["src/a.swift"], "since_added": [None]},
+                                   {"since_paths": ["src/a.swift"], "triggers": None},
+                                   {"since_paths": ["src/a.swift"]},
+                                   {"since_paths": ["src/a.swift"], "since_added": None},
+                                   {"since_paths": [], "since_added": []}, {"since_paths": [""], "since_added": []}])
+def test_an_increment_the_server_cant_use_leaves_the_panel_as_before(app, fresh, since):
+    params = {**WHOLE, **since}
+    before = _risk(app, fresh(), **{k: v for k, v in params.items() if not k.startswith("since_")})
+    out = _risk(app, fresh(), **params)
+    assert out == before and out["scope"] == "full" and out["panel_level"] == out["level"]
+
+
+def test_a_small_increment_picks_the_panel_and_the_whole_pull_request_keeps_the_level(app, sqlite_engine, fresh):
+    run = fresh()
+    out = _risk(app, run, **WHOLE, since_paths=["src/a.swift"], since_added=[])
+    assert (out["level"], out["panel"], out["scope"], out["panel_level"]) == ("high", [risk.REVIEWER], "since", "low")
+    whole = _risk(app, fresh(), **WHOLE)
+    assert (out["floor"], out["reasons"]) == (whole["floor"], whole["reasons"])
+    assert out["triggers"] == {"model": [], "path": []}
+    stored = _row(sqlite_engine, run.id)
+    assert (stored.risk, stored.head_sha) == ("high", HEAD)
+
+
+def test_an_increment_on_a_high_floor_runs_all_nine(app, fresh):
+    out = _risk(app, fresh(), **WHOLE, since_paths=["auth/session.py"], since_added=[])
+    assert (out["panel"], out["panel_level"]) == (list(risk.SPECIALISTS), "high")
+    added = _risk(app, fresh(), **WHOLE, since_paths=["src/api/Client.swift"], since_added=["src/api/Client.swift"])
+    assert (added["panel"], added["panel_level"]) == (list(risk.SPECIALISTS), "high")
+
+
+def test_only_the_increments_paths_force_triggers(app, fresh):
+    whole = {**WHOLE, "paths": ["package.json", "app/build.gradle.kts", "src/a.kt"], "small": False}
+    outside = _risk(app, fresh(), **whole, since_paths=["src/a.kt"], since_added=[])
+    assert outside["triggers"]["path"] == [] and "compatibility" not in outside["panel"]
+    assert outside["panel"] == list(risk.DEFAULT_LOW_RISK_PANEL) and outside["panel_level"] == "low"
+    for since in (["app/build.gradle.kts"], ["package.json"]):
+        inside = _risk(app, fresh(), **whole, since_paths=since, since_added=[])
+        assert inside["triggers"]["path"] == ["security", "compatibility"] and inside["panel_level"] == "medium"
+        assert inside["panel"] == [*risk.CORE_PANEL, "security", "compatibility"]
+
+
+def test_a_truncated_listing_ignores_the_increment(app, fresh):
+    out = _risk(app, fresh(), paths=["src/a.swift"], truncated=True, triggers=[], small=True, lines=1,
+                since_paths=["src/a.swift"], since_added=[])
+    assert (out["panel"], out["scope"], out["panel_level"]) == (list(risk.SPECIALISTS), "full", "high")
+
+
+def test_an_increment_as_long_as_the_compare_api_returns_is_not_trusted(app, fresh):
+    since = [f"a/{i:03}.md" for i in range(marks.COMPARE_MAX)] + ["auth/session.py"]
+    out = _risk(app, fresh(), **WHOLE, since_paths=since, since_added=[])
+    assert (out["panel"], out["scope"], out["panel_level"]) == (list(risk.SPECIALISTS), "full", "high")
 
 
 # review.record-post and review.record-mark
