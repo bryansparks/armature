@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import Connection, select
 
 from armature.events.redact import redact_text
+from armature.procgroup import signal_group
 from armature.server import secrets as secret_store
 from armature.server.crypto import Keyring
 from armature.server.db.schema import INSTANCE_SCOPE, secrets
@@ -65,9 +66,7 @@ def _read(path: Path, limit: int) -> str:
 
 def _kill_group(proc: subprocess.Popen) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except (ProcessLookupError, PermissionError):
+        if not signal_group(proc.pid, sig):
             return
         try:
             proc.wait(KILL_GRACE_S)

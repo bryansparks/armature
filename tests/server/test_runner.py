@@ -643,8 +643,7 @@ def test_cancel_stops_a_same_user_session_the_engine_left_running(world, tmp_pat
 
 def test_stop_sessions_skips_the_runners_own_group_and_junk(tmp_path, monkeypatch):
     signalled = []
-    monkeypatch.setattr(process.os, "killpg", lambda pgid, sig: signalled.append(pgid) or (_ for _ in ()).throw(
-        ProcessLookupError()))
+    monkeypatch.setattr(process, "signal_group", lambda pgid, sig: signalled.append(pgid) and False)
     for name in ("0", "1", str(os.getpgrp()), "-5", "abc", "12345678901", "4242"):
         (tmp_path / name).touch()
     process.stop_sessions(tmp_path)

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import pytest
+import signal
 import subprocess
 import sys
 import time
@@ -388,3 +389,19 @@ async def test_a_sandbox_refusing_killpg_still_returns_the_result(monkeypatch):
     monkeypatch.setattr("armature.nodes.script.os.killpg", refuse)
     result = await ScriptNode(adapter=_adapter("echo hello")).execute({})
     assert result["exit_code"] == 0 and "hello" in result["stdout"]
+
+
+async def test_a_timeout_kills_the_scripts_whole_group_by_its_leader(monkeypatch):
+    from armature.nodes import script
+
+    killed = []
+
+    def signal_group(pgid, sig):
+        killed.append((pgid, sig))
+        os.killpg(pgid, sig)
+        return True
+
+    monkeypatch.setattr(script, "signal_group", signal_group)
+    with pytest.raises(subprocess.TimeoutExpired):
+        await ScriptNode(adapter=_adapter("sleep 10", timeout=1)).execute({})
+    assert killed and all(sig == signal.SIGKILL for _, sig in killed)

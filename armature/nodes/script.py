@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from armature.events.env import child_env
 from armature.nodes.base import BaseNode
+from armature.procgroup import signal_group
 from armature.runtime.templating import text_env
 from armature.spec.models import Adapter
 from armature.permissions.permissions import classify_shell_command, requires_approval
@@ -181,11 +182,7 @@ class ScriptNode(BaseNode):
     @staticmethod
     async def _kill_group(proc: asyncio.subprocess.Process) -> None:
         # The shell's children, such as a CLI the script starts, share its session, so killing only the shell would orphan them.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        # Sandboxes such as gVisor answer EPERM for a group that has already exited.
-        except (ProcessLookupError, PermissionError):
-            pass
+        signal_group(proc.pid, signal.SIGKILL)
         await proc.wait()
 
     def _parse_json(self, envelope: dict[str, Any]) -> Any:

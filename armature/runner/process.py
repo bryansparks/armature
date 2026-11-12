@@ -20,6 +20,7 @@ from typing import Any
 
 from armature.events.sign import ENGINE_FD_ENV, engine_pipe
 from armature.nodes.gate import CHECKPOINT_FILE
+from armature.procgroup import signal_group
 from armature.spec.models import ROLE_KEY, SKILL_NAME
 
 KILL_GRACE_S = 5
@@ -143,9 +144,7 @@ def unshare(run_dir: Path, job_user: str, agent_user: str | None = None, agent_d
 def stop(proc: subprocess.Popen) -> None:
     """Stop the run's whole process group, politely first."""
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
+        if not signal_group(proc.pid, sig):
             return
         try:
             proc.wait(KILL_GRACE_S)
@@ -163,19 +162,11 @@ def stop_sessions(sessions: Path) -> None:
     names = [p.name for p in sessions.iterdir()] if sessions.is_dir() and not sessions.is_symlink() else []
     groups = {int(n) for n in names if n.isdigit() and len(n) <= 10} - {0, 1, own}
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        groups = {g for g in groups if _signal_group(g, sig)}
+        groups = {g for g in groups if signal_group(g, sig)}
         deadline = time.monotonic() + KILL_GRACE_S
         while groups and sig == signal.SIGTERM and time.monotonic() < deadline:
             time.sleep(0.1)
-            groups = {g for g in groups if _signal_group(g, 0)}
-
-
-def _signal_group(pgid: int, sig: int) -> bool:
-    try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        return False
-    return True
+            groups = {g for g in groups if signal_group(g, 0)}
 
 
 def tail(path: Path) -> str:

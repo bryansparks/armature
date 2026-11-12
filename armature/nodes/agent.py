@@ -47,6 +47,7 @@ from armature.nodes.harness import (
     tools,
 )
 from armature.nodes.llm import _extract_json_from_response
+from armature.procgroup import members, signal_group
 from armature.runtime.templating import text_env
 from armature.spec.models import (
     CONTEXT_FILE_NAME,
@@ -961,14 +962,13 @@ class AgentNode:
     async def _kill_group(self, proc: asyncio.subprocess.Process) -> None:
         # The CLI starts its own children, such as Bash tool commands, so the whole session group goes.
         # Under an agent user, only that user may signal them, so the kill runs as that user too.
-        if self._user is not None:
+        pids = members(proc.pid)
+        if self._user is not None and pids != []:
+            targets = [f"-{proc.pid}"] if pids is None else [str(pid) for pid in pids]
             killer = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", f"-{proc.pid}",
+                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", *targets,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await killer.wait()
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        signal_group(proc.pid, signal.SIGKILL)
         await proc.wait()
