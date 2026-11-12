@@ -109,17 +109,37 @@ def _rate(call: Call, params: dict[str, Any], head: str, paths: list[str], added
     model = [{"source": "model", "text": sanitize.plain(r, REASON_MAX)} for r in params.get("reasons") or []
              if isinstance(r, str) and r.strip()]
     with _engine(call).begin() as conn:
-        floor, reasons = levels.floor(paths, levels.extra_floors(conn, call.team_id, call.project_id), total,
-                                      added)
+        extra = levels.extra_floors(conn, call.team_id, call.project_id)
+        floor, reasons = levels.floor(paths, extra, total, added)
         if truncated:
             floor = "high"
             reasons.insert(0, {"source": "floor", "text": "GitHub listed fewer files than the diff changes"})
         held = levels.record(conn, call.run_id, levels.combine(floor, params["level"]),
                              (reasons + model)[:levels.MAX_REASONS])
         conn.execute(update(runs).where(runs.c.id == call.run_id).values(head_sha=head))
-        panel = levels.panel(held, levels.low_risk_panel(conn, call.team_id, call.project_id))
+        since = None if truncated else _since(params)
+        triggered = levels.triggers(params.get("triggers"), paths if since is None else since[0])
+        if since is None or triggered is None:
+            scope, at, files = "full", held, max(len(set(paths)), total or 0)
+        else:
+            scope, files = "since", len(set(since[0]))
+            at = levels.combine(levels.floor(since[0], extra, None, since[1])[0], params["level"])
+        panel = levels.panel(at, levels.low_risk_panel(conn, call.team_id, call.project_id), triggered,
+                             small=params.get("small"), lines=params.get("lines"), files=files)
     return {"level": held, "floor": floor, "model": levels.known(params["level"]), "reasons": reasons + model,
-            "head": head, "panel": panel, "skipped": [role for role in levels.SPECIALISTS if role not in panel]}
+            "head": head, "panel": panel, "skipped": [role for role in levels.SPECIALISTS if role not in panel],
+            "triggers": triggered or {"model": [], "path": []}, "scope": scope, "panel_level": at}
+
+
+def _since(params: dict[str, Any]) -> tuple[list[str], list[str]] | None:
+    """The paths and added paths of the change since the last full review, or None when the pack sent none the
+    server can read, so the panel follows the whole pull request. A listing as long as the compare API returns may
+    be cut short, and an empty one may be a failed lookup."""
+    paths, added = params.get("since_paths"), params.get("since_added")
+    if not all(isinstance(v, list) and all(isinstance(p, str) for p in v) for v in (paths, added)):
+        return None
+    kept = [p for p in paths if p]
+    return (kept, added) if kept and len(paths) < COMPARE_MAX else None
 
 
 def record_risk(call: Call, params: dict[str, Any]) -> dict[str, Any]:

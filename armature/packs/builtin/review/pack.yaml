@@ -105,6 +105,10 @@ adapters:
       reported paths and the given level on the run, with the head it rated. The server can't see the diff, so it
       relies on total, the changed-file count GitHub reports, and truncated to tell a listing cut short, which is
       high. A level never goes down. Uses no connection. Returns the level, its reasons, the head, and the specialist panel that level runs.
+      With triggers, a medium or low panel runs only the triggered specialists beyond its base, and a low change
+      the model calls small, of at most 50 lines and 5 files, runs the reviewer alone.
+      Given triggers and since_paths, the paths changed since the last full review, the panel follows those paths
+      while the recorded level still covers the whole pull request.
     cmd: armature tool review.record-risk
     params:
       type: object
@@ -120,6 +124,11 @@ adapters:
         added: {type: array, items: {type: string}, maxItems: 3000}
         total: {type: integer, minimum: 0}
         truncated: {type: boolean}
+        triggers: {}
+        small: {}
+        lines: {}
+        since_paths: {}
+        since_added: {}
   record-post:
     description: >-
       For a pack that posts its own review. Record that this run posted, or skipped, a review of head and whether
