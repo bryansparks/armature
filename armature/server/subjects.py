@@ -2,21 +2,24 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Connection, String, and_, cast, func, or_, select
 
-from armature.server import display, rbac
+from armature.server import actions, display, rbac
+from armature.server.config import ActionConfig
 from armature.server.db.schema import (
     findings,
     jobs,
     run_artifacts,
+    runner_keys,
     runs,
     webhook_deliveries,
     workflows,
 )
-from armature.server.ingest import RUN_KIND
+from armature.server.ingest import HOST_RUN, RUN_KIND
 from armature.server.threads import PULL_SUBJECT, PULL_URL, links
 
 RUNS_MAX = 500
@@ -65,8 +68,10 @@ def _run_query(scope: rbac.Scope):
     return (select(runs.c.id, runs.c.subject, runs.c.team_id, runs.c.project_id, WORKFLOW.label("workflow"),
                    RUN_KIND.label("kind"),
                    runs.c.status, runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.summary,
-                   runs.c.trigger_ref, runs.c.outcome, runs.c.risk, runs.c.risk_reasons, runs.c.location)
-            .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
+                   runs.c.trigger_ref, runs.c.outcome, runs.c.risk, runs.c.risk_reasons, runs.c.location,
+                   HOST_RUN.label("host_run"))
+            .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id)
+                         .outerjoin(runner_keys, runner_keys.c.id == runs.c.runner_key_id))
             .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
 
 
@@ -276,7 +281,8 @@ def finding_history(rows: list[Any]) -> list[dict[str, Any]]:
     return sorted(grouped.values(), key=lambda e: (e["history"][-1]["started_at"], e["finding_key"]), reverse=True)
 
 
-def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[str, Any] | None:
+def subject_detail(conn: Connection, scope: rbac.Scope, subject: str,
+                   configured: Sequence[ActionConfig] = ()) -> dict[str, Any] | None:
     settings = display.load(conn)
     labels = settings["workflow_labels"]
     # A thread's page lists every run in it, so an issue's page shows the runs on its pull requests too.
@@ -317,6 +323,7 @@ def subject_detail(conn: Connection, scope: rbac.Scope, subject: str) -> dict[st
             "merge": _scalars(ref.get("merge")), "artifacts": artifacts.get(run.id, []),
             "outcome": run.outcome, "risk": run.risk, "risk_reason": first_reason(run.risk_reasons),
             "team_id": run.team_id, "project_id": run.project_id, "job": job_of.get(run.id),
+            "host_cancel": actions.host_cancel(configured, run._mapping),
         }
 
     return {

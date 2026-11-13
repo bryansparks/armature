@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, delete, exists, func, insert, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from armature.server import audit, display, invites, rbac, subjects, trigger
+from armature.server import actions, audit, display, invites, rbac, subjects, trigger
 from armature.server import connections as vendor_connections
 from armature.server import secrets as secret_store
 from armature.server.app.deps import (
@@ -35,13 +35,14 @@ from armature.server.db.schema import (
     memberships,
     projects,
     run_steps,
+    runner_keys,
     runs,
     sessions,
     teams,
     users,
     workflows,
 )
-from armature.server.ingest import about
+from armature.server.ingest import HOST_RUN, about
 from armature.server.users import (
     LastAdmin,
     SlackTaken,
@@ -717,8 +718,9 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
                     func.coalesce(workflows.c.name, runs.c.workflow_name).label("workflow"), runs.c.status,
                     func.coalesce(runs.c.triggered_by, runs.c.actor).label("triggered_by"), runs.c.started_at,
                     runs.c.finished_at, runs.c.cost_usd, runs.c.subject, runs.c.thread, runs.c.summary,
-                    runs.c.outcome, runs.c.risk, runs.c.location, *trigger.columns())
-             .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
+                    runs.c.outcome, runs.c.risk, runs.c.location, HOST_RUN.label("host_run"), *trigger.columns())
+             .select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id)
+                          .outerjoin(runner_keys, runner_keys.c.id == runs.c.runner_key_id))
              .where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id)))
     if team:
         query = query.where(runs.c.team_id == team)
@@ -742,6 +744,7 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
             raise ApiError(400, f"status must be one of {', '.join(RUN_STATUSES)}.")
         query = query.where(runs.c.status == status)
     cursor = _cursor(before)
+    configured = server(request).cfg.actions
     with server(request).engine.connect() as conn:
         settings = display.load(conn)
         if not include_hidden:
@@ -769,6 +772,7 @@ def list_runs(request: Request, team: str | None = None, project: str | None = N
                **about(r.subject, r.summary), "thread": r.thread, "pr": pulls.get(r.subject),
                "outcome": r.outcome, "fix_outcome": _fix_outcome(r.trigger_ref), "risk": r.risk,
                "trigger": started[r.id], "location": r.location, "job": job_of.get(r.id),
+               "host_cancel": actions.host_cancel(configured, r._mapping),
                **({"group_size": r.group_size} if group else {})}
               for r in rows]
     return {"runs": listed, "next_before": _next(rows, limit, "started_at")}
