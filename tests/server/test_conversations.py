@@ -10,11 +10,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 from sqlalchemy import func, insert, select, update
 
 from armature.events.sign import sign_engine
 from armature.nodes.agent import AgentNode
 from armature.nodes.gate import gate_digest
+from armature.packs.params import render_with
 from armature.server import (
     connections,
     conversations,
@@ -739,6 +741,14 @@ def test_an_assistant_turn_runs_its_agent_stage_on_the_stub_and_the_draft_comes_
     shown = world.client.get(f"/api/conversations/{conv_id}").json()["conversation"]
     assert shown["working"] is False and shown["awaiting"] == "user"
     assert shown["draft"]["body"] == RENAMED and shown["messages"][-1]["text"] == "Reworded it."
+
+
+@pytest.mark.parametrize("action", ["answer", "ask"])
+def test_the_shipped_decide_step_renders_a_reply_that_has_no_body(action):
+    spec = HarnessSpec.model_validate(yaml.safe_load(conversations.ASSISTANT_FILE.read_text()))
+    decide = next(s for s in spec.stages if s.id == "decide")
+    rendered = render_with(decide.with_, {"think": {"action": action, "reply": "It isn't in this workflow."}})
+    assert rendered == {"action": action, "reply": "It isn't in this workflow.", "body": ""}
 
 
 # Review fixes
