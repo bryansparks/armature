@@ -81,8 +81,8 @@ finished, and new tool calls from the other five arrive every few seconds.
 
 ## 6. The gate approval
 
-Open **Waiting for you**. The `development` run for FSMOB-1431 paused at its
-`approve_plan` gate before writing any code. Its risk is **High**, because the
+Open **Inbox** > **Waiting for you**. The `development` run for FSMOB-1431
+paused at its `approve_plan` gate before writing any code. Its risk is **High**, because the
 plan touches `FamilySearch/Auth/SessionStore.swift`. Open it to read the plan,
 then click **Approve** or **Reject**, with an optional note.
 
