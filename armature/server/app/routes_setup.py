@@ -220,7 +220,8 @@ def _create(setup: Setup, cfg: ServerConfig, body: AdminBody, ip: str) -> str:
                                      require_totp=False)
             except ValueError as exc:
                 raise ApiError(400, str(exc)) from exc
-            token, _ = auth.start_session(conn, keyring, admin.user_id, setup.clock(), ip=ip, step_up=True)
+            token, _ = auth.start_session(conn, keyring, admin.user_id, setup.clock(), ip=ip, step_up=True,
+                                       lifetime=auth.Lifetime.of(cfg))
     finally:
         engine.dispose()
     return token

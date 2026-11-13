@@ -185,7 +185,7 @@ def _session_check(request: Request) -> Callable[[Callable[[Any, rbac.Access], b
     def build(allowed: Callable[[Any, rbac.Access], bool]) -> Authorize:
         def check() -> bool:
             with srv.engine.begin() as conn:
-                session = load_session(conn, srv.keyring, token, srv.now(), touch=False)
+                session = load_session(conn, srv.keyring, token, srv.now(), srv.session_lifetime, touch=False)
                 if session is None:
                     return False
                 return allowed(conn, rbac.load_access(conn, session.user_id, bool(session.user.is_admin)))

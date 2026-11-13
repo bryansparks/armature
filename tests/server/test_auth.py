@@ -186,11 +186,11 @@ def test_ip_bucket_and_backoff():
 def test_session_idle_expiry(sqlite_engine, keyring, clock, client):
     user_id, _ = add_user(sqlite_engine, keyring, clock, "ana")
     sign_in_as(client, sqlite_engine, keyring, clock, user_id)
-    clock.advance(minutes=29)
+    clock.advance(hours=23)
     assert client.get("/api/teams").status_code == 200
-    clock.advance(minutes=29)
+    clock.advance(hours=23)
     assert client.get("/api/teams").status_code == 200
-    clock.advance(minutes=31)
+    clock.advance(hours=24, minutes=1)
     assert client.get("/api/teams").status_code == 401
     with sqlite_engine.connect() as conn:
         assert conn.execute(select(func.count()).select_from(sessions)).scalar_one() == 0
@@ -199,11 +199,34 @@ def test_session_idle_expiry(sqlite_engine, keyring, clock, client):
 def test_session_absolute_expiry(sqlite_engine, keyring, clock, client):
     user_id, _ = add_user(sqlite_engine, keyring, clock, "ana")
     sign_in_as(client, sqlite_engine, keyring, clock, user_id)
-    for _ in range(35):
-        clock.advance(minutes=20)
+    for _ in range(83):
+        clock.advance(hours=2)
         assert client.get("/api/teams").status_code == 200
-    clock.advance(minutes=21)
+    clock.advance(hours=2, minutes=1)
     assert client.get("/api/teams").status_code == 401
+
+
+def test_configured_session_lifetimes(sqlite_engine, keyring, clock):
+    client = make_client(sqlite_engine, keyring, clock, session_idle_hours=2, session_max_hours=5)
+    user_id, _ = add_user(sqlite_engine, keyring, clock, "ana")
+    sign_in_as(client, sqlite_engine, keyring, clock, user_id)
+    clock.advance(hours=2, minutes=1)
+    assert client.get("/api/teams").status_code == 401
+    sign_in_as(client, sqlite_engine, keyring, clock, user_id)
+    for _ in range(4):
+        clock.advance(hours=1, minutes=15)
+        assert client.get("/api/teams").status_code == 200
+    clock.advance(minutes=1)
+    assert client.get("/api/teams").status_code == 401
+
+
+@pytest.mark.parametrize("hours", [None, 6])
+def test_session_cookie_lives_as_long_as_the_session(sqlite_engine, keyring, clock, hours):
+    overrides = {"session_idle_hours": 1, "session_max_hours": hours} if hours else {}
+    client = make_client(sqlite_engine, keyring, clock, **overrides)
+    _, secret = add_user(sqlite_engine, keyring, clock, "ana")
+    response = login(client, "ana", clock.code(secret))
+    assert f"Max-Age={(hours or 168) * 3600}" in response.headers["set-cookie"]
 
 
 def test_password_change_ends_other_sessions(sqlite_engine, keyring, clock):
