@@ -149,6 +149,25 @@ def test_validate_reports_what_is_missing(aws):
     assert len(problems) == 3 and problems[0].startswith("Can't find the subnets")
 
 
+def test_validate_reads_the_bucket_only_under_the_install_prefix(aws, monkeypatch):
+    s3 = boto3.client("s3", region_name="us-east-1")
+    s3.create_bucket(Bucket="env-artifacts")
+    provisioner = _provisioner(aws, artifact_bucket="env-artifacts")
+    calls = []
+    real = provisioner._client
+
+    def recording(name):
+        client = real(name)
+        if name == "s3":
+            client.meta.events.register("provide-client-params.s3", lambda params, model, **_: calls.append(
+                (model.name, params.get("Prefix"))))
+        return client
+
+    monkeypatch.setattr(provisioner, "_client", recording)
+    assert provisioner.validate() == []
+    assert calls == [("ListObjectsV2", f"{provisioner.install_id}/")]
+
+
 def test_hosts_allocate_list_and_release(aws):
     provisioner = _provisioner(aws)
     host = provisioner.allocate_host(name="mac-1", instance_type="mac2.metal", zone="us-east-1a")

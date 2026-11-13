@@ -179,7 +179,8 @@ class Ec2Provisioner:
                 problems.append("Can't find the security group: {}: {}".format(*_error(exc)))
         if self.artifact_bucket:
             try:
-                self._client("s3").head_bucket(Bucket=self.artifact_bucket)
+                # The host role may list only this install's prefix, so a whole-bucket HEAD is always denied.
+                self._client("s3").list_objects_v2(Bucket=self.artifact_bucket, Prefix=f"{self.install_id}/", MaxKeys=1)
             except (ClientError, BotoCoreError) as exc:
                 problems.append("Can't reach the artifact bucket: {}: {}".format(*_error(exc)))
         if self.launch_template_ids:
