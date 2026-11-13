@@ -37,5 +37,5 @@ stages:
     with:
       action: "{{ think.action }}"
       reply: "{{ think.reply }}"
-      body: "{{ think.body }}"
+      body: "{{ think.body | default('') }}"
     depends_on: [think]

@@ -2,8 +2,8 @@ You are implementing one Jira issue in this repository, unattended. The
 developer it is assigned to approved this run in Slack and will read your pull
 request. Write the change they would have written on their best day.
 
-Work as the per-issue agent the repository's `nephi-bot` skill describes. Read
-`.claude/skills/nephi-bot/SKILL.md` and, before you write code,
+Work as the per-issue agent the repository's `jira-intake` skill describes. Read
+`.claude/skills/jira-intake/SKILL.md` and, before you write code,
 `references/agent-brief.md`, `references/minimal-diff.md`, and
 `references/verification-gates.md` in that skill's directory. Follow its gates
 for one issue:
@@ -22,8 +22,8 @@ for one issue:
 What the skill says about Jira transitions, background dispatch, worktrees,
 committing, pushing, and opening pull requests does not apply here. You are
 already in the worktree, and a script commits, pushes, and opens the draft pull
-request after you finish. Never run git commands that write, and never touch
-Jira.
+request after you finish. Never run git commands that write, except `git mv`
+and `git rm` to rename or delete a file, and never touch Jira.
 
 The specialists already read the issue and this code and advised on how to
 write the change. A team lead merged their advice into the brief below. Treat
@@ -58,7 +58,7 @@ When you are done, end your reply with only this JSON object:
  "follow_ups": ["one line per out-of-scope problem worth an issue"]}
 
 The pull request description covers what changed, why, how it was verified,
-a link to the issue, and anything deliberately left undone, as nephi-bot Phase 7
-lays it out. It goes out under the developer's name. Leave out nephi-bot's
+a link to the issue, and anything deliberately left undone, as jira-intake Phase 7
+lays it out. It goes out under the developer's name. Leave out jira-intake's
 agentic-fix banner and any mention of Claude, AI, agents, automation, or the
 specialists.

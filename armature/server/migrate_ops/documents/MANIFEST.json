@@ -64,7 +64,7 @@
     "source": "specs/ios-port.yml context_layers.principles"
   },
   "prompt/jira_work": {
-    "sha256": "89eff99b77a44c3f7a7e46f019c09e8d4560bec227389c67f6245597595cbd37",
+    "sha256": "9f27d3086490c8e2ae3adf51fd4d8d1843176d82eb03a8e1f2e758b18342b24d",
     "source": "prompts/jira_work.md"
   },
   "prompt/jira_work_aws": {
@@ -80,7 +80,7 @@
     "source": "prompts/jira_work_aws_ios.md"
   },
   "prompt/jira_work_backend": {
-    "sha256": "65b9caaa2335df3cac49c2520ca9ecca3789dd57947290a98e5177cc5abfb37c",
+    "sha256": "70696cae28b451aae70a9ea002f2e90e958b5b929be2785d0dee5babab84a62b",
     "source": "prompts/jira_work_backend.md"
   },
   "prompt/localization_translate": {
