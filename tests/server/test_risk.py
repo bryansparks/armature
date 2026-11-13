@@ -81,6 +81,91 @@ def test_low_risk_runs_its_panel_and_anything_else_runs_all_nine():
     assert len(risk.SPECIALISTS) == 9
 
 
+LOW = list(risk.DEFAULT_LOW_RISK_PANEL)
+CORE = list(risk.CORE_PANEL)
+
+
+def _pick(level, model=(), paths=(), low=LOW, **small):
+    return risk.panel(level, low, risk.triggers(list(model), paths), **small)
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high", None, "bogus"])
+def test_without_triggers_the_panel_is_as_before(level):
+    before = LOW if level == "low" else list(risk.SPECIALISTS)
+    assert risk.panel(level, LOW) == before
+    assert risk.panel(level, LOW, None, small=True, lines=1, files=1) == before
+    assert risk.triggers(None, ["package.json"]) is None
+
+
+def test_with_triggers_high_runs_all_nine_and_medium_runs_the_core_four():
+    assert _pick("high") == list(risk.SPECIALISTS)
+    assert _pick("high", small=True, lines=1, files=1) == list(risk.SPECIALISTS)
+    assert _pick("medium") == ["correctness", "simplicity", "conventions", "test_adequacy"]
+    assert _pick("low") == LOW
+
+
+@pytest.mark.parametrize("trigger,role", list(risk.TRIGGERS.items()))
+def test_each_model_trigger_adds_its_role(trigger, role):
+    assert role in _pick("medium", [trigger]) and role not in _pick("medium")
+    assert set(_pick("low", [trigger])) == set(LOW) | {role}
+
+
+SUPPLY = ["security", "compatibility"]
+
+
+@pytest.mark.parametrize("path,forced", [("package.json", SUPPLY), ("Makefile", SUPPLY),
+                                         ("app/build.gradle.kts", SUPPLY), ("gradle/libs.versions.toml", SUPPLY),
+                                         ("docs/guide.md", [])])
+def test_paths_force_triggers_the_model_cant_remove(path, forced):
+    assert risk.triggers([], [path]) == {"model": [], "path": forced}
+    assert risk.triggers(["performance"], [path]) == {"model": ["performance"], "path": forced}
+    roles = {risk.TRIGGERS[name] for name in forced}
+    assert _pick("medium", [], [path]) == CORE + [r for r in risk.SPECIALISTS if r in roles]
+    assert roles <= set(_pick("medium", ["performance"], [path]))
+    assert roles <= set(_pick("low", ["performance"], [path], low=[]))
+
+
+def test_repeated_triggers_count_once():
+    assert risk.triggers(["ui", "ui"], []) == {"model": ["ui"], "path": []}
+    assert _pick("medium", ["ui", "ui"]) == CORE + ["beauty"]
+
+
+@pytest.mark.parametrize("model", ["security", {"security": True}, ["security", 3], [None], ["telepathy"],
+                                   ["UI"], ["beauty"], ["ui", "telepathy"]])
+def test_triggers_the_server_cant_read_keep_the_panel_as_before(model):
+    assert risk.triggers(model, ["package.json"]) is None
+    assert risk.panel("medium", LOW, risk.triggers(model, [])) == list(risk.SPECIALISTS)
+    assert risk.panel("low", LOW, risk.triggers(model, []), small=True, lines=1, files=1) == LOW
+
+
+@pytest.mark.parametrize("lines", [0, 50])
+def test_a_small_low_change_runs_the_reviewer_alone(lines):
+    assert _pick("low", ["security"], small=True, lines=lines, files=1) == [risk.REVIEWER]
+    assert _pick("low", small=True, lines=lines, files=5) == [risk.REVIEWER]
+    assert risk.REVIEWER not in risk.SPECIALISTS
+
+
+@pytest.mark.parametrize("level,small", [
+    ("medium", {"small": True, "lines": 10, "files": 1}),
+    ("low", {"small": False, "lines": 10, "files": 1}),
+    ("low", {"small": "yes", "lines": 10, "files": 1}),
+    ("low", {"small": True, "files": 1}),
+    ("low", {"small": True, "lines": "10", "files": 1}),
+    ("low", {"small": True, "lines": True, "files": 1}),
+    ("low", {"small": True, "lines": -1, "files": 1}),
+    ("low", {"small": True, "lines": 51, "files": 1}),
+    ("low", {"small": True, "lines": 10, "files": 6})])
+def test_a_change_that_isnt_small_and_low_runs_a_panel(level, small):
+    assert risk.REVIEWER not in _pick(level, **small)
+
+
+def test_triggered_roles_follow_the_base_panel_once_each():
+    assert _pick("medium", ["compatibility", "ui", "security", "ui"], ["package.json"]) == \
+        CORE + ["security", "beauty", "compatibility"]
+    assert _pick("low", ["security", "performance"], low=["house_rules", "security"]) == \
+        ["house_rules", "security", "performance"]
+
+
 def test_high_reasons_come_first_and_one_per_rule():
     level, reasons = risk.floor(["package.json", "a/migrations/1.py", "b/migrations/2.py"])
     assert level == "high"

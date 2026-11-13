@@ -8,7 +8,8 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from sqlalchemy import Connection, func, insert, select, update
+from sqlalchemy import Connection, func, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from armature.server import risk as levels
 from armature.server import sanitize, writer
@@ -36,6 +37,7 @@ READ = {"pull_requests": "read", "contents": "read"}
 READ_CHECKS = {"pull_requests": "read", "checks": "read"}
 ADDED = ("added", "copied")
 RUN_PUSH_CAP = 3
+RISK_TOOLS = ("review.risk", "review.record-risk")
 # A gate these roles decide may hold a high-risk pull request. Contributors and viewers can't.
 GATE_ROLES = ("project_lead", "team_lead", "admin")
 HELD_REASON = "A pull request needs low or medium recorded risk, or a person's approval at the run's gate."
@@ -98,21 +100,55 @@ def risk(call: Call, params: dict[str, Any]) -> dict[str, Any]:
         raise ToolError(409, f"GitHub's head is {head[:12]}, not the reviewed {params['expect_head'][:12]}. "
                              "Review the new head.")
     paths, added = _paths(files)
+    return {**_rate(call, params, head, paths, added, total, truncated), "files": len(files)}
+
+
+def _rate(call: Call, params: dict[str, Any], head: str, paths: list[str], added: list[str], total: int | None,
+          truncated: bool) -> dict[str, Any]:
+    """Record the higher of the server's floors on ``paths`` and the model's level on the run, with its head."""
     model = [{"source": "model", "text": sanitize.plain(r, REASON_MAX)} for r in params.get("reasons") or []
              if isinstance(r, str) and r.strip()]
     with _engine(call).begin() as conn:
-        floor, reasons = levels.floor(paths, levels.extra_floors(conn, call.team_id, call.project_id), total,
-                                      added)
+        extra = levels.extra_floors(conn, call.team_id, call.project_id)
+        floor, reasons = levels.floor(paths, extra, total, added)
         if truncated:
             floor = "high"
             reasons.insert(0, {"source": "floor", "text": "GitHub listed fewer files than the diff changes"})
         held = levels.record(conn, call.run_id, levels.combine(floor, params["level"]),
                              (reasons + model)[:levels.MAX_REASONS])
         conn.execute(update(runs).where(runs.c.id == call.run_id).values(head_sha=head))
-        panel = levels.panel(held, levels.low_risk_panel(conn, call.team_id, call.project_id))
+        since = None if truncated else _since(params)
+        triggered = levels.triggers(params.get("triggers"), paths if since is None else since[0])
+        if since is None or triggered is None:
+            scope, at, files = "full", held, max(len(set(paths)), total or 0)
+        else:
+            scope, files = "since", len(set(since[0]))
+            at = levels.combine(levels.floor(since[0], extra, None, since[1])[0], params["level"])
+        panel = levels.panel(at, levels.low_risk_panel(conn, call.team_id, call.project_id), triggered,
+                             small=params.get("small"), lines=params.get("lines"), files=files)
     return {"level": held, "floor": floor, "model": levels.known(params["level"]), "reasons": reasons + model,
-            "head": head, "files": len(files), "panel": panel,
-            "skipped": [role for role in levels.SPECIALISTS if role not in panel]}
+            "head": head, "panel": panel, "skipped": [role for role in levels.SPECIALISTS if role not in panel],
+            "triggers": triggered or {"model": [], "path": []}, "scope": scope, "panel_level": at}
+
+
+def _since(params: dict[str, Any]) -> tuple[list[str], list[str]] | None:
+    """The paths and added paths of the change since the last full review, or None when the pack sent none the
+    server can read, so the panel follows the whole pull request. A listing as long as the compare API returns may
+    be cut short, and an empty one may be a failed lookup."""
+    paths, added = params.get("since_paths"), params.get("since_added")
+    if not all(isinstance(v, list) and all(isinstance(p, str) for p in v) for v in (paths, added)):
+        return None
+    kept = [p for p in paths if p]
+    return (kept, added) if kept and len(paths) < COMPARE_MAX else None
+
+
+def record_risk(call: Call, params: dict[str, Any]) -> dict[str, Any]:
+    """review.risk for a pack that read the diff itself: the server's floors on the paths it reports, and the run's
+    recorded level and panel."""
+    paths, total = params.get("paths") or [], params.get("total")
+    truncated = params.get("truncated") is True or (total is not None and len(set(paths)) < min(total,
+                                                                                               levels.FILES_MAX))
+    return _rate(call, params, params["head"], paths, params.get("added") or [], total, truncated)
 
 
 def _check_mark(gh: Api, call: Call, conn: Connection, repo: str, head: str) -> bool:
@@ -172,11 +208,36 @@ def mark_of(conn: Connection, project_id: str | None, head: str | None) -> Any:
                                                    review_marks.c.head_sha == head)).first()
 
 
+def is_marked(call: Call, params: dict[str, Any]) -> dict[str, Any]:
+    """review.marked for a pack that read the head from GitHub itself. Only the server's own mark row counts."""
+    head = params["head"]
+    with _engine(call).begin() as conn:
+        valid = mark_of(conn, call.project_id, head) is not None
+        if valid:
+            settle(conn, call.run_id, "noop")
+    return {"valid": valid, "head": head}
+
+
 def review_detail(params: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """What a live github.post-review call keeps on its row: the head it judged and whether it approved it."""
     posted = result.get("posted") is True
     approved = posted and (result.get("findings_state") or {}).get("approved_head") == params["head"]
     return {"head": params["head"], "number": params["number"], "posted": posted, "approved": approved}
+
+
+def post_detail(params: dict[str, Any]) -> dict[str, Any]:
+    """What a review.record-post row keeps, in review_detail's shape."""
+    posted = params["posted"] is True
+    detail = {"head": params["head"], "number": params["number"], "posted": posted,
+              "approved": posted and params["approved"] is True}
+    if params.get("review_id") is not None:
+        detail["review_id"] = params["review_id"]
+    return detail
+
+
+def record_post(call: Call, params: dict[str, Any]) -> dict[str, Any]:
+    """The broker settles the outcome and keeps the row review.record-mark reads, as it does for a live post."""
+    return {"recorded": True, **post_detail(params)}
 
 
 def settle(conn: Connection, run_id: str, outcome: str) -> str:
@@ -212,18 +273,9 @@ def mark(call: Call, params: dict[str, Any]) -> dict[str, Any]:
     Only a head this run's own live review approved is marked, so the mark always follows a posted review.
     """
     repo, number = params["repo"], int(params["number"])
-    target = f"{repo.lower()}#{number}"
-    with _engine(call).connect() as conn:
-        head = conn.execute(select(runs.c.head_sha).where(runs.c.id == call.run_id)).scalar()
-        posts = conn.execute(select(tool_calls.c.detail).where(
-            tool_calls.c.run_id == call.run_id, tool_calls.c.tool == "github.post-review",
-            tool_calls.c.mode == "live", tool_calls.c.target == target)
-            .order_by(tool_calls.c.created_at)).scalars().all()
-    last = posts[-1] if posts else None
-    if not head:
-        return {"marked": False, "reason": "the run has no reviewed head"}
-    if not isinstance(last, dict) or last.get("head") != head or last.get("approved") is not True:
-        return {"marked": False, "head": head, "reason": "this run posted no approving review of its head"}
+    head, refusal = _approved_head(call, repo, number, "github.post-review")
+    if refusal:
+        return refusal
     made = upsert_check(call, {"repo": repo, "head": head, "conclusion": "success", "title": "Reviewed and approved",
                             "summary": f"Armature reviewed and approved {head[:12]}."})
     app_id = call.identity.get("app_id")
@@ -240,6 +292,55 @@ def mark(call: Call, params: dict[str, Any]) -> dict[str, Any]:
         outcome = settle(conn, call.run_id, "pushed" if _pushed(conn, call.run_id) else "approved")
     return {"marked": True, "head": head, "check_run_id": made.get("check_run_id"), "url": made.get("url"),
             "outcome": outcome}
+
+
+def _approved_head(call: Call, repo: str, number: int, post_tool: str) -> tuple[str, dict[str, Any] | None]:
+    """The head the run reviewed, and a refusal unless the run's last live ``post_tool`` row on the pull request
+    approved it."""
+    with _engine(call).connect() as conn:
+        head = conn.execute(select(runs.c.head_sha).where(runs.c.id == call.run_id)).scalar()
+        posts = conn.execute(select(tool_calls.c.detail).where(
+            tool_calls.c.run_id == call.run_id, tool_calls.c.tool == post_tool, tool_calls.c.mode == "live",
+            tool_calls.c.target == f"{repo.lower()}#{number}").order_by(tool_calls.c.created_at)).scalars().all()
+    last = posts[-1] if posts else None
+    if not head:
+        return "", {"marked": False, "reason": "the run has no reviewed head"}
+    if not isinstance(last, dict) or last.get("head") != head or last.get("approved") is not True:
+        return head, {"marked": False, "head": head, "reason": "this run posted no approving review of its head"}
+    return head, None
+
+
+def record_mark(call: Call, params: dict[str, Any]) -> dict[str, Any]:
+    """review.mark for a pack that set the GitHub status itself: the row the server trusts, for the head this run's
+    own last recorded post approved. A newer status id replaces an older status mark, never a check run's."""
+    repo, number, status_id = params["repo"], int(params["number"]), params["status_id"]
+    head, refusal = _approved_head(call, repo, number, "review.record-post")
+    if refusal:
+        return refusal
+    if head != params["head"]:
+        return {"marked": False, "head": head, "reason": f"this run reviewed {head[:12]}, not {params['head'][:12]}"}
+    values = {"team_id": call.team_id, "repo": repo.lower(), "pr_number": number, "run_id": call.run_id,
+              "check_run_id": status_id, "conclusion": "success", "created_at": call.now, "app_id": None}
+    for attempt in range(2):
+        try:
+            with _engine(call).begin() as conn:
+                existing = mark_of(conn, call.project_id, head)
+                if existing is None:
+                    conn.execute(insert(review_marks).values(id=new_id(), project_id=call.project_id,
+                                                             head_sha=head, **values))
+                else:
+                    conn.execute(update(review_marks).where(
+                        review_marks.c.id == existing.id, review_marks.c.app_id.is_(None),
+                        or_(review_marks.c.check_run_id.is_(None), review_marks.c.check_run_id < status_id))
+                        .values(**values))
+                stored = mark_of(conn, call.project_id, head).check_run_id
+                outcome = settle(conn, call.run_id, "pushed" if _pushed(conn, call.run_id) else "approved")
+            break
+        except IntegrityError:
+            # Another run marked the same head first, so the second pass updates its row.
+            if attempt:
+                return {"marked": False, "head": head, "reason": "another run is marking this head"}
+    return {"marked": True, "head": head, "check_run_id": stored, "outcome": outcome}
 
 
 def pushable(call: Call, params: dict[str, Any]) -> dict[str, Any]:
@@ -261,7 +362,7 @@ def push_refusal(conn: Connection, run_id: str, *, to_pr: bool) -> str | None:
     if len(approved) >= RUN_PUSH_CAP:
         return f"this run reached its cap of {RUN_PUSH_CAP} pushes"
     if to_pr and approved and conn.execute(select(tool_calls.c.id).where(
-            tool_calls.c.run_id == run_id, tool_calls.c.tool == "review.risk", tool_calls.c.mode == "live",
+            tool_calls.c.run_id == run_id, tool_calls.c.tool.in_(RISK_TOOLS), tool_calls.c.mode == "live",
             tool_calls.c.outcome == "ok", tool_calls.c.created_at > approved[-1])).first() is None:
         return "the code this run last pushed was never re-reviewed"
     return None
@@ -273,7 +374,7 @@ def may_open(conn: Connection, run_id: str) -> bool:
     if levels.recorded(conn, run_id) in PUSH_RISKS:
         return True
     rated = conn.execute(select(func.max(tool_calls.c.created_at)).where(
-        tool_calls.c.run_id == run_id, tool_calls.c.tool == "review.risk", tool_calls.c.mode == "live",
+        tool_calls.c.run_id == run_id, tool_calls.c.tool.in_(RISK_TOOLS), tool_calls.c.mode == "live",
         tool_calls.c.outcome == "ok")).scalar()
     return rated is not None and conn.execute(select(gates.c.id).where(
         gates.c.run_id == run_id, gates.c.state == "approved", gates.c.min_role.in_(GATE_ROLES),
