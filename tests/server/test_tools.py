@@ -957,3 +957,33 @@ def test_a_fence_outlasts_every_backtick_run():
 
 def test_slack_text_cannot_link_or_mention():
     assert sanitize.slack("<!here> <@U1> <http://x|y> a&b") == "&lt;!here&gt; &lt;@U1&gt; &lt;http://x|y&gt; a&amp;b"
+
+
+def test_a_same_user_remote_runner_holding_an_agent_job_gets_a_push_grant(app, sqlite_engine, keyring, clock, world,
+                                                                         tmp_path):
+    from armature.runner import api
+    from armature.server import defs
+    body = ("name: tools\nrequires: [remote:far]\nstages:\n"
+            "  - id: fix\n    agent: {model: sonnet, prompt: Fix it., access: write}\n"
+            "  - id: push\n    adapter: github/push\n")
+    with sqlite_engine.begin() as conn:
+        defs._add_version(conn, defs.WORKFLOW, world.workflow, 2, body, "agent", None, clock())
+    run = start_run(sqlite_engine, keyring, clock, world, version=2)
+    said = {}
+
+    class Recorder:
+        server = "https://arm.test"
+
+        def post(self, path, payload=None):
+            said.update(payload)
+            return {"runner_id": "r", "capabilities": payload["capabilities"]}
+
+    class Far(api.Runner):
+        def platform(self):
+            return api.location.make(api.REMOTE, "Cloud", same_user=True)
+
+    Far(Recorder(), name="far", capabilities=["remote:far"], slots=1, work_dir=tmp_path, binary="").hello()
+    assert said["platform"] == {"kind": "remote", "label": "Cloud", "same_user": True}
+    assert ask_grant(app, run, "push").status_code == 403
+    on_runner(app, sqlite_engine, keyring, clock, world, run, said["platform"])
+    assert ask_grant(app, run, "push").status_code == 200

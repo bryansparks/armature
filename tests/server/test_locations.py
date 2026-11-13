@@ -146,3 +146,32 @@ def test_backfill_locates_runs_from_jobs_and_step_outputs_once(sqlite_engine):
     assert backfill(sqlite_engine) == {}
     with sqlite_engine.connect() as conn:
         assert dict(conn.execute(select(runs.c.id, runs.c.location)).all()) == found
+
+
+def test_a_remote_location_keeps_its_own_label_and_same_user(monkeypatch):
+    from armature.events import location
+    from armature.nodes.harness import HOST_ONLY_ENV
+
+    assert {location.LOCATION_KIND_ENV, location.LOCATION_LABEL_ENV} <= set(HOST_ONLY_ENV)
+    remote = location.make(location.REMOTE, "Container Cloud", machine="x86_64", same_user=True)
+    assert remote == {"kind": "remote", "label": "Container Cloud", "machine": "x86_64", "same_user": True}
+    assert location.parse(remote, trusted=True) == remote
+    assert "same_user" not in location.parse(remote)
+    assert location.parse({"kind": "remote", "label": "AWS Linux"})["label"] == "Remote"
+    assert not location.better(remote, location.make(location.LOCAL, chip="Apple M1"))
+    assert location.better(location.make(location.LOCAL), remote)
+    assert location.make(location.REMOTE)["label"] == "Remote"
+    assert location.make(location.REMOTE, " Cloud\x1b[31m\n ")["label"] == "Cloud[31m"
+    assert location.make(location.REMOTE, "x" * 500)["label"] == "x" * location.FIELD_MAX
+    assert location.make(location.REMOTE, 7)["label"] == "Remote"
+    assert location.make(location.AWS_LINUX, "Mine")["label"] == "AWS Linux"
+    assert location.make(location.LOCAL, "Mine", chip="Apple M1")["label"] == "M1 (local)"
+    monkeypatch.setenv(location.LOCATION_KIND_ENV, "remote")
+    monkeypatch.setenv(location.LOCATION_LABEL_ENV, "Container Cloud " + "y" * 500)
+    here = location.this_machine(same_user=True)
+    assert here["kind"] == "remote" and here["same_user"] is True
+    assert here["label"].startswith("Container Cloud") and len(here["label"]) == location.FIELD_MAX
+    monkeypatch.setenv(location.LOCATION_KIND_ENV, "aws-linux")
+    assert location.this_machine()["kind"] == "local"
+    monkeypatch.delenv(location.LOCATION_KIND_ENV)
+    assert location.this_machine()["kind"] == "local"
