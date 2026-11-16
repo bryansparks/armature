@@ -17,7 +17,7 @@ import pytest
 import typer
 from sqlalchemy import insert, select, update
 
-from armature.runner import cli, process
+from armature.runner import process, serving
 from armature.runner import client as runner_client
 from armature.runner.client import Client, Runner, RunnerLocked, ServerError
 from armature.runner.process import armature_binary
@@ -398,13 +398,13 @@ def test_the_runner_enrolls_once_and_keeps_its_key(sqlite_engine, keyring, world
     monkeypatch.setattr(runner_client, "enroll", lambda origin, token, name: _via(server, token, name))
     monkeypatch.setenv("ENROLL", booted["token"])
     key_file = tmp_path / "runner.env"
-    key = cli._enrolled_key("https://arm.test", "ENROLL", key_file, "env-1")
+    key = serving.enrolled_key("https://arm.test", "ENROLL", key_file, "env-1")
     assert key.startswith("ark_") and oct(key_file.stat().st_mode & 0o777) == "0o600"
     assert key_file.read_text() == f"ARMATURE_RUNNER_KEY={key}\n"
-    assert cli._enrolled_key("https://arm.test", "ENROLL", key_file, "env-1") == key
+    assert serving.enrolled_key("https://arm.test", "ENROLL", key_file, "env-1") == key
     key_file.unlink()
     with pytest.raises(typer.Exit):
-        cli._enrolled_key("https://arm.test", "ENROLL", key_file, "env-1")
+        serving.enrolled_key("https://arm.test", "ENROLL", key_file, "env-1")
 
 
 def _via(server, token, name):
@@ -549,7 +549,7 @@ def test_an_agent_user_reaches_the_run_and_is_cleaned_up(world, tmp_path, monkey
                     work_dir=tmp_path / "work", binary="/bin/true", job_user="armature-job",
                     agent_user="armature-agent")
     monkeypatch.setattr(runner, "_watch", lambda bundle, proc, workdir: ("succeeded", None))
-    monkeypatch.setattr(runner, "_finish", lambda *args: None)
+    monkeypatch.setattr(runner, "finish", lambda *args: None)
     runner.run_job({"job_id": "j1", "workflow": {"body": "name: x\n"}, "args": [], "settings": {}, "secrets": {},
                     "events_url": "https://x/api/events", "run_token": "rt"})
     agent_dir = Path(process.tempfile.gettempdir()) / "armature-agent-j1"
@@ -607,7 +607,7 @@ def test_a_same_user_runner_starts_the_run_without_sudo(world, tmp_path, monkeyp
     runner.hello()
     assert posted[0]["platform"]["same_user"] is True
     monkeypatch.setattr(runner, "_watch", lambda bundle, proc, workdir: ("succeeded", None))
-    monkeypatch.setattr(runner, "_finish", lambda *args: None)
+    monkeypatch.setattr(runner, "finish", lambda *args: None)
     runner.run_job({"job_id": "j1", "workflow": {"body": "name: x\n"}, "args": [], "settings": {}, "secrets": {},
                     "events_url": "https://x/api/events", "run_token": "rt", "engine_key": "ek"})
     assert started["job_user"] is None and started["run_dir"] is None and started["engine_key"] == "ek"
@@ -631,9 +631,9 @@ def test_cancel_stops_a_same_user_session_the_engine_left_running(world, tmp_pat
     monkeypatch.setattr(client, "end_run", lambda *args: None)
     runner = Runner(client, name="mine", capabilities=[], slots=1, work_dir=tmp_path / "work", binary="/bin/true",
                     same_user=True, heartbeat=0)
-    monkeypatch.setattr(runner, "_beat", lambda job_id: {"cancel_requested": True, "status": "running"})
+    monkeypatch.setattr(runner, "beat", lambda job_id: {"cancel_requested": True, "status": "running"})
     finished = []
-    monkeypatch.setattr(runner, "_finish", lambda *args: finished.append(args))
+    monkeypatch.setattr(runner, "finish", lambda *args: finished.append(args))
     runner.run_job({"job_id": "j1", "workflow": {"body": "name: x\n"}, "args": [], "settings": {}, "secrets": {},
                     "events_url": "https://x/api/events", "run_token": "rt"})
     assert finished[0][1] == "canceled"
@@ -658,7 +658,7 @@ def test_a_bundle_cant_claim_same_user_mode(world, tmp_path, monkeypatch):
     runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="plain", capabilities=[], slots=1,
                     work_dir=tmp_path / "work", binary="/bin/true")
     monkeypatch.setattr(runner, "_watch", lambda bundle, proc, workdir: ("succeeded", None))
-    monkeypatch.setattr(runner, "_finish", lambda *args: None)
+    monkeypatch.setattr(runner, "finish", lambda *args: None)
     runner.run_job({"job_id": "j1", "workflow": {"body": "name: x\n"}, "args": [],
                     "settings": {"ARMATURE_AGENT_SAME_USER": "1"}, "secrets": {"ARMATURE_AGENT_SAME_USER": "1"},
                     "events_url": "https://x/api/events", "run_token": "rt"})
@@ -672,7 +672,7 @@ def test_a_runner_run_gets_its_memory_cap(world, tmp_path, monkeypatch, memory_m
     runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="capped", capabilities=[], slots=1,
                     work_dir=tmp_path / "work", binary="/bin/true", memory_mb=memory_mb)
     monkeypatch.setattr(runner, "_watch", lambda bundle, proc, workdir: ("succeeded", None))
-    monkeypatch.setattr(runner, "_finish", lambda *args: None)
+    monkeypatch.setattr(runner, "finish", lambda *args: None)
     runner.run_job({"job_id": "j1", "workflow": {"body": "name: x\n"}, "args": [], "settings": {}, "secrets": {},
                     "events_url": "https://x/api/events", "run_token": "rt"})
     assert started["memory_mb"] == expected
@@ -704,3 +704,152 @@ def test_runner_env_drops_host_only_agent_names(world, tmp_path):
                       "run_token": "rt"})
     assert not {"ARMATURE_AGENT_USER", "ARMATURE_AGENT_DIR", "ARMATURE_SKILLS_DIR"} & set(env)
     assert env["ARMATURE_TOOLS_URL"] == "http://127.0.0.1:9"
+
+
+GATED = """name: gated
+stages:
+  - id: approve
+    gate: human
+    depends_on: []
+"""
+
+
+async def test_a_team_setting_cant_auto_approve_gates(sqlite_engine, keyring, world, tmp_path, monkeypatch):
+    from armature.nodes.gate import GATE_AUTO_APPROVE_ENV, GATE_DIR_ENV, GateSuspended
+    from armature.runtime.engine import Harness
+    from armature.server import worker
+    from armature.spec.loader import load_spec
+
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(settings).values({"team_id": world["team"], "key": f"env.{GATE_AUTO_APPROVE_ENV}",
+                                              "value": "1"}))
+    job_id = _queue(sqlite_engine, world, "gated", GATED, {})
+    with sqlite_engine.begin() as conn:
+        job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        bundle = worker.build_bundle(conn, keyring, job, now=world["clock"](), lease=timedelta(minutes=2),
+                                     events="https://arm.test/api/events")
+    assert GATE_AUTO_APPROVE_ENV not in bundle.settings and GATE_AUTO_APPROVE_ENV not in bundle.env()
+    runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="host", capabilities=[], slots=1,
+                    work_dir=tmp_path / "work", binary="/bin/false")
+    payload = {**bundle.payload(), "settings": {GATE_AUTO_APPROVE_ENV: "1"}, "secrets": {GATE_AUTO_APPROVE_ENV: "1"}}
+    env = runner.env(payload)
+    assert GATE_AUTO_APPROVE_ENV not in env
+    monkeypatch.delenv(GATE_AUTO_APPROVE_ENV, raising=False)
+    for name in ("ARMATURE_EVENTS", "ARMATURE_EVENTS_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        if name not in ("ARMATURE_EVENTS", "ARMATURE_EVENTS_TOKEN", "PATH", "HOME"):
+            monkeypatch.setenv(name, value)
+    monkeypatch.setenv(GATE_DIR_ENV, str(tmp_path))
+    spec_file = tmp_path / "gated.yaml"
+    spec_file.write_text(GATED)
+    with pytest.raises(GateSuspended):
+        await Harness(spec=load_spec(spec_file), session_dir=tmp_path / "session").run({})
+
+
+@pytest.mark.parametrize("name", ["ARMATURE_LOCATION_KIND", "ARMATURE_LOCATION_LABEL", "ARMATURE_GIT_VIA_PROXY",
+                                  "ARMATURE_GATE_AUTO_APPROVE", "ARMATURE_REDACT_ENV"])
+def test_a_team_setting_or_secret_cant_set_what_only_a_host_sets(sqlite_engine, keyring, world, tmp_path, name):
+    from armature.server import worker
+
+    assert name in worker.HOST_SET_ENV
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(settings).values({"team_id": world["team"], "key": f"env.{name}", "value": "remote"}))
+    job_id = _queue(sqlite_engine, world, "greet", GREET, {"who": "octocat"})
+    with sqlite_engine.begin() as conn:
+        job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        bundle = worker.build_bundle(conn, keyring, job, now=world["clock"](), lease=timedelta(minutes=2),
+                                     events="https://arm.test/api/events")
+    assert name not in bundle.settings and name not in bundle.env()
+    if name == "ARMATURE_REDACT_ENV":
+        return
+    runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="host", capabilities=[], slots=1,
+                    work_dir=tmp_path / "work", binary="/bin/false")
+    payload = {**bundle.payload(), "settings": {name: "remote"}, "secrets": {name: "remote"}}
+    assert name not in runner.env(payload)
+
+
+@pytest.mark.parametrize("name", ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
+                                  "HTTPS_PROXY", "no_proxy", "GIT_SSL_CAINFO", "SSL_CERT_FILE"])
+def test_a_team_setting_or_secret_cant_set_git_config_or_its_proxy(sqlite_engine, keyring, world, tmp_path, name):
+    from armature.nodes.harness import host_only
+    from armature.server import worker
+
+    assert host_only(name)
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(settings).values({"team_id": world["team"], "key": f"env.{name}", "value": "1"}))
+    job_id = _queue(sqlite_engine, world, "greet", GREET, {"who": "octocat"})
+    with sqlite_engine.begin() as conn:
+        job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        bundle = worker.build_bundle(conn, keyring, job, now=world["clock"](), lease=timedelta(minutes=2),
+                                     events="https://arm.test/api/events")
+    assert name not in bundle.settings and name not in bundle.env()
+    runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="host", capabilities=[], slots=1,
+                    work_dir=tmp_path / "work", binary="/bin/false")
+    payload = {**bundle.payload(), "settings": {name: "1"}, "secrets": {name: "1"}}
+    assert name not in runner.env(payload)
+
+
+def test_a_runner_says_where_it_runs_through_platform(world, tmp_path, monkeypatch):
+    from armature.events import location
+
+    posted = []
+    client = Client("http://127.0.0.1:9", world["key"])
+    monkeypatch.setattr(client, "post", lambda path, body=None: posted.append(body) or {"runner_id": "r1",
+                                                                                        "max_slots": 5})
+
+    class Elsewhere(Runner):
+        def platform(self):
+            return location.make(location.REMOTE, "Cloud", same_user=True)
+
+    runner = Elsewhere(client, name="far", capabilities=["remote:far"], slots=2, work_dir=tmp_path, binary="")
+    assert runner.hello()["max_slots"] == 5 and runner.slots == 2
+    assert posted[0]["platform"] == {"kind": "remote", "label": "Cloud", "same_user": True}
+
+
+def test_serve_builds_the_runner_with_make_and_closes_what_it_returns(world, tmp_path, monkeypatch, capsys):
+    from armature.runner import serve
+
+    built, closed = {}, []
+    monkeypatch.setenv("RUNNER_KEY", world["key"])
+
+    class Quick(Runner):
+        def run(self, stop_event):
+            built["ran"] = True
+
+    def make(client, name, host):
+        built.update(server=client.server, name=name, host=host)
+        return Quick(client, name=name, capabilities=["remote:far"], slots=1, work_dir=tmp_path, binary=""), \
+            lambda: closed.append(True)
+
+    serve(make, server="http://127.0.0.1:9", key_env="RUNNER_KEY", name="far", how="on a far service")
+    assert built == {"server": "http://127.0.0.1:9", "name": "far", "host": built["host"], "ran": True}
+    assert closed == [True] and "Runner far polling http://127.0.0.1:9 on a far service." in capsys.readouterr().out
+    monkeypatch.delenv("RUNNER_KEY")
+    with pytest.raises(typer.Exit):
+        serve(make, server="http://127.0.0.1:9", key_env="RUNNER_KEY")
+    with pytest.raises(typer.Exit):
+        serving.check_server("http://example.com")
+    assert serving.parse_labels(["pool=far"]) == {"pool": "far"}
+
+
+def test_a_runner_that_cant_pause_says_so_at_hello(world, tmp_path, monkeypatch):
+    from armature.runner import api
+
+    posted = []
+    client = Client("http://127.0.0.1:9", world["key"])
+    monkeypatch.setattr(client, "post", lambda path, body=None: posted.append(body) or {"runner_id": "r1"})
+    api.Runner(client, name="far", capabilities=["remote:far"], slots=1, work_dir=tmp_path, binary="",
+               pauses=False).hello()
+    Runner(client, name="host", capabilities=[], slots=1, work_dir=tmp_path, binary="").hello()
+    assert posted[0]["pauses"] is False and "pauses" not in posted[1]
+
+
+def test_serve_refuses_plain_http_to_another_host(world, tmp_path, monkeypatch):
+    from armature.runner import serve
+
+    monkeypatch.setenv("RUNNER_KEY", world["key"])
+    made = []
+    with pytest.raises(typer.Exit):
+        serve(lambda *args: made.append(args), server="http://runner.example.com", key_env="RUNNER_KEY")
+    assert made == []

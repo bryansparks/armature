@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
+### Changed
+
+- **Sidebar sections.** The web UI sidebar groups its pages into six
+  sections: Inbox, Activity, Workflows, Events, Library, and Settings. A
+  section with more than one page shows its pages as tabs at the top.
+  Account now appears only in the top bar's account menu.
 
 ## [0.11.0] - 2026-11-05
 
@@ -78,6 +84,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Workflows list, and the workflow tables on team and project pages, now
   show each workflow name once, with its copies in each scope in one row
   along with their version, who uses them, and any lint issues.
+- **Remote runners.** A provider package can run jobs somewhere other than
+  the runner's host by subclassing `Runner` from `armature.runner.api` and
+  starting it with `armature.runner.serve`. A runner offering a
+  `remote:<name>` capability takes only jobs whose `requires:` names it, and
+  the server starts no AWS environment for those jobs. Runs on a remote host
+  show the provider's own location label. The instance setting
+  `runner.max_slots` caps a remote runner's jobs at once. A launcher can set
+  `ARMATURE_GIT_VIA_PROXY` for git through a credential proxy and
+  `ARMATURE_GATE_AUTO_APPROVE` for a runner that can't pause a run, which
+  then gets no gated job. See
+  "Remote runners" in docs/platform/DEPLOY.md.
 
 ### Changed
 

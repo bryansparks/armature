@@ -112,7 +112,7 @@ async def test_runs_claude_with_locked_down_flags(stub, tmp_path, monkeypatch):
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-value"
     for name in ("ARMATURE_EVENTS_TOKEN", "ARMATURE_RUNNER_KEY", "SOME_SECRET", "ARMATURE_EVENTS"):
         assert name not in env
-    assert "Review it." in call["stdin"]
+    assert "Review it." in call["stdin"] and call["stdin_is_file"]
     assert "Review it." not in " ".join(argv)
     assert not list((tmp_path / "agents").iterdir())
 
@@ -635,3 +635,93 @@ async def test_a_session_never_gets_the_runs_tool_grant(stub, tmp_path, monkeypa
     assert call["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-value"
     for name in DENIED_ENV:
         assert name not in call["env"]
+
+
+async def test_a_busy_engine_never_holds_up_or_loses_the_sessions_output(stub, tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    monkeypatch.setenv(MODELS_ENV, json.dumps({"sonnet": {"model": "sonnet",
+                                                          "env": {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-value"}}}))
+    stub.plan({"pause": 0.5, "bulk": 2000, "lines": FIXTURE.read_text().splitlines()})
+    node = AgentNode(stage(), root=tmp_path / "agents")
+
+    async def busy():
+        # As when another step walks a large tree on the engine's thread, once the session has started.
+        while not stub.calls():
+            await asyncio.sleep(0.01)
+        time.sleep(3)
+        return time.time()
+
+    result, freed = await asyncio.gather(node.execute({}), busy())
+    assert result == {"content": "The file hardcodes a GitHub token on line 2."}
+    assert float((stub.bin_dir / "exited").read_text()) < freed
+
+
+async def test_one_sessions_slow_cleanup_never_holds_up_another(stub, tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    from armature.nodes import agent
+
+    monkeypatch.setenv(MODELS_ENV, json.dumps({"sonnet": {"model": "sonnet",
+                                                          "env": {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-value"}}}))
+    lines = FIXTURE.read_text().splitlines()
+    stub.plan({"lines": lines}, {"lines": lines, "sleep": 1})
+    remove = agent._remove_session
+
+    def slow_remove(session, read_tree):
+        # As when a session's worktree holds a large tree.
+        if "agent-slow-" in session.name:
+            time.sleep(3)
+        remove(session, read_tree)
+
+    monkeypatch.setattr(agent, "_remove_session", slow_remove)
+    slow = AgentNode(Stage(id="slow", agent={"model": "sonnet", "prompt": "Review it."}), root=tmp_path / "agents")
+    fast = AgentNode(Stage(id="fast", agent={"model": "sonnet", "prompt": "Review it."}), root=tmp_path / "agents")
+    started = time.monotonic()
+
+    async def timed(node, delay):
+        await asyncio.sleep(delay)
+        await node.execute({})
+        return time.monotonic() - started
+
+    slow_done, fast_done = await asyncio.gather(timed(slow, 0), timed(fast, 0.3))
+    assert slow_done >= 3 and fast_done < 2.8
+
+
+def _git_config(env):
+    return [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"]) for i in range(int(env["GIT_CONFIG_COUNT"]))]
+
+
+PROXY_GIT = {"HTTPS_PROXY": "http://proxy:3128", "no_proxy": "localhost", "SSL_CERT_FILE": "/etc/proxy/ca.pem",
+             "GIT_SSL_CAINFO": "/etc/proxy/ca.pem", "GIT_CONFIG_COUNT": "2",
+             "GIT_CONFIG_KEY_0": "url.https://github.com/.insteadOf", "GIT_CONFIG_VALUE_0": "git@github.com:",
+             "GIT_CONFIG_KEY_1": "http.sslCAInfo", "GIT_CONFIG_VALUE_1": "/etc/proxy/ca.pem",
+             "GITHUB_TOKEN": "proxy-placeholder"}
+
+
+def test_via_a_proxy_git_keeps_the_hosts_proxy_and_config_and_sends_no_token(tmp_path, monkeypatch):
+    from armature.nodes.agent import git_env
+    from armature.nodes.harness import GIT_VIA_PROXY_ENV, HOST_ONLY_ENV, SAME_USER_ENV
+    assert GIT_VIA_PROXY_ENV == "ARMATURE_GIT_VIA_PROXY" and GIT_VIA_PROXY_ENV in HOST_ONLY_ENV
+    for name, value in {**PROXY_GIT, GIT_VIA_PROXY_ENV: "1", SAME_USER_ENV: "1"}.items():
+        monkeypatch.setenv(name, value)
+    _fake_gh(tmp_path, monkeypatch)
+    env = git_env(tmp_path, "github.com")
+    assert _git_config(env) == [("url.https://github.com/.insteadOf", "git@github.com:"),
+                                ("http.sslCAInfo", "/etc/proxy/ca.pem"), ("http.followRedirects", "false")]
+    for name in ("HTTPS_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO"):
+        assert env[name] == PROXY_GIT[name]
+    assert "GITHUB_TOKEN" not in env and env["GIT_TERMINAL_PROMPT"] == "0" and env["GIT_CONFIG_GLOBAL"] == os.devnull
+
+
+def test_without_a_proxy_git_ignores_the_hosts_proxy_and_config(tmp_path, monkeypatch):
+    from armature.nodes.agent import git_env
+    from armature.nodes.harness import GIT_VIA_PROXY_ENV
+    for name, value in {**PROXY_GIT, "GITHUB_TOKEN": "ghs_secret"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv(GIT_VIA_PROXY_ENV, raising=False)
+    env = git_env(tmp_path, "github.com")
+    assert [key for key, _ in _git_config(env)] == ["http.followRedirects", "http.https://github.com/.extraHeader"]
+    assert not {"HTTPS_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO"} & set(env)

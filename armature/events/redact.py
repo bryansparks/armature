@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 # Ported from armature-ops dashboard/lib/redact.js.
@@ -23,6 +23,8 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 REDACTED = "[redacted]"
+# Names the environment variables whose values a run keeps out of its events, separated by commas.
+REDACT_ENV = "ARMATURE_REDACT_ENV"
 _MIN_ENV_VALUE = 4
 
 
@@ -32,11 +34,12 @@ def _replace(match: re.Match[str]) -> str:
     return REDACTED
 
 
-def env_values(names: str | None = None) -> tuple[str, ...]:
-    raw = os.environ.get("ARMATURE_REDACT_ENV", "") if names is None else names
+def env_values(names: str | None = None, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    environ = os.environ if environ is None else environ
+    raw = environ.get(REDACT_ENV, "") if names is None else names
     values = []
     for name in raw.split(","):
-        value = os.environ.get(name.strip(), "") if name.strip() else ""
+        value = environ.get(name.strip(), "") if name.strip() else ""
         if len(value) >= _MIN_ENV_VALUE:
             values.append(value)
     return tuple(sorted(set(values), key=len, reverse=True))

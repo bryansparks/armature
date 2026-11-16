@@ -23,13 +23,13 @@ import socket
 import stat
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, Engine, func, insert, select, update
+from sqlalchemy import Connection, Engine, and_, func, insert, select, update
 
 from armature.events import location
 from armature.events.emitter import (
@@ -39,15 +39,17 @@ from armature.events.emitter import (
 )
 from armature.events.redact import REDACTED, redact_text
 from armature.events.summary import merge_summary, summary_patch
-from armature.server import runners, threads, trigger
+from armature.server import actions, runners, threads, trigger
 from armature.server import secrets as secret_store
 from armature.server.auth import valid_token
+from armature.server.config import ActionConfig
 from armature.server.crypto import Keyring
 from armature.server.db import new_id
 from armature.server.db.schema import (
     FINDING_DECISIONS,
     findings,
     run_events,
+    runner_keys,
     runs,
     secrets,
     workflows,
@@ -91,6 +93,8 @@ STEP_STATUS = {"step_start": "running", "step_end": "succeeded", "step_failed": 
 SUCCEEDED = frozenset({"succeeded", "success", "ok", "completed", "complete", "done", "passed"})
 CANCELED = frozenset({"canceled", "cancelled"})
 RUN_KIND = func.coalesce(workflows.c.kind, "other")
+# Only an instance runner key, which has no team, registers the host's own runs.
+HOST_RUN = and_(runner_keys.c.id.is_not(None), runner_keys.c.team_id.is_(None))
 
 TRUNCATED = "_truncated"
 UPLOAD = re.compile(r"^[0-9a-f]{16}$")
@@ -273,13 +277,13 @@ def about(subject: str | None, reported: Any) -> dict[str, Any]:
             "links": threads.links(subject, reported)}
 
 
-def list_row(summary: dict[str, Any]) -> dict[str, Any]:
+def list_row(summary: dict[str, Any], configured: Sequence[ActionConfig] = ()) -> dict[str, Any]:
     """The fields a row of ``GET /api/runs`` has."""
     return {**{k: summary[k] for k in ("id", "team_id", "project_id", "workflow", "status", "triggered_by",
                                        "started_at", "finished_at", "cost_usd")},
             **about(summary.get("subject"), summary.get("summary")), "thread": summary.get("thread"),
             "outcome": summary.get("outcome"), "risk": summary.get("risk"), "trigger": summary.get("trigger"),
-            "location": summary.get("location")}
+            "location": summary.get("location"), "host_cancel": actions.host_cancel(configured, summary)}
 
 
 def run_columns() -> list:
@@ -289,11 +293,13 @@ def run_columns() -> list:
             runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.input_tokens, runs.c.output_tokens,
             runs.c.rerun_of, runs.c.cancelled_by, runs.c.error, runs.c.subject, runs.c.thread, runs.c.summary,
             runs.c.outcome, runs.c.outcome_source, runs.c.risk, runs.c.risk_reasons, runs.c.head_sha,
-            runs.c.location]
+            runs.c.location, HOST_RUN.label("host_run")]
 
 
 def run_query():
-    return select(*run_columns()).select_from(runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id))
+    return select(*run_columns()).select_from(
+        runs.outerjoin(workflows, workflows.c.id == runs.c.workflow_id)
+        .outerjoin(runner_keys, runner_keys.c.id == runs.c.runner_key_id))
 
 
 def summary_of(row: Any) -> dict[str, Any]:
@@ -379,8 +385,9 @@ class LiveHub:
 
     def __init__(self, engine: Engine, keyring: Keyring, clock: Callable[[], datetime], *,
                  socket_path: str = "", lost_after: timedelta = timedelta(minutes=30),
-                 sse_per_user: int = 8, sse_total: int = 500):
+                 sse_per_user: int = 8, sse_total: int = 500, actions: Sequence[ActionConfig] = ()):
         self.engine = engine
+        self.actions = actions
         self.keyring = keyring
         self.clock = clock
         self.socket_path = str(Path(socket_path).expanduser()) if socket_path else ""
@@ -811,7 +818,7 @@ class LiveHub:
         # A run resumed from a gate starts again under a new token, so its paused state is forgotten.
         self._runs.pop(summary["id"], None)
         if self.running:
-            self.broker.publish(summary_message(summary, list_row(summary)))
+            self.broker.publish(summary_message(summary, list_row(summary, self.actions)))
 
     def _publish_summary(self, state: RunState, immediate: bool) -> None:
         wait = state.published + SUMMARY_INTERVAL_S - time.monotonic()
@@ -826,7 +833,7 @@ class LiveHub:
             state.summary_timer.cancel()
             state.summary_timer = None
         state.published = time.monotonic()
-        self.broker.publish(summary_message(dict(state.summary), list_row(state.summary)))
+        self.broker.publish(summary_message(dict(state.summary), list_row(state.summary, self.actions)))
 
     def run_changed(self, run_id: str) -> None:
         """Publish the risk and outcome server code just wrote for a run. Safe to call from any thread."""
@@ -862,7 +869,7 @@ class LiveHub:
     def _server_wrote(self, stored: dict[str, Any]) -> None:
         state = self._runs.get(stored["id"])
         if state is None:
-            self.broker.publish(summary_message(stored, list_row(stored)))
+            self.broker.publish(summary_message(stored, list_row(stored, self.actions)))
             return
         state.summary.update({k: stored[k] for k in SERVER_FIELDS})
         self._publish_now(state)
@@ -942,7 +949,7 @@ class LiveHub:
             if summary is None:
                 continue
             if state is None:
-                self.broker.publish(summary_message(summary, list_row(summary)))
+                self.broker.publish(summary_message(summary, list_row(summary, self.actions)))
             elif state.summary["status"] == "running":
                 state.summary.update(status=summary["status"], finished_at=summary["finished_at"])
                 self._publish_now(state)
@@ -972,7 +979,7 @@ class LiveHub:
             return True
         state = self._runs.get(run_id)
         if state is None:
-            self.broker.publish(summary_message(summary, list_row(summary)))
+            self.broker.publish(summary_message(summary, list_row(summary, self.actions)))
         else:
             state.summary.update(status=summary["status"], finished_at=summary["finished_at"], error=error)
             self._publish_now(state)

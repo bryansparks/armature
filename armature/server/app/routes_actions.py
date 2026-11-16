@@ -19,6 +19,7 @@ from armature.server.app.deps import (
 )
 from armature.server.app.http import ApiError, client_ip
 from armature.server.auth import Session
+from armature.server.config import ActionConfig
 from armature.server.db.schema import operations, runs
 from armature.server.ingest import load_summary
 
@@ -26,10 +27,9 @@ router = APIRouter()
 
 OPERATIONS_LIMIT = 50
 OPERATIONS_LIMIT_MAX = 200
-CANCEL_ACTION = "cancel"
 
 
-async def _summary(request: Request, run_id: str) -> dict[str, Any]:
+async def run_summary(request: Request, run_id: str) -> dict[str, Any]:
     live = request.app.state.live.summary(run_id)
 
     def read() -> tuple[dict[str, Any] | None, bool]:
@@ -46,7 +46,7 @@ async def _summary(request: Request, run_id: str) -> dict[str, Any]:
 @router.get("/api/runs/{run_id}/actions")
 async def list_actions(run_id: str, request: Request,
                        granted: Granted = Depends(require("viewer", by_run()))) -> dict[str, Any]:
-    summary = await _summary(request, run_id)
+    summary = await run_summary(request, run_id)
     return {"actions": actions.offered(server(request).cfg.actions, summary, granted.role)}
 
 
@@ -67,12 +67,19 @@ async def run_action(run_id: str, action_id: str, request: Request,
             return grant(srv, session, target, "admin" if action.admin_only else action.min_role, conn)
 
     granted = await asyncio.to_thread(authorize)
+    return await perform(request, action, granted, await run_summary(request, run_id))
+
+
+async def perform(request: Request, action: ActionConfig, granted: Granted, summary: dict[str, Any]) -> dict[str, Any]:
+    """Run ``action`` on the run ``summary`` describes, for a caller whose role on it ``granted`` holds."""
+    srv = server(request)
+    session = granted.session
     if action.admin_only:
         require_step_up(request, session)
-    summary = await _summary(request, run_id)
     reason = actions.unavailable(action, summary, granted.role)
     if reason:
         raise ApiError(409, reason)
+    run_id = summary["id"]
     ip = client_ip(request)
 
     def start_and_run() -> dict[str, Any]:
@@ -86,7 +93,7 @@ async def run_action(run_id: str, action_id: str, request: Request,
         row = await asyncio.to_thread(start_and_run)
     except actions.ActionError as exc:
         raise ApiError(exc.status, exc.message) from exc
-    if action.id == CANCEL_ACTION and row.outcome == "ok":
+    if action.id == actions.CANCEL and row.outcome == "ok":
         # The command stopped the process, which never reports its own end, so the server records it.
         await request.app.state.live.end_run(run_id, "canceled", f"Cancelled by {session.user.username}.")
     return {"operation": actions.shown(row, admin=granted.role == "admin")}

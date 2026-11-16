@@ -1,7 +1,8 @@
 """Non-blocking event emitter for runs, scripts, and session wrappers.
 
 `ARMATURE_EVENTS` names the endpoint: `unix:/path/to.sock` for a datagram
-socket, or an `http://` or `https://` URL that takes NDJSON batches.
+socket, an `http://` or `https://` URL that takes NDJSON batches, or
+`file:/path/to.ndjson`, which gets one line per event for a host to relay.
 `ARMATURE_EVENTS_TOKEN` is the per-run token. With no endpoint every call is
 a no-op. No call ever raises to the caller or waits on the server.
 """
@@ -206,7 +207,11 @@ class Emitter:
         self._sock: socket.socket | None = None
         self._sock_path = ""
         self._url = ""
-        if self.endpoint.startswith("unix:"):
+        self._fd: int | None = None
+        if self.endpoint.startswith("file:"):
+            self._fd = os.open(self.endpoint[len("file:"):], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            self._text_interval_s = 0.0
+        elif self.endpoint.startswith("unix:"):
             self._sock_path = self.endpoint[len("unix:"):]
             self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
             self._sock.setblocking(False)
@@ -343,6 +348,13 @@ class Emitter:
 
     def _submit_locked(self, must_keep: bool, data: bytes) -> None:
         data = self._stamp(data)
+        if self._fd is not None:
+            try:
+                os.write(self._fd, data + b"\n")
+                self.sent += 1
+            except OSError:
+                self._count_drop(must_keep)
+            return
         if self._sock is not None and not self._keep and not self._drop and self._inflight == 0:
             outcome = self._report_drops_locked() if self._unreported_drops else "sent"
             if outcome == "sent":
@@ -571,6 +583,9 @@ class Emitter:
         self.flush(timeout)
         with self._lock:
             self._closed = True
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
             self._wake.notify_all()
         try:
             atexit.unregister(self._at_exit)
