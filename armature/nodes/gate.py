@@ -13,6 +13,8 @@ from armature.spec.models import Stage
 
 # Set by the server's worker or a runner. The run keeps its checkpoint there and pauses at a gate instead of asking.
 GATE_DIR_ENV = "ARMATURE_GATE_DIR"
+# Set by a host that can't pause a run. Every human gate then approves itself.
+GATE_AUTO_APPROVE_ENV = "ARMATURE_GATE_AUTO_APPROVE"
 GATE_FILE = "gate.json"
 CHECKPOINT_FILE = "checkpoint.json"
 

@@ -26,9 +26,10 @@ REPLACED = {
     "The\ndeveloper it is assigned to approved this run in Slack":
         "The\ndeveloper it is assigned to approved this run",
     "You are\nalready in the worktree, and a script commits, pushes, and opens the draft pull\nrequest after you "
-    "finish. Never run git commands that write, and never touch\nJira.":
+    "finish. Never run git commands that write, except `git mv`\nand `git rm` to rename or delete a file, and never "
+    "touch Jira.":
         "You are\nalready in the worktree. When the outcome is implemented, commit the change in one\ncommit. Never "
-        "push, never run any other git command that writes, and never touch\nJira.",
+        "push, never run any other git command that writes except `git mv` and\n`git rm`, and never touch Jira.",
 }
 NEXT = "The Jira poll starts disabled and in shadow. Enable it, then turn shadow off after a few polls match ops' log."
 BRANCH = "armature/{{ issue }}"

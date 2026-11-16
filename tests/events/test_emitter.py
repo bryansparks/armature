@@ -364,3 +364,22 @@ def test_drop_marker_has_its_own_counter(reader):
     assert [e["kind"] for e in events] == ["dropped", "step_start"]
     assert events[0]["eid"].split(":")[0] != events[1]["eid"].split(":")[0]
     assert _hwm_accept(events) == events
+
+
+def test_file_sink_writes_one_line_per_event_without_the_token(tmp_path, monkeypatch):
+    path = tmp_path / "events.ndjson"
+    monkeypatch.setenv("ARMATURE_EVENTS", f"file:{path}")
+    monkeypatch.setenv("ARMATURE_EVENTS_TOKEN", "-")
+    emitter = Emitter.from_env()
+    emitter.emit("step_start", "review", role="lead")
+    emitter.emit("text", "review", text="a")
+    emitter.emit("text", "review", text="b")
+    emitter.artifact("notes.md", "# notes")
+    emitter.close()
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [e["kind"] for e in events] == ["step_start", "text", "text", "artifact"]
+    assert [e["eid"].split(":")[1] for e in events] == ["1", "2", "3", "4"]
+    assert not any("token" in e for e in events) and emitter.stats()["sent"] == 4
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    emitter.emit("step_end", "review")
+    assert len(path.read_text().splitlines()) == 4 and emitter.stats()["sent"] == 4

@@ -26,6 +26,9 @@ from armature.server.db.schema import (
 from armature.server.db.schema import (
     environments as environments_table,
 )
+from armature.server.db.schema import (
+    runners as runners_table,
+)
 from armature.transport.provision import ProvisionError
 from tests.server.app_support import (
     Clock,
@@ -865,3 +868,67 @@ def test_an_unverified_connection_never_relaunches(sqlite_engine, service, fake,
     service.tick()
     assert [c[1] for c in _launches(fake)] == [_envs(sqlite_engine)[0].id]
     assert _row(sqlite_engine, environments_table, pending).state == "requested"
+
+
+def test_a_remote_runner_counts_only_for_jobs_that_require_it(sqlite_engine, keyring, service, fake, world, clock):
+    from types import SimpleNamespace
+
+    remote = [environments.Taker(None, ["claude-code", "git", "llm", "remote:a"])]
+    assert not environments.taken(SimpleNamespace(team_id=None, requires=None), remote)
+    assert not environments.taken(SimpleNamespace(team_id=None, requires=["git", "llm"]), remote)
+    assert environments.taken(SimpleNamespace(team_id=None, requires=["remote:a"]), remote)
+    assert not environments.taken(SimpleNamespace(team_id=None, requires=["remote:b"]), remote)
+    assert not environments.taken(SimpleNamespace(team_id=None, requires=["remote:a"]),
+                                  [environments.Taker(None, ["git", "llm"])])
+    job_id = _job(sqlite_engine, clock, world, requires=["git", "remote:a"])
+    service.tick()
+    assert _envs(sqlite_engine) == [] and _row(sqlite_engine, jobs, job_id).status == "queued"
+    admin, _ = add_user(sqlite_engine, keyring, clock, "root", is_admin=True)
+    client = make_client(sqlite_engine, keyring, clock)
+    client.headers.update(mutation(sign_in_as(client, sqlite_engine, keyring, clock, admin)))
+    listed = {j["id"]: j["warning"] for j in client.get("/api/jobs").json()["jobs"]}
+    assert listed[job_id] == "No runner for remote:a is online."
+
+
+def _online_runner(engine, clock, world, *, offers, allowed=None, pauses=None):
+    key_id = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(runner_keys).values(id=key_id, team_id=world["team"], name=key_id, key_hmac=key_id,
+                                                created_at=clock(), capabilities=allowed))
+        conn.execute(insert(runners_table).values(id=new_id(), runner_key_id=key_id, name="far", capabilities=offers,
+                                                  created_at=clock(), last_seen_at=clock(), pauses=pauses))
+
+
+def _warnings(engine, keyring, clock):
+    admin, _ = add_user(engine, keyring, clock, "root", is_admin=True)
+    client = make_client(engine, keyring, clock)
+    client.headers.update(mutation(sign_in_as(client, engine, keyring, clock, admin)))
+    return {j["id"]: j["warning"] for j in client.get("/api/jobs").json()["jobs"]}
+
+
+def test_a_remote_runner_its_key_narrows_still_takes_only_remote_jobs(sqlite_engine, service, fake, world, clock):
+    _online_runner(sqlite_engine, clock, world, offers=["remote:a", "git"], allowed=["git"])
+    job_id = _job(sqlite_engine, clock, world, requires=["git"])
+    with sqlite_engine.connect() as conn:
+        job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        assert not environments.taken(job, environments.takers(conn, clock()))
+    service.tick()
+    assert [e.job_id for e in _envs(sqlite_engine)] == [job_id]
+
+
+def test_a_gated_job_counts_only_runners_that_pause(sqlite_engine, keyring, world, clock):
+    with sqlite_engine.begin() as conn:
+        defs._add_version(conn, defs.WORKFLOW, world["workflow"], 2,
+                          "name: build\nrequires: [remote:a]\nstages:\n  - id: ok\n    gate: human\n", "gate", None,
+                          clock())
+    _online_runner(sqlite_engine, clock, world, offers=["remote:a"], pauses=False)
+    plain = _job(sqlite_engine, clock, world, requires=["remote:a"])
+    gated = _job(sqlite_engine, clock, world, requires=["remote:a"])
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == gated).values(workflow_version=2))
+    listed = _warnings(sqlite_engine, keyring, clock)
+    assert listed[plain] is None
+    assert listed[gated] == "No runner for remote:a that can pause at a gate is online."
+    _online_runner(sqlite_engine, clock, world, offers=["remote:a"])
+    with sqlite_engine.connect() as conn:
+        assert environments.warnings(conn, conn.execute(select(jobs)).all(), clock()) == {}

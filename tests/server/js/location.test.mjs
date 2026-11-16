@@ -54,3 +54,8 @@ test('runHeaders has a Where column after Outcome', () => {
   const names = runHeaders({}).map((header) => (Array.isArray(header) ? header[0] : header));
   assert.equal(names[names.indexOf('Outcome') + 1], 'Where');
 });
+
+test('a remote run reads its runner\'s own label', () => {
+  const chip = locationChip({ kind: 'remote', label: 'Container Cloud', machine: 'x86_64', same_user: true });
+  assert.deepEqual(chip.children.map((child) => child.text), ['Container Cloud']);
+});

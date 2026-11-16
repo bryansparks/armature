@@ -21,8 +21,8 @@ Read them before you write code. Then:
    issue says every app version that reads it is gone. Add rather than change.
 
 You are already in the worktree, and a script commits, pushes, and opens the
-pull request after you finish. Never run git commands that write, never run
-`npm install` or `npm ci`, and never touch Jira. If the change needs a new
+pull request after you finish. Never run git commands that write, except
+`git mv` and `git rm` to rename or delete a file, never run `npm install` or `npm ci`, and never touch Jira. If the change needs a new
 dependency, stop with outcome `blocked` and name the package and version.
 
 The specialists already read the issue and this code and advised on how to

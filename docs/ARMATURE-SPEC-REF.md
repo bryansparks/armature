@@ -534,9 +534,9 @@ Always pair with `output_schema`. Use `medium` or `large` tier (not `small`).
 
 From the CLI, a gate asks on stdin. When the server runs the workflow, the
 run pauses at the gate after the other stages of its wave finish, and the
-question shows on the run page and under **Waiting for you**. Approve or
-reject resumes the same run from its checkpoint, with the gate's result set
-to `{approved, feedback, decided_by, decided_at}`. A gate nobody decides
+question shows on the run page and under **Inbox** > **Waiting for you**.
+Approve or reject resumes the same run from its checkpoint, with the gate's
+result set to `{approved, feedback, decided_by, decided_at}`. A gate nobody decides
 before it expires resumes as rejected with `feedback: expired`. A rejected
 or expired gate also sets the run's outcome to `blocked`, written by the
 server, whatever the gate guarded. Use

@@ -231,7 +231,7 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
                             "rerun", "can_rerun",
                             "cancelled_by", "error", "subject", "thread", "summary", "last_seq", "dry_run", "kind",
                             "links", "trigger", "outcome", "outcome_source", "risk", "risk_reasons",
-                            "head_sha", "location"}
+                            "head_sha", "location", "host_run"}
     assert summary["dry_run"] is False and summary["kind"] == "review"
     assert (summary["status"], summary["error"], summary["workflow"], summary["triggered_by"]) == \
         ("failed", "build broke", "pr-review", "octocat")
@@ -403,7 +403,7 @@ def test_runs_stream_is_scoped(live, world):
         assert [r["status"] for r in rows] == ["running", "succeeded"]
         assert set(rows[0]) == {"id", "team_id", "project_id", "workflow", "status", "triggered_by", "started_at",
                                 "finished_at", "cost_usd", "subject", "thread", "title", "verdict", "trigger",
-                                "links", "outcome", "risk", "location"}
+                                "links", "outcome", "risk", "location", "host_cancel"}
         theirs_frames = theirs.until(lambda f: any(x.get("event") == "run" for x in f))
         assert [f["data"]["id"] for f in theirs_frames if f.get("event") == "run"] == [other_run["run_id"]]
 
