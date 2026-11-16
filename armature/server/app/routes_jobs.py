@@ -1,29 +1,43 @@
 """Jobs the webhook rules queued, how the worker left each one, canceling them, and rerunning a run."""
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 
-from armature.server import dispatch, environments, rbac, reruns
-from armature.server.app.deps import Granted, ScopeFrom, by_run, require, server, signed_in
+from armature.server import actions, dispatch, environments, rbac, reruns
+from armature.server.app.deps import (
+    Granted,
+    ScopeFrom,
+    by_run,
+    require,
+    server,
+    signed_in,
+)
 from armature.server.app.http import ApiError, client_ip
+from armature.server.app.routes_actions import perform, run_summary
 from armature.server.auth import Session
 from armature.server.db.schema import jobs, workflows
 
 router = APIRouter()
+
+NOT_SERVER_RUN = "Only a run the server started can be canceled here."
 
 
 def by_job(param: str = "job_id") -> ScopeFrom:
     return lambda conn, params: dispatch.job_target(conn, params[param])
 
 
-def _cancel(request: Request, granted: Granted, where: Any, missing: str) -> dict[str, Any]:
+def _cancel(request: Request, granted: Granted, where: Any, missing: str | None) -> dict[str, Any] | None:
+    """Cancel the newest job ``where`` picks. With no job, raise 404 ``missing``, or return None when it is None."""
     srv = server(request)
     with srv.engine.begin() as conn:
         job = conn.execute(select(jobs).where(where).order_by(jobs.c.created_at.desc(), jobs.c.id)).first()
         if job is None:
+            if missing is None:
+                return None
             raise ApiError(404, missing)
         try:
             return {"job": dispatch.cancel(conn, job=job, actor_id=granted.user_id, now=srv.now(),
@@ -64,9 +78,17 @@ def cancel_job(job_id: str, request: Request,
 
 
 @router.post("/api/runs/{run_id}/cancel")
-def cancel_run(run_id: str, request: Request,
-               granted: Granted = Depends(require("contributor", by_run()))) -> dict[str, Any]:
-    return _cancel(request, granted, jobs.c.run_id == run_id, "Only a run the server started can be canceled here.")
+async def cancel_run(run_id: str, request: Request,
+                     granted: Granted = Depends(require("contributor", by_run()))) -> dict[str, Any]:
+    canceled = await asyncio.to_thread(_cancel, request, granted, jobs.c.run_id == run_id, None)
+    if canceled is not None:
+        return canceled
+    # A run the host's own runner registered has no job, so its configured cancel action stops it instead.
+    action = actions.find(server(request).cfg.actions, actions.CANCEL)
+    summary = await run_summary(request, run_id)
+    if action is None or not summary["host_run"] or not actions.applies(action, summary.get("workflow")):
+        raise ApiError(404, NOT_SERVER_RUN)
+    return await perform(request, action, granted, summary)
 
 
 @router.post("/api/runs/{run_id}/rerun")

@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ NOT_STORED = "[not stored: the server could not load the secrets to redact it]"
 INTERRUPTED = "The server stopped before the command finished."
 NOT_HOST_RUN = "Actions work only on runs the host's own runner started."
 FAILED_FOR_VIEWERS = "The action failed. An admin can see why on the Status page."
+CANCEL = "cancel"
 
 
 class ActionError(Exception):
@@ -48,7 +50,7 @@ class ActionError(Exception):
         self.message = message
 
 
-def find(actions: list[ActionConfig], action_id: str) -> ActionConfig | None:
+def find(actions: Sequence[ActionConfig], action_id: str) -> ActionConfig | None:
     return next((action for action in actions if action.id == action_id), None)
 
 
@@ -70,6 +72,12 @@ def unavailable(action: ActionConfig, summary: dict[str, Any], role: str | None)
     if not rbac.at_least(role, action.min_role):
         return "Your role cannot do this."
     return None
+
+
+def host_cancel(actions: Sequence[ActionConfig], summary: dict[str, Any]) -> bool:
+    """Whether the configured cancel action could stop this run for some role. The POST checks the caller's."""
+    action = find(actions, CANCEL)
+    return action is not None and unavailable(action, summary, "admin") is None
 
 
 def offered(actions: list[ActionConfig], summary: dict[str, Any], role: str | None) -> list[dict[str, Any]]:
