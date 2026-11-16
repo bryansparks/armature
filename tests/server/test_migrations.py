@@ -864,3 +864,21 @@ def test_0022_adds_poll_state_and_downgrade_drops_poll_triggers(db_url):
     assert found == {job: "canceled", newer: "queued"}
     assert not names & {"trigger_state", "trigger_seen", "trigger_polls"}
     assert not job_columns & {"concurrency_key", "not_before", "superseded_by"}
+
+
+def test_0028_adds_runner_pauses_and_downgrade_drops_it(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        assert "pauses" in {c["name"] for c in inspect(engine).get_columns("runners")}
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0027")
+    engine = make_engine(db_url)
+    try:
+        assert "pauses" not in {c["name"] for c in inspect(engine).get_columns("runners")}
+    finally:
+        engine.dispose()

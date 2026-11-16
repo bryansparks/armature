@@ -861,7 +861,7 @@ def test_a_step_that_reads_its_parents_env_finds_no_key_and_cannot_fake_a_pause(
                         poll=0.2, heartbeat=0.5)
         # A runner that believed the file, so the server's own check is what refuses it. The embedded worker
         # would otherwise settle the job from the run's run_end first.
-        runner._paused = lambda job_id: True
+        runner.paused = lambda job_id: True
         monkeypatch.setattr(worker.Worker, "finish", lambda self, now: None)
         thread = threading.Thread(target=runner.run, args=(stop,), daemon=True)
         thread.start()

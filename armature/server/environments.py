@@ -53,6 +53,7 @@ from armature.server.db.schema import (
 )
 from armature.server.dispatch import ONLINE_WITHIN, RunnerError
 from armature.server.dispatch import capabilities as check_capabilities
+from armature.spec.models import remote_capabilities
 from armature.transport.provision import (
     Instance,
     LaunchSpec,
@@ -551,6 +552,8 @@ def render_user_data(*, server_url: str, token: str, env_id: str, capabilities: 
 class Taker:
     team_id: str | None
     capabilities: list[str] | None
+    allowed: list[str] | None = None
+    pauses: bool = True
 
 
 def takers(conn: Connection, now: datetime) -> list[Taker]:
@@ -559,13 +562,13 @@ def takers(conn: Connection, now: datetime) -> list[Taker]:
     Bound ephemeral keys are left out, because they take only their own job.
     """
     rows = conn.execute(
-        select(runners_table.c.capabilities, runner_keys.c.capabilities.label("allowed"), runner_keys.c.team_id)
+        select(runners_table.c.capabilities, runners_table.c.pauses, runner_keys.c.capabilities.label("allowed"),
+               runner_keys.c.team_id)
         .select_from(runners_table.join(runner_keys, runner_keys.c.id == runners_table.c.runner_key_id))
         .where(runner_keys.c.revoked_at.is_(None), runner_keys.c.kind == "standing",
                or_(runner_keys.c.expires_at.is_(None), runner_keys.c.expires_at > now),
                runners_table.c.last_seen_at > now - ONLINE_WITHIN)).all()
-    found = [Taker(r.team_id, sorted(set(r.capabilities or []) & set(r.allowed)) if r.allowed is not None
-                   else list(r.capabilities or [])) for r in rows]
+    found = [Taker(r.team_id, list(r.capabilities or []), r.allowed, r.pauses is not False) for r in rows]
     enabled = conn.execute(select(settings.c.value).where(settings.c.scope == INSTANCE_SCOPE,
                                                           settings.c.key == worker.ENABLED_KEY)).scalar()
     if enabled is not False:
@@ -575,9 +578,16 @@ def takers(conn: Connection, now: datetime) -> list[Taker]:
     return found
 
 
-def taken(job: Any, found: list[Taker]) -> bool:
-    return any((t.team_id is None or t.team_id == job.team_id) and worker.meets(job.requires, t.capabilities)
+def taken(job: Any, found: list[Taker], gated: bool = False) -> bool:
+    """Whether a runner in ``found`` would claim the job. A ``gated`` job, one that may pause, needs one that pauses."""
+    return any((t.team_id is None or t.team_id == job.team_id) and (t.pauses or not gated)
+               and worker.takes(job.requires, t.capabilities) and worker.meets(job.requires, t.allowed)
                for t in found)
+
+
+def remote_only(requires: list[str] | None) -> bool:
+    """Whether only a remote runner can take the job, so no AWS environment starts for it."""
+    return bool(remote_capabilities(requires))
 
 
 def llm_only(requires: list[str] | None) -> bool:
@@ -597,15 +607,21 @@ def warnings(conn: Connection, rows: list[Any], now: datetime,
                                 .where(projects.c.id.in_({r.project_id for r in queued if r.project_id}))).all())
     out = {}
     for row in queued:
-        message = job_warning(row, found, type_of.get(row.project_id), (reasons or {}).get(row.id))
+        gated = not taken(row, found, True) and taken(row, found) and worker.pauses(conn, row.id)
+        message = job_warning(row, found, type_of.get(row.project_id), (reasons or {}).get(row.id), gated)
         if message:
             out[row.id] = message
     return out
 
 
-def job_warning(job: Any, found: list[Taker], type_enabled: bool | None, reason: str | None = None) -> str | None:
-    if taken(job, found):
+def job_warning(job: Any, found: list[Taker], type_enabled: bool | None, reason: str | None = None,
+                gated: bool = False) -> str | None:
+    if taken(job, found, gated):
         return None
+    if remote_only(job.requires):
+        if gated and taken(job, found):
+            return f"No runner for {remote_capabilities(job.requires)[0]} that can pause at a gate is online."
+        return f"No runner for {remote_capabilities(job.requires)[0]} is online."
     if llm_only(job.requires):
         return f"No runner with {LLM} is online. Start a warm runner on the AWS page." if job.requires else None
     if job.project_id is None:
@@ -791,8 +807,14 @@ class EnvironmentService:
         reasons: dict[str, str] = {}
         launched = 0
         for job in queued:
-            if taken(job, found) or llm_only(job.requires):
+            if llm_only(job.requires) or remote_only(job.requires):
                 continue
+            if taken(job, found, gated=True):
+                continue
+            if taken(job, found):
+                with self.engine.connect() as conn:
+                    if not worker.pauses(conn, job.id):
+                        continue
             if self.retry_after.get(job.id, now) > now:
                 reasons[job.id] = "Waiting to retry after AWS had no capacity."
                 continue

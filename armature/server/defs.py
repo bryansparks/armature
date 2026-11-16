@@ -43,7 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from armature.packs import BUILTIN_PACKS
 from armature.packs.params import with_error_paths
 from armature.runtime.templating import text_env
-from armature.server import audit, calls, display, packs, rbac, risk
+from armature.server import audit, calls, display, limits, packs, rbac, risk
 from armature.server import secrets as secret_store
 from armature.server.db import new_id
 from armature.server.db.schema import (
@@ -1558,6 +1558,13 @@ def put_setting(conn: Connection, *, team_id: str | None, key: Any, value: Any, 
         try:
             value = risk.check_setting(key, value)
         except risk.Invalid as exc:
+            raise DefError(400, str(exc)) from exc
+    if key == limits.MAX_SLOTS_KEY:
+        if team_id is not None or project_id is not None:
+            raise DefError(400, f"{key} applies to the whole server, so set it on Default (all teams).")
+        try:
+            value = limits.check_setting(key, value)
+        except limits.Invalid as exc:
             raise DefError(400, str(exc)) from exc
     scope = project_id or scope_of(team_id)
     where = (settings.c.scope == scope, settings.c.key == key)

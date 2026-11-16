@@ -5,6 +5,7 @@ import pytest
 
 from armature.nodes.gate import (
     CHECKPOINT_FILE,
+    GATE_AUTO_APPROVE_ENV,
     GATE_DIR_ENV,
     GATE_FILE,
     GateSuspended,
@@ -23,10 +24,10 @@ from armature.spec.models import (
 )
 
 
-def _harness(stages, tmp_path):
+def _harness(stages, tmp_path, on_event=None):
     spec = HarnessSpec(name="wf", stages=stages,
                        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")))
-    return Harness(spec=spec, session_dir=tmp_path / "session")
+    return Harness(spec=spec, session_dir=tmp_path / "session", on_event=on_event)
 
 
 def _tool(harness, name, calls):
@@ -95,6 +96,20 @@ async def test_skipped_gate_does_not_pause(tmp_path, monkeypatch):
 
 async def test_a_child_workflow_gate_fails_instead_of_pausing(tmp_path, monkeypatch):
     monkeypatch.setenv(GATE_DIR_ENV, str(tmp_path))
+    spec = HarnessSpec(name="child", stages=[Stage(id="approve", gate="human")],
+                       model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")))
+    child = Harness(spec=spec, session_dir=tmp_path / "child", parent_step="call")
+    with pytest.raises(RuntimeError, match="called workflow"):
+        await child.run({})
+
+
+@pytest.mark.parametrize("gate_dir", [True, False])
+async def test_a_called_workflow_gate_fails_even_where_gates_approve_themselves(tmp_path, monkeypatch, gate_dir):
+    if gate_dir:
+        monkeypatch.setenv(GATE_DIR_ENV, str(tmp_path))
+    else:
+        monkeypatch.delenv(GATE_DIR_ENV, raising=False)
+    monkeypatch.setenv(GATE_AUTO_APPROVE_ENV, "1")
     spec = HarnessSpec(name="child", stages=[Stage(id="approve", gate="human")],
                        model_tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")))
     child = Harness(spec=spec, session_dir=tmp_path / "child", parent_step="call")
@@ -250,3 +265,28 @@ def test_a_script_step_and_a_keyless_sudo_run_never_read_the_run_s_stdin(monkeyp
     finally:
         os.dup2(saved, 0)
         os.close(saved)
+
+
+async def test_a_host_that_cant_pause_approves_every_gate_itself(tmp_path, monkeypatch):
+    monkeypatch.setenv(GATE_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(GATE_AUTO_APPROVE_ENV, "1")
+    calls: list[str] = []
+    events: list[tuple[str, dict]] = []
+    harness = _harness(_stages(), tmp_path, on_event=lambda name, data: events.append((name, data)))
+    for name in ("build", "lint", "ship"):
+        _tool(harness, name, calls)
+    results = await harness.run({})
+    assert results["approve"] == {"approved": True, "feedback": None, "auto_approved": True}
+    assert sorted(calls) == ["build", "lint", "ship"] and not (tmp_path / GATE_FILE).exists()
+    gate = [(name, data) for name, data in events if data.get("stage") == "approve"]
+    assert [name for name, _ in gate] == ["stage_start", "stage_complete"]
+    assert all(data["auto_approved"] is True for _, data in gate)
+
+
+async def test_a_gate_still_pauses_unless_auto_approval_is_on(tmp_path, monkeypatch):
+    monkeypatch.setenv(GATE_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv(GATE_AUTO_APPROVE_ENV, "0")
+    harness = _harness([Stage(id="approve", gate="human")], tmp_path)
+    with pytest.raises(GateSuspended):
+        await harness.run({})
+    assert (tmp_path / GATE_FILE).is_file()

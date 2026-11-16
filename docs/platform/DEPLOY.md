@@ -298,6 +298,70 @@ secrets.
 The Runners page, for admins, lists each runner with what it can do, how many
 jobs it's running, and when the server last heard from it.
 
+### Remote runners
+
+A remote runner claims jobs like any runner but runs each one somewhere other
+than its own host, such as a container service. A provider is a separate
+package that builds on `armature.runner.api`, which re-exports everything a
+provider needs and sets `PROVIDER_API`, the version of that surface. The
+provider subclasses `Runner` and overrides its public methods:
+
+- `platform()`: where its jobs run, as a location of kind `remote` with the
+  provider's own label.
+- `hello()`, `claim(answer_headers)`, and `beat(job_id)`: read what the
+  server answers, such as `max_slots`.
+- `fill()`: hold back claims while the provider can't take jobs.
+- `clear_leftovers()`: clean up what a stopped runner left, such as work
+  still running on the provider.
+- `run_job(bundle)`: run the job, heartbeat it, relay its events with
+  `Client.events`, and report how it ended with `finish`.
+
+`armature.runner.serve(make, server=...)` starts the runner from the
+provider's own command, as `armature runner` does. It reads the runner key,
+builds the runner with `make(client, name, host)`, and runs it until Ctrl-C
+or `SIGTERM`.
+
+A remote runner offers a capability named `remote:<name>`, such as
+`remote:containers`. That capability is exclusive: a runner offering one
+takes only jobs whose `requires:` names it, and no other runner takes those
+jobs. The server never starts an AWS environment for a job that requires a
+`remote:` capability. While no runner offers it, the job's warning reads "No
+runner for remote:<name> is online." A runner key's capability allowlist only
+narrows what a runner may take, so listing a `remote:` capability there
+makes no runner exclusive. Two providers with different names can share one
+server.
+
+Inside each run, the provider's launcher sets these variables. Each one is
+dropped from a job's `env.*` settings and secrets, so only a host can set
+it:
+
+- `ARMATURE_LOCATION_KIND=remote` and `ARMATURE_LOCATION_LABEL`: the run
+  reports that it executed on a remote host with this label. The label is
+  stripped of unprintable characters and cut to 191 characters. The runner's
+  own `platform()` gives the same location at hello, and that's what each
+  run's location chip shows.
+- `ARMATURE_GIT_VIA_PROXY=1`: agent sessions reach git hosts through a proxy
+  that adds the credentials. Git then sends no token of its own, and keeps
+  the host's proxy and CA variables, such as `HTTPS_PROXY` and
+  `GIT_SSL_CAINFO`, and the `GIT_CONFIG_*` entries the host sets.
+- `ARMATURE_GATE_AUTO_APPROVE=1`: for a host that can't pause a run, every
+  human gate approves itself and records `auto_approved: true`. Only a
+  runner that says it can't pause sets it. Such a runner passes
+  `pauses=False` to `Runner`, which sends `"pauses": false` at hello, and the
+  server then never gives it a job that may pause at a gate or resumes from
+  one, so a workflow can't skip its gates by requiring a `remote:`
+  capability.
+
+`ARMATURE_REDACT_ENV` is dropped from settings and secrets the same way, so a
+team setting can't change which values a run keeps out of its events.
+
+The instance setting `runner.max_slots`, a whole number from 1 to 200, caps
+how many jobs a remote runner keeps going at once. You can set it only on
+Default (all teams). When it's set, every hello and heartbeat answer carries
+`max_slots`, and every claim answer, the empty one included, carries the
+`X-Armature-Max-Slots` header. When it's unset, neither appears and the
+provider picks its own cap. A host runner ignores it and runs `--slots` jobs.
+
 ### The server's own worker
 
 The server still runs jobs itself unless you turn that off, so an install with

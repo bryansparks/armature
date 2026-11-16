@@ -24,6 +24,7 @@ from armature.nodes.llm import LLMNode
 from armature.nodes.script import ScriptNode
 from armature.nodes.gate import (
     CHECKPOINT_FILE,
+    GATE_AUTO_APPROVE_ENV,
     GATE_DIR_ENV,
     GateSuspended,
     HumanGateNode,
@@ -463,7 +464,7 @@ class Harness:
         gate_dir = os.environ.get(GATE_DIR_ENV)
         top_level = parent_step is None and emitter is None
         self._gate_dir = Path(gate_dir) if gate_dir and top_level else None
-        self._nested_gate = bool(gate_dir) and not top_level
+        self._nested_gate = bool(gate_dir or os.environ.get(GATE_AUTO_APPROVE_ENV) == "1") and not top_level
         if self._spec.checkpoint or self._gate_dir is not None:
             from armature.runtime.checkpoint import CheckpointStore, SessionLock
             checkpoint_dir = self._gate_dir or base_dir
@@ -1328,6 +1329,16 @@ class Harness:
                 if self._on_event:
                     self._on_event("stage_skipped", {"stage": stage.id, "reason": "condition"})
                 return {"_skipped": True}
+
+        if (stage.gate == "human" and self._stubs is None and not self._nested_gate
+                and os.environ.get(GATE_AUTO_APPROVE_ENV) == "1"):
+            result = {"approved": True, "feedback": None, "auto_approved": True}
+            if self._on_event:
+                self._on_event("stage_start", {"stage": stage.id, "kind": "gate", "role": None, "auto_approved": True})
+                self._on_event("stage_complete", {"stage": stage.id, "elapsed_s": 0, "output": result,
+                                                  "auto_approved": True})
+            self._checkpoint_write(stage.id, result, _loop_iteration)
+            return result
 
         if stage.gate == "human" and self._stubs is None and (self._gate_dir is not None or self._nested_gate):
             if self._nested_gate:
