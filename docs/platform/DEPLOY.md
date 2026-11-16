@@ -154,8 +154,8 @@ set:
   `https://armature.example.com`. Plain HTTP works only to a loopback address.
 - `ARMATURE_RUNNER_KEY`: an `ark_` runner key. A team lead creates a team key
   on the Runner keys tab of the team's page, and its runs land in that team. An
-  admin creates an instance key on the Runner keys page, and each of its runs
-  lands in the team whose project matches the run's repository.
+  admin creates an instance key under **Settings** > **Runner keys**, and each of
+  its runs lands in the team whose project matches the run's repository.
 - `ARMATURE_PROJECT`: the project the run belongs to. With a team key, this
   is a project name or repository in that team. With an instance key, this is
   a repository slug, such as `fs-eng/android-tree`, matched without regard to

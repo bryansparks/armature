@@ -8,6 +8,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Sidebar sections.** The web UI sidebar groups its pages into six
+  sections: Inbox, Activity, Workflows, Events, Library, and Settings. A
+  section with more than one page shows its pages as tabs at the top.
+  Account now appears only in the top bar's account menu.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added
