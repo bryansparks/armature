@@ -1,9 +1,15 @@
 import { api } from '../api.js';
 import { attempt, clear, confirmDialog, element, empty, table } from '../dom.js';
+import { isAdmin } from '../session.js';
 
+// Fields marked admin show only to an admin, since only an admin may set them.
 export const PROVIDER_KINDS = {
   bedrock: { label: 'Bedrock', fields: [{ name: 'region', label: 'Region', placeholder: 'us-east-1' }] },
-  anthropic: { label: 'Anthropic API', fields: [] },
+  anthropic: { label: 'Anthropic API', fields: [
+    { name: 'api_base', label: 'Gateway base URL', placeholder: 'Leave empty for the Anthropic API', admin: true },
+    { name: 'auth', label: 'Gateway auth', admin: true, options: [['', 'x-api-key'], ['bearer', 'Authorization: Bearer']] },
+    { name: 'prices', label: 'Prices per alias, USD per million tokens (JSON)', placeholder: '{"review": {"input": 1, "output": 4}}', admin: true, json: true },
+  ] },
   'claude-subscription': { label: 'Claude subscription', fields: [] },
   'openai-compatible': { label: 'OpenAI-compatible', fields: [{ name: 'api_base', label: 'API base URL' }] },
   ollama: { label: 'Ollama', fields: [{ name: 'api_base', label: 'API base URL' }] },
@@ -29,18 +35,48 @@ export function aliasesFrom(rows) {
   return { aliases };
 }
 
-// Keeps config keys this form does not show, and leaves out the ones the kind does not use.
-export function providerBody(kind, values, rows, credential, previousConfig = {}) {
+export const kindFields = (kind, admin) => (PROVIDER_KINDS[kind]?.fields || []).filter((field) => admin || !field.admin);
+
+// Keeps config keys this form does not show for the kind, and takes the shown ones from the form.
+export function providerBody(kind, values, rows, credential, previousConfig = {}, admin = false) {
   if (!PROVIDER_KINDS[kind]) return { error: 'Pick a provider kind.' };
   const { aliases, error } = aliasesFrom(rows);
   if (error) return { error };
-  const shown = new Set(Object.values(PROVIDER_KINDS).flatMap((entry) => entry.fields.map((field) => field.name)));
+  const fields = kindFields(kind, admin);
+  const shown = new Set(fields.map((field) => field.name));
   const config = Object.fromEntries(Object.entries(previousConfig || {}).filter(([key]) => !shown.has(key) && key !== 'credential_secret'));
-  for (const field of PROVIDER_KINDS[kind].fields) {
-    const value = String(values[field.name] ?? '').trim();
-    if (value) config[field.name] = value;
+  for (const field of fields) {
+    const raw = values[field.name];
+    if (field.json && raw && typeof raw === 'object') {
+      config[field.name] = raw;
+      continue;
+    }
+    const value = String(raw ?? '').trim();
+    if (!value) continue;
+    if (!field.json) {
+      config[field.name] = value;
+      continue;
+    }
+    try {
+      config[field.name] = JSON.parse(value);
+    } catch {
+      return { error: `${field.label} is not valid JSON.` };
+    }
   }
   return { body: { kind, config, aliases, credential_secret: credential || null } };
+}
+
+function fieldInput(field, id, value, onInput) {
+  if (field.options) {
+    const input = element('select', { id }, field.options.map(([option, label]) => element('option', { value: option }, label)));
+    input.value = value ?? '';
+    input.addEventListener('change', () => onInput(input.value));
+    return input;
+  }
+  const input = element(field.json ? 'textarea' : 'input', { ...(field.json ? { rows: 4 } : { type: 'text' }), id, placeholder: field.placeholder || null, spellcheck: 'false', autocapitalize: 'none' });
+  input.value = value && typeof value === 'object' ? JSON.stringify(value, null, 2) : value ?? '';
+  input.addEventListener('input', () => onInput(input.value));
+  return input;
 }
 
 function aliasEditor(initialRows, idPrefix) {
@@ -87,10 +123,8 @@ function providerForm(team, provider, secretNames, onDone, onCancel, createPath)
   const values = { ...(provider?.config || {}) };
   function drawFields() {
     clear(fieldSlot);
-    for (const field of PROVIDER_KINDS[kindSelect.value]?.fields || []) {
-      const input = element('input', { type: 'text', id: `${idPrefix}-${field.name}`, placeholder: field.placeholder || null, spellcheck: 'false', autocapitalize: 'none' });
-      input.value = values[field.name] ?? '';
-      input.addEventListener('input', () => { values[field.name] = input.value; });
+    for (const field of kindFields(kindSelect.value, isAdmin())) {
+      const input = fieldInput(field, `${idPrefix}-${field.name}`, values[field.name], (value) => { values[field.name] = value; });
       fieldSlot.append(element('label', { class: 'stacked', for: input.id }, field.label, input));
     }
   }
@@ -115,7 +149,7 @@ function providerForm(team, provider, secretNames, onDone, onCancel, createPath)
   form.addEventListener('submit', async (submitEvent) => {
     submitEvent.preventDefault();
     clear(status);
-    const { body, error } = providerBody(kindSelect.value, values, aliases.rows(), secretSelect.value, provider?.config);
+    const { body, error } = providerBody(kindSelect.value, values, aliases.rows(), secretSelect.value, provider?.config, isAdmin());
     if (error) {
       status.append(element('div', { class: 'error-box', role: 'alert' }, error));
       return;

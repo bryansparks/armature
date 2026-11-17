@@ -9,7 +9,15 @@ from sqlalchemy import insert, select, update
 
 from armature.server import risk
 from armature.server.db import new_id
-from armature.server.db.schema import findings, review_marks, runs, settings
+from armature.server.db.schema import (
+    candidate_matches,
+    finding_candidates,
+    findings,
+    review_marks,
+    runs,
+    settings,
+    tool_calls,
+)
 from tests.server.tool_support import (  # noqa: F401
     APP_ID,
     GH_LOGIN,
@@ -21,6 +29,8 @@ from tests.server.tool_support import (  # noqa: F401
     clock,
     dns,
     gh_cli,
+    grant,
+    marker,
     pem,
     start_run,
     tool,
@@ -380,8 +390,21 @@ def test_the_leads_decisions_become_the_steps_findings(app, sqlite_engine, world
         "block", "the code shows it", ["correctness", "performance"], "the handle leaks", 3)
 
 
+def test_a_decision_blocks_as_the_lead_said_else_as_its_decision_says(app, sqlite_engine, run):
+    decisions = [{**DECISION, "finding_id": None, "claim": "given", "decision": "suggest", "blocking": True},
+                 {**DECISION, "finding_id": None, "claim": "blocks"},
+                 {**DECISION, "finding_id": None, "claim": "suggests", "decision": "suggest"},
+                 {**DECISION, "finding_id": None, "claim": "drops", "decision": "drop"}]
+    response = tool(app, run, "decisions", "review.decisions", {"repo": REPO, "number": NUMBER,
+                                                                "decisions": decisions})
+    assert response.status_code == 200, response.text
+    assert {r.body: r.blocking for r in _rows(sqlite_engine)} == {"given": True, "blocks": True, "suggests": False,
+                                                                  "drops": None}
+
+
 def _decide(app, run, decisions=(DECISION,), **params):
-    return tool(app, run, "decisions", "review.decisions", {"repo": REPO, "decisions": list(decisions), **params})
+    return tool(app, run, "decisions", "review.decisions", {"repo": REPO, "number": NUMBER,
+                                                            "decisions": list(decisions), **params})
 
 
 def test_fixed_decisions_need_this_runs_approved_push_and_carry_its_commit(app, sqlite_engine, world, run, clock):
@@ -510,14 +533,16 @@ def test_a_live_hub_takes_the_decisions_as_events(sqlite_engine, keyring, clock,
     from armature.server import broker
     heard = []
     hub = SimpleNamespace(run_changed=lambda run_id: None,
-                          server_findings=lambda run_id, step, payloads: heard.append((run_id, step, payloads)))
+                          server_findings=lambda run_id, step, payloads, parent: heard.append(
+                              (run_id, step, payloads, parent)))
     token = broker.encode(keyring, broker.Grant(run.id, "decisions", ("review.decisions",),
                                                 clock() + broker.GRANT_MAX))
     out = broker.call_tool(sqlite_engine, keyring, public_url="https://arm.test", token=token,
-                           tool="review.decisions", params={"repo": REPO, "decisions": [DECISION]}, now=clock(),
-                           ip=None, transport=httpx.MockTransport(vendor), hub=hub)
+                           tool="review.decisions", params={"repo": REPO, "number": NUMBER, "decisions": [DECISION]},
+                           now=clock(), ip=None, transport=httpx.MockTransport(vendor), hub=hub, parent_step="first")
     assert out == {"recorded": 1} and _rows(sqlite_engine) == []
-    [(run_id, step, [payload])] = heard
+    [(run_id, step, [payload], parent)] = heard
+    assert parent == "first"
     assert (run_id, step, payload["finding_key"], payload["decision"]) == (run.id, "decisions", "0123456789ab",
                                                                             "block")
     assert "token" not in payload and "finding_id" not in payload
@@ -549,6 +574,126 @@ def test_context_keeps_only_the_jira_projects_keys_once_it_is_set(app, sqlite_en
     with sqlite_engine.begin() as conn:
         conn.execute(insert(settings).values(team_id=world.team, key="jira.project", value="MOB"))
     assert keys() == ["MOB-12"]
+
+
+def test_context_shows_only_this_pull_requests_last_decision_on_a_shared_claim(app, sqlite_engine, keyring, clock,
+                                                                                  world, vendor, run):
+    vendor.comments = [{"id": 31, "user": {"login": vendor.login}, "path": "src/a.swift", "line": 3,
+                        "created_at": "2026-10-27T10:00:00Z", "body": "It leaks.\n\n" + marker("0123456789ab")}]
+    assert _decide(app, run, [{**DECISION, "decision": "suggest"}]).status_code == 200
+    clock.advance(seconds=1)
+    other = start_run(sqlite_engine, keyring, clock, world, risk=None)
+    assert _decide(app, other, [{**DECISION, "decision": "block"}], number=NUMBER + 1).status_code == 200
+
+    def last_decision():
+        response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+        assert response.status_code == 200, response.text
+        return next(line for line in response.json()["findings"].splitlines() if line.startswith("Last decision"))
+
+    assert last_decision().startswith("Last decision: suggest")
+    with sqlite_engine.begin() as conn:
+        conn.execute(tool_calls.delete().where(tool_calls.c.tool == "review.decisions"))
+    assert last_decision() == "Last decision: unknown"
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.id == run.id).values(subject=f"{REPO}#{NUMBER}"))
+        conn.execute(update(runs).where(runs.c.id == other.id).values(subject=f"{REPO}#{NUMBER + 1}"))
+    assert last_decision().startswith("Last decision: suggest")
+
+
+def test_context_takes_a_runner_runs_decision_on_the_same_pull_request_but_never_a_row_without_one(
+        app, sqlite_engine, keyring, clock, world, vendor, run):
+    vendor.comments = [{"id": 31, "user": {"login": vendor.login}, "path": "src/a.swift", "line": 3,
+                        "created_at": "2026-10-27T10:00:00Z", "body": "It leaks.\n\n" + marker("0123456789ab")}]
+    assert _decide(app, run, [{**DECISION, "decision": "suggest"}]).status_code == 200
+    runner = start_run(sqlite_engine, keyring, clock, world, risk=None)
+
+    def runner_finding(decision):
+        clock.advance(seconds=1)
+        with sqlite_engine.begin() as conn:
+            conn.execute(update(runs).where(runs.c.id == runner.id).values(subject=f"{REPO}#{NUMBER}"))
+            conn.execute(insert(findings).values(id=new_id(), run_id=runner.id, project_id=world.project,
+                                                 finding_key="0123456789ab", path="src/a.swift", decision=decision,
+                                                 created_at=clock()))
+
+    def last_decision():
+        response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+        assert response.status_code == 200, response.text
+        return next(line for line in response.json()["findings"].splitlines() if line.startswith("Last decision"))
+
+    runner_finding(None)
+    assert last_decision().startswith("Last decision: suggest")
+    runner_finding("block")
+    assert last_decision().startswith("Last decision: block")
+    runner_finding(None)
+    assert last_decision().startswith("Last decision: block")
+
+
+def test_context_scopes_decisions_recorded_without_a_number_by_the_runs_subject(app, sqlite_engine, keyring, clock,
+                                                                               world, vendor, run):
+    vendor.comments = [{"id": 31, "user": {"login": vendor.login}, "path": "src/a.swift", "line": 3,
+                        "created_at": "2026-10-27T10:00:00Z", "body": "It leaks.\n\n" + marker("0123456789ab")}]
+    other = start_run(sqlite_engine, keyring, clock, world, risk=None)
+    for decider, decision in ((run, "suggest"), (other, "block")):
+        clock.advance(seconds=1)
+        response = tool(app, decider, "decisions", "review.decisions",
+                        {"repo": REPO, "decisions": [{**DECISION, "decision": decision}]})
+        assert response.status_code == 200, response.text
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.id == run.id).values(subject=f"{REPO}#{NUMBER}"))
+        conn.execute(update(runs).where(runs.c.id == other.id).values(subject=f"{REPO}#{NUMBER + 1}"))
+    response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+    assert response.status_code == 200, response.text
+    assert next(line for line in response.json()["findings"].splitlines()
+                if line.startswith("Last decision")).startswith("Last decision: suggest")
+
+
+def test_neither_a_dry_call_nor_another_projects_call_hides_this_pull_requests_decisions(app, sqlite_engine,
+                                                                                         keyring, clock, world,
+                                                                                         vendor, run):
+    vendor.comments = [{"id": 31, "user": {"login": vendor.login}, "path": "src/a.swift", "line": 3,
+                        "created_at": "2026-10-27T10:00:00Z", "body": "It leaks.\n\n" + marker("0123456789ab")}]
+    response = tool(app, run, "decisions", "review.decisions",
+                    {"repo": REPO, "decisions": [{**DECISION, "decision": "suggest"}]})
+    assert response.status_code == 200, response.text
+    other = start_run(sqlite_engine, keyring, clock, world, risk=None)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(runs).where(runs.c.id == run.id).values(subject=f"{REPO}#{NUMBER}"))
+        # Another run's calls on this pull request: dry, another project's, and a live one that decided nothing.
+        for project_id, mode in ((world.project, "dry"), (new_id(), "live"), (world.project, "live")):
+            conn.execute(tool_calls.insert().values(id=new_id(), run_id=other.id, team_id=world.team,
+                                                    project_id=project_id, step_id="decisions",
+                                                    tool="review.decisions", mode=mode, outcome="ok",
+                                                    target=f"{REPO.lower()}#{NUMBER}", created_at=clock()))
+    response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+    assert response.status_code == 200, response.text
+    assert next(line for line in response.json()["findings"].splitlines()
+                if line.startswith("Last decision")).startswith("Last decision: suggest")
+
+
+def test_decisions_name_their_round_and_an_empty_list_still_settles_the_candidates(app, sqlite_engine, world, run,
+                                                                                   clock):
+    with sqlite_engine.begin() as conn:
+        for key in ("first/correctness", "second/correctness"):
+            conn.execute(finding_candidates.insert().values(id=new_id(), team_id=world.team, project_id=world.project,
+                                                            run_id=run.id, step_key=key, specialist="correctness",
+                                                            ordinal=0, path="src/a.swift", claim="the handle leaks",
+                                                            created_at=clock()))
+
+    def matched():
+        with sqlite_engine.connect() as conn:
+            return sorted((r.step_key, r.method) for r in conn.execute(
+                select(finding_candidates.c.step_key, candidate_matches.c.method)
+                .join(candidate_matches, candidate_matches.c.candidate_id == finding_candidates.c.id)))
+
+    assert _decide(app, run, []).json() == {"recorded": 0}
+    assert matched() == [("first/correctness", "none"), ("second/correctness", "none")]
+    response = app.post("/api/tools/review.decisions",
+                        json={"params": {"repo": REPO, "number": NUMBER, "decisions": [DECISION]},
+                              "parent_step": "first"},
+                        headers={"Authorization": f"Bearer {grant(app, run, 'decisions')}"})
+    assert response.status_code == 200, response.text
+    assert [(r.step_id, r.decision) for r in _rows(sqlite_engine)] == [("first/decisions", "block")]
+    assert matched() == [("first/correctness", "heuristic"), ("second/correctness", "none")]
 
 
 def test_context_keeps_the_newest_comments_past_the_cap(monkeypatch):

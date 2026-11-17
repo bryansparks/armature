@@ -81,6 +81,15 @@ def _response_cost(response: Any) -> float:
     return float(cost) if cost is not None else 0.0
 
 
+def _meter(attempt: dict[str, Any], response: Any) -> None:
+    """Add one response's tokens and cost to its tier attempt, tool turns included."""
+    usage = getattr(response, "usage", None)
+    for key, name in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens")):
+        value = getattr(usage, name, 0)
+        attempt[key] += value if isinstance(value, int) else 0
+    attempt["cost_usd"] += _response_cost(response)
+
+
 _RETRYABLE_ERRORS = _retryable_errors()
 
 
@@ -282,6 +291,30 @@ class LLMNode(BaseNode):
     def _active_tier_order(self) -> list[str]:
         """Tiers actually configured in the spec, in canonical escalation order."""
         return [t for t in _CANONICAL_TIER_ORDER if getattr(self._tiers, t, None) is not None]
+
+    def _escalation_order(self) -> list[str]:
+        """The starting tier, the configured tiers above it, then those below it as a last resort, nearest first.
+
+        A custom tier has no rank, so it falls back to every configured tier, and an
+        unconfigured starting tier starts from the lowest configured one.
+        """
+        tier_name = self._resolve_tier_name()
+        active = self._active_tier_order()
+        if getattr(self._tiers, tier_name, None) is None:
+            return active
+        if tier_name not in _CANONICAL_TIER_ORDER:
+            return [tier_name] + active
+        at = active.index(tier_name)
+        return active[at:] + active[:at][::-1]
+
+    def _attribution(self, tier_name: str, tier_config, attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "tier": tier_name,
+            "model": self._model_string(tier_config),
+            "provider": tier_config.provider,
+            "requested_effort": self._resolve_reasoning_effort(tier_config),
+            "attempts": attempts,
+        }
 
     def _resolve_tier_name(self) -> str:
         """Return the tier name for this stage's role.
@@ -495,6 +528,7 @@ class LLMNode(BaseNode):
             }
             content, input_tok, output_tok = await self._stream_response(model, stream_kwargs)
             self._append_transcript(messages, model, content)
+            stream_tier = self._escalation_order()[0]
             return {
                 "content": content,
                 "_input_tokens": input_tok,
@@ -502,6 +536,10 @@ class LLMNode(BaseNode):
                 "_escalation_count": 0,
                 "_tools_declared": tools_declared,
                 "_tools_called": [],
+                "_attribution": self._attribution(stream_tier, initial_tier_config, [{
+                    "tier": stream_tier, "model": model, "input_tokens": input_tok, "output_tokens": output_tok,
+                    "cost_usd": 0.0, "outcome": "ok" if content else "empty",
+                }]),
             }
 
         cache_extra = {"output_mode": self._stage.output_mode.value}
@@ -522,7 +560,7 @@ class LLMNode(BaseNode):
             )
             cached = await self._cache.get(cache_key)
             if cached is not None:
-                return json.loads(cached)
+                return {**json.loads(cached), "_cached": True}
 
         result = await self._execute_with_escalation(messages, is_json_mode, stage_tools)
         result["_tools_declared"] = tools_declared
@@ -535,26 +573,23 @@ class LLMNode(BaseNode):
     async def _execute_with_escalation(
         self, messages: list[dict], parse_as_json: bool, stage_tools: list[dict] | None = None
     ) -> Any:
-        tier_name = self._resolve_tier_name()
-        active_order = self._active_tier_order()
-        tried: set[str] = set()
         content = ""
         tier_attempt = -1
         tools_called: list[str] = []
         # Accumulates across ALL tier attempts — an escalation retry spent
         # real money too, so exhaustion meters what was observed, not 0.0.
         call_cost = 0.0
+        attempts: list[dict[str, Any]] = []
+        last_tier: tuple[str, Any] | None = None
 
-        for attempt_tier in [tier_name] + active_order:
-            if attempt_tier in tried:
-                continue
-            tier_config = getattr(self._tiers, attempt_tier, None)
-            if tier_config is None:
-                continue
-            tried.add(attempt_tier)
+        for attempt_tier in self._escalation_order():
+            tier_config = getattr(self._tiers, attempt_tier)
             tier_attempt += 1
-
+            last_tier = (attempt_tier, tier_config)
             model = self._model_string(tier_config)
+            attempt = {"tier": attempt_tier, "model": model,
+                       "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "outcome": "error"}
+            attempts.append(attempt)
             tier_active_adapters = self._resolve_active_adapters(tier_config)
             kwargs = {
                 "messages": messages,
@@ -590,6 +625,7 @@ class LLMNode(BaseNode):
             msg = response.choices[0].message
             content = msg.content or ""
             call_cost += _response_cost(response)
+            _meter(attempt, response)
 
             # ReAct tool-call loop — iterations reset per tier attempt.
             # messages is mutated in place; kwargs["messages"] is the same object.
@@ -630,6 +666,7 @@ class LLMNode(BaseNode):
                 msg = response.choices[0].message
                 content = msg.content or ""
                 call_cost += _response_cost(response)
+                _meter(attempt, response)
 
             usage = getattr(response, "usage", None)
             input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -652,22 +689,28 @@ class LLMNode(BaseNode):
                     except _jsonschema.ValidationError:
                         result = None  # schema-invalid → escalate to next tier
                 if result is not None:
+                    attempt["outcome"] = "ok"
                     self._append_transcript(messages, model, content)
                     result["_input_tokens"] = input_tokens
                     result["_output_tokens"] = output_tokens
                     result["_escalation_count"] = tier_attempt
                     result["_tools_called"] = tools_called
                     result["_cost_usd"] = call_cost
+                    result["_attribution"] = self._attribution(attempt_tier, tier_config, attempts)
                     return result
+                attempt["outcome"] = "parse_error"
                 continue  # escalate to next tier
 
             if content:
+                attempt["outcome"] = "ok"
                 self._append_transcript(messages, model, content)
-                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}
+                return {"content": content, "_input_tokens": input_tokens, "_output_tokens": output_tokens, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost, "_attribution": self._attribution(attempt_tier, tier_config, attempts)}
+            attempt["outcome"] = "empty"
             continue  # empty text response — escalate to next tier
 
         # All tiers exhausted — every failed attempt's spend still metered
+        attribution = self._attribution(*last_tier, attempts) if last_tier is not None else None
         if not parse_as_json:
             # All tiers returned empty content — report as empty, not a parse error
-            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}
-        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost}
+            return {"content": "", "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost, "_attribution": attribution}
+        return {"raw": content, "_parse_error": True, "_input_tokens": 0, "_output_tokens": 0, "_escalation_count": tier_attempt, "_tools_called": tools_called, "_cost_usd": call_cost, "_attribution": attribution}

@@ -237,8 +237,9 @@ def test_the_child_process_env_holds_only_the_allowed_names(world, tmp_path, mon
     fake.chmod(0o755)
     runner = Runner(Client("http://127.0.0.1:9", world["key"]), name="envy", capabilities=[], slots=1,
                     work_dir=tmp_path / "work", binary=str(fake))
-    bundle = {"settings": {"REGION": "us-east-1"}, "secrets": {"API_TOKEN": "tok"},
-              "events_url": "https://x/api/events", "run_token": "rt"}
+    bundle = {"settings": {"REGION": "us-east-1", "ARMATURE_SERVER_RUN_ID": "spoofed"},
+              "secrets": {"API_TOKEN": "tok"}, "events_url": "https://x/api/events", "run_token": "rt",
+              "run_id": "srv-1"}
     workdir = tmp_path / "job"
     workdir.mkdir()
     from armature.runner.process import popen
@@ -247,7 +248,8 @@ def test_the_child_process_env_holds_only_the_allowed_names(world, tmp_path, mon
     seen = {line.split("=", 1)[0] for line in (workdir / "run.log").read_text().splitlines() if "=" in line}
     seen -= {"PWD", "SHLVL", "_", "OLDPWD"}
     assert seen == {"PATH", "HOME", "ARMATURE_PACKS_PATH", "REGION", "API_TOKEN", "ARMATURE_EVENTS",
-                    "ARMATURE_EVENTS_TOKEN", "ARMATURE_TOOLS_URL"}
+                    "ARMATURE_EVENTS_TOKEN", "ARMATURE_SERVER_RUN_ID", "ARMATURE_TOOLS_URL"}
+    assert "ARMATURE_SERVER_RUN_ID=srv-1" in (workdir / "run.log").read_text().splitlines()
 
 
 @pytest.mark.parametrize(("memory_mb", "limit"), [(1, 1 << 20), (None, resource.getrlimit(resource.RLIMIT_FSIZE)[0])])
@@ -643,13 +645,22 @@ def test_cancel_stops_a_same_user_session_the_engine_left_running(world, tmp_pat
 
 def test_stop_sessions_skips_the_runners_own_group_and_junk(tmp_path, monkeypatch):
     signalled = []
-    monkeypatch.setattr(process.os, "killpg", lambda pgid, sig: signalled.append(pgid) or (_ for _ in ()).throw(
-        ProcessLookupError()))
+    monkeypatch.setattr(process, "signal_group", lambda pgid, sig: signalled.append(pgid) and False)
     for name in ("0", "1", str(os.getpgrp()), "-5", "abc", "12345678901", "4242"):
         (tmp_path / name).touch()
     process.stop_sessions(tmp_path)
     process.stop_sessions(tmp_path / "missing")
     assert signalled == [4242]
+
+
+def test_stop_reaps_a_leader_whose_group_already_exited(monkeypatch):
+    proc = subprocess.Popen(["true"])
+    monkeypatch.setattr(process, "signal_group", lambda pgid, sig: False)
+    deadline = time.monotonic() + 5
+    while proc.returncode is None and time.monotonic() < deadline:
+        process.stop(proc)
+        time.sleep(0.02)
+    assert proc.returncode == 0
 
 
 def test_a_bundle_cant_claim_same_user_mode(world, tmp_path, monkeypatch):

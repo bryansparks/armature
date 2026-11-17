@@ -18,6 +18,17 @@ test('ruleBody builds the config the server checks and passes the text through',
   assert.equal('cancel_only' in ruleBody({}).config, false);
 });
 
+test('ruleBody sends resident and its signal, and keeps conversation and cancel_only', () => {
+  assert.deepEqual(ruleBody({ resident: true, signal: ' merged ' }).config, { order: 0, stop: false, shadow: false, dry: false, events: [], secrets: [], resident: true, signal: 'merged' });
+  assert.equal('signal' in ruleBody({ resident: false, signal: 'merged' }).config, false);
+  assert.equal('resident' in ruleBody({ signal: 'merged' }).config, false);
+  assert.equal('signal' in ruleBody({ resident: true, signal: '  ' }).config, false);
+  const kept = ruleBody({ conversation: true, cancel_only: true }).config;
+  assert.equal(kept.conversation, true);
+  assert.equal(kept.cancel_only, true);
+  assert.equal('conversation' in ruleBody({}).config, false);
+});
+
 test('prettyMapping formats JSON and leaves YAML as typed', () => {
   assert.equal(prettyMapping('{"inputs":{"a":"$"}}'), '{\n  "inputs": {\n    "a": "$"\n  }\n}');
   assert.equal(prettyMapping('inputs:\n  a: $'), 'inputs:\n  a: $');

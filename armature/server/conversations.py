@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import secrets as _random
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -65,7 +66,8 @@ SLACK_TS = re.compile(r"^[0-9]{1,12}\.[0-9]{1,8}$")
 SLACK_CHANNEL = re.compile(r"^[CGD][A-Z0-9]{2,20}$")
 SLACK_USER = re.compile(r"^[UW][A-Z0-9]{2,20}$")
 ASSISTANT = "workflow-assistant"
-ASSISTANT_FILE = Path(__file__).resolve().parent / "builtin" / "workflow-assistant.yaml"
+BUILTIN_DIR = Path(__file__).resolve().parent / "builtin"
+ASSISTANT_FILE = BUILTIN_DIR / "workflow-assistant.yaml"
 # worker.HELD plus queued and suspended. Spelled out because worker imports this module.
 OPEN_TURN = ("queued", "suspended", "provisioning", "claimed", "running")
 POST_TRIES = 3
@@ -698,32 +700,42 @@ def public(conn: Connection, conv: Any) -> dict[str, Any]:
                          for m in messages]}
 
 
-def _assistant_row(conn: Connection) -> Any:
+def _builtin_row(conn: Connection, name: str) -> Any:
     return conn.execute(select(workflows.c.id, workflows.c.current_version).where(
-        workflows.c.scope == INSTANCE_SCOPE, workflows.c.name == ASSISTANT, workflows.c.built_in.is_(True))).first()
+        workflows.c.scope == INSTANCE_SCOPE, workflows.c.name == name, workflows.c.built_in.is_(True))).first()
+
+
+def _assistant_row(conn: Connection) -> Any:
+    return _builtin_row(conn, ASSISTANT)
 
 
 def assistant_workflow(conn: Connection, now: datetime) -> str:
-    """The built-in ``workflow-assistant``: stored once for the instance, read-only, at the shipped file's body.
+    return builtin_workflow(conn, ASSISTANT, now, path=ASSISTANT_FILE, lookup=_assistant_row)
+
+
+def builtin_workflow(conn: Connection, name: str, now: datetime, *, kind: str = "other", path: Path | None = None,
+                     lookup: Callable[[Connection], Any] | None = None) -> str:
+    """A workflow shipped as ``builtin/<name>.yaml``: stored once for the instance, read-only, at the shipped body.
 
     Two first requests at once both try the insert, and the one that loses reads the winner's row.
     """
-    body = ASSISTANT_FILE.read_text(encoding="utf-8")
-    row = _assistant_row(conn)
+    body = (path or BUILTIN_DIR / f"{name}.yaml").read_text(encoding="utf-8")
+    find = lookup or (lambda c: _builtin_row(c, name))
+    row = find(conn)
     if row is None:
         workflow_id = new_id()
         try:
             with conn.begin_nested():
-                conn.execute(insert(workflows).values(id=workflow_id, name=ASSISTANT, kind="other", current_version=1,
+                conn.execute(insert(workflows).values(id=workflow_id, name=name, kind=kind, current_version=1,
                                                       built_in=True, created_at=now, updated_at=now,
                                                       **defs.INSTANCE.columns()))
                 defs._add_version(conn, defs.WORKFLOW, workflow_id, 1, body, "built in", None, now)
         except IntegrityError:
             pass
-        row = _assistant_row(conn)
+        row = find(conn)
         if row is None:
-            raise ConversationError(409, f"An instance workflow named {ASSISTANT} is in the way of the built-in "
-                                         "assistant. Rename it.")
+            raise ConversationError(409, f"An instance workflow named {name} is in the way of the built-in "
+                                         "one. Rename it.")
     if defs.body_of(conn, defs.WORKFLOW, row.id, row.current_version) != body:
         try:
             with conn.begin_nested():

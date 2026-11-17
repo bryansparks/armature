@@ -2,6 +2,7 @@ import json
 import asyncio
 import os
 import pwd
+import re
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ import pytest
 from armature.nodes import agent as agent_module
 from armature.nodes.agent import DENIED_ENV, MODELS_ENV, SKILLS_ENV, AgentError, AgentNode, strip_repo_config
 from armature.nodes.harness import (
+    OVERRIDES_ENV,
     AGENT_DIR_ENV, AGENT_USER_ENV, GIT_ESCAPES, GIT_HOSTS_ENV, READ_TOOLS, SAME_USER_ENV, SESSIONS_ENV, ClaudeCode, Codex, Launch,
 )
 from armature.spec.models import Stage
@@ -45,7 +47,7 @@ def stub(tmp_path, monkeypatch):
     sudo.write_text(f"#!{sys.executable}\n" + SUDO_STUB)
     sudo.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
-    for name in (MODELS_ENV, SKILLS_ENV, AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, GIT_HOSTS_ENV,
+    for name in (MODELS_ENV, OVERRIDES_ENV, SKILLS_ENV, AGENT_USER_ENV, AGENT_DIR_ENV, SAME_USER_ENV, SESSIONS_ENV, GIT_HOSTS_ENV,
                  "ANTHROPIC_API_KEY",
                  "CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN", "ARMATURE_RUN_ID", "ARMATURE_EVENTS_TOKEN"):
         monkeypatch.delenv(name, raising=False)
@@ -275,6 +277,141 @@ async def test_stream_becomes_events_tagged_with_role(stub, tmp_path):
     assert all(step == "review" and payload["role"] == "security" for _, step, payload in recorder.events)
 
 
+async def test_cost_event_carries_the_effort_the_step_requested(stub, tmp_path):
+    recorder = Recorder()
+    await AgentNode(stage(effort="xhigh"), root=tmp_path, emitter=recorder, step_id="review").execute({})
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert cost["requested_effort"] == "xhigh" and cost["model"] == "us.anthropic.claude-sonnet-5-5"
+    assert cost["alias"] == "sonnet" and "provider" not in cost
+
+
+async def test_cost_event_carries_the_bundles_provider_and_alias(stub, tmp_path, monkeypatch):
+    monkeypatch.setenv(MODELS_ENV, json.dumps({"sonnet": {"model": "claude-sonnet-5-5", "provider": "bedrock",
+                                                          "alias": "sonnet", "env": {}}}))
+    recorder = Recorder()
+    await AgentNode(stage(), root=tmp_path, emitter=recorder, step_id="review").execute({})
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert (cost["provider"], cost["alias"]) == ("bedrock", "sonnet") and "requested_effort" not in cost
+
+
+async def test_a_comparison_runs_override_sets_the_stages_model_effort_and_recorded_fields(stub, tmp_path,
+                                                                                        monkeypatch):
+    models = {alias: {"model": f"claude-{alias}-5-5", "provider": "bedrock", "alias": alias,
+                      "env": {"CLAUDE_CODE_OAUTH_TOKEN": f"{alias}-token"}} for alias in ("sonnet", "opus")}
+    monkeypatch.setenv(MODELS_ENV, json.dumps(models))
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"model": "claude-sonnet-5-5-pinned", "effort": "high"},
+                                                  "other": {"alias": "opus", "effort": "low"}}))
+    recorder = Recorder()
+    await AgentNode(stage(effort="xhigh"), root=tmp_path, emitter=recorder, step_id="review").execute({})
+    [call] = stub.calls()
+    assert call["argv"][call["argv"].index("--model") + 1] == "claude-sonnet-5-5-pinned"
+    assert call["argv"][call["argv"].index("--effort") + 1] == "high"
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert (cost["requested_effort"], cost["alias"], cost["provider"]) == ("high", "sonnet", "bedrock")
+
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"alias": "opus"}}))
+    recorder = Recorder()
+    await AgentNode(stage(effort="xhigh"), root=tmp_path, emitter=recorder, step_id="review").execute({})
+    argv, env = stub.calls()[-1]["argv"], stub.calls()[-1]["env"]
+    assert argv[argv.index("--model") + 1] == "claude-opus-5-5" and env["CLAUDE_CODE_OAUTH_TOKEN"] == "opus-token"
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert (cost["requested_effort"], cost["alias"]) == ("xhigh", "opus")
+
+
+GATEWAY_ENV = {"ANTHROPIC_BASE_URL": "https://gw.example.com", "ANTHROPIC_AUTH_TOKEN": "gw-token",
+               "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gateway-model", "ANTHROPIC_SMALL_FAST_MODEL": "gateway-model",
+               "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+PRICES = {"input": 1, "output": 4, "cache_read": 0.1, "cache_write": 1.25}
+# The fixture's result: 4100 input, 90 output, 8192 cache read, and 2048 cache write tokens.
+PRICED = (4100 * 1 + 90 * 4 + 8192 * 0.1 + 2048 * 1.25) / 1e6
+
+
+async def test_a_variant_on_a_gateway_alias_gets_only_the_gateways_env_and_its_prices(stub, tmp_path, monkeypatch):
+    monkeypatch.setenv(MODELS_ENV, json.dumps({
+        "sonnet": {"model": "us.anthropic.claude-sonnet-5-5", "provider": "bedrock", "alias": "sonnet",
+                   "env": {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_BEARER_TOKEN_BEDROCK": "bedrock-token"}},
+        "fast": {"model": "gateway-model", "provider": "anthropic", "alias": "fast", "env": GATEWAY_ENV,
+                 "prices": PRICES}}))
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "host-token")
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"model": "gateway-model", "alias": "fast"}}))
+    recorder = Recorder()
+    node = AgentNode(stage(), root=tmp_path, emitter=recorder, step_id="review")
+    await node.execute({})
+    [call] = stub.calls()
+    argv, env = call["argv"], call["env"]
+    assert argv[argv.index("--model") + 1] == "gateway-model"
+    assert {name: env.get(name) for name in GATEWAY_ENV} == GATEWAY_ENV
+    assert not {"CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_API_KEY"} & set(env)
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert (cost["provider"], cost["alias"]) == ("anthropic", "fast")
+    assert cost["cost_usd"] == pytest.approx(PRICED) and node.total_cost_usd == pytest.approx(PRICED)
+
+
+def _priced_result(subtype="success"):
+    return json.dumps({"type": "result", "subtype": subtype, "is_error": subtype != "success", "result": "ok",
+                       "session_id": SESSION, "total_cost_usd": 0.002,
+                       "usage": {"input_tokens": 1, "output_tokens": 1},
+                       "modelUsage": {"gateway-model": {"inputTokens": 1000, "outputTokens": 100,
+                                                        "cacheReadInputTokens": 2000, "cacheCreationInputTokens": 0,
+                                                        "costUSD": 0},
+                                      "claude-haiku-5-5": {"inputTokens": 50, "outputTokens": 5, "costUSD": 0.002}}})
+
+
+@pytest.mark.parametrize("subtype", ["success", "error_max_budget_usd"])
+async def test_only_the_alias_models_usage_is_priced_and_the_rest_keeps_its_reported_cost(stub, tmp_path,
+                                                                                         monkeypatch, subtype):
+    monkeypatch.setenv(MODELS_ENV, json.dumps({"sonnet": {"model": "gateway-model", "alias": "sonnet",
+                                                          "env": GATEWAY_ENV, "prices": PRICES}}))
+    stub.plan({"lines": [_priced_result(subtype)]})
+    recorder = Recorder()
+    node = AgentNode(stage(), root=tmp_path, emitter=recorder, step_id="review")
+    if subtype == "success":
+        await node.execute({})
+    else:
+        with pytest.raises(AgentError, match=subtype):
+            await node.execute({})
+    priced = (1000 * 1 + 100 * 4 + 2000 * 0.1) / 1e6
+    [cost] = [payload for kind, _, payload in recorder.events if kind == "cost"]
+    assert cost["model_usage"]["gateway-model"]["cost_usd"] == pytest.approx(priced)
+    assert cost["model_usage"]["claude-haiku-5-5"]["cost_usd"] == 0.002
+    assert cost["cost_usd"] == pytest.approx(priced + 0.002)
+    assert cost["cost_usd"] == pytest.approx(sum(u["cost_usd"] for u in cost["model_usage"].values()))
+    assert node.total_cost_usd == pytest.approx(priced + 0.002)
+
+
+async def test_prices_apply_only_to_the_model_the_alias_names(stub, tmp_path, monkeypatch):
+    monkeypatch.setenv(MODELS_ENV, json.dumps({"sonnet": {"model": "us.anthropic.claude-sonnet-5-5", "alias": "sonnet",
+                                                          "env": {}, "prices": PRICES}}))
+    node = AgentNode(stage(), root=tmp_path)
+    await node.execute({})
+    assert node.total_cost_usd == pytest.approx(PRICED)
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"model": "claude-other-5-5"}}))
+    node = AgentNode(stage(), root=tmp_path)
+    await node.execute({})
+    assert node.total_cost_usd == pytest.approx(0.04213)
+
+
+async def test_a_stand_in_output_answers_the_stage_with_no_session(stub, tmp_path, monkeypatch):
+    schema = {"type": "object", "required": ["level"], "properties": {"level": {"enum": ["low", "high"]}}}
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"output": {"level": "low", "commit": "a" * 40}}}))
+    recorder = Recorder()
+    node = AgentNode(stage(output_mode="guided_json", output_schema=schema), root=tmp_path, emitter=recorder,
+                     step_id="review")
+    assert await node.execute({}) == {"level": "low", "commit": "a" * 40}
+    assert stub.calls() == [] and recorder.events == []
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"output": {"level": "medium"}}}))
+    with pytest.raises(ValueError):
+        await AgentNode(stage(output_mode="guided_json", output_schema=schema), root=tmp_path).execute({})
+
+
+async def test_a_malformed_override_fails_the_stage(stub, tmp_path, monkeypatch):
+    monkeypatch.setenv(OVERRIDES_ENV, json.dumps({"review": {"effort": "huge"}}))
+    with pytest.raises(AgentError, match="override"):
+        await AgentNode(stage(), root=tmp_path).execute({})
+    assert stub.calls() == []
+
+
 def git(*args, cwd):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True,
                    env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
@@ -386,6 +523,8 @@ async def test_write_session_keeps_its_worktree(stub, tmp_path, remote, agent_us
     assert call["writable"] is True and call["cwd_mode"] & 0o070 == 0o070
     assert result["worktree"] == call["cwd"]
     assert (Path(result["worktree"]) / "a.txt").read_text() == "two\n"
+    # Nothing was committed, so the session's head is the commit it started from.
+    assert result["base"] == result["commit"] and len(result["base"]) == 40
     assert call["claude_dir"] == ["notes.md"]
     assert call["env"]["BASH_DEFAULT_TIMEOUT_MS"] == "1800000"
     argv = call["argv"]
@@ -551,6 +690,20 @@ async def test_timeout_under_an_agent_user_kills_as_that_user(stub, tmp_path, ag
         await AgentNode(stage(timeout_s=1), root=tmp_path).execute({})
     kill = stub.sudo_calls()[-1]["argv"]
     assert kill[1:4] == ["-n", "-u", agent_user] and kill[4:7] == ["/bin/kill", "-KILL", "--"]
+
+
+@pytest.mark.parametrize(("listed", "named"), [([4_000_001, 4_000_002], ["4000001", "4000002"]), ([], []),
+                                               (None, [])])
+async def test_under_an_agent_user_the_group_kill_also_names_each_member_proc_lists(stub, tmp_path, agent_user,
+                                                                                    monkeypatch, listed, named):
+    from armature.nodes import agent
+
+    monkeypatch.setattr(agent, "members", lambda pgid: listed)
+    stub.plan({"lines": [], "child": True, "sleep": 30})
+    with pytest.raises(TimeoutError):
+        await AgentNode(stage(timeout_s=1), root=tmp_path).execute({})
+    kills = [call["argv"] for call in stub.sudo_calls() if "/bin/kill" in call["argv"]]
+    assert len(kills) == 1 and re.fullmatch(r"-[1-9][0-9]*", kills[0][7]) and kills[0][8:] == named
 
 
 async def test_a_write_session_cannot_poison_the_run_clone(stub, tmp_path, remote, agent_user):

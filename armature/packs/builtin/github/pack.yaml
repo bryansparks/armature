@@ -143,3 +143,17 @@ adapters:
         dir: {type: string, pattern: '^[A-Za-z0-9._-]{1,100}$'}
         worktree: {type: string, pattern: '^/[^\x00-\x1f]{1,4095}$'}
         connection: {type: string}
+  delete-branch:
+    description: >-
+      Delete an armature/fix- branch whose fix proposal was declined, expired, or failed, when no open pull
+      request uses it.
+    cmd: armature tool github.delete-branch
+    writes: true
+    params:
+      type: object
+      required: [repo, branch]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        branch: {type: string, pattern: '^armature/fix-[A-Za-z0-9._-]{1,180}$'}
+        connection: {type: string}

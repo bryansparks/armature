@@ -37,11 +37,13 @@ READ = {"pull_requests": "read", "contents": "read"}
 READ_CHECKS = {"pull_requests": "read", "checks": "read"}
 ADDED = ("added", "copied")
 RUN_PUSH_CAP = 3
-RISK_TOOLS = ("review.risk", "review.record-risk")
+RISK_TOOLS = ("review.risk", "review.record-risk", "insights.fix-risk")
 # A gate these roles decide may hold a high-risk pull request. Contributors and viewers can't.
 GATE_ROLES = ("project_lead", "team_lead", "admin")
+LEAD_GATE_ROLES = ("team_lead", "admin")
 HELD_REASON = "A pull request needs low or medium recorded risk, or a person's approval at the run's gate."
-DECISION_FIELDS = ("claim", "body", "title", "path", "line", "severity", "raised_by", "decision", "reason",
+FIX_HELD_REASON = "A self-heal fix opens its pull request only after a team lead approves it at the run's gate."
+DECISION_FIELDS = ("claim", "body", "title", "path", "line", "severity", "blocking", "raised_by", "decision", "reason",
                    "disposition")
 
 
@@ -222,7 +224,10 @@ def review_detail(params: dict[str, Any], result: dict[str, Any]) -> dict[str, A
     """What a live github.post-review call keeps on its row: the head it judged and whether it approved it."""
     posted = result.get("posted") is True
     approved = posted and (result.get("findings_state") or {}).get("approved_head") == params["head"]
-    return {"head": params["head"], "number": params["number"], "posted": posted, "approved": approved}
+    detail = {"head": params["head"], "number": params["number"], "posted": posted, "approved": approved}
+    if posted and isinstance(result.get("review_id"), int):
+        detail["review_id"] = result["review_id"]
+    return detail
 
 
 def post_detail(params: dict[str, Any]) -> dict[str, Any]:
@@ -368,16 +373,17 @@ def push_refusal(conn: Connection, run_id: str, *, to_pr: bool) -> str | None:
     return None
 
 
-def may_open(conn: Connection, run_id: str) -> bool:
+def may_open(conn: Connection, run_id: str, *, gated: bool = False) -> bool:
     """Whether a run may open a pull request: low or medium recorded risk, or a gate a project lead or above approved
-    after the run's latest rating. Missing risk is high."""
-    if levels.recorded(conn, run_id) in PUSH_RISKS:
+    after the run's latest rating. Missing risk is high. A ``gated`` run needs a team lead's gate at any risk."""
+    if not gated and levels.recorded(conn, run_id) in PUSH_RISKS:
         return True
     rated = conn.execute(select(func.max(tool_calls.c.created_at)).where(
         tool_calls.c.run_id == run_id, tool_calls.c.tool.in_(RISK_TOOLS), tool_calls.c.mode == "live",
         tool_calls.c.outcome == "ok")).scalar()
     return rated is not None and conn.execute(select(gates.c.id).where(
-        gates.c.run_id == run_id, gates.c.state == "approved", gates.c.min_role.in_(GATE_ROLES),
+        gates.c.run_id == run_id, gates.c.state == "approved",
+        gates.c.min_role.in_(LEAD_GATE_ROLES if gated else GATE_ROLES),
         gates.c.decided_at > rated)).first() is not None
 
 

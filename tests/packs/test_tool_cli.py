@@ -41,15 +41,16 @@ def server(monkeypatch):
 
 def test_the_builtin_packs_load_and_every_cmd_is_the_tool_cli():
     cat = catalog([BUILTIN_DIR])
-    assert cat.errors == [] and [p.name for p in cat.packs()] == ["conversation", "github", "jira", "linear",
-                                                                  "resident", "review", "slack"]
+    assert cat.errors == [] and [p.name for p in cat.packs()] == ["conversation", "github", "insights", "jira",
+                                                                  "linear", "resident", "review", "slack"]
     for pack in cat.packs():
         assert pack.builtin and is_builtin(pack.dir)
         for name, adapter in pack.adapters.items():
             assert adapter.cmd == f"armature tool {pack.name}.{name}"
             assert adapter.writes == (name not in {"checkout", "history", "risk", "marked", "pushable", "get-issue",
                                                         "permission", "pr-diff", "context", "events", "state.get",
-                                                        "record-risk", "is-marked"})
+                                                        "record-risk", "is-marked", "fix-context",
+                                                        "fix-risk"})
 
 
 def test_a_tool_posts_its_with_and_prints_only_the_result(server, monkeypatch, capsys):
@@ -60,6 +61,14 @@ def test_a_tool_posts_its_with_and_prints_only_the_result(server, monkeypatch, c
     assert str(request.url) == "https://arm.test/base/api/tools/slack.post"
     assert request.headers["authorization"] == "Bearer atg_grant"
     assert json.loads(request.content) == {"params": {"channel": "C1", "text": "hi"}}
+
+
+def test_a_tool_in_a_called_workflow_names_the_step_that_called_it(server, monkeypatch, capsys):
+    monkeypatch.setenv(tool_cli.WITH_ENV, json.dumps({"channel": "C1", "text": "hi"}))
+    monkeypatch.setenv(tool_cli.PARENT_ENV, "first")
+    assert tool_cli.main(["slack.post"]) == 0
+    [request] = server
+    assert json.loads(request.content) == {"params": {"channel": "C1", "text": "hi"}, "parent_step": "first"}
 
 
 def test_a_refusal_fails_the_step_and_a_bad_name_never_reaches_the_server(server, monkeypatch, capsys):
@@ -376,7 +385,8 @@ async def test_a_tool_step_in_a_called_workflow_signs_with_the_root_runs_key(tmp
     bin_dir.mkdir()
     fake = bin_dir / "armature"
     fake.write_text(f"#!{sys.executable}\nimport json, os\n"
-                    "print(json.dumps({'token': os.environ.get('ARMATURE_TOOL_TOKEN')}))\n")
+                    "print(json.dumps({'token': os.environ.get('ARMATURE_TOOL_TOKEN'),"
+                    " 'parent': os.environ.get('ARMATURE_TOOL_PARENT_STEP')}))\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
@@ -401,7 +411,7 @@ async def test_a_tool_step_in_a_called_workflow_signs_with_the_root_runs_key(tmp
     finally:
         reader.close()
     assert asked == [("publish", ["slack.post"], ("root-run", "secret"))]
-    assert result["review"] == {"token": "atg_publish"}
+    assert result["review"] == {"token": "atg_publish", "parent": "review"}
 
 
 async def test_a_script_step_never_inherits_standard_input(tmp_path):
@@ -438,3 +448,124 @@ def test_under_sudo_a_lost_fd_name_still_leaves_stdin_on_dev_null(monkeypatch):
     finally:
         os.dup2(saved, 0)
         os.close(saved)
+
+
+@pytest.mark.parametrize("flag, proxied", [(None, False), ("0", False), ("1", True)])
+def test_the_tool_client_uses_the_environments_proxy_only_when_the_host_says_so(monkeypatch, flag, proxied):
+    made = []
+
+    class Client(httpx.Client):
+        def __init__(self, **kwargs):
+            made.append(kwargs["trust_env"])
+            super().__init__(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True})))
+
+    monkeypatch.setattr(tool_cli.httpx, "Client", Client)
+    if flag is None:
+        monkeypatch.delenv(tool_cli.TOOLS_VIA_PROXY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(tool_cli.TOOLS_VIA_PROXY_ENV, flag)
+    assert tool_cli._post("/x", {}, "t", url="https://armature.example.com") == {"ok": True}
+    assert made == [proxied]
+
+
+def _fix_world(tmp_path, monkeypatch):
+    """A session worktree with a base commit and one fix commit on top, and a call that records what it sends."""
+    work = tmp_path / "worktree"
+    work.mkdir()
+    _git("init", "--quiet", cwd=work)
+    (work / "a.txt").write_text("one\ntwo\n")
+    _git("add", ".", cwd=work)
+    _git("commit", "--quiet", "-m", "base", cwd=work)
+    base = _git("rev-parse", "HEAD", cwd=work)
+    (work / "a.txt").write_text("one\nthree\n")
+    _git("commit", "--quiet", "-am", "fix", cwd=work)
+    sent = []
+    monkeypatch.setattr(tool_cli, "call", lambda name, p: sent.append((name, p)) or {"stored": True})
+    monkeypatch.setenv(tool_cli.TOKEN_ENV, "atg_grant")
+    params = {"repo": "Acme/App", "proposal": "0f0f0f0f-1111-2222-3333-444455556666", "outcome": "implemented", "kind": "sweep", "base": base,
+              "commit": _git("rev-parse", "HEAD", cwd=work), "worktree": str(work)}
+    return work, params, sent
+
+
+def test_fix_patch_sends_the_sessions_commit_as_a_patch_against_its_base_and_pushes_nothing(tmp_path, monkeypatch):
+    work, params, sent = _fix_world(tmp_path, monkeypatch)
+    _git("config", "diff.external", str(tmp_path / "evil.sh"), cwd=work)
+    assert tool_cli.fix_patch(params) == {"stored": True}
+    [(name, body)] = sent
+    assert name == "insights.fix-patch" and "worktree" not in body and "oversize" not in body
+    assert body["patch"].startswith("diff --git a/a.txt b/a.txt") and body["patch"].endswith("+three\n")
+    assert "-two\n" in body["patch"]
+
+
+def test_fix_patch_flags_an_oversize_patch_and_refuses_a_commit_off_its_base(tmp_path, monkeypatch):
+    work, params, sent = _fix_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(tool_cli, "PATCH_MAX", 10)
+    tool_cli.fix_patch(params)
+    assert sent[-1][1]["oversize"] is True and "patch" not in sent[-1][1]
+    with pytest.raises(tool_cli.ToolFailed, match="doesn't build on"):
+        tool_cli.fix_patch({**params, "base": "c" * 40})
+
+
+def test_fix_apply_applies_the_servers_patch_on_its_base_and_commits_it(tmp_path, monkeypatch):
+    work, params, sent = _fix_world(tmp_path, monkeypatch)
+    patch = _git("diff", params["base"], params["commit"], cwd=work) + "\n"
+    checkout = tmp_path / "run" / "fix"
+    _git("clone", "--quiet", str(work), str(checkout))
+    _git("checkout", "--quiet", "--detach", params["base"], cwd=checkout)
+    answers = {"patch": patch, "base_sha": params["base"], "branch": "armature/fix-p", "title": "Fix: Tests in src"}
+    monkeypatch.setattr(tool_cli, "call", lambda name, p: sent.append((name, p)) or dict(answers))
+    monkeypatch.chdir(tmp_path / "run")
+    done = tool_cli.fix_apply({"repo": "Acme/App", "proposal": "p" * 36, "dir": "fix"})
+    assert done["applied"] is True and (checkout / "a.txt").read_text() == "one\nthree\n"
+    assert _git("log", "-1", "--format=%s %an", cwd=checkout) == "Fix: Tests in src Armature"
+    assert _git("rev-parse", "HEAD", cwd=checkout) == done["commit"]
+
+
+def test_fix_apply_reports_a_patch_that_no_longer_applies_and_commits_nothing(tmp_path, monkeypatch):
+    work, params, sent = _fix_world(tmp_path, monkeypatch)
+    checkout = tmp_path / "run" / "fix"
+    _git("clone", "--quiet", str(work), str(checkout))
+    _git("checkout", "--quiet", "--detach", params["base"], cwd=checkout)
+    stale = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-gone\n+three\n"
+
+    def server(name, p):
+        sent.append((name, p))
+        if p.get("outcome") == "conflict":
+            return {"failed": True, "reason": "The fix no longer applies to main."}
+        return {"patch": stale, "base_sha": params["base"], "branch": "armature/fix-p", "title": "t"}
+    monkeypatch.setattr(tool_cli, "call", server)
+    monkeypatch.chdir(tmp_path / "run")
+    done = tool_cli.fix_apply({"repo": "Acme/App", "proposal": "p" * 36, "dir": "fix"})
+    assert done == {"applied": False, "reason": "The fix no longer applies to main."}
+    assert sent[-1][1]["outcome"] == "conflict" and _git("rev-parse", "HEAD", cwd=checkout) == params["base"]
+    monkeypatch.setattr(tool_cli, "call", lambda name, p: {"patch": stale, "base_sha": "d" * 40})
+    with pytest.raises(tool_cli.ToolFailed, match="base commit"):
+        tool_cli.fix_apply({"repo": "Acme/App", "proposal": "p" * 36, "dir": "fix"})
+
+
+def test_a_crlf_fix_round_trips_byte_for_byte_and_a_latin_1_fix_is_refused(tmp_path, monkeypatch):
+    work, params, sent = _fix_world(tmp_path, monkeypatch)
+    (work / "win.txt").write_bytes(b"one\r\ntwo\r\n")
+    _git("add", ".", cwd=work)
+    _git("commit", "--quiet", "-m", "crlf base", cwd=work)
+    base = _git("rev-parse", "HEAD", cwd=work)
+    (work / "win.txt").write_bytes(b"one\r\nthree\r\n")
+    _git("commit", "--quiet", "-am", "crlf fix", cwd=work)
+    fix = {**params, "base": base, "commit": _git("rev-parse", "HEAD", cwd=work)}
+    tool_cli.fix_patch(fix)
+    patch = sent[-1][1]["patch"]
+    assert "+three\r\n" in patch and "-two\r\n" in patch
+    checkout = tmp_path / "run" / "fix"
+    _git("clone", "--quiet", str(work), str(checkout))
+    _git("checkout", "--quiet", "--detach", base, cwd=checkout)
+    monkeypatch.setattr(tool_cli, "call", lambda name, p: {"patch": patch, "base_sha": base, "title": "t"})
+    monkeypatch.chdir(tmp_path / "run")
+    assert tool_cli.fix_apply({"repo": "Acme/App", "proposal": params["proposal"], "dir": "fix"})["applied"] is True
+    assert (checkout / "win.txt").read_bytes() == b"one\r\nthree\r\n"
+
+    monkeypatch.setattr(tool_cli, "call", lambda name, p: sent.append((name, p)) or {"stored": False})
+    (work / "latin.txt").write_bytes("café\n".encode("latin-1"))
+    _git("add", ".", cwd=work)
+    _git("commit", "--quiet", "-m", "latin", cwd=work)
+    tool_cli.fix_patch({**fix, "base": fix["commit"], "commit": _git("rev-parse", "HEAD", cwd=work)})
+    assert sent[-1][1].get("undecodable") is True and "patch" not in sent[-1][1]

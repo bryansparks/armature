@@ -42,7 +42,7 @@ async def test_cache_hit_skips_litellm():
         result = await node.execute({"question": "what?"})
 
     mock_litellm.assert_not_called()
-    assert result == {"answer": "cached"}
+    assert result == {"answer": "cached", "_cached": True}
 
 
 async def test_cache_miss_calls_litellm_and_stores():

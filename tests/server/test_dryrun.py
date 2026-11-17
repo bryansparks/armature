@@ -178,7 +178,8 @@ def test_a_test_run_launches_with_a_clean_env_and_ends_when_the_process_does(wor
     for added in ("__CF_USER_TEXT_ENCODING", "LC_CTYPE"):
         env.pop(added, None)
     assert set(env) == {"PATH", "HOME", "ARMATURE_STUB_OUTPUTS", "ARMATURE_EVENTS", "ARMATURE_EVENTS_TOKEN",
-                        "ARMATURE_PACKS_PATH"}
+                        "ARMATURE_SERVER_RUN_ID", "ARMATURE_PACKS_PATH"}
+    assert env["ARMATURE_SERVER_RUN_ID"] == run_id
     assert env["ARMATURE_EVENTS"] == f"unix:{os.path.join(world.socket_dir, 'e.sock')}"
     assert env["ARMATURE_PACKS_PATH"].split(os.pathsep)[-1] == "/srv/packs"
     assert os.path.realpath(env["HOME"]) == os.path.realpath(seen["cwd"])

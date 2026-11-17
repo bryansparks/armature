@@ -21,7 +21,8 @@ A provider runs each claimed job somewhere other than this host, such as a conta
 
 The runner offers a ``remote:<name>`` capability. A runner offering one takes only jobs whose ``requires`` names
 it, and the server starts no AWS environment for such a job. Set ``GIT_VIA_PROXY_ENV`` to ``"1"`` inside a run whose
-git reaches its hosts through a proxy that adds the credentials. A provider that can't pause a run at a gate passes
+git reaches its hosts through a proxy that adds the credentials, and ``TOOLS_VIA_PROXY_ENV`` to ``"1"`` inside a run
+that reaches the server only through its inherited proxy. A provider that can't pause a run at a gate passes
 ``pauses=False`` to ``Runner``, which says so at hello, and the server then gives it no job that may pause or that
 resumes from a gate. Only such a provider sets ``GATE_AUTO_APPROVE_ENV`` to ``"1"`` inside its runs. Every name for
 which ``host_only`` holds, the git config and proxy names among them, is dropped from a job's settings and secrets,
@@ -49,6 +50,7 @@ from armature.nodes.harness import (
     SAME_USER_ENV,
     SESSIONS_ENV,
     SKILLS_ENV,
+    TOOLS_VIA_PROXY_ENV,
     host_only,
 )
 from armature.packs import BUILTIN_PACKS, PACKS_PATH_ENV
@@ -99,6 +101,7 @@ __all__ = [
     "HOST_ONLY_ENV", "JOB_PREFIX", "LOCATION_KIND_ENV", "LOCATION_LABEL_ENV", "LOG_FILE", "MAX_SLOTS_HEADER",
     "MODELS_ENV", "OPEN", "PACKS_PATH_ENV", "PROVIDER_API", "REDACT_ENV", "REMOTE", "REMOTE_PREFIX", "ROLES_DIR",
     "ROLES_ENV", "SAME_USER_ENV", "SESSIONS_ENV", "SHARED_PREFIX", "SKILLS_DIR", "SKILLS_ENV", "TOOLS_URL_ENV",
+    "TOOLS_VIA_PROXY_ENV",
     "Client", "Runner", "RunnerLocked", "ServerError", "armature_binary", "check_bundle_version", "check_name",
     "check_server", "env_values", "fail", "job_path", "location", "parse_labels", "popen", "read_gate",
     "host_only", "redact_text", "remote_capabilities", "serve", "tail", "write_atomic", "write_bundle",

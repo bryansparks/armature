@@ -899,6 +899,9 @@ def test_armature_run_is_undumpable_on_linux(monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "linux")
     cli._undumpable()
     assert calls == [(cli.PR_SET_DUMPABLE, 0, 0, 0, 0)]
+    monkeypatch.setenv("ARMATURE_TOOLS_VIA_PROXY", "1")
+    cli._undumpable()
+    assert len(calls) == 1
 
 
 def test_run_turns_dumping_off_first(monkeypatch, tmp_path):

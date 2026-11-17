@@ -61,6 +61,7 @@ NONE = "none"
 
 
 def registry() -> dict[str, Tool]:
+    from armature.server.insights import fixes
     from armature.server.tools import (
         context,
         github,
@@ -100,4 +101,11 @@ def registry() -> dict[str, Tool]:
         "review.record-post": Tool(NONE, marks.record_post),
         "review.record-mark": Tool(NONE, marks.record_mark),
         "review.is-marked": Tool(NONE, marks.is_marked, reads=True),
+        # A self-heal run's own proposal: its evidence, its stored patch and that patch's rating, and, once approved,
+        # the patch to apply.
+        "insights.fix-context": Tool(NONE, fixes.context, reads=True),
+        "insights.fix-patch": Tool(NONE, fixes.patch),
+        "insights.fix-risk": Tool(NONE, fixes.rate, reads=True),
+        "insights.fix-apply": Tool(NONE, fixes.apply),
+        "github.delete-branch": Tool("github_app", fixes.delete_branch),
     }

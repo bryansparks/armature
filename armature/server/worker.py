@@ -31,8 +31,10 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from sqlalchemy import Connection, Engine, and_, func, insert, or_, select, update
 
+from armature.events.env import SERVER_RUN_ID_ENV
 from armature.events.location import LOCATION_KIND_ENV, LOCATION_LABEL_ENV, this_machine
 from armature.events.redact import REDACT_ENV
+from armature.events.summary import summary_patch
 from armature.nodes.gate import (
     GATE_AUTO_APPROVE_ENV,
     GATE_DIR_ENV,
@@ -45,9 +47,11 @@ from armature.nodes.harness import (
     GIT_HOSTS_ENV,
     GIT_VIA_PROXY_ENV,
     MODELS_ENV,
+    OVERRIDES_ENV,
     PROJECT_REPO_ENV,
     PROXY_ENV,
     ROLES_ENV,
+    TOOLS_VIA_PROXY_ENV,
     SKILLS_ENV,
     host_only,
 )
@@ -70,6 +74,7 @@ from armature.server import (
     llm,
     residents,
     runners,
+    threads,
 )
 from armature.server import secrets as secret_store
 from armature.server.config import ServerConfig
@@ -81,6 +86,7 @@ from armature.server.db.schema import (
     documents,
     environment_types,
     environments,
+    eval_arms,
     jobs,
     projects,
     runs,
@@ -89,16 +95,18 @@ from armature.server.db.schema import (
     trigger_seen,
     triggers,
     versions,
+    webhook_deliveries,
     workflows,
 )
 from armature.server.ingest import load_summary
+from armature.server.insights import fixes
 from armature.spec.models import AGENT_HARNESSES, remote_capabilities
 
 log = logging.getLogger(__name__)
 
 # Only a host sets these, so a team setting or secret of the same name never reaches a bundle.
-HOST_SET_ENV = (GATE_AUTO_APPROVE_ENV, GIT_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV, REDACT_ENV,
-                *GIT_CONFIG_ENV, *PROXY_ENV)
+HOST_SET_ENV = (GATE_AUTO_APPROVE_ENV, GIT_VIA_PROXY_ENV, TOOLS_VIA_PROXY_ENV, LOCATION_KIND_ENV, LOCATION_LABEL_ENV,
+                REDACT_ENV, OVERRIDES_ENV, *GIT_CONFIG_ENV, *PROXY_ENV)
 
 INTERVAL_S = 2.0
 LEASE = timedelta(minutes=2)
@@ -135,6 +143,8 @@ CALLS_BUNDLE_VERSION = 2
 # Required by a job whose agent steps name a role. A runner has it when it reads roles/ (bundle_version 4).
 ROLES_CAPABILITY = "roles:v4"
 ROLES_BUNDLE_VERSION = 4
+# Required by a comparison run, so it runs only where a runner or environment type offers it, away from the review.
+EVAL_ARM = "eval-arm"
 # A runner that reads bundles of this version pauses runs at a gate and resumes them from a checkpoint.
 GATES_BUNDLE_VERSION = 3
 THREAD_ENV = "ARMATURE_THREAD"
@@ -200,7 +210,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
               key: str | None = None, not_before: datetime | None = None, supersede: bool = False,
               cancel_running: bool = False, sticky: Iterable[str] = (), rerun_of: str | None = None,
               requested_by: str | None = None, kind: str = "workflow", resident_id: str | None = None,
-              workflow_version: int | None = None) -> str:
+              workflow_version: int | None = None, arm_id: str | None = None) -> str:
     """Queue a workflow job at the workflow's current version, with its callees pinned. Returns the job id.
 
     ``resume`` is a gate id and the job that paused there: the new job continues that job's run, at the version,
@@ -209,6 +219,8 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
     ``kind`` and ``resident_id`` mark a resident's turn job; the workflow default leaves both as
     any existing caller queues. ``workflow_version`` pins the job to a version other than the
     workflow's current one, as a resident pinned at its creation version needs.
+
+    ``arm_id`` makes the job that comparison run: it requires EVAL_ARM and its run is in arm mode.
 
     Jobs of the workflow with the same ``key`` run one at a time. With ``supersede`` the new job replaces the key's
     queued ones and keeps any ``sticky`` input one of them set. With ``cancel_running`` it also asks the key's
@@ -227,8 +239,10 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
             row.current_version if row is not None else None)
         body = None if version is None else defs.body_of(conn, defs.WORKFLOW, workflow_id, version)
         pins, callees = calls.pin(conn, row.scope, body, row.name) if row is not None else ({}, [])
-        pinned = {"workflow_version": version, "call_pins": pins,
-                  "requires": requirements_with_calls(body, callees), "dry_run": dry_run}
+        requires = requirements_with_calls(body, callees)
+        if arm_id is not None:
+            requires = sorted({*(requires or ()), EVAL_ARM})
+        pinned = {"workflow_version": version, "call_pins": pins, "requires": requires, "dry_run": dry_run}
     job_id = new_id()
     same = (jobs.c.concurrency_key == key, jobs.c.workflow_id == workflow_id)
     older = conn.execute(select(jobs.c.id, jobs.c.inputs).where(*same, jobs.c.status == "queued")
@@ -242,7 +256,7 @@ def queue_job(conn: Connection, *, team_id: str, project_id: str | None, workflo
                                      inputs=inputs, status="queued", attempts=0, trigger_id=trigger_id,
                                      delivery_id=delivery_id, thread=thread, created_at=now, concurrency_key=key,
                                      not_before=not_before, rerun_of=rerun_of, requested_by=requested_by,
-                                     kind=kind, resident_id=resident_id,
+                                     kind=kind, resident_id=resident_id, arm_id=arm_id,
                                      **pinned))
     if older:
         conn.execute(update(jobs).where(jobs.c.id.in_([row.id for row in older]), jobs.c.status == "queued")
@@ -411,7 +425,8 @@ class Bundle:
 
     def env(self) -> dict[str, str]:
         """What the run's environment adds to the host's: settings, then secrets, then the event channel."""
-        env = {**self.settings, **self.secrets, "ARMATURE_EVENTS": self.events, "ARMATURE_EVENTS_TOKEN": self.token}
+        env = {**self.settings, **self.secrets, "ARMATURE_EVENTS": self.events, "ARMATURE_EVENTS_TOKEN": self.token,
+               SERVER_RUN_ID_ENV: self.run_id}
         if self.thread:
             env[THREAD_ENV] = self.thread
         return env
@@ -497,15 +512,22 @@ def _without_front_matter(body: str) -> str:
     return body[match.end():].lstrip("\n") if match else body
 
 
-def _provider_env(row: Any, credential: str | None) -> dict[str, str]:
+def _provider_env(row: Any, credential: str | None, model: str) -> dict[str, str]:
+    config = row.config or {}
     if row.kind == "claude-subscription" and credential:
         return {"CLAUDE_CODE_OAUTH_TOKEN": credential}
+    if row.kind == "anthropic" and credential and config.get("api_base"):
+        # The gateway serves only the models its aliases name, so Claude Code's own model choices are this one too.
+        key = "ANTHROPIC_AUTH_TOKEN" if config.get("auth") == "bearer" else "ANTHROPIC_API_KEY"
+        return {"ANTHROPIC_BASE_URL": config["api_base"], key: credential, "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": model, "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+                "ANTHROPIC_SMALL_FAST_MODEL": model, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     if row.kind == "anthropic" and credential:
         return {"ANTHROPIC_API_KEY": credential}
     if row.kind == "bedrock":
         if credential:
             return llm.bedrock_env(row, credential)
-        region = (row.config or {}).get("region")
+        region = config.get("region")
         return {"CLAUDE_CODE_USE_BEDROCK": "1", **({"AWS_REGION": region} if region else {})}
     if row.kind == "openai-compatible" and credential:
         return {"OPENAI_API_KEY": credential}
@@ -525,8 +547,22 @@ def agent_models(conn: Connection, keyring: Keyring, team_id: str, project_id: s
             raise JobError(f"The credential secret of the provider for {alias} is not set.")
         if not instance and defs.credential_team(row) is None and (row.config or {}).get("credential_secret"):
             raise JobError(f"The provider for {alias} uses a secret for all teams, and a team runner can't receive one.")
-        models[alias] = {"model": model, "env": _provider_env(row, defs.provider_credential(conn, keyring, row))}
+        if row.kind == "anthropic" and (row.config or {}).get("api_base") and not llm.saved_by_admin(conn, row):
+            raise JobError(f"The provider for {alias} has an api_base, which works only when an admin saved it.")
+        models[alias] = {"model": model, "provider": row.kind, "alias": alias,
+                         "env": _provider_env(row, defs.provider_credential(conn, keyring, row), model)}
+        prices = ((row.config or {}).get("prices") or {}).get(alias)
+        if prices:
+            models[alias]["prices"] = prices
     return {MODELS_ENV: json.dumps(models)} if models else {}
+
+
+def _arm_overrides(conn: Connection, job: Any) -> dict[str, dict[str, str]]:
+    """The model and effort a comparison run sets for each stage it changes, from its arm's row."""
+    if job.arm_id is None:
+        return {}
+    found = conn.execute(select(eval_arms.c.overrides).where(eval_arms.c.id == job.arm_id)).scalar()
+    return found if isinstance(found, dict) else {}
 
 
 def _trigger_ref(conn: Connection, job: Any, trigger: Any) -> tuple[str, dict[str, Any]]:
@@ -544,6 +580,24 @@ def _trigger_ref(conn: Connection, job: Any, trigger: Any) -> tuple[str, dict[st
                                                         ("trigger_id", job.trigger_id)) if value is not None}
 
 
+def _pull_subject(key: str | None) -> str | None:
+    """A job keyed by a pull request, such as ``owner/repo#12``, names it as the run's subject, which links it."""
+    return key if key and threads.PULL_SUBJECT.fullmatch(key) else None
+
+
+def _pull_title(conn: Connection, job: Any) -> dict[str, Any] | None:
+    """A pull request job's delivery names its title, which the run starts with until a step reports one."""
+    if _pull_subject(job.concurrency_key) is None or job.delivery_id is None:
+        return None
+    payload = conn.execute(select(webhook_deliveries.c.payload)
+                           .where(webhook_deliveries.c.id == job.delivery_id)).scalar()
+    try:
+        title = json.loads(payload or "")["pull_request"]["title"]
+    except (ValueError, TypeError, KeyError):
+        return None
+    return summary_patch({"title": title}) or None
+
+
 def _rerun_ref(conn: Connection, job: Any) -> tuple[str, dict[str, Any]] | None:
     """A rerun starts as the run it reruns did, since the trigger's seen keys still point at that run's job."""
     if job.rerun_of is None:
@@ -551,7 +605,7 @@ def _rerun_ref(conn: Connection, job: Any) -> tuple[str, dict[str, Any]] | None:
     row = conn.execute(select(runs.c.trigger_kind, runs.c.trigger_ref).where(runs.c.id == job.rerun_of)).first()
     if row is None or row.trigger_kind is None or not isinstance(row.trigger_ref, dict):
         return None
-    return row.trigger_kind, {k: v for k, v in row.trigger_ref.items() if k != "dry_run"}
+    return row.trigger_kind, {k: v for k, v in row.trigger_ref.items() if k not in ("dry_run", "arm_id")}
 
 
 def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime, lease: timedelta,
@@ -597,9 +651,13 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
     for name in [n for n in secret_values if n in (MODELS_ENV, GIT_HOSTS_ENV, PROJECT_REPO_ENV, *HOST_SET_ENV)
                  or n.startswith(GIT_CONFIG_ENTRIES)]:
         secret_values.pop(name)
+    overrides = _arm_overrides(conn, job)
     secret_values.update(agent_models(conn, keyring, job.team_id, job.project_id,
-                                      [a["model"] for a in steps if isinstance(a.get("model"), str)],
+                                      [a["model"] for a in steps if isinstance(a.get("model"), str)]
+                                      + [o["alias"] for o in overrides.values() if o.get("alias")],
                                       instance=instance_secrets))
+    if overrides:
+        secret_values[OVERRIDES_ENV] = json.dumps(overrides)
     if steps:
         secret_values[GIT_HOSTS_ENV] = ",".join(git_hosts(conn, job.team_id, job.project_id))
         repo = None if job.project_id is None else conn.execute(
@@ -622,13 +680,20 @@ def build_bundle(conn: Connection, keyring: Keyring, job: Any, *, now: datetime,
         trigger_kind, trigger_ref = _rerun_ref(conn, job) or _trigger_ref(conn, job, trigger)
         if job.dry_run:
             trigger_ref["dry_run"] = True
+        if job.arm_id is not None:
+            trigger_ref["arm_id"] = job.arm_id
         run_row, token = runners.open_run(conn, keyring, team_id=job.team_id, project_id=job.project_id,
                                           workflow_id=workflow.id, workflow_name=workflow.name, now=now,
                                           workflow_version=job.workflow_version, triggered_by=job.requested_by, actor=None,
                                           trigger_kind=trigger_kind, trigger_ref=trigger_ref,
                                           runner_key_id=runner_key_id, thread=job.thread, location=location,
-                                          rerun_of=job.rerun_of)
+                                          rerun_of=job.rerun_of, subject=_pull_subject(job.concurrency_key),
+                                          summary=_pull_title(conn, job))
         run_id = run_row["id"]
+        if job.arm_id is not None:
+            conn.execute(update(eval_arms).where(eval_arms.c.id == job.arm_id).values(arm_run_id=run_id,
+                                                                                     status="running"))
+        fixes.bind_run(conn, job, run_id, now)
     conn.execute(update(jobs).where(jobs.c.id == job.id).values(
         run_id=run_id, status="running", heartbeat_at=now, lease_expires_at=now + lease))
     return Bundle(job_id=job.id, run_id=run_id, token=token, events=events, workflow_id=workflow.id,

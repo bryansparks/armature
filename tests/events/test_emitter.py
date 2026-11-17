@@ -28,7 +28,7 @@ def http():
 def test_kind_table_is_disjoint_and_complete():
     assert not MUST_KEEP & DROPPABLE
     assert {"run_start", "run_end", "step_start", "step_end", "step_failed", "step_skipped",
-            "retry", "cost", "finding", "tool_call", "tool_result", "session_start",
+            "retry", "cost", "finding", "candidate", "tool_call", "tool_result", "session_start",
             "session_end", "error", "dropped", "artifact", "summary"} == MUST_KEEP
     assert {"text", "log", "progress"} == DROPPABLE
 

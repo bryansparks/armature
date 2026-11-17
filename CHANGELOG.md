@@ -10,14 +10,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Daily report.** Each morning the insights jobs daemon builds what
+  Armature learned the day before across every workflow, and what changed
+  in Armature and in each workflow's run configuration (migration 0036,
+  `daily_reports`). Admins read it on the Insights Daily report tab, and it's
+  written as a self-contained HTML file to `reports.dir`, by default
+  `~/armature-reports`. Cost always shows in it, even with
+  `display.show_cost` off. `reports.roots`, `reports.deploy_log`, and
+  `reports.live_sha` in the config file say what it fingerprints and reads.
+- **Resident rule fields and signals.** A resident webhook rule's `inputs`
+  now declare up to 8 scalar fields (`$.path` only) that reach the turn as
+  `_event.fields`, merged over the batch with the newest value winning, and
+  a rule's `signal: <name>` enqueues a named signal so `close_on` closes the
+  instance with no turn and asks its running turn to stop. The rule form
+  sets both and keeps them through a save.
+- **Review rounds and finding lineage.** Runs gain `review_round`,
+  `prev_round_run_id`, and `review_kind`, and findings gain `blocking` and
+  `lineage_key` (migration 0035). The server derives the run columns,
+  `lineage_key`, and a missing `head_sha` whenever a run ends and whenever
+  GitHub sync or a webhook stores a pull request's reviews or pushes. A
+  runner can't set the run columns or `lineage_key`. `blocking` comes from
+  the finding's own flag, else from its decision.
+- `armature server backfill-rounds` re-keys findings stored under the old
+  `sha256(path|line|body)` fallback key, then derives rounds, kinds, heads,
+  and lineage for every pull request's ended runs. Safe to rerun.
+- `ARMATURE_SERVER_RUN_ID` hands the server's run id to a run the worker,
+  runner, or a test run launches, and each trace row records it as
+  `server_run_id`.
 - `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
+
 ### Changed
 
+- A script stage of a run the server launched now gets the server's run id
+  in `ARMATURE_RUN_ID`, where it used to get the engine's local run id.
+- A finding event without a key is now keyed as `github.post-review` keys
+  it, so a runner's findings match the markers on GitHub. findings.md's
+  "Last decision" skips findings that record no decision, and includes a
+  runner's decisions on the same pull request.
 - Dashboard sessions now last 24 hours idle and 7 days in all, up from 30 minutes and 12 hours. `session_idle_hours` and `session_max_hours` in `server.yaml` set them, and the session cookie lasts as long as `session_max_hours`.
 - **Sidebar sections.** The web UI sidebar groups its pages into six
   sections: Inbox, Activity, Workflows, Events, Library, and Settings. A
   section with more than one page shows its pages as tabs at the top.
   Account now appears only in the top bar's account menu.
+
+### Fixed
+
+- Script steps no longer fail with "Argument list too long" on Linux once earlier stages' output passes 128 KiB. Every step gets `ARMATURE_CONTEXT_FILE`, a private temp file with the context JSON, and `ARMATURE_CONTEXT` stays inline only up to 64 KiB. A `with:` over 64 KiB arrives through `ARMATURE_WITH_FILE`, which `armature tool` reads.
 
 ## [0.11.0] - 2026-11-05
 

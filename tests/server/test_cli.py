@@ -260,6 +260,164 @@ def test_backfill_locations_marks_unplaceable_runs_unknown_once(tmp_path, monkey
     assert again.exit_code == 0 and "Located 0 runs." in again.output, again.output
 
 
+def test_backfill_rounds_reports_the_subjects_it_derived_and_the_findings_it_rekeyed(tmp_path, monkeypatch):
+    import hashlib
+
+    from sqlalchemy import insert, select
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import findings, projects, runs, teams
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, project, run_id = new_id(), new_id(), new_id()
+    legacy = hashlib.sha256(b"a.py|1|It leaks.").hexdigest()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", slug="own", created_at=utcnow()))
+        conn.execute(insert(projects).values(id=project, team_id=team, name="app", repo="acme/app",
+                                             created_at=utcnow()))
+        conn.execute(insert(runs).values(id=run_id, team_id=team, project_id=project, status="succeeded",
+                                         started_at=utcnow(), subject="acme/app#1"))
+        conn.execute(insert(findings).values(id=new_id(), run_id=run_id, project_id=project, finding_key=legacy,
+                                             path="a.py", line=1, body="It leaks."))
+    first = CliRunner().invoke(app, ["server", "backfill-rounds", "--config", str(config)])
+    assert first.exit_code == 0, first.output
+    assert "Derived the review rounds of 1 pull request and re-keyed 1 finding." in first.output
+    with engine.connect() as conn:
+        assert len(conn.execute(select(findings.c.finding_key)).scalar_one()) == 12
+    engine.dispose()
+    again = CliRunner().invoke(app, ["server", "backfill-rounds", "--config", str(config)])
+    assert again.exit_code == 0 and "re-keyed 0 findings." in again.output, again.output
+
+
+def test_backfill_candidates_reports_what_it_stored_and_skipped(tmp_path, monkeypatch):
+    from sqlalchemy import insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import run_steps, runs, teams, tool_calls
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, run_id = new_id(), new_id()
+    found = {"findings": [{"path": "a.py", "line": 1, "claim": "it leaks", "body": "b"}]}
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="own", slug="own", created_at=utcnow()))
+        conn.execute(insert(runs).values(id=run_id, team_id=team, status="succeeded", started_at=utcnow()))
+        conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=team, step_id="decisions",
+                                               tool="review.decisions", mode="live", outcome="ok",
+                                               created_at=utcnow()))
+        conn.execute(insert(run_steps).values([
+            {"run_id": run_id, "step_key": "correctness", "step_id": "correctness", "status": "succeeded",
+             "output": found},
+            {"run_id": run_id, "step_key": "security", "step_id": "security", "status": "succeeded",
+             "output": {**found, "_truncated": True}}]))
+    engine.dispose()
+    first = CliRunner().invoke(app, ["server", "backfill-candidates", "--config", str(config)])
+    assert first.exit_code == 0, first.output
+    assert ("Stored 1 candidates from 1 specialist steps, and matched 1 runs: 0 by key, 0 by path and claim, "
+            "1 unmatched. Skipped 1 truncated step outputs.") in first.output
+    again = CliRunner().invoke(app, ["server", "backfill-candidates", "--config", str(config)])
+    assert again.exit_code == 0 and "Stored 0 candidates" in again.output, again.output
+
+
+def test_label_findings_names_the_alias_it_chose_and_what_it_spent(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from sqlalchemy import insert
+
+    from armature.server import llm
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import (
+        finding_candidates,
+        labels,
+        providers,
+        runs,
+        teams,
+    )
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, run_id = new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="Mobile", slug="mobile", created_at=utcnow()))
+        conn.execute(insert(providers).values(id=new_id(), team_id=team, kind="anthropic", config={},
+                                              aliases={"lead": "claude-opus-5-5", "quick": "claude-haiku-5-5"},
+                                              created_at=utcnow(), updated_at=utcnow()))
+        conn.execute(insert(runs).values(id=run_id, team_id=team, status="succeeded", started_at=utcnow()))
+        conn.execute(insert(finding_candidates).values(id=new_id(), team_id=team, run_id=run_id,
+                                                       step_key="correctness", specialist="correctness", ordinal=0,
+                                                       claim="it leaks", created_at=utcnow()))
+    engine.dispose()
+    answer = {"labels": [{"id": "0", "category": "lifecycle-memory", "confidence": 0.8}]}
+    monkeypatch.setattr(llm, "litellm_completion", lambda **kwargs: SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(answer)))],
+        usage=SimpleNamespace(prompt_tokens=50, completion_tokens=5), _hidden_params={"response_cost": 0.002}))
+    missing = CliRunner().invoke(app, ["server", "label-findings", "--team", "web", "--config", str(config)])
+    assert missing.exit_code == 1 and "No team has the slug or name web." in missing.output
+    engine = make_engine(load_config(config).database_url)
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values([{"id": new_id(), "name": "Alpha", "slug": "beta", "created_at": utcnow()},
+                                           {"id": new_id(), "name": "beta", "slug": "gamma", "created_at": utcnow()}]))
+    engine.dispose()
+    clash = CliRunner().invoke(app, ["server", "label-findings", "--team", "beta", "--config", str(config)])
+    assert clash.exit_code == 1 and "is the slug of one team and the name of another" in clash.output, clash.output
+    done = CliRunner().invoke(app, ["server", "label-findings", "--team", "Mobile", "--config", str(config)])
+    assert done.exit_code == 0, done.output
+    assert "Labeling with quick, because its name or model (claude-haiku-5-5) suggests a small model." in done.output
+    assert "Labeled 1 with taxonomy v1 in 1 calls, 50 input and 5 output tokens, 0.0020 USD." in done.output
+    engine = make_engine(load_config(config).database_url)
+    with engine.connect() as conn:
+        row = conn.execute(select(labels)).one()
+    engine.dispose()
+    assert (row.label, row.labeler) == ("lifecycle-memory", "quick:anthropic/claude-haiku-5-5")
+
+
+def test_sync_github_claims_and_runs_each_matching_state(tmp_path, monkeypatch):
+    from datetime import timedelta
+
+    from sqlalchemy import insert
+
+    from armature.server.db import new_id, utcnow
+    from armature.server.db.schema import gh_repos, gh_sync_state, teams
+    from armature.server.insights import sync
+    config, result = _init(tmp_path, monkeypatch)
+    assert result.exit_code == 0, result.output
+    engine = make_engine(load_config(config).database_url)
+    team, repo = new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(teams).values(id=team, name="Mobile", slug="mobile", created_at=utcnow()))
+        conn.execute(insert(gh_repos).values(id=repo, team_id=team, gh_repo_id=4242, full_name="acme/app",
+                                             enabled=True, created_at=utcnow(), updated_at=utcnow()))
+        conn.execute(insert(gh_sync_state), [
+            {"id": new_id(), "team_id": team, "repo_row_id": repo, "kind": kind, "updated_at": utcnow(),
+             "next_run_at": None if kind == "backfill" else utcnow() - timedelta(minutes=1)} for kind in sync.KINDS])
+    engine.dispose()
+    ran = []
+    monkeypatch.setattr(sync, "run", lambda engine, keyring, state_id, lease, **kw: ran.append(state_id) or "ok")
+    wrong = CliRunner().invoke(app, ["server", "sync-github", "--team", "mobile", "--kind", "nightly",
+                                     "--config", str(config)])
+    assert wrong.exit_code == 1 and "--kind must be one of" in wrong.output
+    none = CliRunner().invoke(app, ["server", "sync-github", "--team", "mobile", "--repo", "acme/lib",
+                                    "--config", str(config)])
+    assert none.exit_code == 1 and "No enabled tracked repository" in none.output
+    poll = CliRunner().invoke(app, ["server", "sync-github", "--team", "mobile", "--kind", "poll",
+                                    "--config", str(config)])
+    assert (poll.exit_code, poll.output.splitlines(), len(ran)) == (0, ["acme/app poll: ok"], 1), poll.output
+    engine = make_engine(load_config(config).database_url)
+    with engine.begin() as conn:
+        conn.execute(gh_sync_state.update().values(next_run_at=utcnow() - timedelta(minutes=1))
+                     .where(gh_sync_state.c.kind != "backfill"))
+    engine.dispose()
+    ran.clear()
+    done = CliRunner().invoke(app, ["server", "sync-github", "--team", "Mobile", "--repo", "Acme/App",
+                                    "--config", str(config)])
+    assert done.exit_code == 0, done.output
+    assert done.output.splitlines() == ["acme/app backfill: done", "acme/app conflicts: ok", "acme/app gap_fill: ok",
+                                        "acme/app poll: ok"]
+    assert len(ran) == 3
+
+
 def test_runs_delete_needs_an_admin_and_can_dry_run(tmp_path, monkeypatch):
     from sqlalchemy import func, insert
 

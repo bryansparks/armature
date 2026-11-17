@@ -241,3 +241,37 @@ def test_parser_payload_wins_over_fields():
     parser = ClaudeStreamParser(recorder, "s", {"role": "beauty", "model": "ignored"})
     parser.feed('{"type":"system","subtype":"init","session_id":"s","model":"m"}')
     assert recorder.events == [("session_start", "s", {"role": "beauty", "model": "m", "session_id": "s"})]
+
+
+def test_cost_keeps_reported_and_requested_effort_and_model_usage():
+    recorder = Recorder()
+    parser = ClaudeStreamParser(recorder, "review", cost_fields={"requested_effort": "xhigh", "provider": "bedrock",
+                                                                 "alias": "opus", "unset": None})
+    parser.feed('{"type":"system","subtype":"init","session_id":"s","model":"claude-opus-5-5","effort":"high"}')
+    parser.feed(json.dumps({
+        "type": "result", "subtype": "success", "session_id": "s", "total_cost_usd": 0.5,
+        "usage": {"input_tokens": 10, "output_tokens": 2},
+        "modelUsage": {
+            "claude-opus-5-5": {"inputTokens": 10, "outputTokens": 2, "cacheReadInputTokens": 400,
+                                "cacheCreationInputTokens": 30, "webSearchRequests": 0, "costUSD": 0.45,
+                                "contextWindow": 200000},
+            "claude-haiku-5-5": {"inputTokens": 900, "outputTokens": 50, "costUSD": 0.05},
+            "bad": "not a mapping",
+        },
+    }))
+    by_kind = {kind: payload for kind, _, payload in recorder.events}
+    assert by_kind["session_start"]["effort"] == "high"
+    cost = by_kind["cost"]
+    assert cost["effort"] == "high" and cost["requested_effort"] == "xhigh"
+    assert (cost["provider"], cost["alias"]) == ("bedrock", "opus") and "unset" not in cost
+    assert cost["model_usage"] == {
+        "claude-opus-5-5": {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 400,
+                            "cache_creation_input_tokens": 30, "cost_usd": 0.45},
+        "claude-haiku-5-5": {"input_tokens": 900, "output_tokens": 50, "cost_usd": 0.05},
+    }
+
+
+def test_cost_leaves_out_effort_and_model_usage_the_cli_never_sent():
+    events = _parse(FIXTURE.read_text().splitlines())
+    [cost] = [payload for kind, _, payload in events if kind == "cost"]
+    assert not {"effort", "requested_effort", "model_usage", "provider", "alias"} & cost.keys()

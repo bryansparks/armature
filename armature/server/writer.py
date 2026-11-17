@@ -26,6 +26,7 @@ from armature.server import runners, threads
 from armature.server.db import new_id
 from armature.server.db.schema import (
     findings,
+    llm_calls,
     run_artifacts,
     run_events,
     run_steps,
@@ -73,6 +74,8 @@ class RunChange:
     end: tuple[str, datetime, str | None] | None = None
     steps: dict[str, StepChange] = field(default_factory=dict)
     findings: list[dict[str, Any]] = field(default_factory=list)
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    llm_calls: list[dict[str, Any]] = field(default_factory=list)
     artifacts: dict[str, dict[str, Any]] = field(default_factory=dict)
     summary: dict[str, Any] | None = None
     location: dict[str, Any] | None = None
@@ -250,18 +253,28 @@ class EventWriter:
     def _write(self, batch: Batch) -> None:
         try:
             self._transact(lambda conn: _apply(conn, batch))
-            return
         except Exception:
             if not self._reachable():
                 raise
             log.exception("run event flush failed with the database up, writing it in parts")
-        self._insert_bisect(batch.events)
-        for run_id, change in batch.runs.items():
+            self._insert_bisect(batch.events)
+            for run_id, change in batch.runs.items():
+                try:
+                    self._transact(lambda conn, r=run_id, c=change: _apply_run(conn, r, c))
+                except Exception:
+                    self.dropped_changes += 1
+                    log.exception("dropping the run, step, and finding changes of run %s", run_id)
+        self._derive_rounds(batch)
+
+    def _derive_rounds(self, batch: Batch) -> None:
+        # After the batch commits, so a sync deriving the same pull request sees these runs as ended.
+        from armature.server import rounds
+        for run_id in [r for r, change in batch.runs.items() if change.end is not None]:
             try:
-                self._transact(lambda conn, r=run_id, c=change: _apply_run(conn, r, c))
+                self._transact(lambda conn, r=run_id: rounds.run_ended(conn, r))
             except Exception:
-                self.dropped_changes += 1
-                log.exception("dropping the run, step, and finding changes of run %s", run_id)
+                # The batch is stored, so a failure here must not send it round again.
+                log.exception("could not derive the review rounds after run %s ended", run_id)
 
     def _insert_bisect(self, events: list[dict[str, Any]]) -> None:
         if not events:
@@ -288,6 +301,8 @@ def _merge_run(into: RunChange, change: RunChange) -> None:
     for key, step in change.steps.items():
         merge_step(into.steps.setdefault(key, StepChange(step_id=step.step_id)), step)
     into.findings.extend(change.findings)
+    into.candidates.extend(change.candidates)
+    into.llm_calls.extend(change.llm_calls)
     into.artifacts.update(change.artifacts)
     if change.summary:
         into.summary = merge_summary(into.summary, change.summary)
@@ -364,8 +379,10 @@ def _apply_run(conn: Connection, run_id: str, change: RunChange) -> None:
                      .values(status="running", finished_at=None))
     for key, step in change.steps.items():
         _upsert_step(conn, run_id, key, step)
-    if change.findings:
-        conn.execute(insert(findings), [{"id": new_id(), "run_id": run_id, **f} for f in change.findings])
+    if change.candidates or change.findings:
+        _record_findings(conn, run_id, change)
+    if change.llm_calls:
+        _insert_llm_calls(conn, run_id, change.llm_calls)
     for name, artifact in change.artifacts.items():
         conn.execute(delete(run_artifacts).where(run_artifacts.c.run_id == run_id, run_artifacts.c.name == name))
         conn.execute(insert(run_artifacts).values(run_id=run_id, **artifact))
@@ -374,6 +391,29 @@ def _apply_run(conn: Connection, run_id: str, change: RunChange) -> None:
         # Imported here, since the broker imports ingest, which imports this module.
         from armature.server import broker
         broker.run_ended(run_id)
+
+
+def _record_findings(conn: Connection, run_id: str, change: RunChange) -> None:
+    # Imported here, since the matcher's module imports ingest, which imports this module.
+    from armature.server.insights import candidates
+
+    added = candidates.store(conn, run_id, change.candidates) if change.candidates else 0
+    if change.findings:
+        conn.execute(insert(findings), [{"id": new_id(), "run_id": run_id, **f} for f in change.findings])
+    # Candidates that arrive after the run's decisions match them now, not only at the next backfill.
+    if change.findings or added:
+        candidates.rematch(conn, run_id)
+
+
+def _insert_llm_calls(conn: Connection, run_id: str, calls: list[dict[str, Any]]) -> None:
+    # Skips seqs already stored, as when a batch is applied again after an ambiguous commit. Only this thread inserts.
+    new = {call["seq"]: call for call in calls}
+    stored = set(conn.execute(select(llm_calls.c.seq).where(llm_calls.c.run_id == run_id,
+                                                            llm_calls.c.seq.in_(list(new)))).scalars())
+    rows = [{"id": new_id(), "run_id": run_id, **call, "cost_usd": _money(call["cost_usd"])}
+            for seq, call in new.items() if seq not in stored]
+    if rows:
+        conn.execute(insert(llm_calls), rows)
 
 
 def server_outcome(conn: Connection, run_id: str, outcome: str) -> None:

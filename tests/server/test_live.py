@@ -4,6 +4,7 @@ import os
 import stat
 import threading
 import time
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import func, insert, select, update
@@ -14,7 +15,10 @@ from armature.server import secrets as secret_store
 from armature.server.db import new_id
 from armature.server.db.schema import (
     audit,
+    candidate_matches,
+    finding_candidates,
     findings,
+    llm_calls,
     memberships,
     projects,
     run_events,
@@ -22,8 +26,12 @@ from armature.server.db.schema import (
     run_tokens,
     runs,
     teams,
+    tool_calls,
     workflows,
 )
+from armature.server.ingest import MAX_CANDIDATES, candidate_row, llm_call_row
+from armature.server.tools.review import finding_key
+from armature.server.writer import RunChange, _apply_run
 from tests.server.app_support import Clock, add_membership, add_user
 from tests.server.live_support import (
     SSE,
@@ -231,7 +239,7 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
                             "rerun", "can_rerun",
                             "cancelled_by", "error", "subject", "thread", "summary", "last_seq", "dry_run", "kind",
                             "links", "trigger", "outcome", "outcome_source", "risk", "risk_reasons",
-                            "head_sha", "location", "host_run"}
+                            "head_sha", "location", "review_round", "prev_round_run_id", "review_kind", "host_run"}
     assert summary["dry_run"] is False and summary["kind"] == "review"
     assert (summary["status"], summary["error"], summary["workflow"], summary["triggered_by"]) == \
         ("failed", "build broke", "pr-review", "octocat")
@@ -250,6 +258,77 @@ def test_ingest_writes_summary_on_run_end(live, world, keyring, clock):
     assert post(http, token, line("log", None, text="late")) == {"accepted": 0, "rejected": 1, "duplicates": 0}
     listed = viewer.get("/api/runs", params={"status": "failed"}).json()["runs"]
     assert listed[0]["id"] == run["run_id"] and listed[0]["workflow"] == "pr-review"
+
+
+def test_cost_events_record_what_ran_once_each_and_the_run_detail_shows_it(live, world, clock):
+    http = live.client()
+    run = register(http, world["key"])
+    attempts = [{"tier": "small", "model": "gpt-4o-mini", "input_tokens": 50, "output_tokens": 10, "cost_usd": 0.001,
+                 "outcome": "parse_error"},
+                {"tier": "large", "model": "anthropic/claude-opus-5-5", "input_tokens": 60, "output_tokens": 12,
+                 "cost_usd": 0.02, "outcome": "ok"}]
+    usage = {"claude-sonnet-5-5": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.4, "junk": "x"}}
+    post(http, run["token"],
+         line("step_start", "judge"),
+         line("cost", "judge", model="anthropic/claude-opus-5-5", input_tokens=60, output_tokens=12, cost_usd=0.021,
+              tier="large", provider="anthropic", requested_effort="high", attempts=attempts, escalation_index=1,
+              cached=True),
+         line("step_start", "review"),
+         line("cost", "review", model="claude-sonnet-5-5", input_tokens=10, output_tokens=2, cost_usd=0.4,
+              effort="medium", requested_effort="high", provider="anthropic", alias="sonnet", model_usage=usage),
+         line("cost", "review", model="claude-opus-5-5", input_tokens=10, output_tokens=2, cost_usd=0.1,
+              effort="xhigh", requested_effort="max", provider="bedrock", alias="opus"),
+         line("step_start", "build"))
+    live.flush()
+    with live.engine.connect() as conn:
+        rows = conn.execute(select(llm_calls).where(llm_calls.c.run_id == run["run_id"])
+                            .order_by(llm_calls.c.seq)).all()
+    assert [(r.seq, r.step_key, r.team_id) for r in rows] == [
+        (2, "judge", world["team"]), (4, "review", world["team"]), (5, "review", world["team"])]
+    judge, review, _ = rows
+    assert (judge.model_id, judge.provider, judge.tier, judge.requested_effort, judge.reported_effort,
+            judge.escalation_index, judge.cached) == ("anthropic/claude-opus-5-5", "anthropic", "large", "high",
+                                                      None, 1, True)
+    assert float(judge.cost_usd) == pytest.approx(0.021) and judge.input_tokens == 60
+    assert [a["outcome"] for a in judge.attempts] == ["parse_error", "ok"]
+    assert (review.alias, review.requested_effort, review.reported_effort, review.cached) == (
+        "sonnet", "high", "medium", False)
+    assert review.model_usage == {"claude-sonnet-5-5": {"input_tokens": 10, "output_tokens": 2, "cost_usd": 0.4}}
+
+    replay = RunChange(llm_calls=[
+        llm_call_row(world["team"], seq, "judge", clock(), {"model": "other"}, 9.0, 1, 1) for seq in (2, 99)])
+    with live.engine.begin() as conn:
+        _apply_run(conn, run["run_id"], replay)
+    with live.engine.connect() as conn:
+        stored = {r.seq: r for r in conn.execute(select(llm_calls).where(llm_calls.c.run_id == run["run_id"]))}
+    assert sorted(stored) == [2, 4, 5, 99]
+    assert stored[2].model_id == "anthropic/claude-opus-5-5" and float(stored[2].cost_usd) == pytest.approx(0.021)
+    assert stored[99].model_id == "other"
+
+    steps = {s["step_id"]: s for s in live.client(world["users"]["viewer"])
+             .get(f"/api/runs/{run['run_id']}").json()["steps"]}
+    fields = ("model", "provider", "alias", "tier", "requested_effort", "reported_effort")
+    assert {k: steps["review"][k] for k in fields} == {
+        "model": "claude-opus-5-5", "provider": "bedrock", "alias": "opus", "tier": None, "requested_effort": "max",
+        "reported_effort": "xhigh"}
+    assert {k: steps["build"][k] for k in fields} == dict.fromkeys(fields)
+
+
+def test_llm_call_row_caps_hostile_payloads():
+    payload = {"model": "m\x00x", "provider": "\x00", "alias": "a\x00b", "tier": "t\x00",
+               "attempts": [{"tier": "small", "model": "x\x00y", "input_tokens": True, "output_tokens": 2 ** 40,
+                             "outcome": "ok"}] * 40,
+               "model_usage": {f"m{i}\x00": {"input_tokens": 1, "cost_usd": 0.1} for i in range(40)}}
+    now = datetime(2026, 11, 13, tzinfo=UTC)
+    row = llm_call_row("team", 1, "step\x00", now, {**payload, "escalation_index": True}, 0.0, 0, 0)
+    assert len(row["attempts"]) == 16 and len(row["model_usage"]) == 16
+    assert row["escalation_index"] is None
+    assert (row["model_id"], row["provider"], row["alias"], row["tier"], row["step_key"]) == (
+        "mx", None, "ab", "t", "step")
+    assert row["attempts"][0]["model"] == "xy" and row["attempts"][0]["input_tokens"] == 0
+    assert "m0" in row["model_usage"] and row["cached"] is False
+    assert llm_call_row("team", 1, None, now, {"escalation_index": 2 ** 40}, 0.0, 0, 0)["escalation_index"] is None
+    assert llm_call_row("team", 1, None, now, {"escalation_index": 2}, 0.0, 0, 0)["escalation_index"] == 2
 
 
 def test_token_is_bound_to_its_run(live, world):
@@ -543,7 +622,7 @@ def test_step_end_outputs_are_stored_with_fan_out_branches_as_a_list(live, world
 def test_registration_stores_subject_and_trigger_ref(live, world):
     http = live.client()
     ref = {"repo": "fs-eng/android-tree", "number": 123, "draft": False, "job": {"mode": "fix"}, "dry_run": True,
-           "source": "spoofed"}
+           "source": "spoofed", "arm_id": "an-arm-the-runner-made-up"}
     run = register(http, world["key"], subject="fs-eng/android-tree#123", trigger_ref=ref)
     with live.engine.connect() as conn:
         row = conn.execute(select(runs.c.subject, runs.c.trigger_ref).where(runs.c.id == run["run_id"])).one()
@@ -614,6 +693,21 @@ def test_outcome_reaches_the_run_and_its_list_row_but_a_runner_never_sets_risk(l
     assert [(r["outcome"], r["risk"]) for r in listed] == [("pushed", None)]
 
 
+@pytest.mark.parametrize(("column", "value"), [("head_sha", "a" * 40), ("review_round", 1),
+                                               ("prev_round_run_id", "0" * 36), ("review_kind", "full")])
+def test_a_runner_never_sets_a_runs_head_or_review_round(live, world, column, value):
+    http = live.client()
+    run = register(http, world["key"])
+    for sent in ([line("summary", None, **{column: value}), line("summary", None, fields={column: value})],
+                 [line("run_end", None, status="succeeded", **{column: value})]):
+        post(http, run["token"], *sent)
+        live.flush()
+        with live.engine.connect() as conn:
+            assert conn.execute(select(runs.c[column]).where(runs.c.id == run["run_id"])).scalar() is None
+    detail = live.client(world["users"]["viewer"]).get(f"/api/runs/{run['run_id']}").json()["run"]
+    assert detail[column] is None
+
+
 def test_a_server_outcome_is_never_replaced_by_a_runner_summary(live, world):
     from armature.server.writer import server_outcome
     http = live.client()
@@ -654,6 +748,13 @@ def test_a_server_outcome_reaches_open_run_pages_and_the_live_summary(live, worl
     assert (summary["outcome"], summary["outcome_source"], summary["risk"]) == ("blocked", "server", "high")
 
 
+def _wait_for_writes(live, run_id):
+    deadline = time.monotonic() + 5
+    while not live.hub.writer.pending(run_id, 0) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    live.flush()
+
+
 def test_server_findings_join_a_live_run_as_its_own_finding_events(live, world):
     from armature.server.db.schema import findings
     http = live.client()
@@ -661,15 +762,15 @@ def test_server_findings_join_a_live_run_as_its_own_finding_events(live, world):
     post(http, run["token"], line("log", None, text="hi"))
     live.flush()
     live.hub.server_findings(run["run_id"], "decisions", [{"claim": "kept", "decision": "block", "reason": "r"}])
-    deadline = time.monotonic() + 5
-    while not live.hub.writer.pending(run["run_id"], 0) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    live.flush()
-    kinds = [(e.kind, e.step_id) for e in _stored(live.engine, run["run_id"])]
-    assert ("finding", "decisions") in kinds
+    live.hub.server_findings(run["run_id"], "decisions", [{"claim": "later", "decision": "drop", "reason": "r"}],
+                             "second")
+    _wait_for_writes(live, run["run_id"])
+    events = [(e.kind, e.step_id, (e.payload or {}).get("parent_step")) for e in _stored(live.engine, run["run_id"])]
+    assert ("finding", "decisions", None) in events and ("finding", "decisions", "second") in events
     with live.engine.connect() as conn:
-        row = conn.execute(select(findings).where(findings.c.run_id == run["run_id"])).one()
-    assert (row.decision, row.reason, row.step_id) == ("block", "r", "decisions")
+        rows = {r.body: r for r in conn.execute(select(findings).where(findings.c.run_id == run["run_id"]))}
+    assert (rows["kept"].decision, rows["kept"].reason, rows["kept"].step_id) == ("block", "r", "decisions")
+    assert rows["later"].step_id == "second/decisions"
 
 
 def test_server_findings_for_a_run_that_left_the_hub_are_still_stored(live, world):
@@ -684,6 +785,36 @@ def test_server_findings_for_a_run_that_left_the_hub_are_still_stored(live, worl
             found = conn.execute(select(findings).where(findings.c.run_id == run["run_id"])).first()
         time.sleep(0.02)
     assert found is not None and (found.decision, found.step_id) == ("suggest", "decisions")
+
+
+def test_server_findings_for_a_run_the_hub_never_held_carry_their_round(live, world):
+    run = register(live.client(), world["key"])
+    live.hub._runs.pop(run["run_id"], None)
+    live.hub.server_findings(run["run_id"], "decisions", [{"claim": "kept", "decision": "block", "reason": "r"}],
+                             "first")
+    with live.engine.connect() as conn:
+        assert conn.execute(select(findings.c.step_id).where(findings.c.run_id == run["run_id"])).scalar_one() == \
+            "first/decisions"
+
+
+def test_a_finding_without_a_key_is_keyed_as_github_post_review_keys_it_and_says_whether_it_blocks():
+    from armature.server.ingest import finding_row
+    now = datetime(2026, 11, 16, tzinfo=UTC)
+
+    def row(**payload):
+        return finding_row("p", "team_lead", now, {"path": "a.py", "line": 3, "body": "It leaks.", **payload})
+
+    assert row(claim="the handle leaks")["finding_key"] == finding_key({"path": "a.py", "claim": "the handle leaks"})
+    assert row()["finding_key"] == finding_key({"path": "a.py", "body": "It leaks."})
+    message_only = finding_row("p", "team_lead", now, {"path": "a.py", "message": "It leaks."})
+    assert message_only["finding_key"] == finding_key({"path": "a.py", "body": "It leaks."}) != finding_key(
+        {"path": "a.py"})
+    assert row(finding_key="0123456789ab", lineage_key="x")["finding_key"] == "0123456789ab"
+    assert "lineage_key" not in row(lineage_key="x")
+    assert [row(**p)["blocking"] for p in ({"decision": "block"}, {"decision": "suggest"}, {"decision": "drop"},
+                                           {}, {"decision": "suggest", "blocking": True},
+                                           {"decision": "block", "blocking": False}, {"blocking": "yes"})] == [
+        True, False, None, None, True, False, None]
 
 
 def test_findings_keep_the_leads_decision(live, world):
@@ -702,6 +833,122 @@ def test_findings_keep_the_leads_decision(live, world):
         ("fixed", ["security"], sha, "r")
     assert rows["b.py"].decision == "drop"
     assert (rows["c.py"].decision, rows["c.py"].fix_sha, rows["c.py"].raised_by) == (None, None, None)
+
+
+CACHE = "the cache is never cleared on sign-out; nothing calls signedOut()"
+
+
+def _decisions_called(live, world, run_id):
+    with live.engine.begin() as conn:
+        conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=world["team"], step_id="decisions",
+                                               tool="review.decisions", mode="live", outcome="ok",
+                                               created_at=datetime.now(UTC)))
+
+
+def test_candidates_are_stored_once_never_as_decisions_and_match_the_leads(live, world, clock):
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"],
+         line("candidate", "correctness", parent_step="first", ordinal=0, specialist="correctness", path="M.kt",
+              line=7, severity="high", blocking=True, claim=CACHE, body="b", suggestion="s"),
+         line("candidate", "correctness", parent_step="first", ordinal=1, specialist="correctness", path="N.kt",
+              line=3, claim="rename the helper"),
+         line("candidate", "security", parent_step="first", ordinal=0, specialist="security", path="M.kt", line=9,
+              claim="one user's memories can show to the next user on a shared device."),
+         line("candidate", "test_adequacy", parent_step="first", ordinal=0, specialist="test_adequacy",
+              path="M.kt", line=9, claim="signedOut() is untested"),
+         line("candidate", "correctness", parent_step="first", ordinal=MAX_CANDIDATES, claim="over the cap"),
+         line("candidate", "correctness", parent_step="first", ordinal=True, claim="not an ordinal"),
+         line("candidate", None, ordinal=0, claim="no step"))
+    live.flush()
+    with live.engine.connect() as conn:
+        rows = {(r.step_key, r.ordinal): r for r in conn.execute(
+            select(finding_candidates).where(finding_candidates.c.run_id == run["run_id"]))}
+        assert conn.execute(select(findings).where(findings.c.run_id == run["run_id"])).first() is None
+    assert sorted(rows) == [("first/correctness", 0), ("first/correctness", 1), ("first/security", 0),
+                            ("first/test_adequacy", 0)]
+    cache = rows[("first/correctness", 0)]
+    assert (cache.team_id, cache.specialist, cache.path, cache.line, cache.severity, cache.blocking, cache.body,
+            cache.suggestion) == (world["team"], "correctness", "M.kt", 7, "high", True, "b", "s")
+    assert cache.finding_key == finding_key({"path": "M.kt", "claim": CACHE})
+
+    _decisions_called(live, world, run["run_id"])
+    live.hub.server_findings(run["run_id"], "decisions", [
+        {"claim": "The cache is never cleared on sign-out, so the next user sees the previous user's memories.",
+         "path": "M.kt", "raised_by": ["correctness", "security"], "decision": "block", "reason": "r"},
+        {"claim": "signedOut() is untested", "path": "M.kt", "raised_by": ["team_lead"], "decision": "suggest",
+         "reason": "r", "finding_key": finding_key({"path": "M.kt", "claim": "signedOut() is untested"})}], "first")
+    _wait_for_writes(live, run["run_id"])
+    with live.engine.connect() as conn:
+        decided = {r.body[:3]: r.id for r in conn.execute(select(findings).where(findings.c.run_id == run["run_id"]))}
+        matched = {(r.step_key, r.ordinal): (r.method, r.finding_id, r.match_ordinal) for r in conn.execute(
+            select(finding_candidates.c.step_key, finding_candidates.c.ordinal, candidate_matches.c.method,
+                   candidate_matches.c.finding_id, candidate_matches.c.match_ordinal)
+            .join(candidate_matches, candidate_matches.c.candidate_id == finding_candidates.c.id)
+            .where(finding_candidates.c.run_id == run["run_id"]))}
+    assert matched == {("first/correctness", 0): ("heuristic", decided["The"], 0),
+                       ("first/security", 0): ("heuristic", decided["The"], 0),
+                       ("first/test_adequacy", 0): ("key", decided["sig"], 0),
+                       ("first/correctness", 1): ("none", None, 0)}
+
+    replay = RunChange(candidates=[
+        candidate_row(world["team"], None, "first/correctness", "correctness", clock(), {"ordinal": o, "claim": "x"})
+        for o in (0, 5)])
+    with live.engine.begin() as conn:
+        _apply_run(conn, run["run_id"], replay)
+    with live.engine.connect() as conn:
+        stored = {r.ordinal: r.claim for r in conn.execute(select(finding_candidates).where(
+            finding_candidates.c.run_id == run["run_id"], finding_candidates.c.step_key == "first/correctness"))}
+    assert stored == {0: CACHE, 1: "rename the helper", 5: "x"}
+
+
+def test_candidates_arriving_after_the_decisions_match_them_without_a_backfill(live, world):
+    http = live.client()
+    run = register(http, world["key"])
+    _decisions_called(live, world, run["run_id"])
+    live.hub.server_findings(run["run_id"], "decisions", [
+        {"claim": "signedOut() is untested", "path": "M.kt", "raised_by": ["test_adequacy"], "decision": "suggest",
+         "reason": "r", "finding_key": finding_key({"path": "M.kt", "claim": "signedOut() is untested"})}])
+    _wait_for_writes(live, run["run_id"])
+    post(http, run["token"],
+         line("candidate", "test_adequacy", ordinal=0, specialist="test_adequacy", path="M.kt", line=9,
+              claim="signedOut() is untested"),
+         line("candidate", "test_adequacy", ordinal=1, specialist="test_adequacy", path="N.kt", claim="other"))
+    live.flush()
+    with live.engine.connect() as conn:
+        decided = conn.execute(select(findings.c.id).where(findings.c.run_id == run["run_id"])).scalar_one()
+        matched = sorted((r.ordinal, r.method, r.finding_id) for r in conn.execute(
+            select(finding_candidates.c.ordinal, candidate_matches.c.method, candidate_matches.c.finding_id)
+            .join(candidate_matches, candidate_matches.c.candidate_id == finding_candidates.c.id)
+            .where(finding_candidates.c.run_id == run["run_id"])))
+    assert matched == [(0, "key", decided), (1, "none", None)]
+
+
+def test_each_fan_out_branch_keeps_its_own_candidates(live, world):
+    http = live.client()
+    run = register(http, world["key"])
+    post(http, run["token"],
+         line("candidate", "review", ordinal=0, branch=0, branches=2, specialist="correctness", claim="a"),
+         line("candidate", "review", ordinal=0, branch=1, branches=2, specialist="security", claim="b"),
+         line("candidate", "review", ordinal=0, branch=1, branches=2, specialist="security", claim="retried"))
+    live.flush()
+    with live.engine.connect() as conn:
+        rows = sorted((r.step_key, r.ordinal, r.specialist, r.claim) for r in conn.execute(
+            select(finding_candidates).where(finding_candidates.c.run_id == run["run_id"])))
+    assert rows == [("review#0", 0, "correctness", "a"), ("review#1", 0, "security", "b")]
+
+
+def test_candidate_row_caps_hostile_payloads():
+    now = datetime(2026, 11, 13, tzinfo=UTC)
+    row = candidate_row("team", "project", "s" * 191, "step", now,
+                        {"ordinal": 3, "specialist": "x\x00" * 50, "path": "p\x00", "line": 2 ** 40, "blocking": "yes",
+                         "claim": "c" * 5000, "body": "b" * 70_000, "severity": "high" * 9})
+    assert (row["specialist"], row["path"], row["line"], row["blocking"]) == ("x" * 50, "p", None, None)
+    assert (len(row["claim"]), len(row["body"]), len(row["severity"])) == (2000, 60_000, 16)
+    assert candidate_row("team", None, "k", "step", now, {"ordinal": 0, "line": "7"})["line"] is None
+    assert candidate_row("team", None, "k", "step", now, {"ordinal": 0})["specialist"] == "step"
+    for bad in (-1, MAX_CANDIDATES, True, "0", None):
+        assert candidate_row("team", None, "k", "step", now, {"ordinal": bad}) is None
 
 
 def test_summary_is_redacted(live, world, keyring):

@@ -77,7 +77,8 @@ def boom(monkeypatch):
 
 def test_the_database_only_tools_resolve_no_connection(app, sqlite_engine, run, vendor, boom):
     assert {name for name, spec in registry().items() if spec.kind == NONE} == {
-        "review.decisions", "review.record-risk", "review.record-post", "review.record-mark", "review.is-marked"}
+        "review.decisions", "review.record-risk", "review.record-post", "review.record-mark", "review.is-marked",
+        "insights.fix-context", "insights.fix-patch", "insights.fix-risk", "insights.fix-apply"}
     _risk(app, run)
     _post(app, run)
     assert _mark(app, run)["marked"] is True
@@ -408,3 +409,28 @@ def test_a_dry_run_records_a_mark_without_writing_one(app, sqlite_engine, keyrin
     assert _mark(app, run)["dry_run"] is True
     assert _marks(sqlite_engine) == [] and _is_marked(app, run)["valid"] is False
     assert _row(sqlite_engine, run.id).risk == "low"
+
+
+def test_a_recorded_post_credits_armature_with_the_review_its_webhook_stored(app, sqlite_engine, world, run, clock):
+    from armature.server.db.schema import gh_pull_requests, gh_repos, gh_reviews
+    from tests.server.tool_support import BOT
+    repo, pr, review = new_id(), new_id(), new_id()
+    now = clock()
+    with sqlite_engine.begin() as conn:
+        conn.execute(insert(gh_repos).values(id=repo, team_id=world.team, gh_repo_id=1, full_name=REPO.lower(),
+                                             enabled=True, created_at=now, updated_at=now))
+        conn.execute(insert(gh_pull_requests).values(
+            id=pr, team_id=world.team, repo_row_id=repo, gh_pr_id=2, number=NUMBER, author_gh_id=3,
+            author_login="octo", state="open", created_at_gh=now, gh_updated_at=now, created_at=now, updated_at=now))
+        conn.execute(insert(gh_reviews).values(id=review, team_id=world.team, pr_row_id=pr, gh_review_id=55,
+                                               reviewer_gh_id=9001, reviewer_login=BOT, state="commented",
+                                               head_sha=HEAD, submitted_at=now, created_at=now, updated_at=now))
+    _post(app, run, approved=False, review_id=55)
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(gh_reviews.c.actor_source).where(gh_reviews.c.id == review)).scalar() == "armature"
+
+
+def test_a_posted_reviews_row_keeps_its_review_id():
+    params = {"head": HEAD, "number": NUMBER}
+    assert marks.review_detail(params, {"posted": True, "review_id": 77})["review_id"] == 77
+    assert "review_id" not in marks.review_detail(params, {"posted": False, "review_id": 77})

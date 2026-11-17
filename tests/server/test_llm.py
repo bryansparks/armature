@@ -42,12 +42,13 @@ class FakeLitellm:
     def __init__(self, *answers):
         self.answers = list(answers) or [{"body": "ok"}]
         self.calls = []
+        self.usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7)
 
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
         content = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(content)))],
-                               usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7),
+                               usage=self.usage,
                                _hidden_params={"response_cost": 0.0125})
 
 
@@ -297,3 +298,80 @@ def test_ollama_without_api_base_needs_an_admin_save(engine, keyring, fake_litel
     _saved_by(engine, keyring, clock, provider, is_admin=True)
     _call(engine, keyring, team)
     assert "api_base" not in fake_litellm.calls[0]
+
+
+def _gateway(engine, keyring, clock, team, auth=None, prices=None, by_admin=True):
+    config = {"api_base": "https://gw.example.com", "credential_secret": "GW_TOKEN",
+              **({"auth": auth} if auth else {}), **({"prices": prices} if prices else {})}
+    provider = _provider(engine, keyring, clock, team, "anthropic", config, {"lead": "gateway-model"},
+                         secret="gw-token")
+    _saved_by(engine, keyring, clock, provider, is_admin=by_admin)
+    return provider
+
+
+def test_an_anthropic_gateway_gets_its_api_base_and_the_key_as_x_api_key(engine, keyring, fake_litellm):
+    clock = Clock()
+    team = _team(engine, clock)
+    _gateway(engine, keyring, clock, team)
+    _call(engine, keyring, team)
+    call = fake_litellm.calls[0]
+    assert (call["model"], call["api_base"], call["api_key"]) == (
+        "anthropic/gateway-model", "https://gw.example.com", "gw-token")
+    assert "extra_headers" not in call and "client" not in call
+
+
+def test_a_bearer_gateway_sends_the_credential_only_as_a_bearer_token(engine, keyring, monkeypatch):
+    import httpx
+    seen = []
+
+    def gateway(request):
+        seen.append(request)
+        return httpx.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "gateway-model",
+            "content": [{"type": "text", "text": json.dumps({"body": "via gateway"})}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 12, "output_tokens": 3}})
+    real = llm.bearer_client
+    monkeypatch.setattr(llm, "bearer_client", lambda: real(httpx.MockTransport(gateway)))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "server-key")
+    clock = Clock()
+    team = _team(engine, clock)
+    _gateway(engine, keyring, clock, team, auth="bearer")
+    result = _call(engine, keyring, team)
+    assert result.data == {"body": "via gateway"} and (result.input_tokens, result.output_tokens) == (12, 3)
+    [request] = seen
+    assert str(request.url).startswith("https://gw.example.com/")
+    assert request.headers["authorization"] == "Bearer gw-token"
+    assert "x-api-key" not in request.headers and "server-key" not in str(request.headers)
+
+
+def test_an_anthropic_gateway_a_non_admin_saved_is_refused_at_call_time(engine, keyring, fake_litellm):
+    clock = Clock()
+    team = _team(engine, clock)
+    provider = _gateway(engine, keyring, clock, team, by_admin=False)
+    with pytest.raises(llm.LLMError, match="admin") as refused:
+        _call(engine, keyring, team)
+    assert refused.value.status == 400 and fake_litellm.calls == []
+    clock.advance(seconds=5)
+    _saved_by(engine, keyring, clock, provider, is_admin=True)
+    _call(engine, keyring, team)
+    assert len(fake_litellm.calls) == 1
+
+
+def test_provider_prices_replace_the_reported_cost_of_a_one_shot_call(engine, keyring, fake_litellm, tmp_path,
+                                                                      monkeypatch):
+    clock = Clock()
+    team = _team(engine, clock)
+    prices = {"lead": {"input": 1000, "output": 2000}}
+    _gateway(engine, keyring, clock, team, prices=prices)
+    # litellm's 11 prompt tokens include the cached ones.
+    fake_litellm.usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7, cache_read_input_tokens=4)
+    assert _call(engine, keyring, team).cost_usd == pytest.approx((7 * 1000 + 7 * 2000) / 1e6)
+    fake_litellm.usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7,
+                                         prompt_tokens_details=SimpleNamespace(cached_tokens=4))
+    assert _call(engine, keyring, team).cost_usd == pytest.approx((7 * 1000 + 7 * 2000) / 1e6)
+    other = _team(engine, clock)
+    _provider(engine, keyring, clock, other, "claude-subscription",
+              {"credential_secret": "CLAUDE_OAUTH", "prices": {"lead": {"input": 1000, "output": 2000}}},
+              {"lead": "claude-opus-5-5"}, secret="oauth-token")
+    _fake_claude(tmp_path, monkeypatch)
+    assert _call(engine, keyring, other).cost_usd == pytest.approx((5 * 1000 + 4 * 2000) / 1e6)

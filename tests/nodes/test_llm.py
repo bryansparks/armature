@@ -963,3 +963,149 @@ def test_llm_node_resolve_skills_returns_all_matching_ids():
     node = LLMNode(stage=stage, tiers=make_tiers(), skill_library=skill_lib)
     resolved = node._resolve_skills()
     assert len(resolved) == 2
+
+
+# ── Escalation order and attribution ─────────────────────────────────────────
+
+def _four_tiers() -> ModelTiers:
+    return ModelTiers(
+        tiny=ModelTierConfig(provider="ollama", model="tiny-m"),
+        small=ModelTierConfig(provider="ollama", model="small-m"),
+        large=ModelTierConfig(provider="openai", model="large-m", reasoning_effort="high"),
+        frontier=ModelTierConfig(provider="anthropic", model="frontier-m"),
+    )
+
+
+def _json_stage(tier: str, mode: OutputMode = OutputMode.GUIDED_JSON) -> Stage:
+    stage = Stage(id="test", role=Role(name="r", type=RoleType.WORKER, description="d", model_tier=tier))
+    stage.output_mode = mode
+    return stage
+
+
+def _priced(content: str, cost: float, input_tokens: int = 10, output_tokens: int = 5):
+    response = make_litellm_response(content, input_tokens, output_tokens)
+    response._hidden_params = {"response_cost": cost}
+    return response
+
+
+async def _models_tried(tier: str) -> list[str]:
+    node = LLMNode(stage=_json_stage(tier), tiers=_four_tiers())
+    models = []
+
+    async def mock_completion(**kwargs):
+        models.append(kwargs["model"])
+        return make_litellm_response("not json")
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=mock_completion):
+        await node.execute({})
+    return models
+
+
+async def test_middle_tier_tries_higher_tiers_then_lower_ones_nearest_first():
+    assert await _models_tried("small") == ["ollama/small-m", "large-m", "anthropic/frontier-m", "ollama/tiny-m"]
+    assert await _models_tried("large") == ["large-m", "anthropic/frontier-m", "ollama/small-m", "ollama/tiny-m"]
+
+
+async def test_top_tier_failure_recovers_on_the_next_lower_tier():
+    node = LLMNode(stage=_json_stage("frontier"), tiers=_four_tiers())
+    responses = [make_litellm_response("not json"), make_litellm_response('{"ok": true}')]
+    with patch("armature.nodes.llm.litellm_completion", side_effect=responses):
+        result = await node.execute({})
+    assert result["ok"] is True and result["_attribution"]["tier"] == "large"
+    assert await _models_tried("frontier") == [
+        "anthropic/frontier-m", "large-m", "ollama/small-m", "ollama/tiny-m"]
+
+
+def test_escalation_order_for_custom_and_unconfigured_tiers():
+    tiers = _four_tiers()
+    tiers.synthesis = ModelTierConfig(provider="openai", model="o3")
+    assert LLMNode(stage=_json_stage("synthesis"), tiers=tiers)._escalation_order() == [
+        "synthesis", "tiny", "small", "large", "frontier"]
+    assert LLMNode(stage=_json_stage("medium"), tiers=tiers)._escalation_order() == [
+        "tiny", "small", "large", "frontier"]
+
+
+async def test_escalation_reports_the_tier_that_succeeded_and_every_attempt():
+    node = LLMNode(stage=_json_stage("small"), tiers=_four_tiers())
+    responses = [_priced("not json", 0.001, 100, 20), _priced('{"ok": true}', 0.03, 120, 40)]
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=responses):
+        result = await node._execute_with_escalation(
+            [{"role": "system", "content": "s"}, {"role": "user", "content": "{}"}], parse_as_json=True)
+
+    assert result["_escalation_count"] == 1
+    assert result["_cost_usd"] == pytest.approx(0.031)
+    assert result["_attribution"] == {
+        "tier": "large", "model": "large-m", "provider": "openai", "requested_effort": "high",
+        "attempts": [
+            {"tier": "small", "model": "ollama/small-m", "input_tokens": 100, "output_tokens": 20,
+             "cost_usd": pytest.approx(0.001), "outcome": "parse_error"},
+            {"tier": "large", "model": "large-m", "input_tokens": 120, "output_tokens": 40,
+             "cost_usd": pytest.approx(0.03), "outcome": "ok"},
+        ],
+    }
+
+
+@pytest.mark.parametrize(("mode", "reply", "outcome"), [(OutputMode.GUIDED_JSON, "not json", "parse_error"),
+                                                        (OutputMode.TEXT, "", "empty")])
+async def test_when_every_tier_fails_attribution_names_the_last_one_tried(mode, reply, outcome):
+    tiers = ModelTiers(small=ModelTierConfig(provider="ollama", model="small-m"),
+                       large=ModelTierConfig(provider="openai", model="large-m"))
+    node = LLMNode(stage=_json_stage("small", mode), tiers=tiers)
+    with patch("armature.nodes.llm.litellm_completion", side_effect=lambda **_: make_litellm_response(reply)):
+        result = await node.execute({})
+    assert result["_attribution"]["tier"] == "large"
+    assert [a["outcome"] for a in result["_attribution"]["attempts"]] == [outcome, outcome]
+
+
+async def test_attempt_meter_sums_tool_turns():
+    from armature.permissions.permissions import PermissionLevel
+    from armature.registry.registry import ToolDescriptor, ToolRegistry
+
+    async def handler(args):
+        return {"result": "found"}
+
+    registry = ToolRegistry()
+    registry.register(ToolDescriptor(name="search", description="Search", permission=PermissionLevel.READ_ONLY,
+                                     handler=handler, parameters={"query": {"type": "string"}}))
+    stage = Stage(id="agent", role=Role(name="a", type=RoleType.WORKER, description="d", model_tier="small",
+                                        tools=["search"]))
+    node = LLMNode(stage=stage, tiers=ModelTiers(small=ModelTierConfig(provider="openai", model="gpt-4o-mini")),
+                   registry=registry)
+    call = MagicMock()
+    call.id, call.function.name, call.function.arguments = "tc_1", "search", '{"query": "x"}'
+    tool_turn = _priced("", 0.01, 100, 20)
+    tool_turn.choices[0].message.content = None
+    tool_turn.choices[0].message.tool_calls = [call]
+    tool_turn.choices[0].message.thinking_blocks = None
+    final = _priced("done", 0.02, 150, 30)
+
+    with patch("armature.nodes.llm.litellm_completion", side_effect=[tool_turn, final]):
+        result = await node.execute({})
+
+    [attempt] = result["_attribution"]["attempts"]
+    assert (attempt["input_tokens"], attempt["output_tokens"]) == (250, 50)
+    assert attempt["cost_usd"] == pytest.approx(0.03) and attempt["outcome"] == "ok"
+
+
+async def test_streaming_stage_reports_its_tier():
+    async def chunks():
+        for text in ("Hel", "lo"):
+            chunk = MagicMock()
+            chunk.choices[0].delta.content = text
+            chunk.usage = None
+            yield chunk
+
+    async def streaming(**kwargs):
+        return chunks()
+
+    async def on_token(_):
+        return None
+
+    node = LLMNode(stage=_json_stage("large", OutputMode.TEXT), tiers=_four_tiers(), on_token=on_token)
+    with patch("armature.nodes.llm.litellm_completion", side_effect=streaming):
+        result = await node.execute({})
+    attribution = result["_attribution"]
+    assert (attribution["tier"], attribution["model"], attribution["provider"], attribution["requested_effort"]) == (
+        "large", "large-m", "openai", "high")
+    assert [a["outcome"] for a in attribution["attempts"]] == ["ok"]

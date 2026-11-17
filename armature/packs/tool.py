@@ -1,6 +1,6 @@
 """``armature tool``: a built-in pack adapter's step, as a thin client of the server's tool broker.
 
-It reads the step's ``with:`` from $ARMATURE_WITH, sends it with the step's
+It reads the step's ``with:`` from $ARMATURE_WITH (or $ARMATURE_WITH_FILE), sends it with the step's
 grant from $ARMATURE_TOOL_TOKEN, and prints only the result. Checkout and push
 run git here. Git gets its one-repository token from ``armature tool
 git-credential``, which asks the server and answers git on stdout, so the
@@ -24,11 +24,14 @@ import httpx
 from armature.events.emitter import plain_http_to_remote
 from armature.events.sign import sign_engine
 from armature.nodes.agent import SAFE_GIT
-from armature.nodes.harness import AGENT_USER_ENV
+from armature.nodes.harness import AGENT_USER_ENV, TOOLS_VIA_PROXY_ENV
 
 TOKEN_ENV = "ARMATURE_TOOL_TOKEN"
+# The step that called this step's workflow, so the server files what the tool records under the full step key.
+PARENT_ENV = "ARMATURE_TOOL_PARENT_STEP"
 URL_ENV = "ARMATURE_TOOLS_URL"
 WITH_ENV = "ARMATURE_WITH"
+WITH_FILE_ENV = "ARMATURE_WITH_FILE"
 HTTP_TIMEOUT_S = 120.0
 GIT_TIMEOUT_S = 540
 GIT_HOST = "github.com"
@@ -40,6 +43,9 @@ REF = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$")
 DIR = re.compile(r"^(?!\.\.?$)[A-Za-z0-9._-]{1,100}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 PUSH_FAILED = "Could not push, most likely because the branch moved. Comment /armature fix to try again."
+# A self-heal patch over this many bytes isn't sent, and the server fails the fix as too large to review.
+PATCH_MAX = 200 * 1024
+FIX_AUTHOR = ("Armature", "armature@users.noreply.github.com")
 
 
 class ToolFailed(Exception):
@@ -54,7 +60,9 @@ def _post(path: str, body: dict[str, Any], token: str | None, *, url: str | None
     if plain_http_to_remote(base):
         raise ToolFailed(f"refusing plain http to a non-loopback host: {base}")
     try:
-        with httpx.Client(timeout=HTTP_TIMEOUT_S, transport=transport, trust_env=False) as http:
+        # The environment's proxy carries the bearer token only where the host said the run has no other way out.
+        proxied = os.environ.get(TOOLS_VIA_PROXY_ENV) == "1"
+        with httpx.Client(timeout=HTTP_TIMEOUT_S, transport=transport, trust_env=proxied) as http:
             response = http.post(f"{base.rstrip('/')}{path}", json=body, headers={"Authorization": f"Bearer {token}"})
     except httpx.HTTPError as exc:
         raise ToolFailed(f"could not reach the server: {exc.__class__.__name__}") from exc
@@ -83,7 +91,9 @@ def request_grant(url: str, run_token: str, step: str, tools: list[str], engine:
 
 
 def call(tool: str, params: dict[str, Any], transport: httpx.BaseTransport | None = None) -> dict[str, Any]:
-    return _post(f"/api/tools/{tool}", {"params": params}, os.environ.get(TOKEN_ENV), transport=transport)
+    parent = os.environ.get(PARENT_ENV)
+    body = {"params": params, **({"parent_step": parent} if parent else {})}
+    return _post(f"/api/tools/{tool}", body, os.environ.get(TOKEN_ENV), transport=transport)
 
 
 def helper(access: str) -> str:
@@ -103,15 +113,19 @@ def git_env(protocol: str | None = None) -> dict[str, str]:
     return env
 
 
-def _run(argv: list[str], env: dict[str, str], cwd: Path | None) -> str:
+def _raw(argv: list[str], env: dict[str, str], cwd: Path | None) -> bytes:
     try:
-        done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        done = subprocess.run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
                               timeout=GIT_TIMEOUT_S)
     except subprocess.TimeoutExpired as exc:
         raise ToolFailed("git timed out") from exc
     if done.returncode != 0:
-        raise ToolFailed(f"git failed: {done.stderr.strip()[-500:]}")
-    return done.stdout.strip()
+        raise ToolFailed(f"git failed: {done.stderr.decode(errors='replace').strip()[-500:]}")
+    return done.stdout
+
+
+def _run(argv: list[str], env: dict[str, str], cwd: Path | None) -> str:
+    return _raw(argv, env, cwd).decode(errors="replace").strip()
 
 
 def _git(access: str, *args: str, cwd: Path | None = None) -> str:
@@ -124,6 +138,13 @@ def _local(*args: str) -> str:
     env = git_env("file")
     env.pop(TOKEN_ENV, None)
     return _run(["git", *SAFE_GIT, *args], env, None)
+
+
+def _local_bytes(*args: str) -> bytes:
+    """_local's output exactly as git wrote it, with no newline translated."""
+    env = git_env("file")
+    env.pop(TOKEN_ENV, None)
+    return _raw(["git", *SAFE_GIT, *args], env, None)
 
 
 def _dir(params: dict[str, Any]) -> Path:
@@ -198,6 +219,63 @@ def push(params: dict[str, Any]) -> dict[str, Any]:
     return {"pushed": True, "branch": branch, "commit": commit}
 
 
+def fix_patch(params: dict[str, Any]) -> dict[str, Any]:
+    """Send an agent session's commit to the server as a patch against the commit the session started from. Nothing
+    is pushed. The diff runs in a bare repository made here, since the session could write its worktree's config."""
+    source, base, commit = _source(params), params.get("base"), params.get("commit")
+    if not all(isinstance(c, str) and COMMIT.fullmatch(c) for c in (base, commit)):
+        raise ToolFailed("base and commit must be 40-character commits")
+    sent = {k: params[k] for k in ("repo", "proposal", "outcome", "kind", "base", "commit")}
+    with tempfile.TemporaryDirectory(prefix="armature-fix-") as tmp:
+        bare = str(Path(tmp) / "fix.git")
+        _local("init", "--quiet", "--bare", bare)
+        try:
+            _local("-C", bare, "fetch", "--quiet", "--no-tags", str(source), f"{commit}:{PUSH_REF}")
+            _local("-C", bare, "merge-base", "--is-ancestor", base, commit)
+        except ToolFailed as exc:
+            raise ToolFailed("the session's commit doesn't build on the commit it started from") from exc
+        found = _local_bytes("-C", bare, "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--full-index",
+                             "--no-renames", base, commit)
+    if len(found) > PATCH_MAX:
+        sent["oversize"] = True
+    else:
+        try:
+            sent["patch"] = found.decode("utf-8")
+        except UnicodeDecodeError:
+            sent["undecodable"] = True
+    return call("insights.fix-patch", sent)
+
+
+def fix_apply(params: dict[str, Any]) -> dict[str, Any]:
+    """Apply the approved fix's patch, as the server holds it, to the checkout of its base in dir, and commit it for
+    github.push. A patch that no longer applies fails the fix on the server, and nothing is committed."""
+    target = _dir(params).resolve()
+    found = call("insights.fix-apply", {"repo": params["repo"], "proposal": params["proposal"]})
+    if found.get("dry_run"):
+        return {"applied": False, "dry_run": True}
+    if not (target / ".git").is_dir():
+        raise ToolFailed(f"{target.name} holds no checkout. Check out the fix's base there first.")
+    # The checkout was made by github.checkout, so its config is this tool's own.
+    if _local("-C", str(target), "rev-parse", "HEAD") != found.get("base_sha"):
+        raise ToolFailed("the checkout isn't at the fix's base commit")
+    # newline="" keeps a CRLF file's \r, so the patch applies as it was made.
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8", newline="") as out:
+        out.write(found.get("patch") or "")
+    try:
+        try:
+            _local("-C", str(target), "apply", "--index", "--whitespace=nowarn", out.name)
+        except ToolFailed:
+            failed = call("insights.fix-apply", {"repo": params["repo"], "proposal": params["proposal"],
+                                                 "outcome": "conflict"})
+            return {"applied": False, "reason": failed.get("reason")}
+    finally:
+        os.unlink(out.name)
+    name, email = FIX_AUTHOR
+    _local("-C", str(target), "-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "--quiet",
+           "--no-verify", "-m", str(found.get("title") or "Armature fix"))
+    return {"applied": True, "commit": _local("-C", str(target), "rev-parse", "HEAD"), "dir": str(target)}
+
+
 def credential(args: list[str], stdin=None, stdout=None, transport: httpx.BaseTransport | None = None) -> int:
     """Git's credential helper protocol: read the request, answer ``get`` with the server's token, ignore the rest."""
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
@@ -236,13 +314,23 @@ def main(args: list[str]) -> int:
         print(f"armature tool: {name} is not a tool name", file=sys.stderr)
         return 2
     try:
-        params = json.loads(os.environ.get(WITH_ENV) or "{}")
+        raw = os.environ.get(WITH_ENV)
+        if raw is None and os.environ.get(WITH_FILE_ENV):
+            try:
+                raw = Path(os.environ[WITH_FILE_ENV]).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ToolFailed(f"could not read {WITH_FILE_ENV}: {exc}") from exc
+        params = json.loads(raw or "{}")
         if not isinstance(params, dict):
             raise ToolFailed(f"{WITH_ENV} must hold a JSON object")
         if name == "github.checkout":
             result = checkout(params)
         elif name == "github.push":
             result = push(params)
+        elif name == "insights.fix-patch":
+            result = fix_patch(params)
+        elif name == "insights.fix-apply":
+            result = fix_apply(params)
         else:
             result = call(name, params)
     except (ToolFailed, ValueError, KeyError) as exc:

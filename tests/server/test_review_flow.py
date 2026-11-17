@@ -28,6 +28,7 @@ from tests.server.tool_support import (  # noqa: F401
     dns,
     pem,
     start_run,
+    tool,
     use,
     vendor,
     world,
@@ -330,3 +331,21 @@ async def test_high_risk_development_pauses_at_the_gate_before_its_pull_request(
                                               created_at=clock(), expires_at=clock(), decided_at=clock()))
     result = await run_flow(tmp_path, "development-review", DEV)
     assert result["open"]["number"] == NUMBER and "github.open-pr" in flow.tools
+
+
+def test_a_carried_approval_records_risk_post_and_mark_with_no_reviewer(app, sqlite_engine, keyring, clock, world):
+    """review-pass v6 on a base-only head: record-risk at low over the pull request's own paths, then an approving
+    record-post, is all record-mark needs."""
+    run = start_run(sqlite_engine, keyring, clock, world, risk=None)
+
+    def call(name, tool_name, params):
+        response = tool(app, run, name, tool_name, {"repo": REPO, "number": NUMBER, **params})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    rated = call("record_risk", "review.record-risk", {"head": HEAD, "level": "low", "reasons": [],
+                                                        "paths": ["src/a.swift"], "added": [], "total": 1,
+                                                        "truncated": False})
+    assert rated["head"] == HEAD
+    call("record_post", "review.record-post", {"head": HEAD, "posted": True, "approved": True, "review_id": 77})
+    assert call("record_mark", "review.record-mark", {"head": HEAD, "status_id": 900})["marked"] is True

@@ -45,7 +45,7 @@ from armature.telemetry import get_tracer
 from armature.events import Emitter, NullEmitter
 from armature.events.engine import forward_engine_event
 from armature.events.sign import read_engine_key, sign_engine
-from armature.events.env import child_env
+from armature.events.env import SERVER_RUN_ID_ENV, child_env
 from armature.events.register import register_run, registration_body
 
 
@@ -117,6 +117,8 @@ def _merge_carry_forward(target: dict, carry: dict) -> None:
 _GLOBAL_TRACES_DB = Path("~/.armature/traces.db")
 
 HEARTBEAT_S = 60.0
+MAX_CANDIDATES = 50
+CANDIDATE_FIELDS = ("path", "line", "severity", "blocking", "claim", "body", "suggestion")
 
 # (harness id, stage id, branch index, branch count) for the fan-out branch running in this task.
 _FAN_OUT_BRANCH: ContextVar[tuple[int, str, int, int] | None] = ContextVar(
@@ -221,6 +223,20 @@ class Harness:
             payload["parent_step"] = self._event_parent_step
         self._events.emit(kind, step_id, **payload)
 
+    def _emit_candidates(self, stage: Stage, result: dict[str, Any], role: str) -> None:
+        """One ``candidate`` event per finding an agent stage reported, so none is lost to a truncated step_end.
+
+        A retried or looped stage emits again under the same ordinals, and the server keeps the first attempt's rows.
+        """
+        found = result.get("findings")
+        if not self._events.enabled or not isinstance(found, list):
+            return
+        specialist = role if role != stage.id else stage.agent.role or stage.id
+        for ordinal, item in enumerate(found[:MAX_CANDIDATES]):
+            if isinstance(item, dict):
+                self._emit("candidate", stage.id, ordinal=ordinal, specialist=specialist,
+                           **{k: item[k] for k in CANDIDATE_FIELDS if k in item})
+
     def _emit_step_failed(self, stage: Stage, exc: BaseException) -> None:
         self._emit("step_failed", stage.id, type=type(exc).__name__, reason=str(exc))
 
@@ -232,6 +248,8 @@ class Harness:
             if outer_step is not None:
                 self._event_parent_step = outer_step
                 self._events_run_id = os.environ.get("ARMATURE_RUN_ID") or None
+            else:
+                self._events_run_id = os.environ.get(SERVER_RUN_ID_ENV) or None
             return Emitter.from_env()
         server = os.environ.get("ARMATURE_SERVER")
         runner_key = os.environ.get("ARMATURE_RUNNER_KEY")
@@ -272,12 +290,13 @@ class Harness:
     async def _tool_env(self, stage, adapter) -> dict[str, str]:
         """A built-in pack step's grant to call the server's tools, for that step's child only."""
         from armature.packs import is_builtin
-        from armature.packs.tool import TOKEN_ENV, URL_ENV, request_grant
+        from armature.packs.tool import PARENT_ENV, TOKEN_ENV, URL_ENV, request_grant
         url, engine = os.environ.get(URL_ENV), self._engine_key
         if not is_builtin(adapter.pack_dir) or not url or not engine or not self._events.enabled:
             return {}
         tools = [adapter.name.replace("/", ".", 1)]
-        return {TOKEN_ENV: await asyncio.to_thread(request_grant, url, self._events.token, stage.id, tools, engine)}
+        token = await asyncio.to_thread(request_grant, url, self._events.token, stage.id, tools, engine)
+        return {TOKEN_ENV: token, **({PARENT_ENV: self._event_parent_step} if self._event_parent_step else {})}
 
     def __init__(
         self,
@@ -293,6 +312,7 @@ class Harness:
         parent_step: str | None = None,
         call_resolver: CallResolver | None = None,
         engine_key: tuple[str, str] | None = None,
+        server_run_id: str | None = None,
     ):
         # A child run in this process signs with the key its parent hands it, under the root run's id. A root run
         # reads its key first, before this process starts anything, so the pipe holding it is closed when it does.
@@ -374,7 +394,8 @@ class Harness:
         self._events: Emitter = emitter if emitter is not None else NullEmitter()
         self._parent_step = parent_step
         self._event_parent_step = parent_step
-        self._events_run_id: str | None = None
+        # A child run in this process shares its parent's emitter, so it takes its parent's server run id too.
+        self._events_run_id: str | None = server_run_id
         self._on_event = on_event
         self._on_token = None   # async (chunk: str)->None; set by service layer for streaming
         self._transcript: list[dict[str, Any]] = []
@@ -659,6 +680,7 @@ class Harness:
                         approved = result.get("approved", True) if isinstance(result, dict) else True
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
+                            server_run_id=self._events_run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type="gate",
@@ -683,6 +705,7 @@ class Harness:
                             stage=stage, session_dir=self._session_dir,
                             emitter=self._events, parent_step=stage.id,
                             call_resolver=self._call_resolver, engine_key=self._engine_key,
+                            server_run_id=self._events_run_id,
                         )
                         try:
                             result = await node.execute(context)
@@ -696,6 +719,7 @@ class Harness:
                         node = CallNode(
                             stage=stage, resolver=self._call_resolver, session_dir=self._session_dir,
                             emitter=self._events, parent_step=stage.id, engine_key=self._engine_key,
+                            server_run_id=self._events_run_id,
                         )
                         try:
                             result = await node.execute(context)
@@ -714,20 +738,23 @@ class Harness:
                             )
                         # Reserved now so concurrent fan-out branches see it, then corrected to the sessions run.
                         self._llm_call_count += 1
+                        _role = _agent_role(stage, context)
                         _agent_node = AgentNode(
                             stage, root=self._session_dir / "agents", step_id=stage.id,
                             emitter=(SimpleNamespace(emit=self._emit, redact=self._events.redact)
                                      if self._events.enabled else None),
-                            fields={"role": _agent_role(stage, context)},
+                            fields={"role": _role},
                         )
                         try:
                             result = await _agent_node.execute(context)
                         finally:
                             self._total_cost_usd += _agent_node.total_cost_usd
                             self._llm_call_count += _agent_node.sessions - 1
+                        self._emit_candidates(stage, result, _role)
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
+                            server_run_id=self._events_run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type="agent",
@@ -775,6 +802,7 @@ class Harness:
                         self._get_provenance().update({k: f"stage:{stage.id}" for k in result})
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
+                            server_run_id=self._events_run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type="script",
@@ -845,15 +873,23 @@ class Harness:
                         _escalation_count = result.pop("_escalation_count", 0)
                         _cost_usd = result.pop("_cost_usd", 0.0)
                         self._total_cost_usd += _cost_usd
-                        _model = _llm_node._resolve_model()
+                        _attribution = result.pop("_attribution", None) or {}
+                        _cached = result.pop("_cached", False)
+                        _model = _attribution.get("model") or _llm_node._resolve_model()
                         _input_tokens = result.pop("_input_tokens", 0)
                         _output_tokens = result.pop("_output_tokens", 0)
                         self._emit(
                             "cost", stage.id, model=_model, input_tokens=_input_tokens,
                             output_tokens=_output_tokens, cost_usd=_cost_usd,
+                            **({"tier": _attribution.get("tier"), "provider": _attribution.get("provider"),
+                                "requested_effort": _attribution.get("requested_effort"),
+                                "attempts": _attribution.get("attempts") or [],
+                                "escalation_index": _escalation_count} if _attribution else {}),
+                            **({"cached": True} if _cached else {}),
                         )
                         await self._record_trace(TraceRecord(
                             run_id=self._run_id,
+                            server_run_id=self._events_run_id,
                             workflow_name=self._spec.name,
                             stage_id=stage.id,
                             role_type=stage.role.type.value,
@@ -914,6 +950,7 @@ class Harness:
                                 _fail_model = _agent_node.model if _agent_node else ""
                             await self._traces.record(TraceRecord(
                                 run_id=self._run_id,
+                                server_run_id=self._events_run_id,
                                 workflow_name=self._spec.name,
                                 stage_id=stage.id,
                                 role_type=_fail_role,

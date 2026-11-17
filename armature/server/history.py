@@ -10,7 +10,17 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import Column, Connection, Table, delete, func, or_, select, update
+from sqlalchemy import (
+    Column,
+    Connection,
+    Table,
+    and_,
+    delete,
+    func,
+    or_,
+    select,
+    update,
+)
 
 from armature.server import audit, worker
 from armature.server.db.schema import jobs, metadata, runs
@@ -24,6 +34,9 @@ UNLINKED: dict[str, Callable[[str], bool]] = {
     "jobs": lambda name: name.endswith("job_id"),
     "gates": lambda name: name == "resume_of_gate" or name.endswith("gate_id"),
 }
+# Tables that point at a row of any table by subject_kind and subject_id, and the kind each owned table goes by.
+SUBJECT_TABLES = ("labels", "cluster_members")
+SUBJECT_KINDS = {"finding_candidates": "candidate", "findings": "finding"}
 
 
 class HistoryError(Exception):
@@ -89,6 +102,10 @@ def _work(owned: dict[str, set[str]]) -> tuple[dict[str, list[Any]], list[tuple[
     for name, ids in owned.items():
         if ids and "id" in metadata.tables[name].c:
             gone.setdefault(name, []).append(metadata.tables[name].c.id.in_(ids))
+        if ids and name in SUBJECT_KINDS:
+            for table in map(metadata.tables.get, SUBJECT_TABLES):
+                gone.setdefault(table.name, []).append(and_(table.c.subject_kind == SUBJECT_KINDS[name],
+                                                            table.c.subject_id.in_(ids)))
     return gone, clears
 
 

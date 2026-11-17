@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from armature.events.env import SERVER_RUN_ID_ENV
 from armature.events.location import this_machine
 from armature.nodes.gate import (
     GATE_AUTO_APPROVE_ENV,
@@ -293,7 +294,8 @@ class Runner:
     def env(self, bundle: dict[str, Any]) -> dict[str, str]:
         # The host's PATH, HOME, and packs path go last, so no setting or secret replaces them.
         env = {**bundle["settings"], **bundle["secrets"], "ARMATURE_EVENTS": bundle["events_url"],
-               "ARMATURE_EVENTS_TOKEN": bundle["run_token"], "PATH": job_path(self.binary),
+               "ARMATURE_EVENTS_TOKEN": bundle["run_token"], SERVER_RUN_ID_ENV: bundle.get("run_id") or "",
+               "PATH": job_path(self.binary),
                "HOME": os.environ.get("HOME") or str(Path.home())}
         if bundle.get("thread"):
             env["ARMATURE_THREAD"] = bundle["thread"]

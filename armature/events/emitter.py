@@ -31,7 +31,7 @@ from armature.events.redact import default_redactor, redact_exact
 
 MUST_KEEP = frozenset({
     "run_start", "run_end", "step_start", "step_end", "step_failed",
-    "step_skipped", "retry", "cost", "finding", "tool_call", "tool_result",
+    "step_skipped", "retry", "cost", "finding", "candidate", "tool_call", "tool_result",
     "session_start", "session_end", "error", "dropped", "artifact", "summary",
 })
 DROPPABLE = frozenset({"text", "log", "progress"})

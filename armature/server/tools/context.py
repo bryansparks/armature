@@ -9,10 +9,10 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 
 from armature.server import sanitize
-from armature.server.db.schema import findings
+from armature.server.db.schema import findings, runs, tool_calls
 from armature.server.tools import Call
 from armature.server.tools.github import READ_PR, api, login_of, ours
 from armature.server.tools.review import (
@@ -165,12 +165,24 @@ def findings_md(roots: dict[str, dict[str, Any]], decided: dict[str, Any]) -> st
     return _capped(lines, "findings")
 
 
-def _decided(call: Call, ids: list[str]) -> dict[str, Any]:
+def _decided(call: Call, repo: str, number: int, ids: list[str]) -> dict[str, Any]:
+    """The latest decision on each finding by a run that reviewed this pull request, so another pull request's
+    finding with the same path and claim never stands in for it. A row without a decision never hides one. A runner's
+    decisions on the pull request count as well."""
     if not ids or call.engine is None or not call.project_id:
         return {}
+    target = f"{repo.lower()}#{number}"
+    called = select(tool_calls.c.run_id).where(
+        tool_calls.c.tool == "review.decisions", tool_calls.c.target == target, tool_calls.c.mode == "live",
+        tool_calls.c.outcome == "ok",
+        or_(tool_calls.c.project_id == call.project_id,
+            and_(tool_calls.c.project_id.is_(None), tool_calls.c.team_id == call.team_id)))
+    # A call that didn't name its pull request leaves the run's subject to say which it was.
+    titled = select(runs.c.id).where(runs.c.team_id == call.team_id, func.lower(runs.c.subject) == target)
     with call.engine.connect() as conn:
         rows = conn.execute(select(findings).where(findings.c.project_id == call.project_id,
-                                                   findings.c.finding_key.in_(ids))
+                                                   findings.c.finding_key.in_(ids), findings.c.decision.is_not(None),
+                                                   or_(findings.c.run_id.in_(called), findings.c.run_id.in_(titled)))
                             .order_by(findings.c.created_at)).all()
     return {row.finding_key: row for row in rows}
 
@@ -192,4 +204,4 @@ def context(call: Call, params: dict[str, Any]) -> dict[str, Any]:
     return {"head": (pr.get("head") or {}).get("sha"), "jira_keys": keys, "pr": pr_md(pr, keys),
             "files": files_of(files),
             "discussion": discussion_md(repo, number, issue_comments, reviews, review_comments, own),
-            "findings": findings_md(roots, _decided(call, sorted(roots)))}
+            "findings": findings_md(roots, _decided(call, repo, number, sorted(roots)))}

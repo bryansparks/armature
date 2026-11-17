@@ -240,8 +240,15 @@ A turn's job `inputs`:
 
 ```json
 { "resident_id": "…", "instance_key": "acme", "event_seq_from": 41, "event_seq_to": 44,
-  "kind": "request", "_event": { "kind": "request", "is": { "request": true, "idle": false, … } } }
+  "kind": "request",
+  "_event": { "kind": "request", "name": null, "fields": { "number": 7, "sha": "abc123" },
+              "is": { "request": true, "idle": false, … } } }
 ```
+
+`_event.fields` holds the declared scalar fields the batch's webhook rules
+mapped (see "Routing events to residents"), merged over the batch in `seq`
+order so the newest value wins per key. Events without fields add nothing,
+and a batch with none gives `{}`.
 
 As with conversations, the run reads everything else through tools, so the
 server stays in control. The engine injects:
@@ -420,6 +427,19 @@ All three are audited (`audit.record`, action `resident.read|ask|signal`).
   the event and through to the job). A resident rule locks only the delivery
   row, so rule-level `concurrency` config means nothing for residents; the
   instance's own one-turn lock (`active_job_id`) is the real serialization.
+  A resident rule's `inputs` declare **fields**: at most 8, each a `$.path`
+  into the payload (no bare `$`, no literals). Only a string of at most 200
+  characters, a whole number, `true`, `false`, or `null` is kept; anything
+  else is dropped whole, never truncated, and named in the decision's
+  reason. A missing path is left out. The kept fields ride on the event as
+  `source.fields` and reach the turn as `_event.fields`; payloads stay
+  fenced. A rule with `signal: <name>` enqueues a `signal` event of that
+  name instead of a `request`, deduped on `delivery_id:name` so a request
+  rule matching the same delivery can't swallow it. When the pinned spec's
+  `close_on` names the signal, the instance closes with no turn and its
+  turn ends: a queued one is superseded at no attempt cost, a running one is
+  asked to stop unless it emitted the closing signal itself.
+  `signal` needs `resident: true` and can't be `cancel_only` or `dry`.
 - **Pollers** (`pollers.py`): a `schedule` from a resident's `on.schedule` is
   materialized as a `triggers` row of kind `schedule` with
   `config.resident = true` when the workflow version is saved or activated, so
@@ -696,6 +716,13 @@ Review fixes folded into this revision:
   navigation tools in residents.
 - Local mode (phase 7) requires authenticated webhook triggers first.
 - Naming: "resident" confirmed ("standing" collides with `runner_keys`).
+
+Added 2026-11-05 (owner decisions): fields are declared scalars only, never
+the whole payload or any prose, and live in the event's existing `source`
+JSON, so there is no migration. There is no supersede. A `close_on` close
+also ends the instance's turn. `ensure` re-reads with a locking read after
+losing its insert race, so MySQL's REPEATABLE READ snapshot can't hide the
+winner's row.
 
 ## Questions
 

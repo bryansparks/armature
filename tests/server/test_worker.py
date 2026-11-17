@@ -20,6 +20,7 @@ from armature.server.db.schema import (
     settings,
     teams,
     triggers,
+    webhook_deliveries,
     webhooks,
 )
 from armature.server.db.schema import (
@@ -236,6 +237,7 @@ def test_launch_builds_env_from_settings_and_listed_secrets(sqlite_engine, keyri
     assert env["ARMATURE_PACKS_PATH"].split(":")[-1] == "/srv/packs"
     assert env["ARMATURE_TOOLS_URL"] == "http://127.0.0.1:8098" and "ARMATURE_TOOL_TOKEN" not in env
     run_id = call["launch"].run_id
+    assert env["ARMATURE_SERVER_RUN_ID"] == run_id
     assert call["launch"].engine_key == f"{run_id}:{runners.engine_key(keyring, run_id)}"
     assert not {"ARMATURE_ENGINE_KEY", "ARMATURE_ENGINE_FD"} & set(env)
     assert call["args"] == ["--input", "number=7"] and call["label"] == "run" and "timeout" not in call
@@ -477,7 +479,8 @@ def test_an_agent_job_bundles_its_skills_and_model_credential(sqlite_engine, key
     [call] = spawned
     env = call["env"]
     assert json.loads(env["ARMATURE_AGENT_MODELS"]) == {
-        "review": {"model": "claude-sonnet-5-5", "env": {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}}}
+        "review": {"model": "claude-sonnet-5-5", "provider": "claude-subscription", "alias": "review",
+                   "env": {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}}}
     skills_dir = tmp_path / "work" / job_id / "skills"
     assert env["ARMATURE_SKILLS_DIR"] == str(skills_dir)
     assert (skills_dir / "kotlin-review" / "SKILL.md").read_text() == "team skill"
@@ -606,7 +609,8 @@ def test_a_project_skill_and_model_alias_win(sqlite_engine, keyring, clock, worl
     _worker(sqlite_engine, keyring, clock, tmp_path).tick()
     env = spawned[0]["env"]
     assert json.loads(env["ARMATURE_AGENT_MODELS"]) == {
-        "review": {"model": "claude-opus-5-5", "env": {"ANTHROPIC_API_KEY": "project-key"}}}
+        "review": {"model": "claude-opus-5-5", "provider": "anthropic", "alias": "review",
+                   "env": {"ANTHROPIC_API_KEY": "project-key"}}}
     assert (tmp_path / "work" / job_id / "skills" / "kotlin-review" / "SKILL.md").read_text() == "project skill"
     assert env["ARMATURE_GIT_HOSTS"] == "git.project.test"
 
@@ -730,3 +734,166 @@ def test_two_concurrent_claims_of_one_key_start_one_job(sqlite_engine, keyring, 
     with sqlite_engine.connect() as conn:
         held = conn.execute(select(func.count()).select_from(jobs).where(jobs.c.status == "claimed")).scalar()
     assert held == 1
+
+
+def test_a_pull_request_key_becomes_the_runs_subject(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    pulled = _queue(sqlite_engine, clock, world, key="acme/app#7")
+    nightly = _queue(sqlite_engine, clock, world, key="nightly")
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.tick()
+    w.tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, pulled).run_id).subject == "acme/app#7"
+    assert _run(sqlite_engine, _get(sqlite_engine, nightly).run_id).subject is None
+
+
+def _delivery(engine, clock, world, payload):
+    delivery = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(webhook_deliveries).values(id=delivery, webhook_id=world["hook"], received_at=clock(),
+                                                       status="accepted", payload=payload))
+    return delivery
+
+
+def test_a_pull_request_delivery_titles_the_run(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    delivery = _delivery(sqlite_engine, clock, world, json.dumps({"pull_request": {"title": "Fix\nthe  login"}}))
+    titled = _queue(sqlite_engine, clock, world, key="acme/app#7", delivery_id=delivery)
+    pruned = _queue(sqlite_engine, clock, world, key="acme/app#8", delivery_id="gone")
+    bare = _queue(sqlite_engine, clock, world, key="acme/app#9")
+    _setting(sqlite_engine, worker.SLOTS_KEY, 3)
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, titled).run_id).summary == {"title": "Fix the login"}
+    for job_id in (pruned, bare):
+        job = _get(sqlite_engine, job_id)
+        assert job.status == "running" and _run(sqlite_engine, job.run_id).summary is None
+
+
+def test_an_unreadable_delivery_leaves_the_run_untitled(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _secret(sqlite_engine, keyring, "API_TOKEN", "t")
+    bad = _delivery(sqlite_engine, clock, world, "{not json")
+    job_id = _queue(sqlite_engine, clock, world, delivery_id=bad)
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert _run(sqlite_engine, _get(sqlite_engine, job_id).run_id).summary is None
+
+
+# Comparison runs.
+
+def _arm(engine, clock, world, overrides=None):
+    from armature.server.db.schema import eval_arms, eval_experiments
+    primary_run, experiment_id, arm_id = new_id(), new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(runs).values(id=primary_run, team_id=world["team"], status="succeeded",
+                                         started_at=clock()))
+        conn.execute(insert(eval_experiments).values(
+            id=experiment_id, team_id=world["team"], specialist="review", variable="effort", baseline={},
+            variant={"effort": "high"}, sample_rate=1.0, daily_budget_usd=25, max_concurrent_arms=2,
+            status="running", min_prs=30, created_at=clock()))
+        conn.execute(insert(eval_arms).values(id=arm_id, team_id=world["team"], experiment_id=experiment_id,
+                                              primary_run_id=primary_run, head_sha="a" * 40, label="variant",
+                                              overrides=overrides, status="queued", created_at=clock()))
+    return arm_id
+
+
+def test_a_comparison_job_bundles_its_overrides_and_opens_its_run_in_arm_mode(sqlite_engine, keyring, clock, world,
+                                                                              tmp_path, spawned):
+    from armature.server.db.schema import eval_arms, providers
+    _agent_world(sqlite_engine, keyring, clock, world)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(providers).values(aliases={"review": "claude-sonnet-5-5", "fast": "claude-haiku-5-5"}))
+    forged = '{"review": {"model": "evil"}}'
+    _secret(sqlite_engine, keyring, "ARMATURE_AGENT_OVERRIDES", forged, team_id=world["team"])
+    _setting(sqlite_engine, "env.ARMATURE_AGENT_OVERRIDES", forged, team_id=world["team"])
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(triggers).where(triggers.c.id == world["rule"]).values(
+            config={"secrets": ["API_TOKEN", "ARMATURE_AGENT_OVERRIDES"]}))
+    arm_id = _arm(sqlite_engine, clock, world, {"review": {"alias": "fast", "effort": "high"}})
+    job_id = _job(sqlite_engine, clock, world, version=2, trigger=False, arm_id=arm_id,
+                  concurrency_key=f"acme/app#7#arm:{arm_id}")
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    env = spawned[0]["env"]
+    assert json.loads(env["ARMATURE_AGENT_OVERRIDES"]) == {"review": {"alias": "fast", "effort": "high"}}
+    assert set(json.loads(env["ARMATURE_AGENT_MODELS"])) == {"review", "fast"}
+    run = _run(sqlite_engine, _get(sqlite_engine, job_id).run_id)
+    assert run.trigger_ref["arm_id"] == arm_id and run.subject is None and run.summary in (None, {})
+    with sqlite_engine.connect() as conn:
+        arm = conn.execute(select(eval_arms).where(eval_arms.c.id == arm_id)).one()
+    assert (arm.arm_run_id, arm.status) == (run.id, "running")
+    _job(sqlite_engine, clock, world, version=2)
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert "ARMATURE_AGENT_OVERRIDES" not in spawned[1]["env"]
+
+
+def _gateway(engine, keyring, clock, world, *, auth="bearer", saved_by=None):
+    from armature.server import audit
+    from armature.server.db.schema import providers
+    provider = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(providers).values(
+            id=provider, team_id=world["team"], kind="anthropic", aliases={"fast": "gateway-model"},
+            config={"api_base": "https://gw.example.com", "auth": auth, "credential_secret": "GW_TOKEN",
+                    "prices": {"fast": {"input": 1, "output": 4}}}, created_at=clock(), updated_at=clock()))
+        audit.record(conn, action="provider.create", actor_id=saved_by, target_kind="provider", target_id=provider)
+    _secret(engine, keyring, "GW_TOKEN", "gw-token", team_id=world["team"])
+
+
+GATEWAY_ENV = {"ANTHROPIC_BASE_URL": "https://gw.example.com", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gateway-model",
+               "ANTHROPIC_DEFAULT_SONNET_MODEL": "gateway-model", "ANTHROPIC_DEFAULT_OPUS_MODEL": "gateway-model",
+               "ANTHROPIC_SMALL_FAST_MODEL": "gateway-model", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
+
+
+@pytest.mark.parametrize("auth, key", [("bearer", "ANTHROPIC_AUTH_TOKEN"), ("x-api-key", "ANTHROPIC_API_KEY")])
+def test_a_comparison_arm_on_a_gateway_alias_gets_the_gateway_env_and_prices(sqlite_engine, keyring, clock, world,
+                                                                             tmp_path, spawned, auth, key):
+    _agent_world(sqlite_engine, keyring, clock, world)
+    _gateway(sqlite_engine, keyring, clock, world, auth=auth)
+    arm_id = _arm(sqlite_engine, clock, world, {"review": {"model": "gateway-model", "alias": "fast"}})
+    _job(sqlite_engine, clock, world, version=2, trigger=False, arm_id=arm_id,
+         concurrency_key=f"acme/app#7#arm:{arm_id}")
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    models = json.loads(spawned[0]["env"]["ARMATURE_AGENT_MODELS"])
+    assert models["review"]["env"] == {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"} and "prices" not in models["review"]
+    assert models["fast"] == {"model": "gateway-model", "provider": "anthropic", "alias": "fast",
+                              "env": {**GATEWAY_ENV, key: "gw-token"}, "prices": {"input": 1, "output": 4}}
+    assert not {"CLAUDE_CODE_USE_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"} & set(models["fast"]["env"])
+
+
+def test_a_gateway_a_non_admin_saved_runs_no_agent_step(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _agent_world(sqlite_engine, keyring, clock, world)
+    lead = add_user(sqlite_engine, keyring, clock, "gateway-lead")[0]
+    _gateway(sqlite_engine, keyring, clock, world, saved_by=lead)
+    arm_id = _arm(sqlite_engine, clock, world, {"review": {"alias": "fast"}})
+    job_id = _job(sqlite_engine, clock, world, version=2, trigger=False, arm_id=arm_id,
+                  concurrency_key=f"acme/app#7#arm:{arm_id}")
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert "admin" in _get(sqlite_engine, job_id).error and spawned == []
+
+
+def test_a_comparison_runs_key_never_supersedes_or_waits_on_its_review(sqlite_engine, keyring, clock, world,
+                                                                       tmp_path):
+    arm_id = _arm(sqlite_engine, clock, world)
+    review = _queue(sqlite_engine, clock, world, supersede=True, cancel_running=True)
+    arm_job = _queue(sqlite_engine, clock, world, key=f"acme/app#7#arm:{arm_id}", arm_id=arm_id)
+    assert _get(sqlite_engine, arm_job).requires == [worker.EVAL_ARM]
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == arm_job).values(status="running"))
+    newer = _queue(sqlite_engine, clock, world, supersede=True, cancel_running=True)
+    arm = _get(sqlite_engine, arm_job)
+    assert (arm.status, arm.cancel_requested_at) == ("running", None)
+    assert _get(sqlite_engine, review).status == "superseded"
+    with sqlite_engine.begin() as conn:
+        worker.cancel_key(conn, workflow_id=world["workflow"], key="acme/app#7", now=clock(), reason="closed")
+    assert _get(sqlite_engine, arm_job).cancel_requested_at is None
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == newer).values(status="queued", finished_at=None))
+    assert _worker(sqlite_engine, keyring, clock, tmp_path).claim(clock()) == newer
+
+
+def test_a_queued_comparison_run_is_claimable_while_its_review_runs(sqlite_engine, keyring, clock, world, tmp_path):
+    arm_id = _arm(sqlite_engine, clock, world)
+    review = _queue(sqlite_engine, clock, world, supersede=True, cancel_running=True)
+    with sqlite_engine.begin() as conn:
+        conn.execute(update(jobs).where(jobs.c.id == review).values(status="running"))
+    arm_job = _queue(sqlite_engine, clock, world, key=f"acme/app#7#arm:{arm_id}", arm_id=arm_id)
+    _setting(sqlite_engine, worker.CAPABILITIES_KEY, [worker.EVAL_ARM])
+    assert _worker(sqlite_engine, keyring, clock, tmp_path).claim(clock()) == arm_job

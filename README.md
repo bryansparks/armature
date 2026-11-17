@@ -239,7 +239,7 @@ stages:
     depends_on: []
 ```
 
-A pack's `pack.yaml` declares each adapter's static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for its parameters and outputs, and a timeout. Parameters travel to the script as `ARMATURE_WITH` and `ARMATURE_CONTEXT["with"]` — never interpolated into the command line. `with:` is checked against the schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/adapter` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
+A pack's `pack.yaml` declares each adapter's static `cmd` (may reference `$PACK_DIR`, the pack's own directory), a JSON Schema for its parameters and outputs, and a timeout. Parameters travel to the script as `ARMATURE_WITH` (or the file named by `ARMATURE_WITH_FILE` when over 64 KiB) and `ARMATURE_CONTEXT["with"]` — never interpolated into the command line. Every script step also gets `ARMATURE_CONTEXT_FILE`, a temp file with the full context JSON, and `ARMATURE_CONTEXT` inline only when that JSON is 64 KiB or less. `with:` is checked against the schema when the workflow is validated (`INVALID_WITH`, with the field path) and again after it renders; a `pack/adapter` reference no installed pack provides is `UNKNOWN_PACK_ADAPTER`.
 
 Packs load from `ARMATURE_PACKS_PATH` and then `~/.armature/packs` — the first pack under a name wins. The server ships built-in packs (`conversation`, `github`, `jira`, `linear`, `resident`, `review`, `slack`) that power its review, integration, and resident flows.
 

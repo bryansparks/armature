@@ -46,6 +46,7 @@ class CallNode(BaseNode):
         emitter: Emitter | None = None,
         parent_step: str | None = None,
         engine_key: tuple[str, str] | None = None,
+        server_run_id: str | None = None,
     ):
         if stage.call is None:
             raise ValueError(f"Stage '{stage.id}' has no call")
@@ -55,6 +56,7 @@ class CallNode(BaseNode):
         self._emitter = emitter
         self._parent_step = parent_step
         self._engine_key = engine_key
+        self._server_run_id = server_run_id
         self.total_cost_usd = 0.0
         self.resolved_version: int | None = None
 
@@ -88,6 +90,7 @@ class CallNode(BaseNode):
             parent_step=self._parent_step,
             call_resolver=self._resolver,
             engine_key=self._engine_key,
+            server_run_id=self._server_run_id,
         )
         try:
             results = await child.run(inputs)

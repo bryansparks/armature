@@ -1,0 +1,10 @@
+[
+  ["claude-opus-4-6", "Claude Opus 4.6"],
+  ["claude-sonnet-4-6-20251001", "Claude Sonnet 4.6"],
+  ["us.anthropic.claude-haiku-4-5", "Us.anthropic.claude Haiku 4.5"],
+  ["gemini-2.5-pro", "Gemini 2.5 Pro"],
+  ["gpt-4o", "GPT 4o"],
+  ["house_model", "House Model"],
+  ["llama-3-1-70b", "Llama 3.1 70b"],
+  ["", "Unknown model"]
+]

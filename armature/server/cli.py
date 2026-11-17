@@ -1,5 +1,5 @@
-"""`armature server` commands: init, migrate, create-admin, run, export, pack, runs, backfill-locations, and
-import-ops."""
+"""`armature server` commands: init, migrate, create-admin, run, export, pack, runs, backfill-locations,
+backfill-candidates, label-findings, and import-ops."""
 from __future__ import annotations
 
 import getpass
@@ -305,6 +305,154 @@ def backfill_locations_cmd(config: Path | None = ConfigOption):
     total = sum(counts.values())
     detail = ", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()))
     typer.echo(f"Located {total} run{'' if total == 1 else 's'}{f' ({detail})' if detail else ''}.")
+
+
+@server_app.command("backfill-rounds")
+def backfill_rounds_cmd(config: Path | None = ConfigOption):
+    """Re-key findings stored under the old fallback key, then derive each pull request's review rounds, run kinds,
+    heads, and finding lineage from ended runs. Safe to rerun."""
+    from armature.server.db import make_engine
+    from armature.server.rounds import backfill
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        counts = backfill(engine)
+    finally:
+        engine.dispose()
+    subjects, rekeyed = counts["subjects"], counts["rekeyed"]
+    typer.echo(f"Derived the review rounds of {subjects} pull request{'' if subjects == 1 else 's'} and re-keyed "
+               f"{rekeyed} finding{'' if rekeyed == 1 else 's'}.")
+
+
+@server_app.command("backfill-candidates")
+def backfill_candidates_cmd(config: Path | None = ConfigOption):
+    """Store every finding specialists raised in ended runs, from their step outputs, and match each to the lead's
+    decision. Safe to rerun."""
+    from armature.server.db import make_engine
+    from armature.server.insights.candidates import backfill
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        counts = backfill(engine)
+    finally:
+        engine.dispose()
+    typer.echo(f"Stored {counts['candidates']} candidates from {counts['steps']} specialist steps, and matched "
+               f"{counts['runs']} runs: {counts['key']} by key, {counts['heuristic']} by path and claim, "
+               f"{counts['none']} unmatched. Skipped {counts['truncated']} truncated step outputs.")
+
+
+@server_app.command("insights-demo")
+def insights_demo_cmd(
+    team: str = typer.Option(..., "--team", help="The demo team's slug. The team is made when no team has it"),
+    force: bool = typer.Option(False, "--force", help="Seed even though the database holds teams that aren't demo "
+                                                      "teams. Never writes into those teams"),
+    config: Path | None = ConfigOption,
+):
+    """For development only: fill a demo team with six months of invented GitHub history, findings, and model spend,
+    so every Insights screen has data.
+
+    A demo team is one this command made, marked by its insights.demo setting. The command refuses while the database
+    holds any other team unless --force, never writes into a team that isn't a demo team, and replaces the demo
+    team's earlier invented history when run again.
+    """
+    from armature.server.db import make_engine, utcnow
+    from armature.server.insights import demo
+
+    cfg = _load(config)
+    engine = make_engine(cfg.database_url)
+    try:
+        try:
+            counts = demo.seed(engine, team, utcnow(), force=force)
+        except demo.Refused as exc:
+            _fail(str(exc))
+    finally:
+        engine.dispose()
+    typer.echo(f"Seeded demo team {team}: {counts['pull_requests']} pull requests, {counts['reviews']} reviews, "
+               f"{counts['flags']} flags, {counts['runs']} runs, and {counts['llm_calls']} model calls.")
+
+
+@server_app.command("label-findings")
+def label_findings_cmd(
+    team: str = typer.Option(..., "--team", help="The team, by slug or name"),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Label at most this many"),
+    alias: str | None = typer.Option(None, "--alias", help="The model alias to label with (default: the "
+                                                           "insights.label_model setting, else a small model)"),
+    config: Path | None = ConfigOption,
+):
+    """Label the team's unlabeled finding candidates and findings with the current categories. Safe to rerun."""
+    from sqlalchemy import or_, select
+
+    from armature.server.db import make_engine
+    from armature.server.db.schema import teams
+    from armature.server.insights import labeling, taxonomy
+    from armature.server.llm import LLMError
+
+    cfg = _load(config)
+    keyring = _keyring(cfg)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.connect() as conn:
+            found = conn.execute(select(teams.c.id).where(or_(teams.c.slug == team, teams.c.name == team))).all()
+            if not found:
+                _fail(f"No team has the slug or name {team}.")
+            if len(found) > 1:
+                # Slugs and names are each unique, so two rows mean one team's slug is another team's name.
+                _fail(f"{team} is the slug of one team and the name of another, so it could mean either. Rename one "
+                      f"of them first.")
+            team_id = found[0].id
+            if alias is None:
+                try:
+                    alias, why = labeling.default_alias(conn, team_id)
+                except LLMError as exc:
+                    _fail(exc.message)
+                typer.echo(f"Labeling with {alias}, because {why}.")
+        try:
+            totals = labeling.label(engine, keyring, team_id, alias, limit=limit)
+        except LLMError as exc:
+            _fail(f"Labeling stopped: {exc.message}")
+    finally:
+        engine.dispose()
+    typer.echo(f"Labeled {totals.labeled} with taxonomy {taxonomy.VERSION} in {totals.calls} calls, "
+               f"{totals.input_tokens} input and {totals.output_tokens} output tokens, "
+               f"{totals.cost_usd:.4f} USD.")
+
+
+@server_app.command("sync-github")
+def sync_github_cmd(
+    team: str = typer.Option(..., "--team", help="The team, by slug or name"),
+    repo: str | None = typer.Option(None, "--repo", help="Only this tracked repository, as owner/name"),
+    kind: str | None = typer.Option(None, "--kind", help="Only this kind: backfill, poll, conflicts, or gap_fill"),
+    config: Path | None = ConfigOption,
+):
+    """Claim and run the team's due GitHub sync states once, as the sync service would."""
+    from sqlalchemy import or_, select
+
+    from armature.server.db import make_engine
+    from armature.server.db.schema import GH_SYNC_KINDS, teams
+    from armature.server.insights import sync
+
+    if kind is not None and kind not in GH_SYNC_KINDS:
+        _fail(f"--kind must be one of {', '.join(GH_SYNC_KINDS)}.")
+    cfg = _load(config)
+    keyring = _keyring(cfg)
+    engine = make_engine(cfg.database_url)
+    try:
+        with engine.connect() as conn:
+            found = conn.execute(select(teams.c.id).where(or_(teams.c.slug == team, teams.c.name == team))).all()
+        if not found:
+            _fail(f"No team has the slug or name {team}.")
+        if len(found) > 1:
+            _fail(f"{team} is the slug of one team and the name of another, so it could mean either. Rename one "
+                  f"of them first.")
+        results = sync.run_now(engine, keyring, found[0].id, repo=repo, kind=kind)
+    finally:
+        engine.dispose()
+    if not results:
+        _fail("No enabled tracked repository in that team matches.")
+    for name, done, status in results:
+        typer.echo(f"{name} {done}: {status}")
 
 
 @pack_app.command("install")

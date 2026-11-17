@@ -79,7 +79,9 @@ real events only. Daily idle budgets push `next_idle_at` to tomorrow rather than
   workflow's `instance_key` template against the delivery body in the trigger sandbox
   (sandbox-linted engine-side; regex-anchored to `event.payload` refs), refuses over-length
   renders (191 — the column's width; truncation would silently merge instances), `ensure`s, and
-  `enqueue(kind="request", dedupe_key=delivery_id, dry_run=rule.dry_run)`. Shadow rules decide
+  `enqueue(kind="request", dedupe_key=delivery_id, dry_run=rule.dry_run)`, or a named `signal`
+  deduped on `delivery_id:name` when the rule sets `signal`. The rule's `$.path` inputs become
+  declared scalar `source.fields`, which `_inputs` merges into `_event.fields`. Shadow rules decide
   only. A resident rule is auditable-but-permissive on config: it locks only the delivery row.
 - **Pollers** (`armature/server/pollers.py`): Jira/Linear rules opt in with `config.resident`
   and route issues to keyed instances (dedupe by issue key); requeue on a resident trigger is

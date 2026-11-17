@@ -41,7 +41,7 @@ TOKEN_TTL = timedelta(hours=48)
 TOUCH = timedelta(seconds=60)
 WORKFLOW = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,190}$")
 TRIGGER_KIND = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
-SERVER_REF_KEYS = frozenset({"dry_run", "source", "import_hash"})
+SERVER_REF_KEYS = frozenset({"dry_run", "source", "import_hash", "arm_id"})
 ACTOR_MAX = 191
 THREAD_MAX = 191
 OPERATIONS_SLUG = "operations"
