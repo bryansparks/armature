@@ -9,8 +9,10 @@ in ``Catalog.errors``.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -160,30 +162,60 @@ def is_builtin(pack_dir: Path | str | None) -> bool:
         and Path(pack_dir).name in BUILTIN_PACKS
 
 
+_CACHE_LIMIT = 256
+_cache: dict[Path, tuple[bytes, Pack | PackError]] = {}
+_cache_lock = threading.Lock()
+
+
 def load_pack(directory: Path | str) -> Pack:
     """Load and validate ``<directory>/pack.yaml``. Raises ``PackError``, whose message names no path."""
-    from ruamel.yaml import YAML
-    from ruamel.yaml.error import YAMLError
-
     directory = Path(directory).expanduser().resolve()
     manifest = directory / PACK_FILE
     if not manifest.is_file():
         raise PackError(f"no {PACK_FILE}")
     try:
-        data = YAML(typ="safe").load(manifest.read_text(encoding="utf-8"))
+        raw = manifest.read_bytes()
     except OSError as exc:
         raise PackError(f"{PACK_FILE} is unreadable: {exc.__class__.__name__}") from exc
+    digest = hashlib.sha256(raw).digest()
+    with _cache_lock:
+        hit = _cache.get(manifest)
+    if hit is not None and hit[0] == digest:
+        result = hit[1]
+    else:
+        try:
+            result = _parse_pack(raw)
+        except PackError as exc:
+            result = exc
+        with _cache_lock:
+            _cache.pop(manifest, None)
+            if len(_cache) >= _CACHE_LIMIT:
+                del _cache[next(iter(_cache))]
+            _cache[manifest] = (digest, result)
+    if isinstance(result, PackError):
+        raise PackError(str(result)) from result.__cause__
+    pack = result.model_copy(deep=True)
+    pack.dir = directory
+    return pack
+
+
+def _parse_pack(raw: bytes) -> Pack:
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
+    try:
+        data = YAML(typ="safe").load(raw.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise PackError(f"{PACK_FILE} is not UTF-8") from exc
     except YAMLError as exc:
         raise PackError(f"{PACK_FILE} does not parse: {exc}") from exc
     if not isinstance(data, dict):
         raise PackError(f"{PACK_FILE} must hold a mapping")
     data.pop("dir", None)
     try:
-        pack = Pack.model_validate(data)
+        return Pack.model_validate(data)
     except ValidationError as exc:
         raise PackError(f"{PACK_FILE}: {_validation_message(exc)}") from exc
-    pack.dir = directory
-    return pack
 
 
 def _validation_message(exc: ValidationError) -> str:

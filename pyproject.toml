@@ -55,6 +55,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.5",
     "opentelemetry-sdk>=1.24",
     "ruff>=0.4",
 ]
@@ -108,10 +109,12 @@ mcp = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-n auto --dist loadgroup"
 markers = [
     "docker: marks tests that require a running Docker daemon (skipped without one)",
     "db_matrix: runs against Postgres or MySQL when ARMATURE_TEST_PG_URL or ARMATURE_TEST_MYSQL_URL is set",
     "load: live-event load test, skipped unless ARMATURE_LOAD=1",
+    "timing: wall-clock budget tests, run in a serial pass",
 ]
 
 [tool.hatch.build.targets.wheel]

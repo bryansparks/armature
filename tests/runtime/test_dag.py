@@ -122,6 +122,7 @@ async def test_independent_stages_run_concurrently():
     assert overlap_detected, "Stages A and B should have run concurrently"
 
 
+@pytest.mark.timing
 async def test_parallel_stages_faster_than_sequential():
     """Two independent 50ms stages should complete in ~50ms, not ~100ms."""
     import time
@@ -179,6 +180,7 @@ async def test_diamond_dag_parallelism():
     assert overlap_at_b or overlap_at_c, "B and C should have overlapped"
 
 
+@pytest.mark.timing
 async def test_fan_out_style_parallelism():
     """Many independent stages all run in a single wave."""
     import time

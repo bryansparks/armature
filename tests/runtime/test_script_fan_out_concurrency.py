@@ -1,9 +1,13 @@
 """A fan-out of script-adapter stages runs its items concurrently."""
 import time
+
+import pytest
+
 from armature.spec.models import Adapter, HarnessSpec, ModelTiers, ModelTierConfig, Stage
 from armature.runtime.engine import Harness
 
 
+@pytest.mark.timing
 async def test_script_fan_out_runs_items_concurrently(tmp_path):
     spec = HarnessSpec(
         name="wf",

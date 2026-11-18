@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+import armature.packs as packs_module
 from armature.packs import (
     BUILTIN_DIR,
     PACKS_PATH_ENV,
@@ -69,6 +70,98 @@ def test_missing_manifest_names_no_path(tmp_path):
     with pytest.raises(PackError) as caught:
         load_pack(tmp_path)
     assert str(tmp_path) not in str(caught.value)
+
+
+@pytest.fixture
+def parses(monkeypatch):
+    calls = []
+    real = packs_module._parse_pack
+
+    def counting(raw):
+        calls.append(raw)
+        return real(raw)
+
+    monkeypatch.setattr(packs_module, "_parse_pack", counting)
+    return calls
+
+
+def test_a_second_load_does_not_reparse(tmp_path, parses):
+    write_pack(tmp_path / "p")
+    first, second = load_pack(tmp_path / "p"), load_pack(tmp_path / "p")
+    assert len(parses) == 1
+    assert first == second and first is not second
+    assert second.dir == (tmp_path / "p").resolve()
+
+
+def test_editing_the_manifest_reloads(tmp_path, parses):
+    write_pack(tmp_path / "p", version="1.0.0")
+    assert load_pack(tmp_path / "p").version == "1.0.0"
+    write_pack(tmp_path / "p", version="10.0.0")
+    assert load_pack(tmp_path / "p").version == "10.0.0"
+    assert len(parses) == 2
+
+
+def test_mutating_a_loaded_pack_leaves_the_next_load_alone(tmp_path, parses):
+    write_pack(tmp_path / "p")
+    pack = load_pack(tmp_path / "p")
+    pack.adapters["echo"].params["properties"]["n"]["type"] = "string"
+    pack.adapters["extra"] = pack.adapters["echo"]
+    pack.name, pack.dir = "changed", tmp_path
+    again = load_pack(tmp_path / "p")
+    assert len(parses) == 1
+    assert again.name == "demo" and sorted(again.adapters) == ["echo"]
+    assert again.adapters["echo"].params["properties"]["n"]["type"] == "integer"
+    assert again.dir == (tmp_path / "p").resolve()
+
+
+def test_a_swapped_in_copy_with_the_old_mtime_reloads(tmp_path, parses):
+    write_pack(tmp_path / "old", version="1.0.0")
+    write_pack(tmp_path / "new", version="2.0.0")
+    old = (tmp_path / "old" / "pack.yaml").stat()
+    os.utime(tmp_path / "new" / "pack.yaml", ns=(old.st_atime_ns, old.st_mtime_ns))
+    (tmp_path / "old").rename(tmp_path / "p")
+    assert load_pack(tmp_path / "p").version == "1.0.0"
+    (tmp_path / "p").rename(tmp_path / "gone")
+    (tmp_path / "new").rename(tmp_path / "p")
+    assert load_pack(tmp_path / "p").version == "2.0.0"
+
+
+
+def test_a_same_size_rewrite_with_the_old_mtime_reloads(tmp_path, parses):
+    manifest = write_pack(tmp_path / "p", version="1.0.0") / "pack.yaml"
+    before = manifest.stat()
+    assert load_pack(tmp_path / "p").version == "1.0.0"
+    manifest.write_text(manifest.read_text().replace("1.0.0", "2.0.0"))
+    os.utime(manifest, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = manifest.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert load_pack(tmp_path / "p").version == "2.0.0"
+    assert len(parses) == 2
+
+def test_a_cached_failure_keeps_its_cause(tmp_path):
+    write_pack(tmp_path / "p", x={"cmd": "echo {{ x }}"})
+    for _ in range(2):
+        with pytest.raises(PackError) as caught:
+            load_pack(tmp_path / "p")
+        assert caught.value.__cause__ is not None
+
+
+def test_a_manifest_that_is_not_utf8_is_a_pack_error(tmp_path):
+    (tmp_path / "p").mkdir()
+    (tmp_path / "p" / "pack.yaml").write_bytes(b"name: d\xe9mo\nversion: 1.0.0\n")
+    with pytest.raises(PackError, match="not UTF-8"):
+        load_pack(tmp_path / "p")
+
+
+def test_a_broken_manifest_that_gets_fixed_loads(tmp_path, parses):
+    write_pack(tmp_path / "p", x={"cmd": "echo {{ x }}"})
+    for _ in range(2):
+        with pytest.raises(PackError, match="template markers"):
+            load_pack(tmp_path / "p")
+    assert len(parses) == 1
+    write_pack(tmp_path / "p")
+    assert sorted(load_pack(tmp_path / "p").adapters) == ["echo"]
+    assert len(parses) == 2
 
 
 def test_search_path_order_and_first_pack_wins(tmp_path):

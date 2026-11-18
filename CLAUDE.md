@@ -30,6 +30,19 @@ in the deployment. See docs/TRANSPORT-AND-PROVIDERS.md.
 
 ---
 
+## Running tests
+
+```bash
+pytest                          # whole suite in parallel (addopts sets -n auto)
+pytest -n0 -m timing            # wall-clock budget tests, serial; skipped in the parallel run
+pytest -n0 path/to/test.py::test_name   # one test, serial, for debugging and pdb
+```
+
+Every test runs with `HOME` pointed at its own temp directory (`tests/conftest.py`),
+so nothing writes to the real `~/.armature`.
+
+---
+
 ## Core Mental Model
 
 ### DAG + cumulative context

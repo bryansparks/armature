@@ -405,6 +405,10 @@ def test_a_real_process_that_never_ends_its_run_fails_the_job(sqlite_engine, key
     assert job.status == "failed" and "exited with status 0" in job.error
     seen = json.loads(record.read_text())
     assert seen["argv"][2:] == ["--quiet", "--no-cache", "--input", "number=7"]
+    # The watch thread fails the run before it removes the directory.
+    deadline = time.monotonic() + 5
+    while (tmp_path / "work" / job_id).exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
     assert not (tmp_path / "work" / job_id).exists()
 
 
