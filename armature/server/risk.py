@@ -21,6 +21,17 @@ SETTINGS = (FLOORS_KEY, PANEL_KEY)
 DEFAULT_LOW_RISK_PANEL = ("correctness", "security", "conventions", "simplicity")
 SPECIALISTS = ("simplicity", "correctness", "security", "performance", "beauty", "test_adequacy", "concurrency",
                "conventions", "compatibility")
+CORE_PANEL = ("correctness", "simplicity", "conventions", "test_adequacy")
+# One pass in place of the panel, kept out of SPECIALISTS so "every one" and the low-risk setting never add it.
+REVIEWER = "reviewer"
+TRIGGERS = {"security": "security", "concurrency": "concurrency", "performance": "performance", "ui": "beauty",
+            "compatibility": "compatibility"}
+# The floors whose paths force a trigger whatever the model says. Dependency and build changes are the supply chain,
+# so they force security too.
+FORCED = {"security": ("dependencies", "build configuration"),
+          "compatibility": ("dependencies", "build configuration")}
+SMALL_LINES = 50
+SMALL_FILES = 5
 # The pull request files API stops at 3000, so a longer diff is one the server can't fully read.
 FILES_MAX = 3000
 MAX_REASONS = 20
@@ -151,9 +162,38 @@ def record(conn: Connection, run_id: str, level: Any, reasons: list[dict[str, st
     return conn.execute(select(runs.c.risk).where(runs.c.id == run_id)).scalar()
 
 
-def panel(level: Any, low_risk: list[str]) -> list[str]:
-    """The specialists a review at ``level`` runs: the low-risk panel when low, else every one."""
-    return list(low_risk) if known(level) == "low" else list(SPECIALISTS)
+def triggers(model: Any, paths: Iterable[str]) -> dict[str, list[str]] | None:
+    """The triggers that pick specialists, by source. None when the model sent anything but a list of known names,
+    so the panel stays as it was before triggers. The model can add to the path triggers and never remove one."""
+    if not isinstance(model, list) or not all(isinstance(name, str) and name in TRIGGERS for name in model):
+        return None
+    rules = {rule.label: rule for rule in DEFAULT_FLOORS}
+    paths = [p for p in paths if isinstance(p, str) and p]
+    forced = [name for name, labels in FORCED.items()
+              if any(_hits(p, rules[label]) for label in labels for p in paths)]
+    return {"model": list(dict.fromkeys(model)), "path": forced}
+
+
+def _small(small: Any, lines: Any, files: int) -> bool:
+    return (small is True and isinstance(lines, int) and not isinstance(lines, bool) and 0 <= lines <= SMALL_LINES
+            and files <= SMALL_FILES)
+
+
+def panel(level: Any, low_risk: list[str], triggered: dict[str, list[str]] | None = None, *, small: Any = None,
+          lines: Any = None, files: int = 0) -> list[str]:
+    """The specialists a review at ``level`` runs. Without triggers: the low-risk panel when low, else every one.
+    With them, medium and low run their base panel plus each triggered role, and a small low change runs the
+    reviewer alone."""
+    level = known(level)
+    if triggered is None:
+        return list(low_risk) if level == "low" else list(SPECIALISTS)
+    if level == "high":
+        return list(SPECIALISTS)
+    if level == "low" and _small(small, lines, files):
+        return [REVIEWER]
+    roles = {TRIGGERS[name] for names in triggered.values() for name in names if name in TRIGGERS}
+    base = list(CORE_PANEL if level == "medium" else low_risk)
+    return base + [r for r in SPECIALISTS if r in roles and r not in base]
 
 
 def recorded(conn: Connection, run_id: str | None) -> str:
