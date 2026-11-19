@@ -321,7 +321,10 @@ async def test_the_base_is_pinned_once_per_run(stub, tmp_path, remote, origin):
     assert second.tree["CLAUDE.md"] == first.tree["CLAUDE.md"]
 
 
-async def test_a_run_without_a_repo_gets_no_repo_skills(stub, tmp_path):
+async def test_a_run_without_a_repo_gets_no_repo_skills(stub, tmp_path, monkeypatch):
+    write(tmp_path / "cwd", "CLAUDE.md", "cwd rules\n")
+    write(tmp_path / "cwd", ".claude/skills/x/SKILL.md", "---\nname: x\ndescription: A cwd skill.\n---\nbody\n")
+    monkeypatch.chdir(tmp_path / "cwd")
     node = Seen(stage(), root=tmp_path / "agents")
     stub.plan({"lines": [result_line("ok")]})
     await node.execute({})
@@ -483,7 +486,10 @@ async def test_the_system_prompt_file_is_capped(stub, tmp_path, remote, monkeypa
     assert "--append-system-prompt-file" not in stub.calls()[-1]["argv"]
 
 
-async def test_no_repo_means_no_system_prompt_file(stub, tmp_path):
+async def test_no_repo_means_no_system_prompt_file(stub, tmp_path, monkeypatch):
+    write(tmp_path / "cwd", "CLAUDE.md", "cwd rules\n")
+    write(tmp_path / "cwd", ".claude/skills/x/SKILL.md", "---\nname: x\ndescription: A cwd skill.\n---\nbody\n")
+    monkeypatch.chdir(tmp_path / "cwd")
     node = Seen(stage(), root=tmp_path / "agents")
     stub.plan({"lines": [result_line("ok")]})
     await node.execute({})

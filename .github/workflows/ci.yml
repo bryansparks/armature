@@ -33,6 +33,9 @@ jobs:
       - name: Run tests
         run: python -m pytest tests/ --tb=short -q
 
+      - name: Run timing tests serially
+        run: python -m pytest tests/ -n0 -m timing --tb=short -q
+
   cloud-tests:
     name: Transport tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest

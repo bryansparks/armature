@@ -1,8 +1,12 @@
 import tempfile
 import time
 
+import pytest
+
 from armature.events import Emitter
 from tests.events.support import DatagramReader, closed_port
+
+pytestmark = pytest.mark.timing
 
 N = 20_000
 TOTAL_BUDGET_S = 1.0

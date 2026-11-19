@@ -54,6 +54,7 @@ def _docker_available() -> bool:
 
 pytestmark = [
     pytest.mark.docker,
+    pytest.mark.xdist_group("docker_image"),
     pytest.mark.skipif(not _docker_available(), reason="Docker daemon not available"),
 ]
 
