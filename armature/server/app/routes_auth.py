@@ -14,7 +14,7 @@ from sqlalchemy import Connection, select
 from armature.server import audit, auth, invites, slacklink
 from armature.server.app.deps import Server, current_session, server, signed_in
 from armature.server.app.http import ApiError, client_ip
-from armature.server.auth import ABSOLUTE, AuthError, Session
+from armature.server.auth import AuthError, Session
 from armature.server.db.schema import memberships, projects, teams, users
 from armature.server.passwords import check_password_policy
 
@@ -83,8 +83,8 @@ def session_payload(srv: Server, session: Session | None, csrf: str | None = Non
 
 
 def set_session_cookie(srv: Server, response: Response, token: str) -> None:
-    response.set_cookie(srv.cookie_name, token, max_age=int(ABSOLUTE.total_seconds()), path=srv.cookie_path,
-                        secure=not srv.insecure_localhost, httponly=True, samesite="strict")
+    response.set_cookie(srv.cookie_name, token, max_age=int(srv.session_lifetime.maximum.total_seconds()),
+                        path=srv.cookie_path, secure=not srv.insecure_localhost, httponly=True, samesite="strict")
 
 
 def clear_session_cookie(srv: Server, response: Response) -> None:
@@ -106,8 +106,8 @@ def get_session(request: Request, response: Response) -> dict[str, Any]:
     pre = request.cookies.get(srv.pre_cookie_name)
     if not auth.valid_token(pre):
         pre = _random.token_urlsafe(32)
-        response.set_cookie(srv.pre_cookie_name, pre, max_age=int(ABSOLUTE.total_seconds()), path=srv.cookie_path,
-                            secure=not srv.insecure_localhost, httponly=True, samesite="strict")
+        response.set_cookie(srv.pre_cookie_name, pre, max_age=int(srv.session_lifetime.maximum.total_seconds()),
+                            path=srv.cookie_path, secure=not srv.insecure_localhost, httponly=True, samesite="strict")
     return session_payload(srv, None, login_csrf(srv, pre))
 
 
@@ -133,12 +133,13 @@ def login(body: LoginBody, request: Request, response: Response) -> dict[str, An
     try:
         signed = auth.login(srv.engine, srv.keyring, username=body.username, password=body.password, code=body.totp,
                             ip=client_ip(request), now=srv.now(), dummy=srv.dummy_hash,
-                            old_token=request.cookies.get(srv.cookie_name), require_totp=srv.cfg.require_totp)
+                            old_token=request.cookies.get(srv.cookie_name), require_totp=srv.cfg.require_totp,
+                            lifetime=srv.session_lifetime)
     except AuthError as exc:
         _raise(exc)
     set_session_cookie(srv, response, signed.token)
     with srv.engine.connect() as conn:
-        session = auth.load_session(conn, srv.keyring, signed.token, srv.now(), touch=False)
+        session = auth.load_session(conn, srv.keyring, signed.token, srv.now(), srv.session_lifetime, touch=False)
     return session_payload(srv, session)
 
 
@@ -243,10 +244,10 @@ def accept_invite(body: AcceptBody, request: Request, response: Response) -> dic
     try:
         accepted = invites.accept(srv.engine, srv.keyring, body.token, password=body.password, code=body.code,
                                   ip=client_ip(request), now=srv.now(), cost=srv.password_cost,
-                                  require_totp=srv.cfg.require_totp)
+                                  require_totp=srv.cfg.require_totp, lifetime=srv.session_lifetime)
     except AuthError as exc:
         _raise(exc)
     set_session_cookie(srv, response, accepted.token)
     with srv.engine.connect() as conn:
-        session = auth.load_session(conn, srv.keyring, accepted.token, srv.now(), touch=False)
+        session = auth.load_session(conn, srv.keyring, accepted.token, srv.now(), srv.session_lifetime, touch=False)
     return session_payload(srv, session)

@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
 ### Changed
 
+- Dashboard sessions now last 24 hours idle and 7 days in all, up from 30 minutes and 12 hours. `session_idle_hours` and `session_max_hours` in `server.yaml` set them, and the session cookie lasts as long as `session_max_hours`.
 - **Sidebar sections.** The web UI sidebar groups its pages into six
   sections: Inbox, Activity, Workflows, Events, Library, and Settings. A
   section with more than one page shows its pages as tabs at the top.

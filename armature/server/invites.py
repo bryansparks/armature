@@ -18,6 +18,7 @@ from sqlalchemy import Connection, Engine, insert, select, update
 from armature.server import audit
 from armature.server.auth import (
     AuthError,
+    Lifetime,
     begin_attempt,
     confirm_enrollment,
     finish_attempt,
@@ -118,7 +119,7 @@ class _Refused(Exception):
 
 
 def accept(engine: Engine, keyring: Keyring, token: Any, *, password: str, code: Any, ip: str, now: datetime,
-           cost: int | None = None, require_totp: bool = True) -> Accepted:
+           lifetime: Lifetime, cost: int | None = None, require_totp: bool = True) -> Accepted:
     """Set the password, confirm the authenticator, use up the invite, and start a session, all or nothing."""
     attempt_id = begin_attempt(engine, ip=ip, username=_throttle_key(keyring, token), now=now)
     password_hash = hash_password(password, **({"cost": cost} if cost else {}))
@@ -138,7 +139,8 @@ def accept(engine: Engine, keyring: Keyring, token: Any, *, password: str, code:
             conn.execute(update(users).where(users.c.id == user.id)
                          .values(password_hash=password_hash, last_login_at=now))
             finish_attempt(conn, attempt_id, True, now)
-            session_token, csrf = start_session(conn, keyring, user.id, now, ip=ip, step_up=True)
+            session_token, csrf = start_session(conn, keyring, user.id, now, ip=ip, step_up=True,
+                                                lifetime=lifetime)
             audit.record(conn, action="invite.accept", actor_id=user.id, target_kind="user", target_id=user.id,
                          detail={"invite_id": invite.id}, ip=ip)
     except _Refused:

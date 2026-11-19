@@ -17,7 +17,7 @@ from sqlalchemy import insert
 
 from armature.server import runners
 from armature.server.app import create_app
-from armature.server.auth import start_session
+from armature.server.auth import Lifetime, start_session
 from armature.server.config import ServerConfig
 from armature.server.db import new_id
 from armature.server.db.schema import projects, teams
@@ -80,7 +80,8 @@ class LiveServer:
         cookies = {}
         if user_id is not None:
             with self.engine.begin() as conn:
-                token, _ = start_session(conn, self.keyring, user_id, self.clock(), ip=None, step_up=step_up)
+                token, _ = start_session(conn, self.keyring, user_id, self.clock(), ip=None, step_up=step_up,
+                                         lifetime=Lifetime.of(ServerConfig()))
             cookies[COOKIE] = token
         return httpx.Client(base_url=self.origin, cookies=cookies, timeout=10, **kwargs)
 

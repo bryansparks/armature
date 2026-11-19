@@ -57,3 +57,17 @@ def test_bad_values_refused(field, value):
 def test_unknown_role_in_group_roles_refused():
     with pytest.raises(ValidationError):
         ServerConfig(oidc={"issuer": "i", "client_id": "c", "client_secret_ref": "s", "group_roles": {"g": [{"scope_kind": "team", "scope": "t", "role": "root"}]}})
+
+
+def test_session_lifetime_defaults():
+    cfg = ServerConfig()
+    assert (cfg.session_idle_hours, cfg.session_max_hours) == (24, 168)
+
+
+@pytest.mark.parametrize("idle,maximum,message", [
+    (0, 168, "greater than 0"), (-1, 168, "greater than 0"), (24, 12, "at least session_idle_hours"),
+    (24, 721, "less than or equal to 720"),
+])
+def test_bad_session_lifetimes_refused(idle, maximum, message):
+    with pytest.raises(ValidationError, match=message):
+        ServerConfig(session_idle_hours=idle, session_max_hours=maximum)
