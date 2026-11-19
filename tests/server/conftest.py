@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 
 import pytest
 
@@ -26,6 +28,16 @@ def _drop_everything(url: str) -> None:
             existing.drop_all(conn)
     finally:
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _home_in_tmp(monkeypatch):
+    # Server tests start real armature processes, which read ~/.armature themselves. Under /tmp rather than tmp_path,
+    # because a Unix socket under HOME must fit macOS's 104-byte limit.
+    home = tempfile.mkdtemp(prefix="armature-home-", dir="/tmp")
+    monkeypatch.setenv("HOME", home)
+    yield
+    shutil.rmtree(home, ignore_errors=True)
 
 
 @pytest.fixture(params=["sqlite", *(pytest.param(name, marks=pytest.mark.db_matrix) for name in MATRIX)])

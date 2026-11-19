@@ -14,7 +14,9 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -57,6 +59,7 @@ CONNECTION_KINDS = ("github_app", "slack", "jira", "linear")
 CONNECTION_STATES = ("unverified", "ok", "error")
 RISK_LEVELS = ("low", "medium", "high")
 FINDING_DECISIONS = ("block", "suggest", "drop", "fixed")
+REVIEW_KINDS = ("full", "incremental", "discuss", "resolve_declined")
 OUTCOME_SOURCES = ("runner", "server")
 GATE_STATES = ("open", "approved", "rejected", "expired", "canceled")
 GATE_VIA = ("web", "slack")
@@ -71,6 +74,24 @@ RESIDENT_STATES = ("idle", "paused", "closed")
 RESIDENT_EVENT_KINDS = ("request", "ask", "schedule", "signal", "idle", "custom")
 TRIGGER_POLL_STATUSES = ("ok", "error", "skipped")
 TRIGGER_SEEN_OUTCOMES = ("queued", "seeded", "shadow", "skipped")
+GH_PR_STATES = ("open", "closed", "merged")
+PERSON_KINDS = ("human", "bot")
+IDENTITY_KINDS = ("github_id", "github_login", "email", "jira_account", "armature")
+GH_PUSH_SOURCES = ("webhook", "sync")
+GH_ACTOR_SOURCES = ("github", "armature")
+GH_LINK_KINDS = ("revert", "fix")
+GH_MERGEABLE = ("mergeable", "conflicting", "unknown")
+GH_SYNC_KINDS = ("backfill", "poll", "conflicts", "gap_fill")
+EVAL_VARIABLES = ("model", "effort")
+EVAL_EXPERIMENT_STATUSES = ("running", "paused", "finished")
+EVAL_ARM_LABELS = ("variant", "control")
+EVAL_ARM_STATUSES = ("queued", "running", "done", "failed", "skipped")
+EVAL_MATCH_METHODS = ("key", "heuristic", "none")
+EVAL_SCORE_LABELS = ("primary", *EVAL_ARM_LABELS)
+EVAL_RECOMMENDATION_STATES = ("waiting", "approved", "dismissed", "applied")
+FIX_STATES = ("queued", "drafting", "waiting", "approved", "declined", "expired", "opened", "merged", "closed",
+              "failed")
+FIX_KINDS = ("check", "sweep", "guidance", "author_note")
 
 INSTANCE_SCOPE = "*"
 
@@ -508,6 +529,8 @@ jobs = Table(
     Column("requested_by", String(36)),
     # No foreign key, as with delivery_id: the resident that queued this turn, pruned residents keep their jobs.
     Column("resident_id", String(36), index=True),
+    # No foreign key, as with resident_id: the comparison run this job is, which runs in arm mode.
+    Column("arm_id", String(36), index=True),
     Index(None, "status", "created_at"),
     # The backfill and a run's page find a run's jobs by run.
     Index(None, "run_id"),
@@ -549,6 +572,11 @@ runs = Table(
     Column("head_sha", String(40)),
     # Where the run executed, as armature.events.location makes it. NULL until known or backfilled.
     Column("location", JSON),
+    # armature.server.rounds derives these from data the server holds. They classify a run and authorize nothing.
+    Column("review_round", Integer),
+    # No foreign key, as with rerun_of: the first run of the previous round.
+    Column("prev_round_run_id", String(36)),
+    Column("review_kind", String(16)),
     Index(None, "team_id", "started_at"),
     Index(None, "status"),
     Index(None, "subject", "started_at"),
@@ -557,6 +585,7 @@ runs = Table(
     CheckConstraint(f"risk IS NULL OR {_in('risk', RISK_LEVELS)}", name="risk"),
     CheckConstraint(f"outcome IS NULL OR {_in('outcome', RUN_OUTCOMES)}", name="outcome"),
     CheckConstraint(f"outcome_source IS NULL OR {_in('outcome_source', OUTCOME_SOURCES)}", name="outcome_source"),
+    CheckConstraint(f"review_kind IS NULL OR {_in('review_kind', REVIEW_KINDS)}", name="review_kind"),
 )
 
 # step_key is parent_step/step_id for a subagent's or nested run's step, so it never merges into the parent's row.
@@ -607,7 +636,11 @@ findings = Table(
     Column("decision", String(16)),
     Column("reason", Text),
     Column("fix_sha", String(40)),
+    Column("blocking", Boolean),
+    # The finding_key of the earliest finding on its pull request that this one restates, else its own.
+    Column("lineage_key", String(64)),
     Index(None, "project_id", "finding_key"),
+    Index(None, "project_id", "lineage_key"),
     CheckConstraint(f"decision IS NULL OR {_in('decision', FINDING_DECISIONS)}", name="decision"),
 )
 
@@ -639,6 +672,549 @@ run_artifacts = Table(
     Column("size", Integer, nullable=False),
     _ts("created_at"),
     PrimaryKeyConstraint("run_id", "name"),
+)
+
+# What one cost event says actually ran. The unique key catches a batch the writer applies again after an ambiguous
+# commit. A client event resent after a server restart gets a new seq, so it isn't caught.
+llm_calls = Table(
+    "llm_calls", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("run_id", String(36), ForeignKey("runs.id"), nullable=False),
+    Column("seq", BigInteger, nullable=False),
+    Column("step_key", String(191)),
+    Column("model_id", String(191)),
+    Column("provider", String(64)),
+    Column("alias", String(191)),
+    Column("tier", String(64)),
+    Column("requested_effort", String(16)),
+    Column("reported_effort", String(16)),
+    Column("escalation_index", Integer),
+    Column("input_tokens", BigInteger),
+    Column("output_tokens", BigInteger),
+    Column("cost_usd", Numeric(14, 6)),
+    Column("attempts", JSON),
+    Column("model_usage", JSON),
+    Column("cached", Boolean, nullable=False, default=False, server_default=false()),
+    _ts("created_at"),
+    UniqueConstraint("run_id", "seq"),
+    Index(None, "team_id", "created_at"),
+)
+
+# Every finding a specialist raised, before the lead decides. Never read as a decision, so never in findings.
+finding_candidates = Table(
+    "finding_candidates", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("project_id", String(36), ForeignKey("projects.id")),
+    Column("run_id", String(36), ForeignKey("runs.id"), nullable=False),
+    Column("step_key", String(191), nullable=False),
+    Column("specialist", String(64), nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("finding_key", String(64)),
+    Column("path", Text),
+    Column("line", Integer),
+    Column("severity", String(16)),
+    Column("blocking", Boolean),
+    Column("claim", Text),
+    Column("body", Text),
+    Column("suggestion", Text),
+    Column("arm_id", String(36)),
+    _ts("created_at"),
+    UniqueConstraint("run_id", "step_key", "ordinal"),
+    Index(None, "team_id", "created_at"),
+    Index(None, "project_id", "finding_key"),
+)
+
+# The lead's decisions a candidate became, by matcher version. A candidate no decision took has one row with no
+# finding_id, at match_ordinal 0.
+candidate_matches = Table(
+    "candidate_matches", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("candidate_id", String(36), ForeignKey("finding_candidates.id"), nullable=False),
+    Column("finding_id", String(36), ForeignKey("findings.id")),
+    Column("match_ordinal", Integer, nullable=False),
+    Column("method", String(16), nullable=False),
+    Column("score", Float),
+    Column("matcher_version", String(64), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("candidate_id", "matcher_version", "match_ordinal"),
+    Index(None, "finding_id"),
+)
+
+taxonomies = Table(
+    "taxonomies", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("version", String(64), nullable=False),
+    Column("definition", JSON, nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("team_id", "version"),
+)
+
+# A subject's category under one taxonomy version. subject_id points at a row of the table subject_kind names, with
+# no foreign key, so every read joins back to that row's team.
+labels = Table(
+    "labels", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("subject_kind", String(16), nullable=False),
+    Column("subject_id", String(64), nullable=False),
+    Column("taxonomy_version", String(64), nullable=False),
+    Column("label", String(191), nullable=False),
+    Column("confidence", Float),
+    Column("labeler", String(191), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("team_id", "subject_kind", "subject_id", "taxonomy_version"),
+    Index(None, "team_id", "taxonomy_version", "label"),
+)
+
+clusters = Table(
+    "clusters", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("taxonomy_version", String(64), nullable=False),
+    Column("label", String(191), nullable=False),
+    Column("scope", JSON),
+    Column("size", Integer, nullable=False, default=0, server_default="0"),
+    _ts("first_seen", nullable=True),
+    _ts("last_seen", nullable=True),
+    Column("summary", Text),
+    _ts("created_at"),
+    Index(None, "team_id", "taxonomy_version", "label"),
+)
+
+cluster_members = Table(
+    "cluster_members", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("cluster_id", String(36), ForeignKey("clusters.id"), nullable=False),
+    Column("subject_kind", String(16), nullable=False),
+    Column("subject_id", String(64), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("cluster_id", "subject_kind", "subject_id"),
+)
+
+# GitHub history a team tracks, from webhooks and the sync service. Rows key on GitHub's IDs, never on a delivery.
+gh_repos = Table(
+    "gh_repos", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("gh_repo_id", BigInteger, nullable=False),
+    Column("full_name", String(191), nullable=False),
+    Column("project_id", String(36), ForeignKey("projects.id")),
+    Column("connection_id", String(36), ForeignKey("connections.id")),
+    Column("enabled", Boolean, nullable=False, default=True),
+    Column("backfill_since", Date),
+    _ts("created_at"),
+    _ts("updated_at"),
+    UniqueConstraint("team_id", "gh_repo_id"),
+    UniqueConstraint("team_id", "full_name"),
+)
+
+people = Table(
+    "people", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("display_name", String(191), nullable=False),
+    Column("kind", String(8), nullable=False),
+    Column("user_id", String(36), ForeignKey("users.id")),
+    _ts("created_at"),
+    _ts("updated_at"),
+    CheckConstraint(_in("kind", PERSON_KINDS), name="kind"),
+)
+
+person_identities = Table(
+    "person_identities", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("person_id", String(36), ForeignKey("people.id"), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("value", String(191), nullable=False),
+    Column("verified", Boolean, nullable=False, default=False, server_default=false()),
+    _ts("first_seen"),
+    _ts("last_seen"),
+    UniqueConstraint("team_id", "kind", "value"),
+    Index(None, "person_id"),
+    CheckConstraint(_in("kind", IDENTITY_KINDS), name="kind"),
+)
+
+gh_pull_requests = Table(
+    "gh_pull_requests", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("repo_row_id", String(36), ForeignKey("gh_repos.id"), nullable=False),
+    Column("gh_pr_id", BigInteger, nullable=False),
+    Column("number", Integer, nullable=False),
+    Column("title", String(512)),
+    Column("author_person_id", String(36), ForeignKey("people.id")),
+    Column("author_gh_id", BigInteger, nullable=False),
+    Column("author_login", String(191), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("draft", Boolean, nullable=False, default=False, server_default=false()),
+    Column("base_ref", String(255)),
+    Column("head_ref", String(255)),
+    Column("head_repo_gh_id", BigInteger),
+    Column("head_sha", String(64)),
+    Column("base_sha", String(64)),
+    Column("merge_commit_sha", String(64)),
+    Column("merge_method", String(16)),
+    Column("additions", Integer),
+    Column("deletions", Integer),
+    Column("changed_files", Integer),
+    _ts("created_at_gh"),
+    _ts("closed_at_gh", nullable=True),
+    _ts("merged_at_gh", nullable=True),
+    Column("merged_by_gh_id", BigInteger),
+    _ts("gh_updated_at"),
+    Column("jira_key", String(64)),
+    _ts("created_at"),
+    _ts("updated_at"),
+    UniqueConstraint("team_id", "gh_pr_id"),
+    Index(None, "team_id", "repo_row_id", "number"),
+    Index(None, "team_id", "author_person_id", "created_at_gh"),
+    Index(None, "team_id", "state"),
+    CheckConstraint(_in("state", GH_PR_STATES), name="state"),
+)
+
+# push_class stays NULL until the sync service classifies the push.
+gh_pushes = Table(
+    "gh_pushes", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("before_sha", String(64), nullable=False),
+    Column("after_sha", String(64), nullable=False),
+    Column("base_sha", String(64)),
+    Column("forced", Boolean),
+    Column("pusher_gh_id", BigInteger),
+    Column("pusher_login", String(191)),
+    Column("pusher_person_id", String(36), ForeignKey("people.id")),
+    # armature when a github.push call names the commit, else github.
+    Column("actor_source", String(16), nullable=False, default="github", server_default="github"),
+    _ts("pushed_at"),
+    Column("source", String(16), nullable=False),
+    Column("push_class", String(32)),
+    Column("class_confidence", Float),
+    Column("class_evidence", JSON),
+    Column("classifier_version", String(64)),
+    _ts("created_at"),
+    UniqueConstraint("pr_row_id", "after_sha"),
+    Index(None, "team_id", "push_class"),
+    CheckConstraint(_in("source", GH_PUSH_SOURCES), name="source"),
+    CheckConstraint(_in("actor_source", GH_ACTOR_SOURCES), name="actor_source"),
+)
+
+gh_reviews = Table(
+    "gh_reviews", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("gh_review_id", BigInteger, nullable=False),
+    Column("reviewer_person_id", String(36), ForeignKey("people.id")),
+    Column("reviewer_gh_id", BigInteger, nullable=False),
+    Column("reviewer_login", String(191), nullable=False),
+    # armature when a review call Armature recorded matches it, whatever login it posted under, else github.
+    Column("actor_source", String(16), nullable=False, default="github", server_default="github"),
+    Column("state", String(32), nullable=False),
+    Column("head_sha", String(64)),
+    _ts("submitted_at", nullable=True),
+    Column("body_length", Integer, nullable=False, default=0, server_default="0"),
+    Column("comment_count", Integer),
+    Column("url", String(512)),
+    _ts("created_at"),
+    _ts("updated_at"),
+    UniqueConstraint("team_id", "gh_review_id"),
+    Index(None, "pr_row_id"),
+    CheckConstraint(_in("actor_source", GH_ACTOR_SOURCES), name="actor_source"),
+)
+
+# The comment's text stays on GitHub.
+gh_review_comments = Table(
+    "gh_review_comments", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("gh_comment_id", BigInteger, nullable=False),
+    Column("gh_review_id", BigInteger),
+    Column("author_person_id", String(36), ForeignKey("people.id")),
+    Column("author_gh_id", BigInteger, nullable=False),
+    Column("author_login", String(191), nullable=False),
+    Column("path", Text),
+    Column("line", Integer),
+    Column("head_sha", String(64)),
+    _ts("created_at_gh"),
+    _ts("updated_at_gh"),
+    Column("deleted", Boolean, nullable=False, default=False, server_default=false()),
+    # NULL when only the sync service has seen the comment, because it never reads the text.
+    Column("body_length", Integer, default=0, server_default="0"),
+    Column("url", String(512)),
+    Column("in_reply_to", BigInteger),
+    _ts("created_at"),
+    UniqueConstraint("team_id", "gh_comment_id"),
+    Index(None, "pr_row_id"),
+)
+
+gh_check_runs = Table(
+    "gh_check_runs", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id")),
+    Column("gh_check_run_id", BigInteger, nullable=False),
+    Column("repo_row_id", String(36), ForeignKey("gh_repos.id"), nullable=False),
+    Column("name", String(191), nullable=False),
+    Column("head_sha", String(64), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("conclusion", String(32)),
+    _ts("started_at", nullable=True),
+    _ts("completed_at", nullable=True),
+    _ts("created_at"),
+    UniqueConstraint("team_id", "gh_check_run_id"),
+    Index(None, "team_id", "repo_row_id", "head_sha"),
+    Index(None, "pr_row_id"),
+)
+
+gh_pr_commits = Table(
+    "gh_pr_commits", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("repo_row_id", String(36), ForeignKey("gh_repos.id"), nullable=False),
+    Column("commit_sha", String(64), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("team_id", "repo_row_id", "commit_sha"),
+    Index(None, "pr_row_id"),
+)
+
+gh_pr_links = Table(
+    "gh_pr_links", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("from_pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("to_pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("evidence", JSON),
+    Column("confidence", Float, nullable=False),
+    Column("detector_version", String(64), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("from_pr_row_id", "to_pr_row_id", "kind"),
+    Index(None, "to_pr_row_id"),
+    CheckConstraint(_in("kind", GH_LINK_KINDS), name="kind"),
+)
+
+gh_conflict_samples = Table(
+    "gh_conflict_samples", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    _ts("sampled_at"),
+    Column("mergeable", String(16), nullable=False),
+    Column("merge_state", String(32)),
+    UniqueConstraint("pr_row_id", "sampled_at"),
+    CheckConstraint(_in("mergeable", GH_MERGEABLE), name="mergeable"),
+)
+
+gh_sync_state = Table(
+    "gh_sync_state", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("repo_row_id", String(36), ForeignKey("gh_repos.id"), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("cursor", Text),
+    _ts("watermark", nullable=True),
+    _ts("next_run_at", nullable=True),
+    Column("last_error", Text),
+    Column("failures", Integer),
+    _ts("updated_at"),
+    UniqueConstraint("team_id", "repo_row_id", "kind"),
+    CheckConstraint(_in("kind", GH_SYNC_KINDS), name="kind"),
+)
+
+# The files a merged pull request changed. A path can outgrow an index, so lookups go through its SHA-256.
+gh_pr_files = Table(
+    "gh_pr_files", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("repo_row_id", String(36), ForeignKey("gh_repos.id"), nullable=False),
+    Column("pr_row_id", String(36), ForeignKey("gh_pull_requests.id"), nullable=False),
+    Column("path", Text, nullable=False),
+    Column("path_key", String(64), nullable=False),
+    _ts("created_at"),
+    UniqueConstraint("pr_row_id", "path_key"),
+    Index(None, "team_id", "repo_row_id", "path_key"),
+)
+
+# One specialist setting compared against what the primary review runs, on a sampled share of reviews.
+eval_experiments = Table(
+    "eval_experiments", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("project_id", String(36), ForeignKey("projects.id")),
+    Column("specialist", String(64), nullable=False),
+    Column("variable", String(16), nullable=False),
+    Column("baseline", JSON, nullable=False),
+    Column("variant", JSON, nullable=False),
+    Column("sample_rate", Float, nullable=False, default=0.2),
+    Column("daily_budget_usd", Numeric(10, 2), nullable=False, default=25),
+    Column("max_concurrent_arms", Integer, nullable=False, default=2),
+    Column("status", String(16), nullable=False, default="running"),
+    Column("min_prs", Integer, nullable=False, default=30),
+    _ts("created_at"),
+    Column("created_by", String(36)),
+    Index(None, "team_id", "status"),
+    CheckConstraint(_in("variable", EVAL_VARIABLES), name="variable"),
+    CheckConstraint(_in("status", EVAL_EXPERIMENT_STATUSES), name="status"),
+)
+
+# One comparison run of a primary review: the variant, or the control that repeats the primary's settings.
+eval_arms = Table(
+    "eval_arms", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("experiment_id", String(36), ForeignKey("eval_experiments.id"), nullable=False),
+    Column("primary_run_id", String(36), ForeignKey("runs.id"), nullable=False),
+    Column("arm_run_id", String(36), ForeignKey("runs.id")),
+    Column("head_sha", String(40), nullable=False),
+    Column("label", String(16), nullable=False),
+    Column("overrides", JSON),
+    Column("status", String(16), nullable=False),
+    # Why the arm was skipped or failed.
+    Column("reason", Text),
+    Column("cost_usd", Numeric(14, 6)),
+    Column("latency_s", Float),
+    _ts("created_at"),
+    UniqueConstraint("experiment_id", "primary_run_id", "label"),
+    Index(None, "arm_run_id"),
+    CheckConstraint(_in("label", EVAL_ARM_LABELS), name="label"),
+    CheckConstraint(_in("status", EVAL_ARM_STATUSES), name="status"),
+)
+
+# Which primary finding each comparison run's finding repeats, if any, by matcher version.
+eval_matches = Table(
+    "eval_matches", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("experiment_id", String(36), ForeignKey("eval_experiments.id"), nullable=False),
+    Column("primary_run_id", String(36), ForeignKey("runs.id"), nullable=False),
+    Column("left_candidate_id", String(36), ForeignKey("finding_candidates.id"), nullable=False),
+    Column("right_candidate_id", String(36), ForeignKey("finding_candidates.id")),
+    Column("method", String(16), nullable=False),
+    Column("score", Float),
+    Column("matcher_version", String(64), nullable=False),
+    UniqueConstraint("experiment_id", "left_candidate_id", "matcher_version"),
+    Index(None, "experiment_id", "primary_run_id"),
+    CheckConstraint(_in("method", EVAL_MATCH_METHODS), name="method"),
+)
+
+# Whether a finding was real, from the blinded judge or from later evidence, which wins.
+eval_judgments = Table(
+    "eval_judgments", metadata,
+    _id(),
+    Column("candidate_id", String(36), ForeignKey("finding_candidates.id"), nullable=False),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("experiment_id", String(36), ForeignKey("eval_experiments.id"), nullable=False),
+    Column("valid", Boolean, nullable=False),
+    Column("confidence", Float),
+    Column("judge", String(191), nullable=False),
+    Column("cost_usd", Numeric(14, 6)),
+    _ts("created_at"),
+    UniqueConstraint("experiment_id", "candidate_id"),
+    Index(None, "experiment_id", "created_at"),
+)
+
+eval_scores = Table(
+    "eval_scores", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("experiment_id", String(36), ForeignKey("eval_experiments.id"), nullable=False),
+    Column("arm_label", String(16), nullable=False),
+    Column("scorer_version", String(64), nullable=False),
+    Column("prs", Integer, nullable=False),
+    Column("recall", Float),
+    Column("precision", Float),
+    Column("unique_valid", Integer, nullable=False),
+    Column("cost_usd", Numeric(14, 6)),
+    Column("latency_s", Float),
+    Column("noise_floor", JSON),
+    _ts("computed_at"),
+    UniqueConstraint("experiment_id", "arm_label", "scorer_version"),
+    CheckConstraint(_in("arm_label", EVAL_SCORE_LABELS), name="arm_label"),
+)
+
+# A setting change an experiment's evidence supports, waiting for a team lead. Approving applies it.
+eval_recommendations = Table(
+    "eval_recommendations", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("experiment_id", String(36), ForeignKey("eval_experiments.id"), nullable=False),
+    Column("specialist", String(64), nullable=False),
+    Column("change", JSON, nullable=False),
+    Column("sentence", Text, nullable=False),
+    Column("evidence", JSON),
+    Column("state", String(16), nullable=False, default="waiting"),
+    Column("decided_by", String(36)),
+    _ts("decided_at", nullable=True),
+    # Each workflow the approval saved, with the version it saved.
+    Column("applied_version", JSON),
+    _ts("created_at"),
+    Index(None, "team_id", "state"),
+    CheckConstraint(_in("state", EVAL_RECOMMENDATION_STATES), name="state"),
+)
+
+# A fix Armature proposes for a recurring pattern. cluster_key names the pattern, since cluster rows are rebuilt
+# weekly. No foreign key to gh_repos, runs, or gates, so removing a repository or pruning a run keeps the record.
+fix_proposals = Table(
+    "fix_proposals", metadata,
+    _id(),
+    Column("team_id", String(36), ForeignKey("teams.id"), nullable=False),
+    Column("repo_row_id", String(36)),
+    Column("project_id", String(36), ForeignKey("projects.id")),
+    Column("cluster_key", String(191), nullable=False),
+    # The kind of fix the run made, unknown until it makes one.
+    Column("kind", String(16)),
+    Column("title", Text, nullable=False),
+    Column("rationale", Text),
+    Column("evidence", JSON),
+    Column("state", String(16), nullable=False, default="queued"),
+    Column("run_id", String(36)),
+    Column("gate_id", String(36)),
+    # The self-heal job the weekly slot queued for it, which alone binds its run.
+    Column("job_id", String(36)),
+    Column("branch", String(255)),
+    Column("base", String(255)),
+    # The fix as a patch against base_sha. Nothing reaches GitHub until a team lead approves it.
+    Column("base_sha", String(40)),
+    Column("patch", LongText),
+    Column("diff_preview", JSON),
+    Column("risk", String(16)),
+    Column("pr_number", Integer),
+    Column("pr_url", Text),
+    Column("decided_by", String(36)),
+    _ts("decided_at", nullable=True),
+    Column("decline_reason", Text),
+    _ts("merged_at", nullable=True),
+    Column("flags_before", Integer),
+    Column("cost_usd", Numeric(14, 6)),
+    Column("failure_reason", Text),
+    _ts("created_at"),
+    _ts("updated_at"),
+    Index(None, "team_id", "state"),
+    Index(None, "team_id", "cluster_key"),
+    Index(None, "run_id"),
+    Index(None, "job_id"),
+    CheckConstraint(_in("state", FIX_STATES), name="state"),
+    CheckConstraint(_in("kind", FIX_KINDS), name="kind"),
+)
+
+# One instance-wide daily report per local day. No team_id: only an admin reads it, as with settings.
+daily_reports = Table(
+    "daily_reports", metadata,
+    _id(),
+    Column("day", Date, nullable=False),
+    Column("data", JSON),
+    _ts("created_at"),
+    UniqueConstraint("day"),
 )
 
 runner_keys = Table(
@@ -868,7 +1444,7 @@ github_installations = Table(
     UniqueConstraint("connection_id", "owner"),
 )
 
-TOOL_CALL_MODES = ("live", "dry")
+TOOL_CALL_MODES = ("live", "dry", "arm")
 TOOL_CALL_OUTCOMES = ("ok", "approved", "refused", "failed")
 
 # One row per broker call a run's step made. Params are kept only for a dry call, redacted.

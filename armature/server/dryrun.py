@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import Connection, Engine, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from armature.events.env import SERVER_RUN_ID_ENV
 from armature.events.location import this_machine
 from armature.packs import PACKS_PATH_ENV
 from armature.runner.process import LOG_FILE, popen, write_bundle
@@ -224,7 +225,8 @@ def packs_path(packs_dir: str) -> str:
 def child_env(launch: Launch, endpoint: str, packs_dir: str, missing_empty: bool) -> dict[str, str]:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(launch.workdir),
            "ARMATURE_STUB_OUTPUTS": str(launch.workdir / "stubs.json"), "ARMATURE_EVENTS": endpoint,
-           "ARMATURE_EVENTS_TOKEN": launch.token, PACKS_PATH_ENV: packs_path(packs_dir)}
+           "ARMATURE_EVENTS_TOKEN": launch.token, SERVER_RUN_ID_ENV: launch.run_id,
+           PACKS_PATH_ENV: packs_path(packs_dir)}
     if missing_empty:
         env["ARMATURE_STUB_DEFAULT"] = "empty"
     return env

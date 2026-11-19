@@ -69,4 +69,4 @@ async def call_tool(tool: str, request: Request) -> JSONResponse:
     return await _guarded(request, lambda token: broker.call_tool(
         srv.engine, srv.keyring, public_url=_public_url(request), token=token, tool=tool, params=body.get("params"),
         now=srv.now(), ip=client_ip(request), transport=request.app.state.vendor_transport,
-        packs_dir=srv.cfg.packs_dir, hub=live(request)))
+        packs_dir=srv.cfg.packs_dir, hub=live(request), parent_step=body.get("parent_step")))

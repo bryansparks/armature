@@ -60,6 +60,26 @@ class ExportConfig(BaseModel):
         return value
 
 
+class ReportsConfig(BaseModel):
+    """Where the daily report's files go, and what it reads from the host. Only the config file sets it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dir: str = "~/armature-reports"
+    # The only directories whose files the report fingerprints. ops.env and secrets/ are always skipped.
+    roots: list[str] = Field(default_factory=list)
+    deploy_log: str | None = None
+    live_sha: str | None = None
+
+    @field_validator("roots")
+    @classmethod
+    def _roots(cls, value: list[str]) -> list[str]:
+        names = [Path(root).expanduser().name for root in value]
+        if not all(names) or len(names) != len(set(names)):
+            raise ValueError("each root needs its own directory name")
+        return value
+
+
 def _argv(value: list[str] | None) -> list[str] | None:
     if value is not None and (not value or not all(value) or any("\0" in part for part in value)):
         raise ValueError("command is a non-empty list of non-empty arguments")
@@ -152,6 +172,7 @@ class ServerConfig(BaseModel):
     runner: RunnerConfig = Field(default_factory=RunnerConfig)
     actions: list[ActionConfig] = Field(default_factory=list)
     status: StatusConfig | None = None
+    reports: ReportsConfig = Field(default_factory=ReportsConfig)
 
     @field_validator("base_path")
     @classmethod
@@ -214,7 +235,8 @@ def load_config(path: Path | str | None = None, env: Mapping[str, str] | None = 
             raise ValueError(f"{p} must hold a mapping")
         data = dict(loaded or {})
     for name in ServerConfig.model_fields:
-        if name in ("oidc", "export_on_change", "assist", "dry_run", "runner", "actions", "status"):
+        if name in ("oidc", "export_on_change", "assist", "dry_run", "runner", "actions", "status",
+                    "reports"):
             continue
         value = env.get(ENV_PREFIX + name.upper())
         if value is not None:

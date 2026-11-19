@@ -22,12 +22,12 @@ import tarfile
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import urlsplit
 
 from jinja2 import ChainableUndefined
 
-from armature.events.claude_stream import ClaudeStreamParser
+from armature.events.claude_stream import ClaudeStreamParser, session_cost
 from armature.nodes.harness import (
     AGENT_DIR_ENV,
     AGENT_USER_ENV,
@@ -35,6 +35,7 @@ from armature.nodes.harness import (
     GIT_VIA_PROXY_ENV,
     HARNESSES,
     MODELS_ENV,
+    OVERRIDES_ENV,
     PROJECT_REPO_ENV,
     PROXY_ENV,
     ROLES_ENV,
@@ -47,12 +48,14 @@ from armature.nodes.harness import (
     tools,
 )
 from armature.nodes.llm import _extract_json_from_response
+from armature.procgroup import members, signal_group
 from armature.runtime.templating import text_env
 from armature.spec.models import (
     CONTEXT_FILE_NAME,
     ROLE_KEY,
     SKILL_NAME,
     OutputMode,
+    ReasoningEffort,
     Stage,
 )
 
@@ -96,8 +99,9 @@ class AgentError(RuntimeError):
     pass
 
 
-def model_env(alias: str, harness: Harness) -> tuple[str, dict[str, str]]:
-    """The model id and credential env for ``alias``: from the run's bundle on a server, else this host's env.
+def model_env(alias: str, harness: Harness) -> tuple[str, dict[str, str], str | None, str]:
+    """The model id, credential env, provider kind, and alias for ``alias``: from the run's bundle on a server, else
+    this host's env, which names no provider.
 
     A run from a server never falls back to a literal model id with whatever credentials its environment holds.
     """
@@ -107,8 +111,32 @@ def model_env(alias: str, harness: Harness) -> tuple[str, dict[str, str]]:
         found = json.loads(raw or "{}").get(alias)
         if not isinstance(found, dict):
             raise AgentError(f"model alias {alias} isn't configured for this project")
-        return str(found["model"]), {str(k): str(v) for k, v in (found.get("env") or {}).items()}
-    return alias, {name: os.environ[name] for name in harness.credentials if name in os.environ}
+        provider = found.get("provider")
+        return (str(found["model"]), {str(k): str(v) for k, v in (found.get("env") or {}).items()},
+                provider if isinstance(provider, str) else None, str(found.get("alias") or alias))
+    return alias, {name: os.environ[name] for name in harness.credentials if name in os.environ}, None, alias
+
+
+def model_prices(alias: str, model: str) -> dict[str, Any] | None:
+    """The provider's prices for ``alias`` from the run's bundle, when the session runs the model the alias names."""
+    raw = os.environ.get(MODELS_ENV)
+    found = json.loads(raw).get(alias) if raw else None
+    prices = found.get("prices") if isinstance(found, dict) and found.get("model") == model else None
+    return prices if isinstance(prices, dict) else None
+
+
+def stage_override(stage_id: str) -> dict[str, Any]:
+    """What the server set for this stage in a comparison run: a model or alias and an effort, or an output that
+    stands in for a stage the comparison doesn't need, so no session starts. Else nothing."""
+    raw = os.environ.get(OVERRIDES_ENV)
+    found = json.loads(raw).get(stage_id) if raw else None
+    if not isinstance(found, dict):
+        return {}
+    if any(not isinstance(found.get(k), str | None) for k in ("model", "alias", "effort")) \
+            or found.get("effort") not in (None, *get_args(ReasoningEffort)) \
+            or not isinstance(found.get("output"), dict | None):
+        raise AgentError(f"The comparison run's override of {stage_id} is not valid.")
+    return {k: v for k, v in found.items() if k in ("model", "alias", "effort", "output") and v is not None}
 
 
 def repo_host(repo: Any) -> str:
@@ -650,8 +678,11 @@ class AgentNode:
         self.total_cost_usd = 0.0
         self.sessions = 0
         self.model = ""
+        self._cost_fields: dict[str, Any] = {}
+        self._prices: dict[str, Any] | None = None
         self.session_id: str | None = None
         self._base: str | None = None
+        self._start: str | None = None
         self._repo_skills: dict[str, dict[str, tuple[bytes, bool]]] = {}
         self._refused: list[str] = []
         self._over_cap = False
@@ -683,7 +714,17 @@ class AgentNode:
         if self._user is not None:
             self._group = pwd.getpwnam(self._user).pw_gid
         harness = HARNESSES[agent.harness]
-        self.model, credentials = model_env(agent.model, harness)
+        override = stage_override(self._stage.id)
+        if "output" in override:
+            return self._output(json.dumps(override["output"]))
+        self.model, credentials, provider, alias = model_env(agent.model, harness)
+        if "alias" in override:
+            self.model, credentials, provider, alias = model_env(override["alias"], harness)
+        elif "model" in override:
+            self.model = override["model"]
+        effort = override.get("effort", agent.effort)
+        self._cost_fields = {"requested_effort": effort, "provider": provider, "alias": alias}
+        self._prices = model_prices(alias, self.model)
         prompt = _render(agent.prompt, context)
         if not all(CONTEXT_FILE_NAME.fullmatch(name) for name in agent.context_files):
             raise AgentError("A context file name is not valid.")
@@ -721,7 +762,7 @@ class AgentNode:
                 schema = self._stage.output_schema
                 prompt += JSON_NOTE.format(schema=f" matching this JSON Schema: {json.dumps(schema)}" if schema else "")
             allowed, denied = tools(agent.access, agent.allowed_tools, agent.disallowed_tools, add_dirs)
-            launch = Launch(model=self.model, effort=agent.effort, access=agent.access, allowed=allowed,
+            launch = Launch(model=self.model, effort=effort, access=agent.access, allowed=allowed,
                             disallowed=denied, add_dirs=add_dirs, config_dir=config,
                             memory=config / MEMORY_FILE if self._memory else None)
             env = {"HOME": str(home), "TMPDIR": str(tmp), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -745,6 +786,8 @@ class AgentNode:
                                               cwd=worktree)
             if agent.access == "write" and worktree is not None:
                 output["worktree"] = str(worktree)
+                # The commit the session started from, so a later step can take the change as a patch against it.
+                output["base"] = self._start
             return output
         finally:
             await asyncio.to_thread(_remove_session, session,
@@ -817,7 +860,7 @@ class AgentNode:
         else:
             ref = context.get("ref")
         src, commit = await checkout(repo, ref or None, self._root, env)
-        self._base = trusted_base(src)
+        self._base, self._start = trusted_base(src), commit
         option = self._agent.repo_skills
         if option is None:
             option = not self._agent.skills
@@ -858,7 +901,8 @@ class AgentNode:
 
     async def _session(self, harness: Harness, launch: Launch, env: dict[str, str], cwd: Path, prompt: str) -> str:
         self.sessions += 1
-        parser = ClaudeStreamParser(self._emitter, self._step_id, self._fields) if self._emitter else None
+        parser = ClaudeStreamParser(self._emitter, self._step_id, self._fields, cost_fields=self._cost_fields,
+                                    prices=self._prices, priced_model=self.model) if self._emitter else None
         # Unnamed files, since Claude Code drops output still unwritten to a full pipe when it exits.
         out, err = tempfile.TemporaryFile(), tempfile.TemporaryFile()
         try:
@@ -936,7 +980,7 @@ class AgentNode:
             tail = errors.decode(errors="replace").strip()[-ERROR_TAIL:]
             raise AgentError(f"The agent session exited {proc.returncode} without a result."
                              + (f"\n{tail}" if tail else ""))
-        self.total_cost_usd += float(final.get("total_cost_usd") or 0.0)
+        self.total_cost_usd += session_cost(final, self._prices, self.model)
         self.session_id = final.get("session_id") or self.session_id
         if final.get("is_error") or final.get("subtype") != "success":
             raise AgentError(f"The agent session failed ({final.get('subtype')}): "
@@ -962,13 +1006,12 @@ class AgentNode:
         # The CLI starts its own children, such as Bash tool commands, so the whole session group goes.
         # Under an agent user, only that user may signal them, so the kill runs as that user too.
         if self._user is not None:
+            # The group by its negative pid, and each member /proc lists, for a sandbox that refuses the former.
+            listed = [str(pid) for pid in members(proc.pid) or []]
             killer = await asyncio.create_subprocess_exec(
-                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", f"-{proc.pid}",
+                "sudo", "-n", "-u", self._user, "/bin/kill", "-KILL", "--", f"-{proc.pid}", *listed,
                 stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
             await killer.wait()
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+        signal_group(proc.pid, signal.SIGKILL)
         await proc.wait()

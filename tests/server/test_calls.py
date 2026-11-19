@@ -468,5 +468,5 @@ def test_an_agent_step_only_in_a_callee_gets_its_skill_model_and_hosts(world):
     bundle = _bundle(world, job)
     assert bundle.skills == {"kotlin-review": "skill body"}
     assert json.loads(bundle.secrets["ARMATURE_AGENT_MODELS"]) == {
-        "review": {"model": "claude-x", "env": {"ANTHROPIC_API_KEY": "k"}}}
+        "review": {"model": "claude-x", "provider": "anthropic", "alias": "review", "env": {"ANTHROPIC_API_KEY": "k"}}}
     assert bundle.secrets["ARMATURE_GIT_HOSTS"] == "github.com"

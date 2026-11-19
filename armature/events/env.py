@@ -7,6 +7,9 @@ from collections.abc import Mapping
 from armature.events.sign import ENGINE_FD_ENV
 
 RUNNER_KEY = "ARMATURE_RUNNER_KEY"
+# The server's id for a run it launched, which its traces carry. ARMATURE_RUN_ID with ARMATURE_STEP_ID names a
+# parent run's step instead, and a script stage's ARMATURE_RUN_ID is the server's run id whenever there is one.
+SERVER_RUN_ID_ENV = "ARMATURE_SERVER_RUN_ID"
 _PARENT_ONLY = ("ARMATURE_EVENTS", "ARMATURE_EVENTS_TOKEN", "ARMATURE_AGENT_MODELS", "ARMATURE_TOOL_TOKEN",
                 "ARMATURE_GATE_DIR", ENGINE_FD_ENV)
 

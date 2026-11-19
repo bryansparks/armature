@@ -66,6 +66,12 @@ class Vendors:
         self.linear_states = [{"id": "s1", "name": "Todo"}, {"id": "s2", "name": "In Review"}]
         self.next_id = 500
         self.minted = 0
+        # The sync service's GitHub: GraphQL answers from a handler of the request body, the REST pull list, and
+        # compares by "base...head".
+        self.github_graphql = None
+        self.pull_list: list[dict] | None = None
+        self.compares: dict[str, dict | int] = {}
+        self.gets: dict[str, dict] = {}
 
     def writes(self, method: str | None = None) -> list[httpx.Request]:
         return [r for r in self.requests if r.method != "GET" and (method is None or r.method == method)
@@ -90,6 +96,20 @@ class Vendors:
         if path == "/installation/token":
             return httpx.Response(204)
         repo = f"/repos/{REPO}"
+        if path == "/graphql" and request.headers.get("host") == "api.github.com" and self.github_graphql:
+            found = self.github_graphql(self.body(request))
+            return found if isinstance(found, httpx.Response) else httpx.Response(200, json=found)
+        if method == "GET" and path.lower() in self.gets:
+            return httpx.Response(200, json=self.gets[path.lower()])
+        found = re.fullmatch(rf"{repo.lower()}/compare/(.+)", path.lower())
+        if found and found.group(1) in self.compares:
+            answer = self.compares[found.group(1)]
+            return httpx.Response(answer) if isinstance(answer, int) else httpx.Response(200, json=answer)
+        if path.lower() == f"{repo.lower()}/pulls" and self.query(request).get("state") == "all" \
+                and self.pull_list is not None:
+            query = self.query(request)
+            size, page = int(query.get("per_page", 30)), int(query.get("page", 1))
+            return httpx.Response(200, json=self.pull_list[(page - 1) * size:page * size])
         if path == f"{repo}/pulls/{NUMBER}":
             return httpx.Response(200, json=self.pr)
         if path == f"{repo}/pulls/{NUMBER}/files":

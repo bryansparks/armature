@@ -2,7 +2,7 @@
 """A/B comparison for the TypeSafe decision adapter spike (Layer 1).
 
 Called by the Armature ScriptNode as the final stage of ab-demo.yml.
-Reads ARMATURE_CONTEXT, which holds (index-aligned — fan-out preserves
+Reads ARMATURE_CONTEXT (or ARMATURE_CONTEXT_FILE), which holds (index-aligned — fan-out preserves
 item order):
 
   load_benchmark — {"states": [{id, text, labels}]}
@@ -199,12 +199,16 @@ def summarize(states: list, decide_results: list, judge_results: list) -> dict:
 
 def main() -> int:
     try:
-        context = json.loads(os.environ.get("ARMATURE_CONTEXT", "{}"))
+        raw = os.environ.get("ARMATURE_CONTEXT")
+        if raw is None and os.environ.get("ARMATURE_CONTEXT_FILE"):
+            with open(os.environ["ARMATURE_CONTEXT_FILE"], encoding="utf-8") as f:
+                raw = f.read()
+        context = json.loads(raw or "{}")
         states = context["load_benchmark"]["states"]
         decide_results = context["decide"]
         judge_results = context["llm_judge"]
         summary = summarize(states, decide_results, judge_results)
-    except (KeyError, ValueError, json.JSONDecodeError) as exc:
+    except (KeyError, ValueError, OSError) as exc:
         print(f"compare.py: {exc}", file=sys.stderr)
         return 1
     json.dump(summary, sys.stdout, indent=2)

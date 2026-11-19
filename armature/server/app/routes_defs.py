@@ -36,6 +36,7 @@ from armature.server.db.schema import (
     users,
     versions,
 )
+from armature.server.insights import jobs as insights_jobs
 
 router = APIRouter()
 
@@ -533,7 +534,9 @@ def _setting_scope(request: Request, session: Session, conn: Connection, value: 
 @router.get("/api/settings")
 def list_settings(request: Request, scope: str | None = Query(None, max_length=36),
                   session: Session = Depends(signed_in)) -> dict[str, Any]:
-    query = select(settings.c.key, settings.c.value, settings.c.scope).order_by(settings.c.key)
+    query = select(settings.c.key, settings.c.value, settings.c.scope).where(
+        settings.c.key.not_in(insights_jobs.SLOTS),
+        ~settings.c.key.startswith(insights_jobs.ARM_SLOT_PREFIX, autoescape=True)).order_by(settings.c.key)
     with _refusals(), server(request).engine.connect() as conn:
         _, found = _setting_scope(request, session, conn, scope or None)
         if scope:

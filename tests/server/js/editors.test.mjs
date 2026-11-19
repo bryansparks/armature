@@ -265,6 +265,20 @@ test('provider aliases and body keep only what the kind uses', () => {
   assert.ok(providerBody('nope', {}, [], '').error);
 });
 
+test('provider body keeps the fields the form does not show, and an admin edits a gateway', () => {
+  const gateway = { api_base: 'https://gw.example.com', auth: 'bearer', prices: { fast: { input: 1, output: 4 } }, credential_secret: 'GW_TOKEN' };
+  const rows = [{ alias: 'fast', model: 'gateway-model' }];
+  assert.deepEqual(providerBody('anthropic', { ...gateway }, rows, 'GW_TOKEN', gateway).body.config,
+    { api_base: 'https://gw.example.com', auth: 'bearer', prices: { fast: { input: 1, output: 4 } } });
+  assert.deepEqual(providerBody('anthropic', { ...gateway }, rows, 'GW_TOKEN', gateway, true).body.config,
+    { api_base: 'https://gw.example.com', auth: 'bearer', prices: { fast: { input: 1, output: 4 } } });
+  const edited = providerBody('anthropic', { api_base: ' https://other-gw.example.com ', auth: '', prices: '{"fast": {"output": 5}}' }, rows, 'GW_TOKEN', gateway, true);
+  assert.deepEqual(edited.body.config, { api_base: 'https://other-gw.example.com', prices: { fast: { output: 5 } } });
+  assert.ok(providerBody('anthropic', { prices: '{"fast":' }, rows, '', gateway, true).error.includes('JSON'));
+  assert.deepEqual(providerBody('bedrock', { region: 'us-east-1' }, [], '', { region: 'old', api_base: 'kept' }).body.config,
+    { api_base: 'kept', region: 'us-east-1' });
+});
+
 test('settings scope and value helpers', () => {
   assert.equal(scopeParam('*'), 'instance');
   assert.equal(scopeParam(null), 'instance');

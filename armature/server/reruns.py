@@ -65,6 +65,8 @@ def check(conn: Connection, run_id: str) -> Any:
         raise RerunError(409, "Only a run the server queued can be rerun here.")
     if isinstance(job.inputs, dict) and "conversation_id" in job.inputs:
         raise RerunError(409, "A conversation turn reruns from its conversation.")
+    if job.arm_id is not None or (isinstance(run.trigger_ref, dict) and run.trigger_ref.get("arm_id")):
+        raise RerunError(409, "A comparison run can't be rerun. Its experiment samples new reviews instead.")
     workflow = conn.execute(select(workflows.c.current_version).where(workflows.c.id == job.workflow_id)).first()
     if workflow is None or not workflow.current_version:
         raise RerunError(409, "This run's workflow no longer exists.")

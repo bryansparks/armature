@@ -24,6 +24,7 @@ from armature.server import audit, defs, ingest, rbac, runners, worker, writer
 from armature.server.crypto import Keyring
 from armature.server.db import new_id
 from armature.server.db.schema import gates, jobs, run_events, runs, users, workflows
+from armature.server.insights import fixes
 
 DEFAULT_EXPIRES_HOURS = 72.0
 MAX_EXPIRES_HOURS = 720.0
@@ -159,6 +160,7 @@ def open_gate(conn: Connection, keyring: Keyring, *, job_id: str, request: Any, 
     conn.execute(update(jobs).where(jobs.c.id == job.id, jobs.c.status.in_(worker.HELD)).values(
         status="suspended", finished_at=now, lease_expires_at=None, error=None))
     runners.revoke_tokens(conn, [job.run_id])
+    fixes.gate_opened(conn, job.run_id, job.team_id, gate_id, now)
     audit.record(conn, action="gate.open", actor_id=None, team_id=job.team_id, target_kind="gate",
                  target_id=gate_id, detail={"run_id": job.run_id, "step_id": request.get("step_id")})
     return gate_id
@@ -252,12 +254,18 @@ def decide(conn: Connection, *, gate_id: str, approved: bool, nonce: Any, actor_
     if not isinstance(nonce, str):
         raise GateError(400, "nonce is required.")
     state = "approved" if approved else "rejected"
+    if approved:
+        held = conn.execute(select(gates).where(gates.c.id == gate_id, gates.c.state == "open")).first()
+        refusal = fixes.approve_refusal(conn, held, now) if held is not None else None
+        if refusal:
+            raise GateError(409, refusal)
     won = conn.execute(update(gates).where(
         gates.c.id == gate_id, gates.c.state == "open", gates.c.nonce == nonce, gates.c.expires_at > now).values(
         state=state, decided_at=now, decided_by=actor_id, decided_via=via, decision_note=note)).rowcount == 1
     if not won:
         raise GateError(409, "This gate was already decided, or it expired.")
     gate = conn.execute(select(gates).where(gates.c.id == gate_id)).one()
+    fixes.gate_decided(conn, gate, now)
     if not approved:
         writer.server_outcome(conn, gate.run_id, "blocked")
     job_id = _resume(conn, gate, now)
@@ -275,6 +283,7 @@ def expire(conn: Connection, now: datetime) -> list[str]:
                 state=EXPIRED, decided_at=now, decision_note=EXPIRED)).rowcount != 1:
             continue
         writer.server_outcome(conn, gate.run_id, "blocked")
+        fixes.gate_decided(conn, conn.execute(select(gates).where(gates.c.id == gate.id)).one(), now)
         job_id = _resume(conn, gate, now)
         audit.record(conn, action="gate.expire", actor_id=None, team_id=gate.team_id, target_kind="gate",
                      target_id=gate.id, detail={"run_id": gate.run_id, "resume_job_id": job_id})

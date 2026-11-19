@@ -594,6 +594,20 @@ def llm_only(requires: list[str] | None) -> bool:
     return set(requires or ()) <= {LLM}
 
 
+def is_arm(requires: list[str] | None) -> bool:
+    """Whether the job is a comparison run, which needs an environment type offering EVAL_ARM."""
+    return worker.EVAL_ARM in (requires or ())
+
+
+def arm_type(conn: Connection, requires: list[str] | None, preferred: str | None = None) -> Any | None:
+    """The enabled environment type that provides everything a comparison run requires: ``preferred`` when it does,
+    else the first by name."""
+    rows = conn.execute(select(environment_types).where(environment_types.c.enabled.is_(True))
+                        .order_by(environment_types.c.name)).all()
+    fits = [r for r in rows if set(requires or ()) <= set(r.capabilities or [])]
+    return next((r for r in fits if r.id == preferred), fits[0] if fits else None)
+
+
 def warnings(conn: Connection, rows: list[Any], now: datetime,
              reasons: dict[str, str] | None = None) -> dict[str, str]:
     """Why each queued job is still waiting, for the jobs that won't start without someone acting."""
@@ -608,7 +622,8 @@ def warnings(conn: Connection, rows: list[Any], now: datetime,
     out = {}
     for row in queued:
         gated = not taken(row, found, True) and taken(row, found) and worker.pauses(conn, row.id)
-        message = job_warning(row, found, type_of.get(row.project_id), (reasons or {}).get(row.id), gated)
+        enabled = arm_type(conn, row.requires) is not None if is_arm(row.requires) else type_of.get(row.project_id)
+        message = job_warning(row, found, enabled, (reasons or {}).get(row.id), gated)
         if message:
             out[row.id] = message
     return out
@@ -627,7 +642,8 @@ def job_warning(job: Any, found: list[Taker], type_enabled: bool | None, reason:
     if job.project_id is None:
         return "No runner can take this job, and it has no project to start an environment for."
     if not type_enabled:
-        return "Project has no environment type."
+        return f"No runner or environment type provides {worker.EVAL_ARM}." if is_arm(job.requires) \
+            else "Project has no environment type."
     return reason
 
 
@@ -657,6 +673,21 @@ def _project_limit(conn: Connection, team_id: str) -> int | None:
         settings.c.key == PROJECT_LIMIT_KEY, settings.c.scope.in_([team_id, INSTANCE_SCOPE]))).all())
     value = rows.get(team_id, rows.get(INSTANCE_SCOPE))
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def arm_guard(conn: Connection, row: Any, now: datetime) -> str | None:
+    """Why a comparison run must wait when the AWS connection nears its limits, so reviews keep the headroom: one
+    environment short of max_concurrent, or half its daily launches or budget used. None when it may go."""
+    live = conn.execute(select(func.count()).select_from(environments).where(
+        environments.c.connection_id == row.id, environments.c.purpose == "job",
+        environments.c.state.in_(LIVE))).scalar_one()
+    launched = conn.execute(select(func.count()).select_from(environments).where(
+        environments.c.connection_id == row.id, environments.c.requested_at > now - DAY,
+        or_(environments.c.state != "failed", environments.c.provider_id.is_not(None)))).scalar_one()
+    if live >= row.max_concurrent - 1 or launched >= row.max_daily_launches / 2 or (
+            row.daily_budget_usd is not None and _day_spend(conn, row.id, now) >= Decimal(row.daily_budget_usd) / 2):
+        return "A comparison run waits while AWS is near its limits, so reviews keep the room."
+    return None
 
 
 def guard(conn: Connection, row: Any, job: Any, now: datetime) -> str | None:
@@ -806,7 +837,11 @@ class EnvironmentService:
             found = takers(conn, now) if queued else []
         reasons: dict[str, str] = {}
         launched = 0
+        # Comparison runs yield: they go after reviews, and wait while any review waits for capacity.
+        queued = sorted(queued, key=lambda j: is_arm(j.requires))
+        waiting = False
         for job in queued:
+            arm = is_arm(job.requires)
             if llm_only(job.requires) or remote_only(job.requires):
                 continue
             if taken(job, found, gated=True):
@@ -819,8 +854,14 @@ class EnvironmentService:
                 reasons[job.id] = "Waiting to retry after AWS had no capacity."
                 continue
             with self.engine.connect() as conn:
-                kind = None if job.environment_type_id is None else conn.execute(
-                    select(environment_types).where(environment_types.c.id == job.environment_type_id)).first()
+                if arm:
+                    kind = arm_type(conn, job.requires, job.environment_type_id)
+                else:
+                    kind = None if job.environment_type_id is None else conn.execute(
+                        select(environment_types).where(environment_types.c.id == job.environment_type_id)).first()
+            if arm and kind is None:
+                self._fail_job(job.id, f"No environment type provides {worker.EVAL_ARM}.", now)
+                continue
             if kind is None or not kind.enabled:
                 continue
             missing = sorted(set(job.requires or ()) - set(kind.capabilities or []))
@@ -830,10 +871,14 @@ class EnvironmentService:
             if self.paused_until is not None and now < self.paused_until:
                 reasons[job.id] = "Launches are paused after repeated AWS failures."
                 continue
+            if arm and waiting:
+                reasons[job.id] = "A comparison run waits while reviews wait for an environment."
+                continue
             with self.engine.connect() as conn:
-                reason = guard(conn, row, job, now)
+                reason = guard(conn, row, job, now) or (arm_guard(conn, row, now) if arm else None)
             if reason:
                 reasons[job.id] = reason
+                waiting = waiting or not arm
                 continue
             env_id = self.claim(row, kind, job, now)
             if env_id is None:

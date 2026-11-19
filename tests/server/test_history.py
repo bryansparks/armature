@@ -10,10 +10,16 @@ from armature.server import defs, history
 from armature.server.db import new_id
 from armature.server.db.schema import (
     audit,
+    candidate_matches,
+    cluster_members,
+    clusters,
     conversations,
+    finding_candidates,
     findings,
     gates,
     jobs,
+    labels,
+    llm_calls,
     metadata,
     operations,
     review_marks,
@@ -69,13 +75,29 @@ def _everything(conn, world, run_id, job_id):
                                               content="x", size=1, created_at=NOW))
     conn.execute(insert(run_tokens).values(token_hmac=new_id(), run_id=run_id, team_id=team,
                                            expires_at=NOW + timedelta(hours=1)))
-    conn.execute(insert(findings).values(id=new_id(), run_id=run_id, finding_key="f1"))
+    finding, candidate = new_id(), new_id()
+    conn.execute(insert(findings).values(id=finding, run_id=run_id, finding_key="f1"))
+    conn.execute(insert(finding_candidates).values(id=candidate, team_id=team, run_id=run_id, step_key="a",
+                                                   specialist="a", ordinal=0, created_at=NOW))
+    conn.execute(insert(candidate_matches).values(id=new_id(), team_id=team, candidate_id=candidate,
+                                                  finding_id=finding, match_ordinal=0, method="key",
+                                                  matcher_version="1", created_at=NOW))
+    cluster = new_id()
+    conn.execute(insert(clusters).values(id=cluster, team_id=team, taxonomy_version="v1", label="correctness",
+                                         created_at=NOW))
+    for kind, subject in (("candidate", candidate), ("finding", finding)):
+        conn.execute(insert(labels).values(id=new_id(), team_id=team, subject_kind=kind, subject_id=subject,
+                                           taxonomy_version="v1", label="correctness", labeler="x", created_at=NOW))
+        conn.execute(insert(cluster_members).values(id=new_id(), team_id=team, cluster_id=cluster, subject_kind=kind,
+                                                    subject_id=subject, created_at=NOW))
     conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=team, step_id="a", tool="slack.post",
                                            mode="live", outcome="ok", created_at=NOW))
     conn.execute(insert(operations).values(id=new_id(), action_id="act", run_id=run_id, started_at=NOW))
     conn.execute(insert(review_marks).values(id=new_id(), team_id=team, project_id=world["project"], repo="a/b",
                                              head_sha=run_id.replace("-", "")[:40].ljust(40, "0"), run_id=run_id,
                                              conclusion="success", created_at=NOW))
+    conn.execute(insert(llm_calls).values(id=new_id(), team_id=team, run_id=run_id, seq=1, step_key="a",
+                                          model_id="claude-sonnet-5-5", created_at=NOW))
     gate = new_id()
     conn.execute(insert(gates).values(id=gate, run_id=run_id, team_id=team, job_id=job_id, step_id="ok",
                                       step_key="ok", nonce=new_id(), state="approved", created_at=NOW,
@@ -112,14 +134,18 @@ def test_a_run_goes_with_its_jobs_and_rows_and_other_records_only_lose_their_lin
         [plan] = history.delete_runs(conn, [target], actor_id=world["admin"])
     assert plan.job_ids == [job]
     assert plan.deleted == {"run_events": 1, "run_steps": 1, "run_artifacts": 1, "run_tokens": 1, "findings": 1,
-                            "tool_calls": 1, "operations": 1, "review_marks": 1, "gates": 1, "jobs": 1, "runs": 1}
+                            "tool_calls": 1, "operations": 1, "review_marks": 1, "llm_calls": 1,
+                            "finding_candidates": 1, "candidate_matches": 1, "labels": 2, "cluster_members": 2,
+                            "gates": 1, "jobs": 1, "runs": 1}
     assert plan.cleared == {"runs.rerun_of": 1, "jobs.rerun_of": 1, "jobs.resume_of_gate": 1,
                             "conversations.active_job_id": 1, "trigger_seen.job_id": 1}
     with sqlite_engine.connect() as conn:
         for table in (run_events, run_steps, run_artifacts, run_tokens, findings, tool_calls, operations,
-                      review_marks, gates):
+                      review_marks, llm_calls, finding_candidates, gates):
             assert _count(conn, table, table.c.run_id == target) == 0
             assert _count(conn, table, table.c.run_id == rerun) == 1
+        assert _count(conn, candidate_matches) == 1 and _count(conn, labels) == 2
+        assert _count(conn, cluster_members) == 2 and _count(conn, clusters) == 2
         assert _count(conn, runs, runs.c.id == target) == 0 and _count(conn, jobs, jobs.c.id == job) == 0
         assert conn.execute(select(runs.c.rerun_of).where(runs.c.id == rerun)).scalar() is None
         assert _count(conn, jobs, jobs.c.run_id == rerun, jobs.c.rerun_of.is_(None)) == 2

@@ -16,6 +16,7 @@ from typing import Any
 
 from sqlalchemy import Connection, desc, select
 
+from armature.events.claude_stream import priced_cost, session_cost
 from armature.server import defs
 from armature.server.db.schema import INSTANCE_SCOPE, audit, providers, users
 
@@ -79,25 +80,44 @@ def _parse_json(text: Any) -> dict[str, Any]:
     return data
 
 
+def bearer_client(transport: Any = None) -> Any:
+    """A litellm HTTP client that sends no x-api-key header, for a gateway that takes the credential as a bearer
+    token only."""
+    import httpx
+    from litellm.llms.custom_httpx.http_handler import HTTPHandler
+
+    def drop_api_key(request: httpx.Request) -> None:
+        request.headers.pop("x-api-key", None)
+    return HTTPHandler(timeout=TIMEOUT_S, client=httpx.Client(timeout=TIMEOUT_S, transport=transport,
+                                                              event_hooks={"request": [drop_api_key]}))
+
+
 def _litellm_call(row: Any, model_id: str, credential: str | None, system: str, messages: list[dict[str, Any]],
-                  schema: dict[str, Any]) -> Completion:
+                  schema: dict[str, Any], prices: dict[str, Any] | None = None) -> Completion:
     from armature.nodes.llm import _response_cost
     config = row.config or {}
+    gateway = row.kind == "anthropic" and bool(config.get("api_base"))
     kwargs: dict[str, Any] = {
         "messages": [{"role": "system", "content": system}, *messages],
         "response_format": {"type": "json_schema", "json_schema": {"name": "result", "schema": schema}},
         "timeout": TIMEOUT_S,
         "max_tokens": MAX_TOKENS,
     }
+    # A placeholder keeps litellm from sending the server's own key from its environment.
     if credential:
         kwargs["api_key"] = credential
-    elif row.kind in ("openai-compatible", "ollama"):
+    elif row.kind in ("openai-compatible", "ollama") or gateway:
         kwargs["api_key"] = NO_KEY
     if row.kind == "bedrock":
         model = f"bedrock/{model_id}"
         kwargs["aws_region_name"] = config.get("region")
     elif row.kind == "anthropic":
         model = f"anthropic/{model_id}"
+        if gateway:
+            kwargs["api_base"] = config["api_base"]
+        if gateway and credential and config.get("auth") == "bearer":
+            kwargs["extra_headers"] = {"Authorization": f"Bearer {credential}"}
+            kwargs["client"] = bearer_client()
     elif row.kind == "openai-compatible":
         model = f"openai/{model_id}"
         kwargs["api_base"] = config.get("api_base")
@@ -111,10 +131,24 @@ def _litellm_call(row: Any, model_id: str, credential: str | None, system: str, 
         response = litellm_completion(model=model, **kwargs)
     except Exception as exc:
         raise LLMError(502, f"The model call failed: {type(exc).__name__}.") from exc
+    finally:
+        if "client" in kwargs:
+            kwargs["client"].client.close()
     usage = getattr(response, "usage", None)
+    input_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+    if prices:
+        # litellm's prompt tokens include the cached ones.
+        read = getattr(usage, "cache_read_input_tokens", None)
+        if read is None:
+            read = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0)
+        read = int(read or 0)
+        written = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        cost = priced_cost(prices, max(input_tokens - read - written, 0), output_tokens, read, written)
+    else:
+        cost = _response_cost(response)
     return Completion(data=_parse_json(response.choices[0].message.content), model=model, provider_kind=row.kind,
-                      cost_usd=_response_cost(response), input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
-                      output_tokens=int(getattr(usage, "completion_tokens", 0) or 0))
+                      cost_usd=cost, input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 def _prompt_text(messages: list[dict[str, Any]]) -> str:
@@ -123,7 +157,7 @@ def _prompt_text(messages: list[dict[str, Any]]) -> str:
 
 # env -i with a home of its own, so the CLI reads no settings, credentials, or MCP servers of this host's user.
 def _claude_call(model_id: str, credentials: dict[str, str], system: str, messages: list[dict[str, Any]],
-                 schema: dict[str, Any], provider_kind: str) -> Completion:
+                 schema: dict[str, Any], provider_kind: str, prices: dict[str, Any] | None = None) -> Completion:
     binary = claude_binary()
     if binary is None:
         raise LLMError(503, "The claude CLI is not installed on this server.")
@@ -146,7 +180,7 @@ def _claude_call(model_id: str, credentials: dict[str, str], system: str, messag
         raise LLMError(502, f"The claude CLI failed with exit status {done.returncode}.")
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     return Completion(data=_parse_json(result.get("structured_output")), model=model_id,
-                      provider_kind=provider_kind, cost_usd=float(result.get("total_cost_usd") or 0),
+                      provider_kind=provider_kind, cost_usd=session_cost(result, prices, model_id),
                       input_tokens=int(usage.get("input_tokens") or 0),
                       output_tokens=int(usage.get("output_tokens") or 0))
 
@@ -166,18 +200,19 @@ class Call:
     row: Any
     model_id: str
     credential: str | None = field(repr=False)
+    prices: dict[str, Any] | None = None
 
     def complete(self, system: str, messages: list[dict[str, Any]], schema: dict[str, Any]) -> Completion:
         if self.row.kind == "claude-subscription":
             if not self.credential:
                 raise LLMError(400, "The provider's credential secret is not set.")
             return _claude_call(self.model_id, {"CLAUDE_CODE_OAUTH_TOKEN": self.credential}, system, messages,
-                                schema, self.row.kind)
+                                schema, self.row.kind, self.prices)
         # Without a bearer token, or without the CLI, Bedrock stays on litellm and the host's AWS chain.
         if self.row.kind == "bedrock" and self.credential and claude_binary() is not None:
             return _claude_call(self.model_id, bedrock_env(self.row, self.credential), system, messages, schema,
-                                self.row.kind)
-        return _litellm_call(self.row, self.model_id, self.credential, system, messages, schema)
+                                self.row.kind, self.prices)
+        return _litellm_call(self.row, self.model_id, self.credential, system, messages, schema, self.prices)
 
 
 def saved_by_admin(conn: Connection, row: Any) -> bool:
@@ -194,9 +229,12 @@ def saved_by_admin(conn: Connection, row: Any) -> bool:
 
 # The address may have changed since a non-admin saved it, so it is checked again before every call.
 def check_endpoint(conn: Connection, row: Any) -> None:
+    api_base = (row.config or {}).get("api_base")
+    # Only an admin may save an anthropic api_base, so one a non-admin saved predates that rule.
+    if row.kind == "anthropic" and api_base and not saved_by_admin(conn, row):
+        raise LLMError(400, "An anthropic provider with an api_base works only when an admin saved it.")
     if row.kind not in ("openai-compatible", "ollama") or saved_by_admin(conn, row):
         return
-    api_base = (row.config or {}).get("api_base")
     if not api_base:
         raise LLMError(400, "An ollama provider with no api_base works only when an admin saved it.")
     try:
@@ -210,7 +248,8 @@ def prepare(conn: Connection, keyring: Any, team_id: str, alias: str, project_id
     if not defs.provider_configured(conn, row):
         raise LLMError(400, "The provider's credential secret is not set.")
     check_endpoint(conn, row)
-    return Call(row=row, model_id=model_id, credential=defs.provider_credential(conn, keyring, row))
+    return Call(row=row, model_id=model_id, credential=defs.provider_credential(conn, keyring, row),
+                prices=((row.config or {}).get("prices") or {}).get(alias) or None)
 
 
 def complete_json(conn: Connection, keyring: Any, team_id: str, alias: str, system: str,

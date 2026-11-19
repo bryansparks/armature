@@ -1,7 +1,7 @@
 export const NAV_LABELS = {
-  overview: 'Overview', gates: 'Waiting for you', runs: 'Runs', subjects: 'Pull requests', trends: 'Trends', teams: 'Teams', projects: 'Projects',
+  overview: 'Overview', gates: 'Waiting for you', runs: 'Runs', subjects: 'Pull requests', trends: 'Trends', insights: 'Insights', teams: 'Teams', projects: 'Projects',
   status: 'Status', workflows: 'Workflows', 'workflow-guide': 'Create a workflow', roles: 'Roles and prompts', packs: 'Packs', setup: 'Setup',
-  users: 'Users', secrets: 'Secrets', 'runner-keys': 'Runner keys', runners: 'Runners', aws: 'AWS', webhooks: 'Webhooks', triggers: 'Triggers',
+  users: 'Users', secrets: 'Secrets', 'runner-keys': 'Runner keys', runners: 'Runners', aws: 'AWS', webhooks: 'Webhooks', repos: 'Tracked repos', triggers: 'Triggers',
   settings: 'Settings',
 };
 
@@ -10,8 +10,9 @@ export const NAV_PARENT = { team: 'teams', project: 'projects', run: 'runs', sub
 export const NAV_SECTIONS = [
   { id: 'inbox', title: 'Inbox', icon: 'inbox', views: ['overview', 'gates'] },
   { id: 'activity', title: 'Activity', icon: 'pulse', views: ['runs', 'subjects', 'trends'] },
+  { id: 'insights', title: 'Insights', icon: 'bars', views: ['insights'] },
   { id: 'workflows', title: 'Workflows', icon: 'flow', views: ['workflows', 'workflow-guide', 'triggers'] },
-  { id: 'events', title: 'Events', icon: 'hook', views: ['webhooks'] },
+  { id: 'events', title: 'Events', icon: 'hook', views: ['webhooks', 'repos'] },
   { id: 'library', title: 'Library', icon: 'doc', views: ['roles', 'packs'] },
   { id: 'settings', title: 'Settings', icon: 'gear', views: ['setup', 'users', 'teams', 'projects', 'secrets', 'runner-keys', 'runners', 'aws', 'settings', 'status'] },
 ];

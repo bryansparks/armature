@@ -90,7 +90,7 @@ VALUE_OPS = ("eq", "ne", "in", "not_in", "starts_with", "contains")
 TEXT_OPS = ("starts_with", "contains")
 RULE_KEYS = ("order", "stop", "shadow", "dry", "events", "event_from", "conditions", "project_from", "inputs",
              "secrets", "thread", "conversation", "resident", "import_hash", "key", "concurrency", "debounce_seconds",
-             "cancel_running", "sticky", "cancel_only")
+             "cancel_running", "sticky", "cancel_only", "signal")
 IMPORT_HASH = re.compile(r"^[0-9a-f]{64}$")
 CONCURRENCY = ("none", "queue", "supersede")
 KEY_PATHS_MAX = 3
@@ -105,6 +105,7 @@ CONDITION_KEYS = ("path", "op", "value", "ignore_case")
 TEXT_VALUE_MAX = 200
 CONDITIONS_MAX = 50
 INPUTS_MAX = 100
+RESIDENT_INPUTS_MAX = 8
 EVENTS_MAX = 50
 EVENT_MAX = 64
 SECRETS_MAX = 32
@@ -387,6 +388,23 @@ def check_rule(config: Any) -> dict[str, Any]:
     if not isinstance(inputs, dict) or len(inputs) > INPUTS_MAX:
         raise WebhookError(400, f"inputs must be an object of at most {INPUTS_MAX} entries.")
     out["inputs"] = {name: _check_input(name, value) for name, value in inputs.items()}
+    if out.get("resident"):
+        if len(inputs) > RESIDENT_INPUTS_MAX:
+            raise WebhookError(400, f"A resident rule takes at most {RESIDENT_INPUTS_MAX} inputs.")
+        for name, value in inputs.items():
+            if not isinstance(value, str) or not value.startswith("$."):
+                raise WebhookError(400, f"Input {name} of a resident rule must be a $.path into the payload.")
+    if "signal" in config:
+        signal = config["signal"]
+        if not isinstance(signal, str) or not residents.NAME_RE.fullmatch(signal):
+            raise WebhookError(400, "signal must be an event name such as done.")
+        if not out.get("resident"):
+            raise WebhookError(400, "signal needs resident: true.")
+        if config.get("cancel_only"):
+            raise WebhookError(400, "signal can't be a cancel_only rule.")
+        if config.get("dry"):
+            raise WebhookError(400, "signal can't be a dry rule.")
+        out["signal"] = signal
     names = config.get("secrets", [])
     if not isinstance(names, list) or len(names) > SECRETS_MAX or not all(
             isinstance(n, str) and secret_store.NAME.fullmatch(n) for n in names):
@@ -497,6 +515,18 @@ def _describe(condition: dict[str, Any]) -> str:
     value = f" {json.dumps(condition['value'])}" if "value" in condition else ""
     case = " (ignoring case)" if condition.get("ignore_case") else ""
     return f"{condition['path']} {condition['op']}{value}{case}"
+
+
+def _scalars(values: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """The values a resident event may carry as fields, and the names of those dropped whole."""
+    kept, dropped = {}, []
+    for name, value in values.items():
+        if value is None or isinstance(value, (bool, int)) or (
+                isinstance(value, str) and len(value) <= TEXT_VALUE_MAX):
+            kept[name] = value
+        else:
+            dropped.append(name)
+    return kept, dropped
 
 
 def map_inputs(inputs: dict[str, Any], payload: Any) -> dict[str, Any]:
@@ -611,6 +641,12 @@ def _decide(conn: Connection, team_id: str, source: str, rule: Any, event: str |
             decision["matched"] = False
             decision["reason"] = target
             return decision
+        target["fields"], dropped = _scalars(decision["inputs"])
+        if dropped:
+            decision["reason"] = (f"matched; dropped input {', '.join(dropped)}: a field is text of at most "
+                                  f"{TEXT_VALUE_MAX} characters, a whole number, true, false, or null")
+        if config.get("signal"):
+            target["signal"] = config["signal"]
         decision["resident"] = target
         if not target["enabled"]:
             decision["reason"] = "residents are not enabled on this instance"
@@ -676,10 +712,13 @@ def _resident_delivery(conn: Connection, *, team_id: str, delivery_id: str, deci
     """What a resident rule's delivery records: the event it routed, or why it routed nothing.
 
     The delivery becomes a ``request`` event on the instance its key names, ensured at the
-    workflow's current version; ``wake`` may queue the turn, which is the job the entry records,
-    as a conversation's entry records its turn. A duplicate delivery id collapses in the inbox, a
-    closed instance skips the delivery rather than failing it, and with residents disabled on the
-    instance the rule records its match and routes nothing — the rollback gate.
+    workflow's current version, or a named ``signal`` event when the rule sets ``signal``; the
+    rule's declared scalar inputs ride along as ``source["fields"]``. ``wake`` may queue the turn,
+    which is the job the entry records while the instance is still open, as a conversation's entry
+    records its turn. A duplicate delivery id collapses in the inbox (a signal dedupes on
+    ``delivery_id:name``, so a request rule matching the same delivery can't swallow it), a closed
+    instance skips the delivery rather than failing it, and with residents disabled on the instance
+    the rule records its match and routes nothing — the rollback gate.
     """
     target = decision["resident"]
     entry = {"trigger_id": decision["trigger_id"], "workflow_id": decision["workflow_id"],
@@ -691,16 +730,26 @@ def _resident_delivery(conn: Connection, *, team_id: str, delivery_id: str, deci
         resident = residents.ensure(conn, team_id=team_id, project_id=decision["project_id"],
                                     workflow_id=decision["workflow_id"], instance_key=target["instance_key"],
                                     now=now)
-        seq = residents.enqueue(conn, resident.id, "request", payload=target["payload"],
-                                source={"delivery_id": delivery_id, "trigger_id": decision["trigger_id"]},
-                                dedupe_key=delivery_id, dry_run=decision.get("dry", False), now=now)
+        if resident.team_id != team_id:
+            entry["skipped"] = "instance belongs to another team"
+            return entry
+        signal = target.get("signal")
+        source = {"delivery_id": delivery_id, "trigger_id": decision["trigger_id"]}
+        if target.get("fields"):
+            source["fields"] = target["fields"]
+        seq = residents.enqueue(conn, resident.id, "signal" if signal else "request", payload=target["payload"],
+                                name=signal, source=source,
+                                dedupe_key=f"{delivery_id}:{signal}" if signal else delivery_id,
+                                dry_run=decision.get("dry", False), now=now)
     except residents.ResidentError as exc:
         entry["skipped"] = exc.message
         return entry
     entry.update(resident_id=resident.id, event_seq=seq)
     if seq is not None:
-        entry["job_id"] = conn.execute(select(resident_rows.c.active_job_id).where(
-            resident_rows.c.id == resident.id)).scalar()
+        row = conn.execute(select(resident_rows.c.state, resident_rows.c.active_job_id).where(
+            resident_rows.c.id == resident.id)).first()
+        if row.state != "closed":
+            entry["job_id"] = row.active_job_id
     return entry
 
 

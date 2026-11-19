@@ -40,6 +40,7 @@ from ruamel.yaml.events import (
 from sqlalchemy import Connection, Table, delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
+from armature.events.claude_stream import PRICE_FIELDS
 from armature.packs import BUILTIN_PACKS
 from armature.packs.params import with_error_paths
 from armature.runtime.templating import text_env
@@ -121,6 +122,10 @@ CREDENTIAL_KEYS = ("credential_secret", "credential_scope")
 CREDENTIAL_SCOPES = ("team", "instance")
 REQUIRED_CONFIG = {"bedrock": ("region",), "claude-subscription": ("credential_secret",),
                    "openai-compatible": ("api_base",)}
+# How an anthropic provider with an api_base sends its credential: as x-api-key, the default, or as a bearer token.
+AUTH_SCHEMES = ("x-api-key", "bearer")
+GATEWAY_KEYS = ("api_base", "auth")
+MAX_PRICE = 10_000
 
 PATH_PART = re.compile(r"\[([^\]]*)\]|([^.\[\]]+)")
 SECRET_MARKERS = ("TOKEN", "SECRET", "KEY", "PASSWORD")
@@ -805,6 +810,24 @@ def render_stages(body: str, stages: Any) -> str:
     return out.getvalue()
 
 
+def set_agent_field(body: str, stage_id: str, name: str, value: Any) -> str:
+    """``body`` with one field of a stage's ``agent:`` set, keeping comments, order, and every other key."""
+    data = _yaml().load(body)
+    stages = data.get("stages") if isinstance(data, dict) else None
+    stage = next((s for s in stages if isinstance(s, dict) and s.get("id") == stage_id
+                  and isinstance(s.get("agent"), dict)), None) if isinstance(stages, list) else None
+    if stage is None:
+        raise DefError(409, f"The workflow has no agent stage {stage_id}.")
+    stage["agent"][name] = value
+    out = io.StringIO()
+    dumper = _yaml()
+    sequence, offset = _detect_indent(body)
+    dumper.indent(mapping=2, sequence=sequence, offset=offset)
+    dumper.width = 4096
+    dumper.dump(data, out)
+    return out.getvalue()
+
+
 @dataclass(frozen=True)
 class Kind:
     object_kind: str
@@ -1388,9 +1411,10 @@ def _check_public_api_base(url: str) -> None:
 
 
 def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any, *, is_admin: bool = False,
-                   previous: dict | None = None, may_name_secret: bool = True) -> tuple[dict, dict]:
+                   previous: dict | None = None, may_name_secret: bool = True,
+                   previous_aliases: dict | None = None) -> tuple[dict, dict]:
     """Check a provider's fields. ``may_name_secret`` is False for a project lead, who can't hand a team secret
-    to a provider they control."""
+    to a provider they control. Prices for an alias the provider no longer has are dropped."""
     if kind not in PROVIDER_KINDS:
         raise DefError(400, f"kind must be one of {', '.join(PROVIDER_KINDS)}.")
     config = {} if config is None else config
@@ -1406,7 +1430,7 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
         if key not in CREDENTIAL_KEYS and any(word in SECRET_WORDS for word in key.split("_")):
             raise DefError(400, f"Config key {key} looks like a credential. Store it as a secret and name it in "
                                 "credential_secret.")
-        if value is not None and not isinstance(value, (str, int, float, bool)):
+        if key != "prices" and value is not None and not isinstance(value, (str, int, float, bool)):
             raise DefError(400, f"Config value {key} must be a string, number, or boolean.")
         if isinstance(value, str) and len(value) > 512:
             raise DefError(400, f"Config value {key} is too long.")
@@ -1426,6 +1450,12 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
     if config.get("region") is not None and not (isinstance(config["region"], str)
                                                  and REGION.fullmatch(config["region"])):
         raise DefError(400, "region is an AWS region such as us-east-1.")
+    # The provider's credential and every prompt go to the address, which only an admin may choose.
+    if kind == "anthropic" and not is_admin and any(config.get(k) is not None for k in GATEWAY_KEYS):
+        raise DefError(403, "Only an admin can give an anthropic provider an api_base or auth, or change one that "
+                            "has them.")
+    if kind == "anthropic" and config.get("auth") is not None and config["auth"] not in AUTH_SCHEMES:
+        raise DefError(400, f"auth must be one of {', '.join(AUTH_SCHEMES)}.")
     if config.get("api_base") is not None:
         if not (isinstance(config["api_base"], str) and API_BASE.fullmatch(config["api_base"])):
             raise DefError(400, "api_base is an http or https URL.")
@@ -1436,7 +1466,34 @@ def check_provider(kind: Any, config: Any, aliases: Any, credential_secret: Any,
             raise DefError(400, f"Alias {alias!r} must match {ALIAS.pattern}.")
         if not isinstance(model, str) or not MODEL_ID.fullmatch(model):
             raise DefError(400, f"Alias {alias} needs a model id.")
+    prices = _check_prices(config.pop("prices", None), aliases)
+    if prices:
+        config["prices"] = prices
+    # Prices stand in for the reported cost that comparison budgets add up, so only an admin changes them or the
+    # model a priced alias names. Anyone may drop the prices of an alias they remove.
+    before = (previous or {}).get("prices") or {}
+    if not is_admin and prices != {alias: entry for alias, entry in before.items() if alias in aliases}:
+        raise DefError(403, "Only an admin can set or remove a provider's prices.")
+    if not is_admin and any(alias in aliases and aliases[alias] != (previous_aliases or {}).get(alias)
+                            for alias in before):
+        raise DefError(403, "Only an admin can change the model of an alias that has a price.")
     return config, aliases
+
+
+def _check_prices(prices: Any, aliases: dict) -> dict:
+    if prices is None:
+        return {}
+    if not isinstance(prices, dict):
+        raise DefError(400, "prices maps each alias to its prices in USD per million tokens.")
+    prices = {alias: entry for alias, entry in prices.items() if alias in aliases}
+    for alias, entry in prices.items():
+        if not isinstance(entry, dict) or set(entry) - set(PRICE_FIELDS):
+            raise DefError(400, f"The prices of {alias} take only {', '.join(PRICE_FIELDS)}.")
+        for name, value in entry.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= MAX_PRICE:
+                raise DefError(400, f"prices.{alias}.{name} must be a number of USD per million tokens from 0 to "
+                                    f"{MAX_PRICE}.")
+    return prices
 
 
 def credential_team(row: Any) -> str | None:
@@ -1496,7 +1553,7 @@ def update_provider(conn: Connection, *, provider_id: str, body: dict[str, Any],
         raise DefError(400, "A provider's kind can't change. Add a provider of the new kind instead.")
     config, aliases = check_provider(kind, body.get("config", row.config), body.get("aliases", row.aliases),
                                      body.get("credential_secret"), is_admin=is_admin, previous=row.config or {},
-                                     may_name_secret=may_name_secret)
+                                     may_name_secret=may_name_secret, previous_aliases=row.aliases or {})
     if not is_admin and (row.config or {}).get("credential_scope") == "instance" and config != (row.config or {}):
         raise DefError(403, "This provider uses a secret for all teams, so only an admin can change its credential, "
                             "region, or api_base. You can edit its aliases.")

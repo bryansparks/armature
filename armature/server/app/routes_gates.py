@@ -21,6 +21,7 @@ from armature.server.app.deps import (
     signed_in,
 )
 from armature.server.app.http import ApiError, client_ip
+from armature.server.app.routes_insights import answers as insights_answers
 from armature.server.auth import Session
 from armature.server.db.schema import GATE_STATES
 
@@ -89,6 +90,8 @@ def _decide(request: Request, granted: Granted, gate_id: str, body: DecisionBody
                                    ip=client_ip(request))
     except gates.GateError as exc:
         raise ApiError(exc.status, exc.message) from exc
+    # A decided gate can move a fix proposal, which the Insights screens show.
+    insights_answers.forget_team(decided["team_id"])
     return {"gate": _shown(granted.access, decided)}
 
 

@@ -25,10 +25,13 @@ from armature.server.app import (
     routes_environments,
     routes_export,
     routes_gates,
+    routes_insights,
     routes_jobs,
     routes_live,
     routes_oidc,
     routes_packs,
+    routes_reports,
+    routes_repos,
     routes_residents,
     routes_runner,
     routes_stats,
@@ -47,6 +50,9 @@ from armature.server.crypto import Keyring
 from armature.server.db import utcnow
 from armature.server.export import ExportHook
 from armature.server.ingest import LiveHub, RateLimit
+from armature.server.insights import experiments as insights_arms
+from armature.server.insights import jobs as insights_jobs
+from armature.server.insights import sync as github_sync
 from armature.server.oidc import Provider
 from armature.server.status import StatusHook
 
@@ -67,6 +73,10 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
     job_worker = worker.Worker(engine, keyring, cfg, hub, clock=clock, interval=worker_interval or worker.INTERVAL_S)
     envs = environments.EnvironmentService(engine, keyring, cfg, clock=clock)
     scheduler = pollers.Scheduler(engine, keyring, clock=clock, transport=lambda: app.state.vendor_transport)
+    syncer = github_sync.SyncService(engine, keyring, clock=clock, transport=lambda: app.state.vendor_transport)
+    insights = insights_jobs.Jobs(engine, keyring, clock=clock, transport=lambda: app.state.vendor_transport,
+                                  reports=cfg.reports)
+    comparisons = insights_arms.Arms(engine, keyring, clock=clock)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -75,6 +85,9 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
             await asyncio.to_thread(job_worker.start)
             envs.start()
             scheduler.start()
+            syncer.start()
+            insights.start()
+            comparisons.start()
         if export is not None:
             export.schedule()
         if cfg.actions:
@@ -87,6 +100,9 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
             await asyncio.to_thread(job_worker.stop)
             await asyncio.to_thread(envs.stop)
             await asyncio.to_thread(scheduler.stop)
+            await asyncio.to_thread(syncer.stop)
+            await asyncio.to_thread(insights.stop)
+            await asyncio.to_thread(comparisons.stop)
             await hub.stop()
             if export is not None:
                 await asyncio.to_thread(export.stop)
@@ -100,6 +116,7 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
     app.state.worker = job_worker
     app.state.environments = envs
     app.state.scheduler = scheduler
+    app.state.github_sync = syncer
     app.state.vendor_transport = None
     app.state.runner_polls = RateLimit(routes_runner.POLL_PER_S, routes_runner.POLL_BURST)
     app.state.tool_calls = RateLimit(routes_tools.CALLS_PER_S, routes_tools.CALLS_BURST)
@@ -123,7 +140,8 @@ def create_app(cfg: ServerConfig, engine: Engine, keyring: Keyring, *, clock: Ca
                    routes_actions.router, routes_status.router, routes_webhooks.router, routes_jobs.router,
                    routes_environments.router, routes_connections.router, routes_tools.router, routes_gates.router,
                    routes_conversations.router, routes_residents.router, routes_triggers.router,
-                   static.router):
+                   routes_repos.router, routes_reports.router,
+                   routes_insights.router, static.router):
         app.include_router(router, prefix=base)
 
     if base:

@@ -11,6 +11,7 @@ const ICON_PATHS = {
   doc: 'M4 1.5h5.5L12 4v10.5H4zM9.5 1.5V4H12M6 7.5h4M6 10h4',
   gear: 'M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4',
   pulse: 'M1.5 8.5h3l2-5 3 9 2-4h3',
+  bars: 'M3 13.5V9M8 13.5V3M13 13.5V6.5',
   hook: 'M8 1.5v7a3 3 0 1 1-3-3M8 1.5l2 2M8 1.5l-2 2',
   inbox: 'M1.5 9.5l2-6.5h9l2 6.5v4h-13zM1.5 9.5h4l1 2h3l1-2h4',
   menu: 'M2 4h12M2 8h12M2 12h12',
@@ -31,6 +32,7 @@ function icon(name) {
 const VIEW_LOADERS = {
   overview: () => import('./views/overview.js'),
   trends: () => import('./views/trends.js'),
+  insights: () => import('./views/insights/index.js'),
   gates: () => import('./views/gates.js'),
   runs: () => import('./views/runs.js'),
   run: () => import('./views/run.js'),
@@ -50,6 +52,7 @@ const VIEW_LOADERS = {
   webhook: () => import('./views/webhooks.js'),
   triggers: () => import('./views/triggers.js'),
   trigger: () => import('./views/triggers.js'),
+  repos: () => import('./views/repos.js'),
   workflows: () => import('./views/workflows.js'),
   workflow: () => import('./views/workflows.js'),
   resident: () => import('./views/residents.js'),
@@ -112,7 +115,7 @@ async function route() {
     await viewModule.render(viewRoot, { name, args, query, signal: controller.signal });
     if (sequence !== renderSequence) return;
     clear(main).append(viewRoot);
-    const currentTab = viewRoot.querySelector('.section-tabs [aria-current]');
+    const currentTab = viewRoot.querySelector('.section-tabs [aria-current], .in-tabs [aria-current]');
     currentTab?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
     if (fromTab) currentTab?.focus();
     document.title = `${viewRoot.querySelector('h1')?.textContent || 'Armature'} | Armature`;
@@ -270,7 +273,7 @@ async function start() {
   document.getElementById('skip').addEventListener('click', () => document.getElementById('content').focus());
   // Safari does not focus a link on click, so the tab that started a route is remembered here.
   document.getElementById('content').addEventListener('click', (clickEvent) => {
-    const href = clickEvent.target.closest?.('.section-tabs a')?.getAttribute('href') ?? null;
+    const href = clickEvent.target.closest?.('.section-tabs a, .in-tabs a')?.getAttribute('href') ?? null;
     clickedTabHref = href === location.hash ? null : href;
   });
   window.addEventListener('hashchange', leaveThenRoute);

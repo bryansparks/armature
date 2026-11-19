@@ -835,6 +835,70 @@ def test_api_base_must_be_public_https_unless_an_admin_saves_it(world, public_dn
     assert admin.status_code == 200, admin.text
 
 
+def test_only_an_admin_gives_an_anthropic_provider_a_gateway(world, public_dns):
+    lead = _client(world, "team_lead")
+    for config in ({"api_base": "https://llm.example/v1"}, {"auth": "bearer"}):
+        refused = lead.post(f"/api/teams/{world.own.team}/providers", json={"kind": "anthropic", "config": config})
+        assert refused.status_code == 403, refused.text
+    admin = _client(world, "admin")
+    gateway = {"kind": "anthropic", "config": {"api_base": "https://gw.example.com", "auth": "bearer"},
+               "aliases": {"fast": "gateway-model"}}
+    bad = admin.post(f"/api/teams/{world.own.team}/providers",
+                     json={**gateway, "config": {**gateway["config"], "auth": "basic"}})
+    assert bad.status_code == 400 and "auth" in bad.json()["error"]
+    created = admin.post(f"/api/teams/{world.own.team}/providers", json=gateway)
+    assert created.status_code == 200, created.text
+    provider = created.json()["provider"]
+    assert provider["config"] == {"api_base": "https://gw.example.com", "auth": "bearer"}
+    edited = lead.post(f"/api/providers/{provider['id']}", json={"aliases": {"fast": "other-model"}})
+    assert edited.status_code == 403, edited.text
+    assert admin.post(f"/api/providers/{provider['id']}",
+                      json={"aliases": {"fast": "other-model"}}).status_code == 200
+
+
+@pytest.mark.parametrize("prices", [
+    [], {"fast": {"input": 1, "extra": 2}}, {"fast": {"input": -1}},
+    {"fast": {"output": True}}, {"fast": {"output": "1"}}, {"fast": {"output": float("nan")}},
+    {"fast": {"output": defs.MAX_PRICE + 1}}, {"fast": 3}])
+def test_bad_provider_prices_are_refused(prices):
+    with pytest.raises(defs.DefError) as refused:
+        defs.check_provider("anthropic", {"prices": prices}, {"fast": "gateway-model"}, None, is_admin=True)
+    assert refused.value.status == 400
+
+
+def test_only_an_admin_sets_provider_prices():
+    prices = {"fast": {"input": 0.5, "output": 2, "cache_read": 0.05, "cache_write": 0.6}}
+    aliases = {"fast": "gateway-model"}
+    config, _ = defs.check_provider("bedrock", {"region": "us-east-1", "prices": prices}, aliases, None, is_admin=True)
+    assert config["prices"] == prices
+    with pytest.raises(defs.DefError) as refused:
+        defs.check_provider("bedrock", {"region": "us-east-1", "prices": prices}, aliases, None)
+    assert refused.value.status == 403
+    previous = {"region": "us-east-1", "prices": prices}
+    kept, _ = defs.check_provider("bedrock", {"region": "us-east-1", "prices": prices}, {**aliases, "x": "m"}, None,
+                                  previous=previous, previous_aliases=aliases)
+    assert kept["prices"] == prices
+    for config, new_aliases in (({"region": "us-east-1"}, aliases),
+                                ({"region": "us-east-1", "prices": {}}, aliases),
+                                ({"region": "us-east-1", "prices": prices}, {"fast": "cheaper-model"})):
+        with pytest.raises(defs.DefError) as refused:
+            defs.check_provider("bedrock", config, new_aliases, None, previous=previous, previous_aliases=aliases)
+        assert refused.value.status == 403, (config, new_aliases)
+
+
+def test_prices_of_a_removed_alias_are_dropped_by_anyone():
+    prices = {"fast": {"input": 1}, "slow": {"output": 2}}
+    aliases = {"fast": "gateway-model", "slow": "big-model"}
+    previous = {"region": "us-east-1", "prices": prices}
+    config, _ = defs.check_provider("bedrock", {"region": "us-east-1", "prices": prices}, {"quick": "gateway-model",
+                                    "slow": "big-model"}, None, previous=previous, previous_aliases=aliases)
+    assert config["prices"] == {"slow": {"output": 2}}
+    config, _ = defs.check_provider("bedrock", dict(previous), {}, None, previous=previous, previous_aliases=aliases)
+    assert "prices" not in config
+    config, _ = defs.check_provider("anthropic", {"prices": {"nope": {"input": 1}}}, aliases, None, is_admin=True)
+    assert "prices" not in config
+
+
 def test_a_provider_secret_comes_only_from_its_own_team(world):
     from armature.server import secrets as secret_store
     client = _client(world, "team_lead")

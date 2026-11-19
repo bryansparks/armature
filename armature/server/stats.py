@@ -18,6 +18,7 @@ from sqlalchemy import Connection, func, or_, select
 from armature.server import display, rbac
 from armature.server.db.schema import run_steps, runs, workflows
 from armature.server.ingest import list_row, run_query, summary_of
+from armature.server.insights import arms
 
 RECENT = 8
 SERIES_MAX = 7
@@ -64,7 +65,8 @@ def man_hours(agent_seconds: float, multiplier: float) -> float:
 
 
 def _scoped(query, scope: rbac.Scope, team: str | None):
-    query = query.where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id))
+    # Comparison runs are the Models screen's, so they count in no run statistic.
+    query = query.where(rbac.scope_clause(scope, runs.c.team_id, runs.c.project_id), arms.not_arm(runs.c.id))
     return query.where(runs.c.team_id == team) if team else query
 
 

@@ -882,3 +882,347 @@ def test_0028_adds_runner_pauses_and_downgrade_drops_it(db_url):
         assert "pauses" not in {c["name"] for c in inspect(engine).get_columns("runners")}
     finally:
         engine.dispose()
+
+
+def test_0029_adds_llm_calls_and_downgrade_drops_it(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert "llm_calls" in insp.get_table_names()
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("llm_calls")} == {("run_id", "seq")}
+        columns = {c["name"]: c for c in insp.get_columns("llm_calls")}
+        assert not columns["team_id"]["nullable"] and not columns["cached"]["nullable"]
+        assert {"alias", "cached"} <= columns.keys()
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0028")
+    engine = make_engine(db_url)
+    try:
+        assert "llm_calls" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0030_adds_candidates_and_labels_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    added = {"finding_candidates", "candidate_matches", "taxonomies", "labels", "clusters", "cluster_members"}
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert added <= set(insp.get_table_names())
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("finding_candidates")} == {
+            ("run_id", "step_key", "ordinal")}
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("candidate_matches")} == {
+            ("candidate_id", "matcher_version", "match_ordinal")}
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("labels")} == {
+            ("team_id", "subject_kind", "subject_id", "taxonomy_version")}
+        assert ["finding_id"] in [i["column_names"] for i in insp.get_indexes("candidate_matches")]
+        for table in added:
+            assert not {c["name"]: c for c in insp.get_columns(table)}["team_id"]["nullable"], table
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0029")
+    engine = make_engine(db_url)
+    try:
+        assert not added & set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
+
+
+def test_0031_adds_github_history_and_people_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    added = {"gh_repos", "gh_pull_requests", "gh_pushes", "gh_reviews", "gh_review_comments", "gh_check_runs",
+             "gh_pr_commits", "gh_pr_links", "gh_conflict_samples", "gh_sync_state", "people", "person_identities"}
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert added <= set(insp.get_table_names())
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("gh_repos")} == {
+            ("team_id", "gh_repo_id"), ("team_id", "full_name")}
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("gh_pushes")} == {
+            ("pr_row_id", "after_sha")}
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("person_identities")} == {
+            ("team_id", "kind", "value")}
+        assert {tuple(i["column_names"]) for i in insp.get_indexes("gh_pull_requests")} == {
+            ("team_id", "repo_row_id", "number"), ("team_id", "author_person_id", "created_at_gh"),
+            ("team_id", "state")}
+        for table in added:
+            assert not {c["name"]: c for c in insp.get_columns(table)}["team_id"]["nullable"], table
+        assert "body" not in {c["name"] for c in insp.get_columns("gh_review_comments")}
+        for table in ("gh_reviews", "gh_pushes"):
+            source = {c["name"]: c for c in insp.get_columns(table)}["actor_source"]
+            assert not source["nullable"] and "github" in str(source["default"]), table
+        assert "head_repo_gh_id" in {c["name"] for c in insp.get_columns("gh_pull_requests")}
+        for table in ("gh_reviews", "gh_review_comments", "gh_check_runs", "gh_pr_commits"):
+            assert ["pr_row_id"] in [i["column_names"] for i in insp.get_indexes(table)], table
+        assert ["to_pr_row_id"] in [i["column_names"] for i in insp.get_indexes("gh_pr_links")]
+        checks = {(table, c["name"]) for table in ("gh_pull_requests", "people", "person_identities", "gh_pushes",
+                                                   "gh_reviews", "gh_pr_links", "gh_conflict_samples",
+                                                   "gh_sync_state")
+                  for c in insp.get_check_constraints(table)}
+        assert checks >= {("gh_pull_requests", "ck_gh_pull_requests_state"), ("people", "ck_people_kind"),
+                          ("person_identities", "ck_person_identities_kind"), ("gh_pushes", "ck_gh_pushes_source"),
+                          ("gh_pushes", "ck_gh_pushes_actor_source"), ("gh_reviews", "ck_gh_reviews_actor_source"),
+                          ("gh_pr_links", "ck_gh_pr_links_kind"),
+                          ("gh_conflict_samples", "ck_gh_conflict_samples_mergeable"),
+                          ("gh_sync_state", "ck_gh_sync_state_kind")}
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0030")
+    engine = make_engine(db_url)
+    try:
+        assert not added & set(inspect(engine).get_table_names())
+        assert "finding_candidates" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0032_adds_pull_request_files_and_sync_failures_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        columns = {c["name"]: c for c in insp.get_columns("gh_pr_files")}
+        assert not columns["team_id"]["nullable"] and not columns["path_key"]["nullable"]
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("gh_pr_files")} == {
+            ("pr_row_id", "path_key")}
+        assert [i["column_names"] for i in insp.get_indexes("gh_pr_files")] == [["team_id", "repo_row_id", "path_key"]]
+        assert {c["name"]: c for c in insp.get_columns("gh_sync_state")}["failures"]["nullable"]
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0031")
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert "gh_pr_files" not in insp.get_table_names()
+        assert "failures" not in {c["name"] for c in insp.get_columns("gh_sync_state")}
+        assert "gh_sync_state" in insp.get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0033_adds_model_eval_and_arm_mode_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    from armature.server.db.schema import eval_arms, eval_experiments, tool_calls
+    eval_arms_table = eval_arms
+    migrate(db_url)
+    engine = make_engine(db_url)
+    team_id, run_id, experiment_id = new_id(), new_id(), new_id()
+    tables = ("eval_experiments", "eval_arms", "eval_matches", "eval_judgments", "eval_scores",
+              "eval_recommendations")
+    try:
+        insp = inspect(engine)
+        for table in tables:
+            assert not {c["name"]: c for c in insp.get_columns(table)}["team_id"]["nullable"]
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("eval_arms")} == {
+            ("experiment_id", "primary_run_id", "label")}
+        assert {tuple(u["column_names"]) for u in insp.get_unique_constraints("eval_scores")} == {
+            ("experiment_id", "arm_label", "scorer_version")}
+        assert {c["name"]: c for c in insp.get_columns("jobs")}["arm_id"]["nullable"]
+        with engine.begin() as conn:
+            conn.execute(insert(teams).values(id=team_id, name="mobile", created_at=utcnow()))
+            conn.execute(insert(runs).values(id=run_id, team_id=team_id, status="running", started_at=utcnow()))
+            conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=team_id, step_id="post",
+                                                   tool="github.post-review", mode="arm", outcome="ok",
+                                                   created_at=utcnow()))
+            experiment = {"id": experiment_id, "team_id": team_id, "specialist": "concurrency", "variable": "effort",
+                          "baseline": {}, "variant": {"effort": "high"}, "sample_rate": 0.2, "daily_budget_usd": 25,
+                          "max_concurrent_arms": 2, "status": "running", "min_prs": 30, "created_at": utcnow()}
+            conn.execute(insert(eval_experiments).values(**experiment))
+            arm = {"team_id": team_id, "experiment_id": experiment_id, "primary_run_id": run_id, "head_sha": "a" * 40,
+                   "label": "variant", "status": "queued", "created_at": utcnow()}
+            conn.execute(insert(eval_arms).values(id=new_id(), **arm))
+            for bad in ({**arm, "label": "control", "status": "paused"}, {**arm, "label": "other"}, arm):
+                with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                    conn.execute(insert(eval_arms).values(id=new_id(), **bad))
+            for bad in ({"variable": "tier"}, {"status": "stopped"}):
+                with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                    conn.execute(insert(eval_experiments).values(**{**experiment, "id": new_id(), **bad}))
+            from armature.server.db.schema import (
+                eval_matches,
+                eval_recommendations,
+                finding_candidates,
+                jobs,
+                llm_calls,
+                workflows,
+            )
+            arm_run, live_run, candidate = new_id(), new_id(), new_id()
+            for run in (arm_run, live_run):
+                conn.execute(insert(runs).values(id=run, team_id=team_id, status="succeeded", started_at=utcnow()))
+                conn.execute(insert(llm_calls).values(id=new_id(), team_id=team_id, run_id=run, seq=1, cost_usd=1,
+                                                      created_at=utcnow()))
+            conn.execute(update(eval_arms_table).where(eval_arms_table.c.label == "variant").values(arm_run_id=arm_run))
+            conn.execute(insert(finding_candidates).values(id=candidate, team_id=team_id, run_id=arm_run,
+                                                           step_key="first/concurrency", specialist="concurrency",
+                                                           ordinal=0, arm_id=new_id(), created_at=utcnow()))
+            conn.execute(insert(tool_calls).values(id=new_id(), run_id=live_run, team_id=team_id, step_id="post",
+                                                   tool="github.post-review", mode="live", outcome="ok",
+                                                   created_at=utcnow()))
+            workflow = new_id()
+            conn.execute(insert(workflows).values(id=workflow, team_id=team_id, scope=team_id, name="review",
+                                                  current_version=1, created_at=utcnow(), updated_at=utcnow()))
+            conn.execute(insert(jobs).values(id=new_id(), team_id=team_id, workflow_id=workflow, status="queued",
+                                             attempts=0, created_at=utcnow(), arm_id=None))
+            recommendation = {"id": new_id(), "team_id": team_id, "experiment_id": experiment_id,
+                              "specialist": "concurrency", "change": {}, "sentence": "s", "state": "maybe",
+                              "created_at": utcnow()}
+            with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                conn.execute(insert(eval_recommendations).values(**recommendation))
+            with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                conn.execute(insert(eval_matches).values(
+                    id=new_id(), team_id=team_id, experiment_id=experiment_id, primary_run_id=run_id,
+                    left_candidate_id=candidate, method="guess", matcher_version="1"))
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0032")
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert not set(tables) & set(insp.get_table_names())
+        assert "arm_id" not in {c["name"] for c in insp.get_columns("jobs")}
+        with engine.begin() as conn:
+            # The arm's call and spend and its finding go; the live review's rows and the queued job stay.
+            assert [tuple(r) for r in conn.execute(select(tool_calls.c.run_id, tool_calls.c.mode))] == [
+                (live_run, "live")]
+            assert conn.execute(select(text("run_id FROM llm_calls"))).scalars().all() == [live_run]
+            assert conn.execute(select(text("count(*) FROM finding_candidates"))).scalar() == 0
+            assert conn.execute(select(text("count(*) FROM jobs"))).scalar() == 1
+            with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                conn.execute(insert(tool_calls).values(id=new_id(), run_id=run_id, team_id=team_id, step_id="post",
+                                                       tool="slack.post", mode="arm", outcome="ok",
+                                                       created_at=utcnow()))
+    finally:
+        engine.dispose()
+
+
+def test_0034_adds_fix_proposals_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    from armature.server.db.schema import fix_proposals
+    migrate(db_url)
+    engine = make_engine(db_url)
+    team_id = new_id()
+    try:
+        insp = inspect(engine)
+        columns = {c["name"]: c for c in insp.get_columns("fix_proposals")}
+        assert not columns["team_id"]["nullable"] and not columns["cluster_key"]["nullable"]
+        assert columns["kind"]["nullable"] and columns["run_id"]["nullable"] and columns["repo_row_id"]["nullable"]
+        assert sorted(i["column_names"] for i in insp.get_indexes("fix_proposals")) == [
+            ["job_id"], ["run_id"], ["team_id", "cluster_key"], ["team_id", "state"]]
+        # No foreign key to clusters, runs, gates, or gh_repos, which are rebuilt, pruned, or removed.
+        assert {fk["referred_table"] for fk in insp.get_foreign_keys("fix_proposals")} == {"teams", "projects"}
+        with engine.begin() as conn:
+            conn.execute(insert(teams).values(id=team_id, name="mobile", created_at=utcnow()))
+            row = {"team_id": team_id, "cluster_key": "v1|concurrency|acme/app|src", "title": "Fix", "state": "queued",
+                   "created_at": utcnow(), "updated_at": utcnow()}
+            conn.execute(insert(fix_proposals).values(id=new_id(), **row))
+            conn.execute(insert(fix_proposals).values(id=new_id(), **{**row, "kind": "check", "state": "merged"}))
+            for bad in ({"state": "rejected"}, {"kind": "lint"}):
+                with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                    conn.execute(insert(fix_proposals).values(id=new_id(), **{**row, **bad}))
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0033")
+    engine = make_engine(db_url)
+    try:
+        assert "fix_proposals" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_0035_adds_review_rounds_and_finding_lineage_and_downgrade_drops_them(db_url):
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    from armature.server.db.schema import findings
+    migrate(db_url, "0034")
+    team_id, run_id, finding_id = new_id(), new_id(), new_id()
+    engine = make_engine(db_url)
+    try:
+        with engine.begin() as conn:
+            stamp = {"at": "2026-11-16 12:00:00"}
+            conn.execute(text("INSERT INTO teams (id, name, created_at) VALUES (:t, 'live', :at)"),
+                         {"t": team_id, **stamp})
+            conn.execute(text("INSERT INTO runs (id, team_id, status, started_at) VALUES (:r, :t, 'succeeded', :at)"),
+                         {"r": run_id, "t": team_id, **stamp})
+            conn.execute(text("INSERT INTO findings (id, run_id, finding_key) VALUES (:f, :r, 'abc')"),
+                         {"f": finding_id, "r": run_id})
+    finally:
+        engine.dispose()
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        added = {c["name"]: c for c in insp.get_columns("runs")}
+        assert all(added[name]["nullable"] for name in ("review_round", "prev_round_run_id", "review_kind"))
+        assert ["project_id", "lineage_key"] in [ix["column_names"] for ix in insp.get_indexes("findings")]
+        with engine.begin() as conn:
+            assert conn.execute(select(runs.c.review_round, runs.c.prev_round_run_id, runs.c.review_kind)).one() == \
+                (None, None, None)
+            assert conn.execute(select(findings.c.blocking, findings.c.lineage_key)).one() == (None, None)
+            conn.execute(update(runs).values(review_round=2, prev_round_run_id=new_id(), review_kind="incremental"))
+            conn.execute(update(findings).values(blocking=False, lineage_key="abc"))
+            assert conn.execute(select(findings.c.blocking)).scalar_one() is False
+            with pytest.raises(CHECK_FAILED), conn.begin_nested():
+                conn.execute(update(runs).values(review_kind="partial"))
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0034")
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        assert not {"review_round", "prev_round_run_id", "review_kind"} & {c["name"] for c in insp.get_columns("runs")}
+        assert not {"blocking", "lineage_key"} & {c["name"] for c in insp.get_columns("findings")}
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT id FROM findings")).scalars().all() == [finding_id]
+    finally:
+        engine.dispose()
+
+
+def test_0036_adds_daily_reports_and_downgrade_drops_it(db_url):
+    from datetime import date
+
+    from alembic import command
+
+    from armature.server.db import alembic_config
+    from armature.server.db.schema import daily_reports
+    migrate(db_url)
+    engine = make_engine(db_url)
+    try:
+        insp = inspect(engine)
+        columns = {c["name"]: c for c in insp.get_columns("daily_reports")}
+        assert set(columns) == {"id", "day", "data", "created_at"}
+        assert not columns["day"]["nullable"] and not columns["created_at"]["nullable"]
+        assert [u["column_names"] for u in insp.get_unique_constraints("daily_reports")] == [["day"]]
+        assert insp.get_foreign_keys("daily_reports") == []
+        with engine.begin() as conn:
+            row = {"day": date(2026, 11, 16), "data": {"version": 1}, "created_at": utcnow()}
+            conn.execute(insert(daily_reports).values(id=new_id(), **row))
+            with pytest.raises(IntegrityError), conn.begin_nested():
+                conn.execute(insert(daily_reports).values(id=new_id(), **row))
+            assert conn.execute(select(daily_reports.c.day, daily_reports.c.data)).one() == \
+                (date(2026, 11, 16), {"version": 1})
+    finally:
+        engine.dispose()
+    command.downgrade(alembic_config(db_url), "0035")
+    engine = make_engine(db_url)
+    try:
+        assert "daily_reports" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()

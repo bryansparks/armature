@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import logging
 import math
@@ -55,6 +54,7 @@ from armature.server.db.schema import (
     workflows,
 )
 from armature.server.live import LocalBroker, event_message, summary_message
+from armature.server.tools import review
 from armature.server.writer import EventWriter, StepChange, step_key, sweep_lost
 
 log = logging.getLogger(__name__)
@@ -82,11 +82,20 @@ KIND = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 EID = re.compile(r"^([A-Za-z0-9_-]{1,64}):(\d{1,18})$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 MAX_RAISED_BY = 20
+# Per step, as the engine caps them.
+MAX_CANDIDATES = 50
+MAX_BRANCH = 10_000
+MAX_ATTEMPTS = 16
+MAX_MODELS = 16
+MODEL_USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                      "cost_usd")
 RUNNER_KEY = re.compile(r"\bark_[\w-]{40,}")
 # Tool grants and vendor token shapes, should a step ever print one.
 TOKEN_SHAPES = re.compile(r"\b(?:atg_[\w.-]{20,}|gh[opsur]_[A-Za-z0-9]{20,}|github_pat_\w{20,}|xox[abeoprs]-[\w-]{10,}"
                           r"|xapp-[\w-]{10,}|lin_api_\w{20,})")
 SURROGATE = re.compile("[\ud800-\udfff]")
+# A finding's blocking flag when its payload gives none. Other decisions say nothing about it.
+DECISION_BLOCKS = {"block": True, "suggest": False}
 STRIPPED = ("run_id", "team_id", "token", "eid")
 STEP_STATUS = {"step_start": "running", "step_end": "succeeded", "step_failed": "failed",
                "step_skipped": "skipped"}
@@ -293,7 +302,8 @@ def run_columns() -> list:
             runs.c.started_at, runs.c.finished_at, runs.c.cost_usd, runs.c.input_tokens, runs.c.output_tokens,
             runs.c.rerun_of, runs.c.cancelled_by, runs.c.error, runs.c.subject, runs.c.thread, runs.c.summary,
             runs.c.outcome, runs.c.outcome_source, runs.c.risk, runs.c.risk_reasons, runs.c.head_sha,
-            runs.c.location, HOST_RUN.label("host_run")]
+            runs.c.location, runs.c.review_round, runs.c.prev_round_run_id, runs.c.review_kind,
+            HOST_RUN.label("host_run")]
 
 
 def run_query():
@@ -346,13 +356,13 @@ def finding_row(project_id: str | None, step_id: str | None, now: datetime, payl
     body = _text(payload.get("body") or payload.get("message") or payload.get("claim"), 60_000)
     line = payload.get("line")
     line = line if isinstance(line, int) and not isinstance(line, bool) and 0 <= line < 2 ** 31 else None
-    key = _text(payload.get("finding_key") or payload.get("id"), 64)
-    if key is None:
-        key = hashlib.sha256(f"{path}|{line}|{body}".encode()).hexdigest()[:64]
+    key = _text(payload.get("finding_key") or payload.get("id"), 64) or review.finding_key(
+        {"path": path, "claim": payload.get("claim"), "body": body})
     disposition = _text(payload.get("disposition"), 32)
     decision = payload.get("decision")
     if decision not in FINDING_DECISIONS:
         decision = "drop" if disposition in ("drop_rebutted", "resolved") else None
+    blocking = payload.get("blocking")
     raised_by = payload.get("raised_by") if isinstance(payload.get("raised_by"), list) else []
     raised_by = [r for r in (_text(r, 64) for r in raised_by[:MAX_RAISED_BY]) if r]
     fix_sha = payload.get("fix_sha")
@@ -360,12 +370,78 @@ def finding_row(project_id: str | None, step_id: str | None, now: datetime, payl
             "severity": _text(payload.get("severity"), 16), "disposition": disposition,
             "title": _text(payload.get("title"), 2000), "body": body, "step_id": step_id, "created_at": now,
             "raised_by": raised_by or None, "decision": decision, "reason": _text(payload.get("reason"), 2000),
-            "fix_sha": fix_sha if isinstance(fix_sha, str) and SHA.fullmatch(fix_sha) else None}
+            "fix_sha": fix_sha if isinstance(fix_sha, str) and SHA.fullmatch(fix_sha) else None,
+            "blocking": blocking if isinstance(blocking, bool) else DECISION_BLOCKS.get(decision)}
+
+
+def candidate_row(team_id: str, project_id: str | None, key: str, step_id: str, now: datetime,
+                  payload: dict[str, Any]) -> dict[str, Any] | None:
+    """The finding_candidates row a ``candidate`` event makes, or None when its ordinal is out of range."""
+    ordinal = _index(payload.get("ordinal"))
+    if ordinal is None or not 0 <= ordinal < MAX_CANDIDATES:
+        return None
+    path, claim = _nul_free(payload.get("path"), 4096), _nul_free(payload.get("claim"), 2000)
+    body = _nul_free(payload.get("body"), 60_000)
+    line = _index(payload.get("line"))
+    blocking = payload.get("blocking")
+    return {"team_id": team_id, "project_id": project_id, "step_key": key,
+            "specialist": _nul_free(payload.get("specialist"), 64) or step_id[:64], "ordinal": ordinal,
+            "finding_key": review.finding_key({"path": path, "claim": claim, "body": body}), "path": path,
+            "line": line if line is not None and 0 <= line < 2 ** 31 else None,
+            "severity": _nul_free(payload.get("severity"), 16),
+            "blocking": blocking if isinstance(blocking, bool) else None, "claim": claim, "body": body,
+            "suggestion": _nul_free(payload.get("suggestion"), 60_000), "created_at": now}
+
+
+def _nul_free(value: Any, limit: int) -> str | None:
+    """Text for an llm_calls column, without the NUL characters Postgres rejects."""
+    return _text(value.replace("\x00", ""), limit) if isinstance(value, str) else None
+
+
+def _attempt(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {"tier": _nul_free(value.get("tier"), 64), "model": _nul_free(value.get("model"), 191),
+            "input_tokens": int(_number(value.get("input_tokens"))),
+            "output_tokens": int(_number(value.get("output_tokens"))),
+            "cost_usd": _number(value.get("cost_usd")), "outcome": _nul_free(value.get("outcome"), 32)}
+
+
+def _model_usage(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    found = {}
+    for model, usage in list(value.items())[:MAX_MODELS]:
+        name = _nul_free(model, 191)
+        if name and isinstance(usage, dict):
+            found[name] = {k: _number(v) if k == "cost_usd" else int(_number(v)) for k, v in usage.items()
+                           if k in MODEL_USAGE_FIELDS}
+    return found or None
+
+
+def llm_call_row(team_id: str, seq: int, key: str | None, now: datetime, payload: dict[str, Any], cost: float,
+                 tokens_in: int, tokens_out: int) -> dict[str, Any]:
+    """The llm_calls row a ``cost`` event makes: what model, tier, and effort actually produced the step's output."""
+    attempts = payload.get("attempts")
+    attempts = [a for a in map(_attempt, attempts[:MAX_ATTEMPTS]) if a] if isinstance(attempts, list) else []
+    index = _index(payload.get("escalation_index"))
+    return {"team_id": team_id, "seq": seq, "step_key": _nul_free(key, 191),
+            "model_id": _nul_free(payload.get("model"), 191), "provider": _nul_free(payload.get("provider"), 64),
+            "alias": _nul_free(payload.get("alias"), 191), "tier": _nul_free(payload.get("tier"), 64),
+            "requested_effort": _nul_free(payload.get("requested_effort"), 16),
+            "reported_effort": _nul_free(payload.get("effort"), 16),
+            "escalation_index": index if index is not None and 0 <= index < MAX_ATTEMPTS else None,
+            "input_tokens": tokens_in, "output_tokens": tokens_out, "cost_usd": cost, "attempts": attempts or None,
+            "model_usage": _model_usage(payload.get("model_usage")), "cached": payload.get("cached") is True,
+            "created_at": now}
 
 
 def store_findings(engine: Engine, keyring: Keyring, run_id: str, step_id: str, payloads: list[dict[str, Any]],
                    now: datetime) -> None:
     """The findings rows of ``payloads``, redacted as ingest redacts, for a run no live hub holds."""
+    # Imported here, since the matcher's module imports this one.
+    from armature.server.insights import candidates
+
     with engine.begin() as conn:
         row = conn.execute(select(runs.c.team_id, runs.c.project_id).where(runs.c.id == run_id)).first()
         if row is None or not payloads:
@@ -374,10 +450,12 @@ def store_findings(engine: Engine, keyring: Keyring, run_id: str, step_id: str, 
         conn.execute(insert(findings), [{"id": new_id(), "run_id": run_id,
                                          **finding_row(row.project_id, step_id, now, utf8(redact(p, hidden)))}
                                         for p in payloads])
+        candidates.rematch(conn, run_id)
 
 
 # The run fields only server code writes, which a live run's in-memory summary takes from the row.
-SERVER_FIELDS = ("outcome", "outcome_source", "risk", "risk_reasons", "head_sha")
+SERVER_FIELDS = ("outcome", "outcome_source", "risk", "risk_reasons", "head_sha", "review_round", "prev_round_run_id",
+                 "review_kind")
 
 
 class LiveHub:
@@ -714,8 +792,10 @@ class LiveHub:
             change.cost_usd += cost
             change.input_tokens += tokens_in
             change.output_tokens += tokens_out
-            if step_id is not None:
-                key = step_key(step_id, parent)
+            key = step_key(step_id, parent) if step_id is not None else None
+            change.llm_calls.append(llm_call_row(state.team_id, event["seq"], key, now, payload, cost, tokens_in,
+                                                 tokens_out))
+            if key is not None:
                 step = change.steps.setdefault(key, StepChange(step_id=step_id))
                 step.cost_usd += cost
                 step.input_tokens += tokens_in
@@ -726,7 +806,16 @@ class LiveHub:
             summary["output_tokens"] = (summary["output_tokens"] or 0) + tokens_out
             changed = changed or bool(cost or tokens_in or tokens_out)
         elif kind == "finding":
-            change.findings.append(finding_row(state.project_id, step_id, now, payload))
+            key = step_key(step_id, parent) if step_id is not None else None
+            change.findings.append(finding_row(state.project_id, key, now, payload))
+        elif kind == "candidate" and step_id is not None:
+            branch = _index(payload.get("branch"))
+            # A fan-out branch's findings are kept apart from its siblings', which reuse the same ordinals.
+            key = step_key(step_id if branch is None or not 0 <= branch < MAX_BRANCH else f"{step_id}#{branch}",
+                           parent)
+            row = candidate_row(state.team_id, state.project_id, key, step_id, now, payload)
+            if row is not None:
+                change.candidates.append(row)
         elif kind == "summary":
             patch = summary_patch(payload)
             if summary.get("outcome_source") == "server":
@@ -844,27 +933,30 @@ class LiveHub:
         if stored is not None:
             self._loop.call_soon_threadsafe(self._server_wrote, stored)
 
-    def server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]]) -> None:
+    def server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]],
+                        parent: str | None = None) -> None:
         """Record findings server code decided as the run's own ``finding`` events. Safe to call from any thread.
 
         A run the hub holds takes them as if its runner sent them, so open pages see them. Any other run gets the
-        findings rows only.
+        findings rows only. ``parent`` is the step that called the workflow ``step_id`` is in.
         """
         if self.running and self._loop is not None and run_id in self._runs:
-            self._loop.call_soon_threadsafe(self._server_findings, run_id, step_id, payloads)
+            self._loop.call_soon_threadsafe(self._server_findings, run_id, step_id, payloads, parent)
             return
-        store_findings(self.engine, self.keyring, run_id, step_id, payloads, self.clock())
+        store_findings(self.engine, self.keyring, run_id, step_key(step_id, parent), payloads, self.clock())
 
-    def _server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]]) -> None:
+    def _server_findings(self, run_id: str, step_id: str, payloads: list[dict[str, Any]],
+                         parent: str | None = None) -> None:
         state = self._runs.get(run_id)
         now = self.clock()
         if state is None:
             # The run left the hub after the call was handed over, so its rows are written off the loop instead.
-            self._loop.run_in_executor(None, store_findings, self.engine, self.keyring, run_id, step_id, payloads,
-                                       now)
+            self._loop.run_in_executor(None, store_findings, self.engine, self.keyring, run_id,
+                                       step_key(step_id, parent), payloads, now)
             return
         for payload in payloads:
-            self._accept(state, "finding", step_id, now, now, utf8(redact(payload, state.secrets)))
+            self._accept(state, "finding", step_id, now, now,
+                         utf8(redact({**payload, "parent_step": parent} if parent else payload, state.secrets)))
 
     def _server_wrote(self, stored: dict[str, Any]) -> None:
         state = self._runs.get(stored["id"])

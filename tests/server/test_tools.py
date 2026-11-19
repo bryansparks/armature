@@ -11,7 +11,19 @@ from sqlalchemy import insert, select, update
 from armature.server import broker, sanitize, writer
 from armature.server.ingest import REDACTED
 from armature.server.db import new_id
-from armature.server.db.schema import audit, connections, jobs, projects, runs, settings
+from armature.server.db.schema import (
+    audit,
+    connections,
+    eval_arms,
+    eval_experiments,
+    findings,
+    jobs,
+    projects,
+    review_marks,
+    run_steps,
+    runs,
+    settings,
+)
 from armature.server.tools.jira import adf
 from tests.server.tool_support import (  # noqa: F401
     AUTHOR,
@@ -288,7 +300,8 @@ def test_every_tool_is_classified_and_only_reads_run_in_a_dry_run():
     from armature.server.tools import registry
     reads = {name for name, spec in registry().items() if spec.reads}
     assert reads == {"github.permission", "github.pr-diff", "jira.get-issue", "review.risk", "review.marked",
-                     "review.pushable", "review.context", "review.record-risk", "review.is-marked"}
+                     "review.pushable", "review.context", "review.record-risk", "review.is-marked",
+                     "insights.fix-context", "insights.fix-risk"}
 
 
 # Jira and Linear.
@@ -987,3 +1000,137 @@ def test_a_same_user_remote_runner_holding_an_agent_job_gets_a_push_grant(app, s
     assert ask_grant(app, run, "push").status_code == 403
     on_runner(app, sqlite_engine, keyring, clock, world, run, said["platform"])
     assert ask_grant(app, run, "push").status_code == 200
+
+
+# Comparison runs.
+
+STORED_RISK = {"level": "medium", "panel": ["correctness", "concurrency"], "head": "b" * 40, "reasons": [],
+               "skipped": ["security"], "files": 1}
+# What a comparison run of concurrency hears: the primary's risk at the pinned head, with only that specialist.
+PINNED = {**STORED_RISK, "head": HEAD, "panel": ["concurrency"], "skipped": ["correctness"]}
+DECISION = {"claim": "The lock leaks", "path": "src/a.swift", "raised_by": ["concurrency"], "decision": "block",
+            "reason": "It leaks."}
+ARM_ANSWERED = [
+    ("review", "github.post-review", {"repo": REPO, "number": NUMBER, "head": HEAD, "verdict": "approve",
+                                      "summary": "s", "comments": [], "decisions": []}),
+    ("check", "github.check-run", {"repo": REPO, "head": HEAD, "name": "Build", "status": "in_progress"}),
+    ("comment", "github.pr-comment", {"repo": REPO, "number": NUMBER, "body": "hi"}),
+    ("open", "github.open-pr", {"repo": REPO, "head": "feature", "base": "main", "title": "Add it"}),
+    ("push", "github.push", PUSH),
+    ("post", "slack.post", SLACK),
+    ("jira", "jira.comment", {"issue": "MOB-12", "body": "x"}),
+    ("move", "jira.transition", {"issue": "MOB-12", "to": "In Test"}),
+    ("create", "jira.create", CREATE),
+    ("linear", "linear.comment", {"issue": "ENG-4", "body": "x"}),
+    ("mark", "review.mark", {"repo": REPO, "number": NUMBER}),
+    ("record_post", "review.record-post", {"repo": REPO, "number": NUMBER, "head": HEAD, "posted": True,
+                                           "approved": True}),
+    ("record_mark", "review.record-mark", {"repo": REPO, "number": NUMBER, "head": HEAD, "status_id": 900}),
+]
+
+
+def _arm_run(engine, keyring, clock, world):
+    """A comparison run of a review whose first pass rated medium risk with concurrency on its panel."""
+    primary = start_run(engine, keyring, clock, world)
+    experiment_id, arm_id = new_id(), new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(run_steps).values(run_id=primary.id, step_key="first/risk", step_id="risk",
+                                              status="succeeded", output=STORED_RISK))
+        conn.execute(insert(eval_experiments).values(
+            id=experiment_id, team_id=world.team, specialist="concurrency", variable="effort", baseline={},
+            variant={"effort": "high"}, sample_rate=1.0, daily_budget_usd=25, max_concurrent_arms=2,
+            status="running", min_prs=30, created_at=clock()))
+        conn.execute(insert(eval_arms).values(id=arm_id, team_id=world.team, experiment_id=experiment_id,
+                                              primary_run_id=primary.id, head_sha=HEAD, label="variant",
+                                              status="running", created_at=clock()))
+    run = start_run(engine, keyring, clock, world, trigger_ref={"arm_id": arm_id}, risk=None)
+    with engine.begin() as conn:
+        conn.execute(update(eval_arms).where(eval_arms.c.id == arm_id).values(arm_run_id=run.id))
+    return run
+
+
+def test_a_comparison_run_writes_to_no_vendor_finding_mark_or_outcome(app, sqlite_engine, keyring, clock, world,
+                                                                      vendor):
+    _setting(sqlite_engine, "jira.project", "MEMTEMDIS", team_id=world.team)
+    run = _arm_run(sqlite_engine, keyring, clock, world)
+    for step, name, params in ARM_ANSWERED:
+        response = tool(app, run, step, name, params)
+        assert response.status_code == 200, (name, response.text)
+        assert response.json()["arm"] is True and response.json()["dry_run"] is True
+    assert tool(app, run, "decisions", "review.decisions", {"repo": REPO, "number": NUMBER,
+                                                           "decisions": [DECISION]}).json() == {"recorded": 1}
+    assert tool(app, run, "marked", "review.marked", {"repo": REPO, "number": NUMBER}).json() == {
+        "valid": False, "head": HEAD, "source": None}
+    assert tool(app, run, "risk", "review.risk", {"repo": REPO, "number": NUMBER, "level": "low",
+                                                  "expect_head": "b" * 40}).json() == PINNED
+    assert tool(app, run, "pushable", "review.pushable", {"repo": REPO, "number": NUMBER,
+                                                          "branch": "feature"}).json()["pushable"] is False
+    assert tool(app, run, "is_marked", "review.is-marked", {"repo": REPO, "number": NUMBER,
+                                                            "head": HEAD}).json()["valid"] is False
+    writes = app.post("/api/tools/git-credential", json={"host": "github.com", "path": f"{REPO}.git",
+                                                          "access": "write"},
+                      headers={"Authorization": f"Bearer {grant(app, run, 'push')}"})
+    assert writes.status_code == 403 and writes.json()["error"] == broker.ARM_PUSHES
+    assert vendor.writes() == []
+    with sqlite_engine.connect() as conn:
+        assert conn.execute(select(findings)).all() == [] and conn.execute(select(review_marks)).all() == []
+        row = conn.execute(select(runs.c.outcome, runs.c.risk, runs.c.head_sha).where(runs.c.id == run.id)).one()
+    assert tuple(row) == (None, None, None)
+    assert {c.mode for c in calls(sqlite_engine)} == {"arm"}
+    assert len(calls(sqlite_engine)) == len(ARM_ANSWERED) + 5
+
+
+def test_a_comparison_run_reads_for_real(app, sqlite_engine, keyring, clock, world, vendor):
+    run = _arm_run(sqlite_engine, keyring, clock, world)
+    assert tool(app, run, "diff", "github.pr-diff", {"repo": REPO, "number": NUMBER}).json()["files"]
+    assert "dry_run" not in tool(app, run, "permission", "github.permission", {"repo": REPO, "user": "ana"}).json()
+    reads = app.post("/api/tools/git-credential", json={"host": "github.com", "path": f"{REPO}.git",
+                                                         "access": "read"},
+                     headers={"Authorization": f"Bearer {grant(app, run, 'checkout')}"})
+    assert reads.status_code == 200
+    assert vendor.requests and vendor.writes() == []
+    assert [(c.tool, c.mode) for c in calls(sqlite_engine)] == [
+        ("github.pr-diff", "arm"), ("github.permission", "arm"), ("github.git-credential", "arm")]
+
+
+def test_a_comparison_run_without_its_reviews_risk_is_refused(app, sqlite_engine, keyring, clock, world, vendor):
+    run = _arm_run(sqlite_engine, keyring, clock, world)
+    with sqlite_engine.begin() as conn:
+        conn.execute(run_steps.delete())
+    response = tool(app, run, "risk", "review.risk", {"repo": REPO, "number": NUMBER, "level": "low",
+                                                      "expect_head": HEAD})
+    assert response.status_code == 409 and vendor.requests == []
+    assert [(c.mode, c.outcome) for c in calls(sqlite_engine)] == [("arm", "refused")]
+
+
+def test_every_tool_is_classified_for_a_comparison_run():
+    from armature.server.tools import registry
+    answered = {name for _, name, _ in ARM_ANSWERED}
+    pinned = {"review.decisions", "review.marked", "review.risk", "review.record-risk", "review.pushable",
+              "review.is-marked", "insights.fix-risk"}
+    assert set(broker.ARM_READS) == {"github.permission", "github.pr-diff", "jira.get-issue", "review.context"}
+    assert set(broker.ARM_READS) <= {name for name, spec in registry().items() if spec.reads}
+    unlisted = set(registry()) - set(broker.ARM_READS) - pinned - answered
+    # Self-heal's tools never run in a review. A comparison run gets the server's dry answer for them.
+    assert unlisted == {"github.checkout", "slack.update", "linear.transition", "github.delete-branch",
+                        "insights.fix-context", "insights.fix-patch", "insights.fix-apply"}
+
+
+def test_the_tools_the_answer_list_leaves_out_answer_dry_too(app, sqlite_engine, keyring, clock, world, vendor):
+    run = _arm_run(sqlite_engine, keyring, clock, world)
+    for step, name, params in (("update", "slack.update", {"channel": "C0REVIEW", "ts": "1.2", "text": "x"}),
+                               ("state", "linear.transition", {"issue": "ENG-4", "state": "In Review"})):
+        assert tool(app, run, step, name, params).json()["arm"] is True
+    # Checkout has no broker call. Git asks for its read credential, which a comparison run gets.
+    assert tool(app, run, "checkout", "github.checkout", {"repo": REPO}).status_code == 404
+    assert vendor.writes() == [] and {c.mode for c in calls(sqlite_engine)} == {"arm"}
+
+
+def test_a_comparison_run_of_a_moved_pull_request_gets_no_context(app, sqlite_engine, keyring, clock, world, vendor):
+    run = _arm_run(sqlite_engine, keyring, clock, world)
+    vendor.pr = {**vendor.pr, "head": {**vendor.pr["head"], "sha": "c" * 40}}
+    response = tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER})
+    assert response.status_code == 409 and "moved past the head" in response.json()["error"]
+    assert [(c.tool, c.mode, c.outcome) for c in calls(sqlite_engine)] == [("review.context", "arm", "refused")]
+    vendor.pr = {**vendor.pr, "head": {**vendor.pr["head"], "sha": HEAD}}
+    assert tool(app, run, "context", "review.context", {"repo": REPO, "number": NUMBER}).json()["head"] == HEAD

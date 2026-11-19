@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
-from sqlalchemy import Connection, Engine, func, insert, select
+from sqlalchemy import Connection, Engine, func, insert, select, update
 
 from armature.events.sign import sign_engine
 from armature.packs import BUILTIN_DIR, Catalog
@@ -46,6 +46,7 @@ from armature.server.db import new_id
 from armature.server.db.schema import (
     INSTANCE_SCOPE,
     environments,
+    fix_proposals,
     github_installations,
     jobs,
     projects,
@@ -56,11 +57,13 @@ from armature.server.db.schema import (
     workflows,
 )
 from armature.server.db.schema import runners as runner_rows
+from armature.server.insights import arms, attribution, candidates, fixes
 from armature.server.tools import NONE, Call, ToolError, marks, registry
 from armature.server.tools import github as github_tools
 from armature.server.tools import jira as jira_tools
 from armature.server.vendors import VendorError
 from armature.server.vendors import github as github_vendor
+from armature.server.writer import step_key
 
 log = logging.getLogger(__name__)
 
@@ -82,12 +85,19 @@ GIT_HOST = "github.com"
 GIT_TOOL = "github.git-credential"
 DETAIL_MAX = 2000
 DRY_KEY = "tools.dry_run"
+# The reads a comparison run makes for real. Every other tool answers it from the server and changes nothing.
+ARM_READS = ("github.permission", "github.pr-diff", "jira.get-issue", "review.context")
+ARM_PUSHES = "A comparison run pushes nothing."
 AUTHORS_KEY = "github.push_authors"
 EXCLUDE_KEY = "github.push_exclude"
 CAP_KEY = "github.push_daily_cap"
 DEFAULT_PUSH_CAP = 3
 # Pushes to one pull request across all runs in a day, whatever the team's daily cap says.
 PR_PUSH_CAP = 6
+# A self-heal run's calls that must name its own proposal's repository and branch.
+FIX_PINNED = ("github.push", "github.open-pr", "github.delete-branch")
+FIX_PR_CAP_KEY = "insights.fix_daily_pr_cap"
+DEFAULT_FIX_PR_CAP = 2
 
 _minted: dict[str, list[tuple[str, str, httpx.BaseTransport | None]]] = {}
 _minted_lock = threading.Lock()
@@ -247,6 +257,9 @@ def issue_grant(conn: Connection, keyring: Keyring, *, run_token: Any, body: dic
             and not _same_user_runner(conn, job):
         raise BrokerError(403, "A workflow with an agent stage pushes only from a runner whose sessions run as a "
                                "separate agent user, or one started with --same-user.")
+    # A self-heal session works unattended on flagged code, so it never runs as the runner's own user.
+    if body.get("agent_user") is not True and fixes.is_self_heal(conn, job.workflow_id):
+        raise BrokerError(403, "A self-heal run needs a runner whose agent sessions run as a separate agent user.")
     grant = Grant(run_id=run.id, step=step, tools=tuple(tools),
                   expires_at=now + min(timedelta(seconds=timeout) + GRANT_SLACK, GRANT_MAX))
     audit.record(conn, action="tool.grant", actor_id=None, team_id=job.team_id, target_kind="run", target_id=run.id,
@@ -272,6 +285,55 @@ def setting(conn: Connection, key: str, team_id: str, project_id: str | None) ->
 def _dry(conn: Connection, run: Any, job: Any) -> bool:
     return (run.trigger_ref or {}).get("dry_run") is True or setting(conn, DRY_KEY, job.team_id,
                                                                       job.project_id) is True
+
+
+def _arm(run: Any) -> str | None:
+    """The comparison run's arm, when the run is one."""
+    found = (run.trigger_ref or {}).get("arm_id")
+    return found if isinstance(found, str) else None
+
+
+def _arm_call(engine: Engine, grant: Grant, job: Any, ctx: Call, spec: Any, tool: str, params: dict[str, Any],
+              target: str | None, arm_id: str, now: datetime, ip: str | None) -> dict[str, Any]:
+    """A comparison run's call, recorded in arm mode. A read runs for real. Anything else gets the answer the run
+    needs from the server, so nothing reaches GitHub, Jira, findings, review marks, or the run's outcome."""
+    if tool in ARM_READS:
+        try:
+            result = spec.run(ctx, params)
+        except ToolError as exc:
+            _record(engine, grant, job, tool, "arm", "refused", target, {"error": exc.message}, now, ip)
+            raise BrokerError(exc.status, exc.message) from exc
+        except VendorError as exc:
+            _record(engine, grant, job, tool, "arm", "failed", target, {"error": str(exc)}, now, ip)
+            raise BrokerError(502, str(exc)) from exc
+        if tool == "review.context":
+            # The context names the pull request's files now, so a head that moved would review other code.
+            with engine.connect() as conn:
+                pinned = arms.pinned(conn, arm_id)
+            if pinned is None or result.get("head") != pinned["head"]:
+                _record(engine, grant, job, tool, "arm", "refused", target, {"error": arms.MOVED}, now, ip)
+                raise BrokerError(409, arms.MOVED)
+        _record(engine, grant, job, tool, "arm", "ok", target, None, now, ip)
+        return result
+    with engine.connect() as conn:
+        pinned = arms.pinned(conn, arm_id)
+    if tool in marks.RISK_TOOLS:
+        if pinned is None or pinned["risk"] is None:
+            _record(engine, grant, job, tool, "arm", "refused", target, {"error": arms.NO_RISK}, now, ip)
+            raise BrokerError(409, arms.NO_RISK)
+        result = pinned["risk"]
+    elif tool == "review.marked":
+        result = {"valid": False, "head": pinned["head"] if pinned else None, "source": None}
+    elif tool == "review.is-marked":
+        result = {"valid": False, "head": params["head"]}
+    elif tool == "review.pushable":
+        result = {"pushable": False, "reason": ARM_PUSHES}
+    elif tool == "review.decisions":
+        result = {"recorded": len(params.get("decisions") or [])}
+    else:
+        result = {"dry_run": True, "arm": True, "tool": tool, "params": _redacted(params)}
+    _record(engine, grant, job, tool, "arm", "ok", target, {"params": _redacted(params)}, now, ip)
+    return result
 
 
 def _target(params: dict[str, Any]) -> str | None:
@@ -374,6 +436,37 @@ def _admit_push(engine: Engine, grant: Grant, job: Any, result: dict[str, Any], 
     return result
 
 
+def _admit_open(engine: Engine, grant: Grant, job: Any, target: str | None, project_id: str | None, now: datetime,
+                ip: str | None) -> str:
+    """Hold a self-heal pull request's place under the repository's daily cap, as _admit_push does a push's, by
+    recording it approved before it opens. Returns that row's id. 429 when the cap is reached."""
+    row_id = new_id()
+    with github_tools.pr_lock(target or "", "open-pr"), engine.begin() as conn:
+        conn.execute(select(projects.c.id).where(projects.c.id == project_id).with_for_update())
+        cap = setting(conn, FIX_PR_CAP_KEY, job.team_id, project_id)
+        cap = cap if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0 else DEFAULT_FIX_PR_CAP
+        opened = conn.execute(select(func.count()).select_from(tool_calls).where(
+            tool_calls.c.tool == "github.open-pr", tool_calls.c.mode == "live", tool_calls.c.target == target,
+            tool_calls.c.outcome.in_(("approved", "ok")), tool_calls.c.created_at >= now - timedelta(days=1),
+            tool_calls.c.run_id.in_(select(fix_proposals.c.run_id).where(
+                fix_proposals.c.team_id == job.team_id, fix_proposals.c.run_id.is_not(None))))).scalar_one()
+        if opened >= cap:
+            reason = f"the repository reached its cap of {cap} self-heal pull requests a day"
+            _write(conn, grant, job, "github.open-pr", "live", "refused", target, {"reason": reason}, now, ip)
+        else:
+            conn.execute(insert(tool_calls).values(id=row_id, run_id=grant.run_id, team_id=job.team_id,
+                                                   project_id=job.project_id, step_id=grant.step,
+                                                   tool="github.open-pr", mode="live", outcome="approved",
+                                                   target=target, detail=None, created_at=now))
+            return row_id
+    raise BrokerError(429, f"Not opened: {reason}.")
+
+
+def _settle(engine: Engine, row_id: str, outcome: str, detail: dict[str, Any] | None) -> None:
+    with engine.begin() as conn:
+        conn.execute(update(tool_calls).where(tool_calls.c.id == row_id).values(outcome=outcome, detail=detail))
+
+
 def _redacted(value: Any) -> Any:
     value = ingest.redact(value, ())
     if isinstance(value, str):
@@ -415,12 +508,14 @@ def _checked(tool: str, params: Any) -> dict[str, Any]:
 
 def call_tool(engine: Engine, keyring: Keyring, *, public_url: str, token: Any, tool: str, params: Any,
               now: datetime, ip: str | None, transport: httpx.BaseTransport | None = None,
-              packs_dir: str | None = None, hub: Any = None) -> dict[str, Any]:
+              packs_dir: str | None = None, hub: Any = None, parent_step: Any = None) -> dict[str, Any]:
     """Run one built-in tool for the step the grant names. In a dry run, a tool that only reads runs, and any other
-    is recorded and calls no vendor. A stub-mode test run records every tool.
+    is recorded and calls no vendor. A stub-mode test run records every tool. A comparison run is answered by
+    _arm_call.
 
     The live ``hub`` hears of a run whose risk or outcome a tool changed, and takes the findings review.decisions
-    records as the step's own events. Without one, the findings are stored directly.
+    records as the step's own events. Without one, the findings are stored directly. ``parent_step`` names the step
+    that called the grant's workflow, so findings are filed under the full step key.
     """
     grant = _grant(keyring, token, now)
     if tool not in grant.tools:
@@ -441,28 +536,52 @@ def call_tool(engine: Engine, keyring: Keyring, *, public_url: str, token: Any, 
         # A test run in stub mode replays recorded outputs, so it reads nothing for real either.
         any_dry = _dry(conn, run, job)
         dry = any_dry and (not spec.reads or (run.trigger_ref or {}).get("mode") == "stub")
+        heal = fixes.is_self_heal(conn, job.workflow_id)
+        proposal = fixes.proposal_of(conn, run.id, job.team_id) if heal else None
         if tool in ("github.push", "review.pushable"):
             ctx.policy = _push_policy(conn, job, run, ctx.project_id)
         elif tool == "github.open-pr":
-            ctx.policy = {"head_sha": run.head_sha}
+            # A self-heal fix was rated as a patch, so its pull request opens from the commit its push sent.
+            ctx.policy = {"head_sha": marks._approved_commit(conn, run.id) if heal else run.head_sha}
         elif tool in ("jira.create", "review.context"):
             ctx.policy = {"project": setting(conn, jira_tools.PROJECT_KEY, job.team_id, job.project_id)}
-        held = tool == "github.open-pr" and not marks.may_open(conn, run.id)
+        held = (tool == "github.open-pr" or (heal and tool == "github.push")) \
+            and not marks.may_open(conn, run.id, gated=heal)
+        arm_id = _arm(run)
+    if arm_id is not None:
+        return _arm_call(engine, grant, job, ctx, spec, tool, params, target, arm_id, now, ip)
+    if heal:
+        strayed = fixes.pinned(proposal, tool, params) if tool in FIX_PINNED else None
+    else:
+        strayed = fixes.foreign(tool, params)
+    if strayed:
+        _record(engine, grant, job, tool, "dry" if dry else "live", "refused", target, {"error": strayed}, now, ip)
+        raise BrokerError(403, strayed)
+    if heal and tool == "github.open-pr":
+        params = {**params, "draft": True}
     if held:
-        _record(engine, grant, job, tool, "dry" if dry else "live", "refused", target,
-                {"error": marks.HELD_REASON}, now, ip)
-        raise BrokerError(403, marks.HELD_REASON)
+        reason = marks.FIX_HELD_REASON if heal else marks.HELD_REASON
+        _record(engine, grant, job, tool, "dry" if dry else "live", "refused", target, {"error": reason}, now, ip)
+        raise BrokerError(403, reason)
     if dry:
         shown = _redacted(params)
         _record(engine, grant, job, tool, "dry", "ok", target, {"params": shown}, now, ip)
         return {"dry_run": True, "tool": tool, "params": shown}
+    reserved = _admit_open(engine, grant, job, target, ctx.project_id, now, ip) \
+        if heal and tool == "github.open-pr" else None
     try:
         result = spec.run(ctx, params)
     except ToolError as exc:
-        _record(engine, grant, job, tool, "live", "refused", target, {"error": exc.message}, now, ip)
+        if reserved:
+            _settle(engine, reserved, "refused", {"error": exc.message})
+        else:
+            _record(engine, grant, job, tool, "live", "refused", target, {"error": exc.message}, now, ip)
         raise BrokerError(exc.status, exc.message) from exc
     except VendorError as exc:
-        _record(engine, grant, job, tool, "live", "failed", target, {"error": str(exc)}, now, ip)
+        if reserved:
+            _settle(engine, reserved, "failed", {"error": str(exc)})
+        else:
+            _record(engine, grant, job, tool, "live", "failed", target, {"error": str(exc)}, now, ip)
         raise BrokerError(502, str(exc)) from exc
     if tool == "github.push" and result.get("approved") is True:
         return _admit_push(engine, grant, job, result, target, ctx.policy["daily_cap"], ctx.project_id, now, ip)
@@ -482,12 +601,25 @@ def call_tool(engine: Engine, keyring: Keyring, *, public_url: str, token: Any, 
             marks.reviewed(conn, grant.run_id, detail)
         elif tool == "github.open-pr":
             marks.opened(conn, grant.run_id, result)
-        _write(conn, grant, job, tool, "live", outcome, target, detail, now, ip)
-    if tool == "review.decisions":
-        if hub is not None:
-            hub.server_findings(grant.run_id, grant.step, result["findings"])
+            if proposal is not None:
+                fixes.opened(conn, proposal.id, result, now)
+        if reserved:
+            conn.execute(update(tool_calls).where(tool_calls.c.id == reserved).values(outcome=outcome, detail=detail))
         else:
-            ingest.store_findings(engine, keyring, grant.run_id, grant.step, result["findings"], now)
+            _write(conn, grant, job, tool, "live", outcome, target, detail, now, ip)
+    if tool in attribution.REVIEW_TOOLS:
+        attribution.claim_reviews(engine, job.team_id, target, detail, now)
+    if tool == "review.decisions":
+        parent = parent_step if isinstance(parent_step, str) and STEP.fullmatch(parent_step) else None
+        if not result["findings"]:
+            # The lead dropped everything, so each candidate's match is none.
+            with engine.begin() as conn:
+                candidates.rematch(conn, grant.run_id)
+        elif hub is not None:
+            hub.server_findings(grant.run_id, grant.step, result["findings"], parent)
+        else:
+            ingest.store_findings(engine, keyring, grant.run_id, step_key(grant.step, parent), result["findings"],
+                                  now)
         result = {"recorded": result["recorded"]}
     if hub is not None and tool in RUN_TOOLS:
         hub.run_changed(grant.run_id)
@@ -547,7 +679,10 @@ def git_credential(engine: Engine, keyring: Keyring, *, public_url: str, token: 
     with engine.connect() as conn:
         run, job = _run_job(conn, grant.run_id)
         ctx = _context(conn, keyring, public_url, run, job, grant, "github_app", params, now, transport)
+        mode = "live" if _arm(run) is None else "arm"
         if access == "write":
+            if mode == "arm":
+                raise BrokerError(403, ARM_PUSHES)
             if _dry(conn, run, job):
                 raise BrokerError(403, "A dry run pushes nothing.")
             approved = conn.execute(select(tool_calls.c.target).where(
@@ -566,13 +701,13 @@ def git_credential(engine: Engine, keyring: Keyring, *, public_url: str, token: 
     except ToolError as exc:
         raise BrokerError(exc.status, exc.message) from exc
     except VendorError as exc:
-        _record(engine, grant, job, GIT_TOOL, "live", "failed", repo.lower(), {"error": str(exc)}, now, ip)
+        _record(engine, grant, job, GIT_TOOL, mode, "failed", repo.lower(), {"error": str(exc)}, now, ip)
         raise BrokerError(502, str(exc)) from exc
     if not github_vendor.uses_gh_cli(ctx.config):
         with _minted_lock:
             _minted.setdefault(run.id, []).append((ctx.config.get("api_base") or github_vendor.API, secret,
                                                    transport))
-    _record(engine, grant, job, GIT_TOOL, "live", "ok", repo.lower(), {"access": access}, now, ip)
+    _record(engine, grant, job, GIT_TOOL, mode, "ok", repo.lower(), {"access": access}, now, ip)
     return {"username": "x-access-token", "password": secret}
 
 

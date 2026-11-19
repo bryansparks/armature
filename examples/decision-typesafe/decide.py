@@ -13,6 +13,7 @@ network — lets the whole workflow run offline.
 
 Env vars used:
   ARMATURE_CONTEXT  — JSON blob with full workflow context (set by engine)
+  ARMATURE_CONTEXT_FILE — path to the same JSON, read when ARMATURE_CONTEXT is unset
   TYPESAFE_API_KEY  — TypeSafe decision API key
 
 Output contract (parse: json): exit 0 + JSON object on stdout:
@@ -52,7 +53,10 @@ def resolve_state(cli_state: str | None) -> str:
     """State text: --state flag > ARMATURE_CONTEXT state_item.text > --state-file."""
     if cli_state:
         return cli_state
-    raw = os.environ.get("ARMATURE_CONTEXT", "")
+    raw = os.environ.get("ARMATURE_CONTEXT")
+    if raw is None and os.environ.get("ARMATURE_CONTEXT_FILE"):
+        with open(os.environ["ARMATURE_CONTEXT_FILE"], encoding="utf-8") as f:
+            raw = f.read()
     if raw:
         try:
             ctx = json.loads(raw)

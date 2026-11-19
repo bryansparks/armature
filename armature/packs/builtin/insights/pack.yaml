@@ -1,0 +1,76 @@
+name: insights
+version: 1.0.0
+description: >-
+  The server's side of a self-healing fix. Each adapter acts only on the fix proposal its own run was started for,
+  so a step can't read or change another team's proposal. The fix stays on the server as a patch until a team lead
+  approves it.
+adapters:
+  fix-context:
+    description: >-
+      The proposal's pattern, how often review flagged it, and up to ten examples, fenced as data. Also the pull
+      request title and body the server writes for the fix. Uses no connection.
+    cmd: armature tool insights.fix-context
+    params:
+      type: object
+      required: [repo, proposal]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        proposal: {type: string, pattern: '^[0-9a-f-]{36}$'}
+        connection: {type: string}
+  fix-patch:
+    description: >-
+      Take an agent session's commit as a patch against the commit it started from, here on the runner, and store
+      it on the proposal with its first changed lines and the kind of fix. Nothing is pushed. A patch over 200 KB,
+      a binary or non-UTF-8 change, a change to anything but a plain text file, or no change at all fails the
+      proposal. Uses no connection.
+    cmd: armature tool insights.fix-patch
+    writes: true
+    params:
+      type: object
+      required: [repo, proposal, outcome, kind, base, commit]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        proposal: {type: string, pattern: '^[0-9a-f-]{36}$'}
+        outcome: {type: string, maxLength: 40}
+        kind: {type: string, maxLength: 40}
+        base: {type: string, pattern: '^[0-9a-f]{40}$'}
+        commit: {type: string, pattern: '^[0-9a-f]{40}$'}
+        worktree: {type: string, pattern: '^/[^\x00-\x1f]{1,4095}$'}
+        patch: {type: string, maxLength: 220000}
+        oversize: {type: boolean}
+        undecodable: {type: boolean}
+        connection: {type: string}
+  fix-risk:
+    description: >-
+      Rate the proposal's stored patch as the higher of the server's path floors and the given level, and record it
+      on the run, as review.risk does a pushed branch. Uses no connection.
+    cmd: armature tool insights.fix-risk
+    params:
+      type: object
+      required: [repo, proposal, level]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        proposal: {type: string, pattern: '^[0-9a-f-]{36}$'}
+        level: {enum: [low, medium, high]}
+        reasons: {type: array, items: {type: string}, maxItems: 20}
+        connection: {type: string}
+  fix-apply:
+    description: >-
+      After a team lead approves the fix, apply its stored patch to a checkout of its base commit in dir and commit
+      it, here on the runner, for github.push. A patch that no longer applies fails the proposal. Uses no
+      connection.
+    cmd: armature tool insights.fix-apply
+    writes: true
+    params:
+      type: object
+      required: [repo, proposal]
+      additionalProperties: false
+      properties:
+        repo: {type: string, pattern: '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'}
+        proposal: {type: string, pattern: '^[0-9a-f-]{36}$'}
+        dir: {type: string, pattern: '^[A-Za-z0-9._-]{1,100}$'}
+        outcome: {enum: [conflict]}
+        connection: {type: string}

@@ -7,6 +7,8 @@ from typing import Any, BinaryIO
 from armature.events.emitter import Emitter
 
 SUMMARY_CHARS = 2048
+# What a provider may price per alias, in USD per million tokens. A priced alias's cost replaces the reported one.
+PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 
 
 def _text(value: Any) -> str:
@@ -23,15 +25,76 @@ def _text(value: Any) -> str:
     return text
 
 
+_MODEL_USAGE_FIELDS = {
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "cacheReadInputTokens": "cache_read_input_tokens",
+    "cacheCreationInputTokens": "cache_creation_input_tokens",
+    "costUSD": "cost_usd",
+}
+
+
+def model_usage(value: Any) -> dict[str, dict[str, Any]] | None:
+    """The result's ``modelUsage``, per model, with only its token and cost counts."""
+    if not isinstance(value, dict):
+        return None
+    found = {}
+    for model, usage in value.items():
+        if isinstance(model, str) and isinstance(usage, dict):
+            found[model] = {name: usage[key] for key, name in _MODEL_USAGE_FIELDS.items()
+                            if isinstance(usage.get(key), int | float) and not isinstance(usage.get(key), bool)}
+    return found or None
+
+
+def priced_cost(prices: dict[str, Any], input_tokens: Any, output_tokens: Any, cache_read: Any = 0,
+                cache_write: Any = 0) -> float:
+    """The cost of these tokens at a provider's prices for an alias. A price left out counts as zero."""
+    tokens = {"input": input_tokens, "output": output_tokens, "cache_read": cache_read, "cache_write": cache_write}
+    return sum(float(prices.get(name) or 0) * float(tokens[name] or 0) for name in PRICE_FIELDS) / 1_000_000
+
+
+def priced_usage(usage: dict[str, dict[str, Any]] | None, prices: dict[str, Any] | None,
+                 model: str | None) -> dict[str, dict[str, Any]] | None:
+    """``model_usage`` with the priced model's entry at the provider's prices. Other models, such as a subagent's,
+    keep the cost Claude Code reports."""
+    if usage is None or prices is None:
+        return usage
+    return {name: {**counts, "cost_usd": priced_cost(prices, counts.get("input_tokens"), counts.get("output_tokens"),
+                                                     counts.get("cache_read_input_tokens"),
+                                                     counts.get("cache_creation_input_tokens"))}
+            if name == model else counts for name, counts in usage.items()}
+
+
+def session_cost(result: dict[str, Any], prices: dict[str, Any] | None, model: str | None = None) -> float:
+    """A session result's cost: the one Claude Code reports, or with ``model``'s tokens at the provider's prices.
+    The result's overall usage is priced only when it has no per-model usage."""
+    if prices is None:
+        return float(result.get("total_cost_usd") or 0.0)
+    usage = priced_usage(model_usage(result.get("modelUsage")), prices, model)
+    if usage is None:
+        totals = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        return priced_cost(prices, totals.get("input_tokens"), totals.get("output_tokens"),
+                           totals.get("cache_read_input_tokens"), totals.get("cache_creation_input_tokens"))
+    return sum(float(counts.get("cost_usd") or 0) for counts in usage.values())
+
+
 class ClaudeStreamParser:
-    def __init__(self, emitter: Emitter, step_id: str | None = None, fields: dict[str, Any] | None = None):
+    def __init__(self, emitter: Emitter, step_id: str | None = None, fields: dict[str, Any] | None = None,
+                 cost_fields: dict[str, Any] | None = None, prices: dict[str, Any] | None = None,
+                 priced_model: str | None = None):
         self._emitter = emitter
+        # The provider's prices for the model the session runs, which replace the cost reported for that model.
+        self._prices = prices
+        self._priced_model = priced_model
         self._step_id = step_id
         self._fields = dict(fields or {})
+        # What the step asked for, such as its effort and provider, which only the cost event carries.
+        self._cost_fields = dict(cost_fields or {})
         self._tool_names: dict[str, str] = {}
         self._started = False
         self._ended = False
         self._model: str | None = None
+        self._effort: str | None = None
         self._session_id: str | None = None
 
     def feed(self, line: str) -> None:
@@ -65,8 +128,11 @@ class ClaudeStreamParser:
             return
         self._started = True
         self._model = message.get("model")
+        effort = message.get("effort")
+        self._effort = effort if isinstance(effort, str) else None
         self._session_id = message.get("session_id")
-        self._emit("session_start", model=self._model, session_id=self._session_id)
+        self._emit("session_start", model=self._model, session_id=self._session_id,
+                   **({"effort": self._effort} if self._effort else {}))
 
     def _on_assistant(self, message: dict[str, Any]) -> None:
         body = message.get("message") or {}
@@ -100,15 +166,19 @@ class ClaudeStreamParser:
 
     def _on_result(self, message: dict[str, Any]) -> None:
         usage = message.get("usage") or {}
+        attribution = {**self._cost_fields, "effort": self._effort,
+                       "model_usage": priced_usage(model_usage(message.get("modelUsage")), self._prices,
+                                                   self._priced_model)}
         self._emit(
             "cost",
             model=self._model,
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
-            cost_usd=message.get("total_cost_usd") or 0.0,
+            cost_usd=session_cost(message, self._prices, self._priced_model),
             cache_creation_input_tokens=usage.get("cache_creation_input_tokens", 0),
             cache_read_input_tokens=usage.get("cache_read_input_tokens", 0),
             session_id=message.get("session_id") or self._session_id,
+            **{key: value for key, value in attribution.items() if value is not None},
         )
         self._emit(
             "session_end",

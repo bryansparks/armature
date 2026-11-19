@@ -103,6 +103,18 @@ def test_day_boundaries_follow_the_zone():
     assert stats.day_start(datetime(2026, 10, 23).date(), denver) == at(23, 6)
 
 
+def test_a_dst_day_is_23_or_25_hours_long():
+    from datetime import date, timedelta
+    from zoneinfo import ZoneInfo
+    denver = ZoneInfo("America/Denver")
+
+    def length(day):
+        return stats.day_start(day + timedelta(days=1), denver) - stats.day_start(day, denver)
+    assert length(date(2026, 3, 8)) == timedelta(hours=23)
+    assert length(date(2026, 11, 1)) == timedelta(hours=25)
+    assert length(date(2026, 11, 16)) == timedelta(hours=24)
+
+
 def test_overview_counts_only_the_viewers_teams(engine, keyring, seeded):
     client, _ = _client(engine, keyring, seeded, "viewer")
     body = client.get("/api/overview").json()
@@ -278,3 +290,25 @@ def test_hidden_actors_leave_the_run_list_unless_asked_for(engine, keyring, seed
     assert person in default and seeded["review"] in default
     assert {smoke, by_actor, person} <= listed(include_hidden=1)
     assert smoke not in listed(workflows="code-review") and smoke not in listed(workflow="code-review")
+
+
+def test_comparison_runs_count_in_no_run_statistic(engine, keyring, seeded):
+    from armature.server.db.schema import eval_arms, eval_experiments
+    client, _ = _client(engine, keyring, seeded, "viewer")
+    overview = client.get("/api/overview").json()
+    trends = client.get("/api/trends", params={"days": 7}).json()
+    with engine.begin() as conn:
+        experiment_id = new_id()
+        conn.execute(insert(eval_experiments).values(
+            id=experiment_id, team_id=seeded["own"], specialist="security", variable="effort", baseline={},
+            variant={"effort": "high"}, sample_rate=1.0, daily_budget_usd=25, max_concurrent_arms=2,
+            status="running", min_prs=30, created_at=NOW))
+        for status, primary in (("succeeded", "review"), ("running", "late"), ("failed", "lost")):
+            arm = _run(conn, seeded["own"], "code-review", status, at(23, 10), at(23, 10, 9), 3.0, {},
+                       error="boom" if status == "failed" else None, summary={"verdict": "approve"})
+            _step(conn, arm, "security", at(23, 10), at(23, 10, 9), cost=3.0, error="boom")
+            conn.execute(insert(eval_arms).values(id=new_id(), team_id=seeded["own"], experiment_id=experiment_id,
+                                                  primary_run_id=seeded[primary], arm_run_id=arm, head_sha="a" * 40,
+                                                  label="variant", status="done", created_at=NOW))
+    assert client.get("/api/overview").json() == overview
+    assert client.get("/api/trends", params={"days": 7}).json() == trends

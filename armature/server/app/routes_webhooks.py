@@ -25,6 +25,7 @@ from armature.server.app.http import ApiError, client_ip
 from armature.server.app.routes_api import _before_clause, _check_name, _cursor, _next
 from armature.server.auth import AuthError, count_call, ip_bucket
 from armature.server.db.schema import jobs, webhook_deliveries, webhooks, workflows
+from armature.server.insights import collect
 
 router = APIRouter()
 
@@ -257,6 +258,9 @@ def _release(request: Request, granted: Granted, webhook_id: str, delivery_id: s
         row = _stored_delivery(conn, webhook_id, delivery_id)
         webhook = _public(request, conn, hook)
         secret = _secret(conn, srv.keyring, hook) if result["replayed"] and hook.forward_url else None
+    if result["replayed"] and hook.source == "github":
+        payload = hooks.parse_payload(row.headers or {}, row.payload.encode())
+        background.add_task(collect.collect, srv.engine, hook, row.event, payload, srv.now())
     if result["replayed"] and hook.forward_url:
         raw = row.payload.encode()
         headers = hooks.signed_headers(hook.source, hook._mapping, secret, row.headers or {}, raw, srv.now())
@@ -368,10 +372,12 @@ def _secret(conn: Connection, keyring: Any, hook: Any) -> str | None:
 
 
 def _handle(srv: Any, token: str, headers: Any, raw: bytes, ip: str,
-            notes: list[tuple[Any, Any]] | None = None) -> tuple[Response, Any]:
+            notes: list[tuple[Any, Any]] | None = None,
+            collected: list[tuple[Any, Any, Any]] | None = None) -> tuple[Response, Any]:
     """Everything after the body is read. Returns the response and the delivery to forward after it, if any.
 
-    A gate button's click adds the note for the clicker, and its webhook, to ``notes``.
+    A gate button's click adds the note for the clicker, and its webhook, to ``notes``. A GitHub delivery the webhook
+    admitted, so not held, adds its webhook, event, and parsed payload to ``collected``.
     """
     _throttle(srv, f"hook-ip:{ip_bucket(ip)}", IP_LIMIT)
     with srv.engine.connect() as conn:
@@ -459,6 +465,8 @@ def _handle(srv: Any, token: str, headers: Any, raw: bytes, ip: str,
     delivery_id, status, count = accepted
     if status == "held":
         return JSONResponse({"status": "held"}), None
+    if collected is not None and hook.source == "github":
+        collected.append((hook, event, payload))
     return JSONResponse({"status": status, "jobs": count}), _forwarder(hook, delivery_id, sender)
 
 
@@ -471,12 +479,15 @@ async def receive(token: str, request: Request) -> Response:
     srv = server(request)
     raw = await request.body()
     notes: list[tuple[Any, Any]] = []
+    collected: list[tuple[Any, Any, Any]] = []
     response, forward = await asyncio.to_thread(_handle, srv, token[:64], request.headers, raw, client_ip(request),
-                                                notes)
+                                                notes, collected)
     tasks = BackgroundTasks()
     for hook, notice in notes:
         tasks.add_task(gatecards.tell, srv.engine, srv.keyring, hook, notice, srv.now(),
                        request.app.state.vendor_transport)
+    for hook, event, payload in collected:
+        tasks.add_task(collect.collect, srv.engine, hook, event, payload, srv.now())
     if forward is not None:
         delivery_id, forward_url = forward
         tasks.add_task(hooks.forward, srv.engine, delivery_id, forward_url, list(request.headers.items()), raw)

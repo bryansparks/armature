@@ -4,8 +4,8 @@ import { test } from 'node:test';
 const STATIC = new URL('../../../armature/server/static/', import.meta.url);
 const { NAV_LABELS, NAV_PARENT, NAV_SECTIONS, sectionFor, tabsFor, visibleSections } = await import(new URL('nav.js', STATIC));
 
-const EVERY_VIEW = ['overview', 'gates', 'runs', 'subjects', 'trends', 'teams', 'projects', 'status', 'workflows', 'workflow-guide', 'roles', 'packs',
-  'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'triggers', 'settings'];
+const EVERY_VIEW = ['overview', 'gates', 'runs', 'subjects', 'trends', 'insights', 'teams', 'projects', 'status', 'workflows', 'workflow-guide', 'roles', 'packs',
+  'setup', 'users', 'secrets', 'runner-keys', 'runners', 'aws', 'webhooks', 'repos', 'triggers', 'settings'];
 
 test('every sidebar view is in exactly one section', () => {
   const placed = NAV_SECTIONS.flatMap(({ views }) => views);
@@ -59,7 +59,7 @@ test('the landing page is the first page of its section', async () => {
 
 test('tabs show only on a section page with more than one allowed view', () => {
   assert.equal(tabsFor('run', EVERY_VIEW), null);
-  assert.equal(tabsFor('webhooks', EVERY_VIEW), null);
+  assert.equal(tabsFor('webhooks', ['webhooks', 'runs']), null);
   assert.equal(tabsFor('runs', ['runs', 'gates']), null);
   assert.deepEqual(tabsFor('runs', EVERY_VIEW), [
     { view: 'runs', label: 'Runs', current: true },

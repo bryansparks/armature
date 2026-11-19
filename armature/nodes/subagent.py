@@ -80,6 +80,7 @@ class SubagentNode(BaseNode):
         parent_step: str | None = None,
         call_resolver: CallResolver | None = None,
         engine_key: tuple[str, str] | None = None,
+        server_run_id: str | None = None,
     ):
         if not stage.subagent_spec:
             raise ValueError(f"Stage '{stage.id}' has no subagent_spec")
@@ -89,6 +90,7 @@ class SubagentNode(BaseNode):
         self._parent_step = parent_step
         self._call_resolver = call_resolver
         self._engine_key = engine_key
+        self._server_run_id = server_run_id
         # Child-run spend is observed spend of the parent run too (design
         # §2.3): every child's metered cost accumulates here, and the engine
         # adds it to the run's total after execution — the child's own
@@ -131,6 +133,7 @@ class SubagentNode(BaseNode):
             parent_step=self._parent_step,
             call_resolver=self._call_resolver,
             engine_key=self._engine_key,
+            server_run_id=self._server_run_id,
         )
         try:
             return await child.run(child_context)

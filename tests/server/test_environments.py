@@ -932,3 +932,72 @@ def test_a_gated_job_counts_only_runners_that_pause(sqlite_engine, keyring, worl
     _online_runner(sqlite_engine, clock, world, offers=["remote:a"])
     with sqlite_engine.connect() as conn:
         assert environments.warnings(conn, conn.execute(select(jobs)).all(), clock()) == {}
+
+
+# Comparison runs
+
+def _arm_type(engine, clock, name="eval", capabilities=("git", "platform:android", "eval-arm")):
+    kind = new_id()
+    with engine.begin() as conn:
+        conn.execute(insert(environment_types).values(
+            id=kind, name=name, kind="ec2-linux", image="ami-0123456789abcdef0", instance_types=["m6i.large"],
+            market="spot-then-on-demand", capabilities=list(capabilities), job_timeout_s=3600, hourly_cost_usd=1,
+            enabled=True, created_at=clock(), updated_at=clock()))
+    return kind
+
+
+def test_a_comparison_run_launches_in_the_type_that_provides_eval_arm(sqlite_engine, service, fake, world, clock):
+    _arm_type(sqlite_engine, clock, name="b-eval", capabilities=("git",))
+    kind = _arm_type(sqlite_engine, clock)
+    job_id = _job(sqlite_engine, clock, world, requires=["git", "platform:android", "eval-arm"])
+    service.tick()
+    (env,) = _envs(sqlite_engine, job_id)
+    assert env.type_id == kind and _row(sqlite_engine, jobs, job_id).status == "provisioning"
+    assert "eval-arm" in fake.specs[env.id].user_data
+
+
+def test_a_comparison_run_with_no_type_offering_eval_arm_fails_saying_why(sqlite_engine, keyring, service, fake,
+                                                                         world, clock):
+    job_id = _job(sqlite_engine, clock, world, requires=["git", "eval-arm"])
+    with sqlite_engine.connect() as conn:
+        row = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        assert environments.warnings(conn, [row], clock()) == {
+            job_id: "No runner or environment type provides eval-arm."}
+    service.tick()
+    job = _row(sqlite_engine, jobs, job_id)
+    assert (job.status, job.error) == ("failed", "No environment type provides eval-arm.") and fake.calls == []
+
+
+@pytest.mark.parametrize("near", ["concurrent", "launches", "spend"])
+def test_comparison_runs_hold_while_aws_nears_its_caps(sqlite_engine, service, fake, world, clock, near):
+    _arm_type(sqlite_engine, clock)
+    if near == "concurrent":
+        _connection(sqlite_engine, max_concurrent=2)
+        _job(sqlite_engine, clock, world)
+    elif near == "launches":
+        _connection(sqlite_engine, max_daily_launches=2)
+        _job(sqlite_engine, clock, world)
+    else:
+        _connection(sqlite_engine, daily_budget_usd=2)
+        _job(sqlite_engine, clock, world)
+    service.tick()
+    if near == "spend":
+        clock.advance(hours=1)
+    arm = _job(sqlite_engine, clock, world, requires=["git", "platform:android", "eval-arm"])
+    service.tick()
+    assert _row(sqlite_engine, jobs, arm).status == "queued"
+    assert service.reasons[arm] == "A comparison run waits while AWS is near its limits, so reviews keep the room."
+
+
+def test_comparison_runs_yield_to_reviews_waiting_for_capacity(sqlite_engine, service, fake, world, clock):
+    _arm_type(sqlite_engine, clock)
+    _connection(sqlite_engine, max_concurrent=1)
+    arm = _job(sqlite_engine, clock, world, requires=["git", "platform:android", "eval-arm"], age=60)
+    review = _job(sqlite_engine, clock, world)
+    service.tick()
+    assert [e.job_id for e in _envs(sqlite_engine)] == [review]
+    assert _row(sqlite_engine, jobs, arm).status == "queued"
+    second = _job(sqlite_engine, clock, world)
+    service.tick()
+    assert service.reasons[second].startswith("1 environments are running")
+    assert service.reasons[arm] == "A comparison run waits while reviews wait for an environment."

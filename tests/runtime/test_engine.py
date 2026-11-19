@@ -1,6 +1,6 @@
 import pytest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from armature.runtime import engine
 from armature.runtime.engine import Harness, _extract_quorum_score
 from armature.spec.models import (
     HarnessSpec, Stage, Role, RoleType, ModelTiers, ModelTierConfig,
@@ -43,7 +43,7 @@ async def test_harness_initializes_trace_store(tmp_path):
 async def test_harness_uses_global_traces_db_by_default():
     spec = make_minimal_spec()
     harness = Harness(spec=spec)
-    assert harness._traces._path == Path("~/.armature/traces.db").expanduser()
+    assert harness._traces._path == engine._GLOBAL_TRACES_DB.expanduser()
 
 
 async def test_harness_uses_custom_traces_db(tmp_path):

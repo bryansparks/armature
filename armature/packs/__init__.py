@@ -26,7 +26,7 @@ PACKS_PATH_ENV = "ARMATURE_PACKS_PATH"
 DEFAULT_PACKS_DIR = Path("~/.armature/packs")
 PACK_FILE = "pack.yaml"
 BUILTIN_DIR = Path(__file__).resolve().parent / "builtin"
-BUILTIN_PACKS = ("conversation", "github", "jira", "linear", "resident", "review", "slack")
+BUILTIN_PACKS = ("conversation", "github", "insights", "jira", "linear", "resident", "review", "slack")
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 # A dot separates a tool's group from its leaf name, as resident.state.set does; never two in a row.

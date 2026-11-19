@@ -16,7 +16,7 @@ from armature.server import display, rbac, reruns, threads
 from armature.server.app.deps import Granted, by_run, require, server, signed_in
 from armature.server.app.http import ApiError
 from armature.server.auth import Session, load_session
-from armature.server.db.schema import findings, jobs, run_artifacts, run_steps, runs
+from armature.server.db.schema import findings, jobs, llm_calls, run_artifacts, run_steps, runs
 from armature.server.ingest import TRUNCATED, list_row, load_summary
 from armature.server.live import (
     Message,
@@ -45,36 +45,53 @@ def _live(request: Request):
     return request.app.state.live
 
 
-def _step(row: Any, show_cost: bool) -> dict[str, Any]:
+MODEL_FIELDS = ("model", "provider", "alias", "tier", "requested_effort", "reported_effort")
+
+
+def _step(row: Any, show_cost: bool, models: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {"step_key": row.step_key, "step_id": row.step_id, "status": row.status, "started_at": row.started_at,
             "finished_at": row.finished_at,
             "cost_usd": float(row.cost_usd) if row.cost_usd is not None and show_cost else None,
-            "error": row.error, "parent_step": row.parent_step}
+            "error": row.error, "parent_step": row.parent_step,
+            **models.get(row.step_key, dict.fromkeys(MODEL_FIELDS))}
+
+
+def step_models(conn: Any, run_id: str) -> dict[str, dict[str, Any]]:
+    """Each step's model, provider, alias, tier, and effort, from its latest call."""
+    rows = conn.execute(select(llm_calls.c.step_key, llm_calls.c.model_id, llm_calls.c.provider, llm_calls.c.alias,
+                               llm_calls.c.tier, llm_calls.c.requested_effort, llm_calls.c.reported_effort)
+                        .where(llm_calls.c.run_id == run_id, llm_calls.c.step_key.is_not(None))
+                        .order_by(llm_calls.c.seq))
+    return {row.step_key: {"model": row.model_id, "provider": row.provider, "alias": row.alias, "tier": row.tier,
+                           "requested_effort": row.requested_effort, "reported_effort": row.reported_effort}
+            for row in rows}
 
 
 @router.get("/api/runs/{run_id}")
 async def get_run(run_id: str, request: Request,
                   granted: Granted = Depends(require("viewer", by_run()))) -> dict[str, Any]:
-    def read() -> tuple[dict[str, Any] | None, list[Any], Any, bool, dict[str, Any] | None, dict[str, Any]]:
+    def read() -> tuple[dict[str, Any] | None, list[Any], Any, bool, dict[str, Any] | None, dict[str, Any],
+                        dict[str, dict[str, Any]]]:
         with server(request).engine.connect() as conn:
             rerun = {"can_rerun": rbac.at_least(granted.role, "contributor") and reruns.allowed(conn, run_id),
                      "rerun": reruns.latest(conn, run_id)}
             steps = conn.execute(select(run_steps).where(run_steps.c.run_id == run_id)
                                  .order_by(run_steps.c.started_at, run_steps.c.step_key)).all()
+            models = step_models(conn, run_id)
             trigger_ref = conn.execute(select(runs.c.trigger_ref).where(runs.c.id == run_id)).scalar()
             job = conn.execute(select(jobs.c.id, jobs.c.status, jobs.c.cancel_requested_at)
                                .where(jobs.c.run_id == run_id).order_by(jobs.c.created_at.desc(), jobs.c.id)).first()
             return (load_summary(conn, run_id), steps, trigger_ref, display.load(conn)["show_cost"],
-                    dict(job._mapping) if job else None, rerun)
+                    dict(job._mapping) if job else None, rerun, models)
 
-    stored, steps, trigger_ref, show_cost, job, rerun = await asyncio.to_thread(read)
+    stored, steps, trigger_ref, show_cost, job, rerun, models = await asyncio.to_thread(read)
     hub = _live(request)
     summary = hub.summary(run_id) or stored
     dry_run = isinstance(trigger_ref, dict) and trigger_ref.get("dry_run") is True
     cost = summary["cost_usd"] if show_cost else None
     return {"run": {**summary, "cost_usd": cost, "last_seq": await hub.last_seq(run_id), "dry_run": dry_run,
                     "links": threads.links(summary.get("subject"), summary.get("summary")), **rerun},
-            "steps": [_step(r, show_cost) for r in steps], "job": job}
+            "steps": [_step(r, show_cost, models) for r in steps], "job": job}
 
 
 @router.get("/api/runs/{run_id}/events")

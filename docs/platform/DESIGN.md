@@ -186,7 +186,9 @@ Its scripts move with little change, because packs still run through
 
 ## Data model
 
-Every table except `users` and `settings` belongs to a team. Ids are UUIDs
+Every table except `users`, `settings`, and `daily_reports` belongs to a team.
+`daily_reports` holds one instance-wide report per day that only an admin
+reads, so it has no team scope. Ids are UUIDs
 stored as strings, which keeps them portable across backends. Tables are
 SQLAlchemy Core definitions with one module of query functions per area.
 
@@ -272,6 +274,68 @@ a subscription can't run the inline LLM stages (the litellm path), so the
 validator flags a workflow whose stages need a provider kind the team lacks.
 Anthropic's terms for subscriptions also govern automated use, so check that
 an unattended pipeline is allowed under the plan before you rely on one.
+
+### Gateway providers
+
+An `anthropic` provider can point at a gateway that speaks the Anthropic
+Messages API, such as a proxy in front of another vendor's models. Two config
+keys set this up, and only an admin can set or change them:
+
+- `api_base`: the gateway's base URL. Any http or https address is allowed,
+  loopback included, because only an admin saves it.
+- `auth`: how the credential is sent. `x-api-key` (the default) sends it as
+  the `x-api-key` header. `bearer` sends it as `Authorization: Bearer` and
+  sends no `x-api-key` header.
+
+A team lead can't edit a provider that has either key, aliases included.
+Every prompt and the provider's credential go to the gateway, so a provider
+whose last save wasn't an admin's is refused at call time and at bundle time.
+
+One-shot server calls go through litellm with the `api_base`. An agent step
+on such an alias runs Claude Code with this environment and nothing else from
+the provider:
+
+| Variable | Value |
+| --- | --- |
+| `ANTHROPIC_BASE_URL` | The `api_base` |
+| `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | The credential, by `auth` |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL` | The alias's own model |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` |
+
+Claude Code's small model and its haiku, sonnet, and opus defaults are set to
+the alias's model, so a subagent that asks for one stays on it, because a
+gateway usually serves only the models its aliases name. No Bedrock variable reaches
+the session, because a session's environment holds only its provider's
+variables.
+
+### Provider prices
+
+Claude Code and litellm price only the models they know, so a gateway's
+models would otherwise cost $0, and comparison budgets would never trip. A
+provider can carry its own prices per alias, in USD per million tokens:
+
+```json
+{
+  "prices": {
+    "fast": {"input": 0.6, "output": 2.5, "cache_read": 0.06, "cache_write": 0.75}
+  }
+}
+```
+
+`prices` is a config key. Each key names one of the provider's aliases, and
+each price is optional, a number from 0 to 10000. A price left out counts as
+zero. Only an admin can set, change, or remove prices, or change the model of
+a priced alias, on any kind of provider. Saving drops the prices of an alias
+the provider no longer has, so anyone who may edit the aliases can remove or
+rename one. When
+an alias has prices, its cost is computed from the recorded tokens and these
+prices, in place of the cost litellm or Claude Code reports. In an agent
+step, only the per-model usage of the alias's own model is priced, and other
+models, such as a subagent's, keep the cost Claude Code reports. This applies to
+one-shot server calls, such as the comparison judge, and to agent steps, whose
+cost events fill the `llm_calls` rows, the step and run totals, and comparison
+budgets. An agent step whose comparison
+override pins another model id than the alias names keeps the reported cost.
 
 ## Run history and live activity
 

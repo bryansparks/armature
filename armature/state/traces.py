@@ -40,6 +40,7 @@ class TraceRecord(BaseModel):
     agent_version: str | None = None
     active_skill_ids: list[str] = Field(default_factory=list)
     context_policy: dict[str, Any] | None = None  # effective context governance (must/never)
+    server_run_id: str | None = None  # the server's id for this run, a join hint for analytics only
 
 
 class HqsResult(BaseModel):
@@ -123,8 +124,8 @@ _INSERT_SQL = """INSERT INTO traces
         inputs_hash, policy_version, inputs_provenance_json,
         tools_declared_json, tools_called_json,
         sandbox_image_digest, loop_iteration,
-        agent_id, agent_version, active_skill_ids_json, context_policy_json)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
+        agent_id, agent_version, active_skill_ids_json, context_policy_json, server_run_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"""
 
 
 def _insert_trace(path: Path, params: tuple[Any, ...]) -> None:
@@ -172,6 +173,7 @@ class TraceStore:
                 "agent_version TEXT",
                 "active_skill_ids_json TEXT DEFAULT '[]'",
                 "context_policy_json TEXT",
+                "server_run_id TEXT",
             ]:
                 col = col_def.split()[0]
                 try:
@@ -199,6 +201,7 @@ class TraceStore:
             trace.agent_version,
             json.dumps(trace.active_skill_ids),
             json.dumps(trace.context_policy) if trace.context_policy else None,
+            trace.server_run_id,
         )
         # One thread hop for the whole transaction. Awaiting between the INSERT
         # and the COMMIT would hold the write lock for as long as the event loop
@@ -271,6 +274,7 @@ class TraceStore:
             agent_version=d.get("agent_version") or None,
             active_skill_ids=json.loads(d.get("active_skill_ids_json") or "[]"),
             context_policy=json.loads(d["context_policy_json"]) if d.get("context_policy_json") else None,
+            server_run_id=d.get("server_run_id"),
         )
 
     async def latest_run_id(self, workflow_name: str) -> str | None:

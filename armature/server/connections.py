@@ -25,6 +25,7 @@ from armature.server.db import new_id
 from armature.server.db.schema import (
     CONNECTION_KINDS,
     connections,
+    gh_repos,
     github_installations,
     projects,
     webhooks,
@@ -251,6 +252,9 @@ def remove(conn: Connection, row: Any, *, actor_id: str, ip: str | None) -> None
     project = conn.execute(select(projects.c.name).where(projects.c.connection_id == row.id).limit(1)).scalar()
     if project is not None:
         raise ConnError(409, f"Project {project} uses this connection. Pick another first.")
+    repo = conn.execute(select(gh_repos.c.full_name).where(gh_repos.c.connection_id == row.id).limit(1)).scalar()
+    if repo is not None:
+        raise ConnError(409, f"Tracked repository {repo} uses this connection. Pick another first.")
     conn.execute(delete(github_installations).where(github_installations.c.connection_id == row.id))
     conn.execute(delete(connections).where(connections.c.id == row.id))
     github.forget(row.id)
