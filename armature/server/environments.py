@@ -556,10 +556,11 @@ class Taker:
     pauses: bool = True
 
 
-def takers(conn: Connection, now: datetime) -> list[Taker]:
+def takers(conn: Connection, now: datetime, ceiling: list[str] | None = None) -> list[Taker]:
     """Every runner that could claim a job now, busy or not, and the server's own worker when it's on.
 
-    Bound ephemeral keys are left out, because they take only their own job.
+    Bound ephemeral keys are left out, because they take only their own job. ``ceiling`` is the config's cap on
+    the server's own worker, from ``worker.embedded_ceiling``.
     """
     rows = conn.execute(
         select(runners_table.c.capabilities, runners_table.c.pauses, runner_keys.c.capabilities.label("allowed"),
@@ -571,10 +572,11 @@ def takers(conn: Connection, now: datetime) -> list[Taker]:
     found = [Taker(r.team_id, list(r.capabilities or []), r.allowed, r.pauses is not False) for r in rows]
     enabled = conn.execute(select(settings.c.value).where(settings.c.scope == INSTANCE_SCOPE,
                                                           settings.c.key == worker.ENABLED_KEY)).scalar()
-    if enabled is not False:
+    if enabled is not False and ceiling != []:
         caps = conn.execute(select(settings.c.value).where(settings.c.scope == INSTANCE_SCOPE,
                                                            settings.c.key == worker.CAPABILITIES_KEY)).scalar()
-        found.append(Taker(None, caps if isinstance(caps, list) else []))
+        caps = caps if isinstance(caps, list) else []
+        found.append(Taker(None, caps if ceiling is None else [c for c in caps if c in ceiling]))
     return found
 
 
@@ -595,12 +597,12 @@ def llm_only(requires: list[str] | None) -> bool:
 
 
 def warnings(conn: Connection, rows: list[Any], now: datetime,
-             reasons: dict[str, str] | None = None) -> dict[str, str]:
+             reasons: dict[str, str] | None = None, ceiling: list[str] | None = None) -> dict[str, str]:
     """Why each queued job is still waiting, for the jobs that won't start without someone acting."""
     queued = [r for r in rows if r.status == "queued"]
     if not queued:
         return {}
-    found = takers(conn, now)
+    found = takers(conn, now, ceiling)
     type_of = dict(conn.execute(select(projects.c.id, environment_types.c.enabled)
                                 .select_from(projects.outerjoin(environment_types, environment_types.c.id
                                                                 == projects.c.environment_type_id))
@@ -803,7 +805,7 @@ class EnvironmentService:
                                   .where(jobs.c.status == "queued", jobs.c.kind == worker.JOB_KIND,
                                          jobs.c.created_at < now - QUEUE_DELAY, worker.ready(now))
                                   .order_by(jobs.c.created_at, jobs.c.id).limit(worker.CLAIM_SCAN)).all()
-            found = takers(conn, now) if queued else []
+            found = takers(conn, now, worker.embedded_ceiling(self.cfg)) if queued else []
         reasons: dict[str, str] = {}
         launched = 0
         for job in queued:

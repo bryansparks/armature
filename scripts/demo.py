@@ -29,7 +29,7 @@ from armature.nodes.gate import gate_digest
 from armature.server import audit, connections, defs, display, environments, gates, rbac, risk, runners, webhooks
 from armature.server.config import ServerConfig, load_config, write_config
 from armature.server.crypto import keyring_from_source, write_key_file
-from armature.server.db import make_engine, migrate, new_id, utcnow
+from armature.server.db import engine_for, migrate_for, new_id, utcnow
 from armature.server.db.schema import aws_connections, jobs, projects, teams, triggers
 from armature.server.db.schema import connections as connection_rows
 from armature.server.ingest import LiveHub
@@ -71,7 +71,7 @@ def write_setup(data: Path) -> ServerConfig:
                        lost_after_minutes=24 * 60)
     write_config(cfg, path)
     write_key_file(data / "master.key")
-    migrate(cfg.database_url)
+    migrate_for(cfg)
     return load_config(path)
 
 
@@ -705,8 +705,8 @@ def seed(data: Path) -> None:
         return
     print(f"Seeding {data}")
     cfg = write_setup(data)
-    keyring = keyring_from_source(cfg.master_key)
-    engine = make_engine(cfg.database_url)
+    keyring = keyring_from_source(cfg.master_key, provider=cfg.secret_provider)
+    engine = engine_for(cfg)
     now = utcnow()
     with engine.begin() as conn:
         user_id, project_ids, team_id = seed_people(conn, keyring, now)
@@ -789,7 +789,7 @@ def serve(data: Path) -> None:
 
     from armature.server.app import create_app
     cfg = load_config(data / "server.yaml")
-    app = create_app(cfg, make_engine(cfg.database_url), keyring_from_source(cfg.master_key))
+    app = create_app(cfg, engine_for(cfg), keyring_from_source(cfg.master_key, provider=cfg.secret_provider))
     offline(app)
     stop = threading.Event()
     threading.Thread(target=ticker, args=(data, stop), name="demo-ticker", daemon=True).start()

@@ -243,7 +243,8 @@ sign-in settings need step-up.
 
 Secrets are encrypted in the database with AES-256-GCM, as the dashboard
 already encrypts TOTP secrets, under a master key that never enters the
-database. The key comes from `ARMATURE_MASTER_KEY`, a key file, or AWS KMS.
+database. The key comes from an environment variable, a key file, or the
+`secret_provider` hook a deployment installs, which also handles `kms:` (unimplemented without it).
 HKDF derives separate sub-keys for secrets, sessions, and TOTP, and a key id
 in each value's prefix allows rotation. The team, secret id, and name are
 bound as GCM additional data, so a ciphertext copied into another team's row

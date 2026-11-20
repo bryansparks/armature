@@ -156,6 +156,26 @@ def test_run_refuses_without_the_master_key(tmp_path, monkeypatch):
     assert "Master key unavailable" in result.output
 
 
+def test_run_reports_an_unresolvable_database_password_as_database_unavailable(tmp_path, monkeypatch):
+    import types
+
+    from sqlalchemy import create_engine
+
+    from armature.server import db
+    error = type("Error", (Exception,), {})
+    fake_dbapi = types.SimpleNamespace(__version__="1.30.0", paramstyle="format", Error=error,
+                                       InterfaceError=type("InterfaceError", (error,), {}),
+                                       OperationalError=type("OperationalError", (error,), {}))
+    monkeypatch.setattr(db, "create_engine", lambda url, **kw: create_engine(url, module=fake_dbapi, **kw))
+    monkeypatch.delenv("ARMATURE_TEST_UNSET_PGPASS", raising=False)
+    config = tmp_path / "server.yaml"
+    config.write_text("database_url: postgresql+pg8000://armature@db.example/armature\n"
+                      "database_password: env:ARMATURE_TEST_UNSET_PGPASS\n")
+    result = CliRunner().invoke(app, ["server", "run", "--config", str(config)])
+    assert result.exit_code == 1
+    assert "Database unavailable (OperationalError)" in result.output
+
+
 def test_run_starts_uvicorn_with_the_app(tmp_path, monkeypatch):
     config, _ = _init(tmp_path, monkeypatch)
     seen = {}

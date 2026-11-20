@@ -37,7 +37,7 @@ def _load(config: Path | None):
 def _keyring(cfg):
     from armature.server.crypto import MasterKeyError, keyring_from_source
     try:
-        return keyring_from_source(cfg.master_key)
+        return keyring_from_source(cfg.master_key, provider=cfg.secret_provider)
     except (MasterKeyError, NotImplementedError) as exc:
         _fail(f"Master key unavailable: {exc}")
 
@@ -60,12 +60,12 @@ CONFIRM_TRIES = 3
 
 
 def _create_admin(cfg, username: str | None) -> None:
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.users import create_admin
     keyring = _keyring(cfg)
     username = username or typer.prompt("Admin username")
     password = _prompt_password()
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         try:
             with engine.begin() as conn:
@@ -171,9 +171,9 @@ def init(
 @server_app.command("migrate")
 def migrate_cmd(config: Path | None = ConfigOption):
     """Upgrade the database to the latest schema."""
-    from armature.server.db import migrate
+    from armature.server.db import migrate_for
     cfg = _load(config)
-    migrate(cfg.database_url)
+    migrate_for(cfg)
     typer.echo("Database is at the latest schema.")
 
 
@@ -200,7 +200,7 @@ def _serve_setup(path: Path, cfg):
     from armature.server.app import create_app
     from armature.server.app.routes_setup import SETUP_HOST, Swappable, can_swap, create_setup_app, setup_origin
     from armature.server.crypto import keyring_from_source
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
 
     # A service manager's log is no place for a link that makes an admin.
     if not _interactive():
@@ -211,7 +211,8 @@ def _serve_setup(path: Path, cfg):
 
     async def finish(ready) -> bool:
         if can_swap(ready, origin):
-            await holder.swap(create_app(ready, make_engine(ready.database_url), keyring_from_source(ready.master_key)))
+            keyring = keyring_from_source(ready.master_key, provider=ready.secret_provider)
+            await holder.swap(create_app(ready, engine_for(ready), keyring))
             return True
         after["cfg"] = ready
         server.should_exit = True
@@ -232,7 +233,7 @@ def run(config: Path | None = ConfigOption):
     from sqlalchemy.exc import SQLAlchemyError
 
     from armature.server.config import config_path
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.setup import needs_setup
     from armature.server.users import has_admin
     path = (config or config_path()).expanduser()
@@ -248,7 +249,7 @@ def run(config: Path | None = ConfigOption):
         if cfg is None:
             return
     keyring = _keyring(cfg)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn:
             exists = has_admin(conn, cfg.require_totp)
@@ -275,11 +276,11 @@ def export_cmd(
     team: str | None = typer.Option(None, "--team", help="Only this team's definitions, by slug, and the instance's"),
 ):
     """Write workflows, roles, prompts, missions, teams, settings, and providers to files. Never secrets."""
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.export import ExportRefused, export_definitions
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn:
             manifest = export_definitions(conn, dest, team=team)
@@ -293,11 +294,11 @@ def export_cmd(
 @server_app.command("backfill-locations")
 def backfill_locations_cmd(config: Path | None = ConfigOption):
     """Record where each run without a location executed, from its job and step outputs. Safe to rerun."""
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.locations import backfill
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         counts = backfill(engine)
     finally:
@@ -314,11 +315,11 @@ def pack_install(
     force: bool = typer.Option(False, "--force", help="Install over a newer installed version"),
 ):
     """Copy a pack into packs_dir, record it in the database, and audit it."""
-    from armature.server.db import make_engine, utcnow
+    from armature.server.db import engine_for, utcnow
     from armature.server.packs import InstallError, install
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         installed = install(engine, Path(cfg.packs_dir), source, now=utcnow(), force=force)
     except InstallError as exc:
@@ -336,11 +337,11 @@ def pack_remove(
     config: Path | None = ConfigOption,
 ):
     """Delete an installed pack's files and its database row, and audit it."""
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.packs import InstallError, remove
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         version = remove(engine, Path(cfg.packs_dir), name)
     except InstallError as exc:
@@ -394,11 +395,11 @@ def runs_delete(
     from sqlalchemy import select
 
     from armature.server import history
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.db.schema import users
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.begin() as conn:
             admin = conn.execute(select(users.c.id).where(users.c.username == username, users.c.is_admin.is_(True),
@@ -432,10 +433,10 @@ def runs_relink(
 ):
     """Link runs recorded under an old name, and linked to no workflow, to the workflow they now resolve to."""
     from armature.server import defs
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.begin() as conn:
             row = _relink_target(conn, wanted)
@@ -457,12 +458,12 @@ def import_ops_cmd(
 ):
     """Upsert an armature-ops workflow, its documents, and its webhook rules into a project. Never deletes."""
     from armature.server import defs
-    from armature.server.db import make_engine, utcnow
+    from armature.server.db import engine_for, utcnow
     from armature.server.migrate_ops import MigrateError, import_ops, resolve_project
     from armature.server.webhooks import WebhookError
 
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn, conn.begin() as tx:
             try:
@@ -512,10 +513,10 @@ def env_build(
     from sqlalchemy import select
 
     from armature.server import envbuild
-    from armature.server.db import make_engine
+    from armature.server.db import engine_for
     from armature.server.db.schema import aws_connections, environment_types
     cfg = _load(config)
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn:
             kind = conn.execute(select(environment_types).where(environment_types.c.name == type_name)).first()

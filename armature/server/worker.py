@@ -308,6 +308,11 @@ def takes(requires: Iterable[str] | None, capabilities: Iterable[str] | None) ->
     return meets(requires, capabilities)
 
 
+def embedded_ceiling(cfg: Any) -> list[str] | None:
+    """The host's ceiling on the server's own worker's capabilities, or None for no ceiling."""
+    return getattr(getattr(cfg, "runner", None), "embedded_capabilities", None)
+
+
 def claimable(conn: Connection, *, capabilities: Iterable[str] | None, allowlist: Iterable[str] | None = None,
               team_id: str | None = None, bound_key: str | None = None, now: datetime | None = None) -> list[str]:
     """Queued workflow jobs and resident turns these capabilities may run, oldest first, oldest ``CLAIM_SCAN`` queued.
@@ -732,11 +737,14 @@ class Worker:
 
         Without a ``worker.capabilities`` setting it runs only jobs that require nothing, which every job queued
         before ``requires:`` existed is. It never runs agent sessions, which need a runner with ``--agent-user``
-        or ``--same-user``.
+        or ``--same-user``. The config's ``runner.embedded_capabilities`` caps that setting, and ``[]`` stops claims.
         """
+        ceiling = embedded_ceiling(self.cfg)
+        if ceiling == []:
+            return None
         with self.engine.connect() as conn:
             capabilities = _instance_setting(conn, CAPABILITIES_KEY)
-            capabilities = [c for c in capabilities if c not in AGENT_HARNESSES] \
+            capabilities = [c for c in capabilities if c not in AGENT_HARNESSES and (ceiling is None or c in ceiling)] \
                 if isinstance(capabilities, list) else []
             found = claimable(conn, capabilities=[*capabilities, CALLS_CAPABILITY, ROLES_CAPABILITY], now=now)
         return next((job_id for job_id in found if self.try_claim(job_id, now)), None)

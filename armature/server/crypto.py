@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import secrets as _random
-import stat
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -22,6 +21,8 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+from armature.server import secretref
 
 VERSION = "v1"
 KEY_BYTES = 32
@@ -58,35 +59,14 @@ def _decode_key(text: str, where: str) -> bytes:
     return key
 
 
-def load_master_key(source: str, env: Mapping[str, str] | None = None) -> bytes:
-    env = os.environ if env is None else env
-    scheme, _, rest = source.partition(":")
-    if scheme == "env":
-        value = env.get(rest)
-        if not value:
-            raise MasterKeyError(f"master key variable {rest} is not set")
-        return _decode_key(value, f"${rest}")
-    if scheme == "file":
-        path = Path(rest).expanduser()
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError as exc:
-            raise MasterKeyError(f"master key file {path} does not exist") from exc
-        except OSError as exc:
-            raise MasterKeyError(f"master key file {path} can't be opened: {exc.strerror}") from exc
-        with os.fdopen(fd, "r", encoding="ascii") as handle:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise MasterKeyError(f"master key file {path} is not a regular file")
-            if info.st_mode & 0o077:
-                raise MasterKeyError(
-                    f"master key file {path} has mode {stat.S_IMODE(info.st_mode):04o}; chmod 600 it")
-            if info.st_uid != os.getuid():
-                raise MasterKeyError(f"master key file {path} is not owned by this user")
-            return _decode_key(handle.read(), str(path))
-    if scheme == "kms":
+def load_master_key(source: str, env: Mapping[str, str] | None = None, provider: str | None = None) -> bytes:
+    if source.startswith("kms:") and provider is None:
         raise NotImplementedError("kms master keys are not implemented yet")
-    raise MasterKeyError(f"unknown master key source {source!r}")
+    try:
+        value = secretref.resolve(source, provider=provider, env=env, label="master key")
+    except secretref.SecretRefError as exc:
+        raise MasterKeyError(str(exc)) from exc
+    return _decode_key(value, source)
 
 
 def key_id_of(master: bytes) -> str:
@@ -137,5 +117,5 @@ def _derive(master: bytes, label: str) -> bytes:
                 info=f"armature-server {label} v1".encode("ascii")).derive(master)
 
 
-def keyring_from_source(source: str, env: Mapping[str, str] | None = None) -> Keyring:
-    return Keyring(load_master_key(source, env))
+def keyring_from_source(source: str, env: Mapping[str, str] | None = None, provider: str | None = None) -> Keyring:
+    return Keyring(load_master_key(source, env, provider))

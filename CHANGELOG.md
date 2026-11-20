@@ -11,6 +11,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `review/record-risk`, `review/record-post`, `review/record-mark`, and `review/is-marked` let a pack that makes its own GitHub calls keep risk, the review, and the mark in the server's database, without a connection. `review/decisions` no longer needs a verified GitHub connection either.
+- `runner.embedded_capabilities` in `server.yaml` caps what the server's own worker claims, above the `worker.capabilities` setting. An empty list stops its claims.
+- `database_password` keeps the database password out of `database_url` and is read on each new connection. `secret_provider` names a `module:callable` that resolves other reference schemes for it and for `master_key`.
 ### Changed
 
 - Dashboard sessions now last 24 hours idle and 7 days in all, up from 30 minutes and 12 hours. `session_idle_hours` and `session_max_hours` in `server.yaml` set them, and the session cookie lasts as long as `session_max_hours`.

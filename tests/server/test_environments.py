@@ -916,6 +916,42 @@ def test_a_remote_runner_its_key_narrows_still_takes_only_remote_jobs(sqlite_eng
     assert [e.job_id for e in _envs(sqlite_engine)] == [job_id]
 
 
+def _embedded_worker_on(engine, capabilities):
+    with engine.begin() as conn:
+        conn.execute(update(settings).where(settings.c.key == "worker.enabled").values(value=True))
+        conn.execute(insert(settings).values(team_id=None, key="worker.capabilities", value=capabilities))
+
+
+def test_takers_see_the_embedded_ceiling(sqlite_engine, world, clock):
+    _embedded_worker_on(sqlite_engine, ["git", "platform:android"])
+    job_id = _job(sqlite_engine, clock, world)
+    with sqlite_engine.connect() as conn:
+        job = conn.execute(select(jobs).where(jobs.c.id == job_id)).one()
+        assert environments.taken(job, environments.takers(conn, clock()))
+        assert environments.taken(job, environments.takers(conn, clock(), ["git", "platform:android"]))
+        assert not environments.taken(job, environments.takers(conn, clock(), ["git"]))
+        assert not environments.taken(job, environments.takers(conn, clock(), []))
+
+
+def test_an_empty_embedded_ceiling_lets_dispatch_launch(sqlite_engine, service, fake, world, clock):
+    _embedded_worker_on(sqlite_engine, ["git", "platform:android"])
+    job_id = _job(sqlite_engine, clock, world)
+    service.tick()
+    assert _envs(sqlite_engine) == []
+    service.cfg.runner.embedded_capabilities = []
+    service.tick()
+    assert [e.job_id for e in _envs(sqlite_engine)] == [job_id]
+
+
+def test_an_empty_embedded_ceiling_warns_about_a_job_only_the_server_could_take(sqlite_engine, world, clock):
+    _embedded_worker_on(sqlite_engine, ["git"])
+    job_id = _job(sqlite_engine, clock, world, project="bare", requires=["git"])
+    with sqlite_engine.connect() as conn:
+        rows = conn.execute(select(jobs).where(jobs.c.id == job_id)).all()
+        assert environments.warnings(conn, rows, clock()) == {}
+        assert job_id in environments.warnings(conn, rows, clock(), ceiling=[])
+
+
 def test_a_gated_job_counts_only_runners_that_pause(sqlite_engine, keyring, world, clock):
     with sqlite_engine.begin() as conn:
         defs._add_version(conn, defs.WORKFLOW, world["workflow"], 2,
