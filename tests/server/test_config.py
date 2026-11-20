@@ -71,3 +71,50 @@ def test_session_lifetime_defaults():
 def test_bad_session_lifetimes_refused(idle, maximum, message):
     with pytest.raises(ValidationError, match=message):
         ServerConfig(session_idle_hours=idle, session_max_hours=maximum)
+
+
+def test_secret_fields_default_off():
+    cfg = ServerConfig()
+    assert (cfg.database_password, cfg.secret_provider, cfg.runner.embedded_capabilities) == (None, None, None)
+
+
+def test_secret_fields_from_env(tmp_path):
+    cfg = load_config(tmp_path / "absent.yaml", env={"ARMATURE_SERVER_DATABASE_PASSWORD": "vault:db/armature",
+                                                     "ARMATURE_SERVER_SECRET_PROVIDER": "deploy.secrets:fetch"})
+    assert (cfg.database_password, cfg.secret_provider) == ("vault:db/armature", "deploy.secrets:fetch")
+
+
+@pytest.mark.parametrize("values", [
+    {"database_password": "vault:db"}, {"database_password": "kms:x"}, {"database_password": "plain"},
+    {"database_password": "env:"}, {"secret_provider": "deploy.secrets"}, {"secret_provider": "a b:c"},
+    {"master_key": "vault:x", "secret_provider": "deploy.secrets:fetch", "database_password": "Bad Scheme:x"},
+])
+def test_bad_secret_refs_refused(values):
+    with pytest.raises(ValidationError):
+        ServerConfig(**values)
+
+
+def test_provider_schemes_need_a_provider():
+    cfg = ServerConfig(master_key="vault:master", database_password="vault:db", secret_provider="deploy.secrets:fetch")
+    assert (cfg.master_key, cfg.database_password) == ("vault:master", "vault:db")
+    assert ServerConfig(database_password="env:PGPASSWORD").database_password == "env:PGPASSWORD"
+
+
+def test_embedded_capabilities_from_the_file(tmp_path):
+    path = tmp_path / "server.yaml"
+    path.write_text("runner:\n  embedded_capabilities: [llm, platform:ios]\n")
+    assert load_config(path, env={}).runner.embedded_capabilities == ["llm", "platform:ios"]
+    path.write_text("runner:\n  embedded_capabilities: []\n")
+    assert load_config(path, env={}).runner.embedded_capabilities == []
+
+
+@pytest.mark.parametrize("name", ["Not-A-Cap", "llm\n"])
+def test_bad_embedded_capability_refused(name):
+    with pytest.raises(ValidationError, match="invalid capabilities"):
+        ServerConfig(runner={"embedded_capabilities": ["llm", name]})
+
+
+def test_a_bad_database_password_stays_out_of_the_error(tmp_path):
+    with pytest.raises(ValidationError) as caught:
+        load_config(tmp_path / "absent.yaml", env={"ARMATURE_SERVER_DATABASE_PASSWORD": "hunter2-literal-password"})
+    assert "hunter2-literal-password" not in str(caught.value)

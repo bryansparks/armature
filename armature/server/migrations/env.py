@@ -14,7 +14,8 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    engine = make_engine(config.get_main_option("sqlalchemy.url"))
+    engine = make_engine(config.get_main_option("sqlalchemy.url"), password_ref=config.attributes.get("password_ref"),
+                         provider=config.attributes.get("secret_provider"))
     try:
         with engine.connect() as connection:
             context.configure(connection=connection, target_metadata=metadata, render_as_batch=True)

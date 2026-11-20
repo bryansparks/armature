@@ -586,6 +586,58 @@ def test_the_server_worker_never_takes_an_agent_job(sqlite_engine, keyring, cloc
     assert _get(sqlite_engine, git_job).status != "queued"
 
 
+def test_no_embedded_ceiling_leaves_the_setting_alone(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _setting(sqlite_engine, worker.CAPABILITIES_KEY, ["git", "llm"])
+    git_job = _job(sqlite_engine, clock, world, trigger=False, requires=["git"])
+    _worker(sqlite_engine, keyring, clock, tmp_path).tick()
+    assert _get(sqlite_engine, git_job).status != "queued"
+
+
+def test_an_empty_embedded_ceiling_claims_nothing(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    plain = _job(sqlite_engine, clock, world, trigger=False)
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.cfg.runner.embedded_capabilities = []
+    w.tick()
+    assert _get(sqlite_engine, plain).status == "queued"
+    assert spawned == []
+
+
+def test_the_embedded_ceiling_narrows_the_setting(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _setting(sqlite_engine, worker.CAPABILITIES_KEY, ["git", "llm"])
+    git_job = _job(sqlite_engine, clock, world, trigger=False, requires=["git"])
+    llm_job = _job(sqlite_engine, clock, world, trigger=False, requires=["llm"])
+    gpu_job = _job(sqlite_engine, clock, world, trigger=False, requires=["gpu"])
+    calls_job = _job(sqlite_engine, clock, world, trigger=False, requires=["llm", worker.CALLS_CAPABILITY])
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.cfg.runner.embedded_capabilities = ["llm", "gpu"]
+    _setting(sqlite_engine, worker.SLOTS_KEY, 9)
+    w.tick()
+    assert _get(sqlite_engine, git_job).status == "queued"
+    assert _get(sqlite_engine, gpu_job).status == "queued"
+    assert _get(sqlite_engine, llm_job).status != "queued"
+    assert _get(sqlite_engine, calls_job).status != "queued"
+
+
+def test_the_embedded_ceiling_drops_a_remote_capability(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    _setting(sqlite_engine, worker.CAPABILITIES_KEY, ["llm", "remote:x"])
+    llm_job = _job(sqlite_engine, clock, world, trigger=False, requires=["llm"])
+    remote_job = _job(sqlite_engine, clock, world, trigger=False, requires=["remote:x"])
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.cfg.runner.embedded_capabilities = ["llm"]
+    w.tick()
+    assert _get(sqlite_engine, llm_job).status != "queued"
+    assert _get(sqlite_engine, remote_job).status == "queued"
+
+
+def test_an_empty_embedded_ceiling_still_reaps(sqlite_engine, keyring, clock, world, tmp_path, spawned):
+    live = _expired(sqlite_engine, clock, world, run_status="running")
+    w = _worker(sqlite_engine, keyring, clock, tmp_path)
+    w.cfg.runner.embedded_capabilities = []
+    w.tick()
+    w.tick()
+    assert _get(sqlite_engine, live).status == "lost"
+
+
 def test_a_project_skill_and_model_alias_win(sqlite_engine, keyring, clock, world, tmp_path, spawned):
     from armature.server.db.schema import documents, providers
     _agent_world(sqlite_engine, keyring, clock, world)

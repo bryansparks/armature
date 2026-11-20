@@ -23,7 +23,7 @@ from armature.server.app.routes_auth import set_session_cookie
 from armature.server.app.static import BASE_META, TYPES
 from armature.server.config import ServerConfig, load_config
 from armature.server.crypto import MasterKeyError, keyring_from_source
-from armature.server.db import make_engine, utcnow
+from armature.server.db import engine_for, utcnow
 from armature.server.passwords import PASSWORD_MIN
 from armature.server.setup import SetupError, check_database_url, key_file_of, prepare, try_database, write_new_config
 from armature.server.users import create_admin, has_admin
@@ -99,10 +99,10 @@ class Setup:
             return "database"
         cfg = self.config()
         try:
-            keyring_from_source(cfg.master_key)
+            keyring_from_source(cfg.master_key, provider=cfg.secret_provider)
         except (MasterKeyError, NotImplementedError):
             return "database"
-        engine = make_engine(cfg.database_url)
+        engine = engine_for(cfg)
         try:
             with engine.connect() as conn:
                 return "admin" if inspect(conn).has_table("users") else "database"
@@ -115,7 +115,7 @@ class Setup:
         if not self.path.exists():
             return False
         cfg = self.config()
-        engine = make_engine(cfg.database_url)
+        engine = engine_for(cfg)
         try:
             with engine.connect() as conn:
                 return inspect(conn).has_table("users") and has_admin(conn, cfg.require_totp)
@@ -209,8 +209,8 @@ def database(body: DatabaseBody, setup: Setup = Depends(with_token)) -> dict[str
 
 
 def _create(setup: Setup, cfg: ServerConfig, body: AdminBody, ip: str) -> str:
-    keyring = keyring_from_source(cfg.master_key)
-    engine = make_engine(cfg.database_url)
+    keyring = keyring_from_source(cfg.master_key, provider=cfg.secret_provider)
+    engine = engine_for(cfg)
     try:
         with engine.begin() as conn:
             if has_admin(conn, cfg.require_totp):

@@ -14,6 +14,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from armature.server import secretref
+from armature.spec.models import CAPABILITY
+
 CONFIG_ENV = "ARMATURE_SERVER_CONFIG"
 DEFAULT_CONFIG_PATH = Path("~/.armature/server.yaml")
 ENV_PREFIX = "ARMATURE_SERVER_"
@@ -121,10 +124,20 @@ class RunnerConfig(BaseModel):
 
     # Caps each run's address space on Linux. 0 turns it off, and macOS ignores it.
     memory_mb: int = Field(default=8192, ge=0)
+    # A ceiling on the server's own worker.capabilities setting. None leaves it alone, [] stops its claims.
+    embedded_capabilities: list[str] | None = None
+
+    @field_validator("embedded_capabilities")
+    @classmethod
+    def _embedded_capabilities(cls, value: list[str] | None) -> list[str] | None:
+        bad = [name for name in value or () if not CAPABILITY.fullmatch(name)]
+        if bad:
+            raise ValueError(f"embedded_capabilities holds invalid capabilities: {', '.join(bad)}")
+        return value
 
 
 class ServerConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     database_url: str = Field(default_factory=lambda: f"sqlite:///{Path('~/.armature/server.db').expanduser()}")
     public_origin: str = "http://127.0.0.1:8098"
@@ -136,6 +149,10 @@ class ServerConfig(BaseModel):
     allow_private_http: bool = False
     trust_real_ip: bool = False
     master_key: str = Field(default_factory=lambda: f"file:{Path('~/.armature/master.key').expanduser()}")
+    # A reference such as env:PGPASSWORD, resolved on each new database connection.
+    database_password: str | None = None
+    # A module:callable that resolves references in any scheme besides env and file.
+    secret_provider: str | None = None
     oidc: OIDCConfig | None = None
     password_login: bool = True
     require_totp: bool = False
@@ -160,13 +177,20 @@ class ServerConfig(BaseModel):
             raise ValueError("base_path must be empty or start with '/' and not end with '/'")
         return value
 
-    @field_validator("master_key")
+    @field_validator("secret_provider")
     @classmethod
-    def _master_key(cls, value: str) -> str:
-        scheme, _, rest = value.partition(":")
-        if scheme not in ("env", "file", "kms") or not rest:
-            raise ValueError("master_key must be env:<NAME>, file:<path>, or kms:<key-arn>")
+    def _secret_provider(cls, value: str | None) -> str | None:
+        if value is not None and not secretref.PROVIDER.match(value):
+            raise ValueError("secret_provider must be module:callable")
         return value
+
+    @model_validator(mode="after")
+    def _secret_refs(self) -> ServerConfig:
+        if not _ref_ok(self.master_key, ("kms",), self.secret_provider):
+            raise ValueError("master_key must be env:<NAME>, file:<path>, kms:<key-arn>, or a secret_provider scheme")
+        if self.database_password is not None and not _ref_ok(self.database_password, (), self.secret_provider):
+            raise ValueError("database_password must be env:<NAME>, file:<path>, or a secret_provider scheme")
+        return self
 
     @field_validator("actions")
     @classmethod
@@ -187,6 +211,14 @@ class ServerConfig(BaseModel):
         if not self.allow_public_bind and not _is_loopback(self.host):
             raise ValueError(f"host {self.host!r} is not loopback; set allow_public_bind: true to bind it")
         return self
+
+
+def _ref_ok(ref: str, extra: tuple[str, ...], provider: str | None) -> bool:
+    try:
+        scheme = secretref.scheme_of(ref)
+    except secretref.SecretRefError:
+        return False
+    return scheme in (*secretref.BUILTIN_SCHEMES, *extra) or provider is not None
 
 
 def _is_loopback(host: str) -> bool:

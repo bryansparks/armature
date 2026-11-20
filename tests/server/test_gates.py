@@ -303,6 +303,16 @@ def test_an_expired_gate_is_rejected_and_resumes(world, tmp_path):
         assert gates.expire(conn, world.clock()) == []
 
 
+def test_a_worker_with_an_empty_embedded_ceiling_still_expires_gates(world, tmp_path):
+    _, _, gate_id = _paused(world, workflow=_approval(world, "{expires_hours: 1}"))
+    world.clock.advance(hours=1, seconds=1)
+    cfg = SimpleNamespace(public_origin="https://arm.test", base_path="",
+                          runner=SimpleNamespace(embedded_capabilities=[]))
+    worker.Worker(world.engine, world.keyring, cfg, SimpleNamespace(), clock=world.clock,
+                  work_dir=tmp_path / "work").tick()
+    assert _gate(world, gate_id).state == "expired"
+
+
 def test_canceling_a_suspended_job_cancels_its_run_and_gate(world):
     job_id, bundle, gate_id = _paused(world)
     with world.engine.begin() as conn:

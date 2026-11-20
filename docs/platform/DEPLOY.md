@@ -30,6 +30,10 @@ and the trigger scheduler's claim are unverified under its default
 REPEATABLE READ isolation. Run the database test matrix against a real MySQL
 server before you use it in production.
 
+To keep the database password out of `database_url`, set
+`database_password` in `server.yaml` instead. See
+[Secrets from outside the config](#secrets-from-outside-the-config).
+
 The server then signs you in and opens **Setup** in the app, a checklist for
 your team's models, AWS, runners, connections, repos, and webhooks. Each
 step can be skipped and done later. The server never starts a runner itself.
@@ -151,6 +155,38 @@ session_max_hours: 168
 `session_idle_hours` must be above 0, and `session_max_hours` must be at
 least `session_idle_hours` and at most 720 (30 days). The session cookie
 lasts `session_max_hours`. Step-up stays at five minutes.
+
+### Secrets from outside the config
+
+`database_password` says where the database password lives, so
+`database_url` holds no password and is safe to log. The server resolves the
+reference on every new database connection, so a rotated password takes
+effect for new connections without a restart.
+
+```yaml
+database_url: postgresql+psycopg://armature@db.internal/armature
+database_password: env:PGPASSWORD
+```
+
+`env:NAME` reads an environment variable. `file:/path` reads a regular file
+with mode 0600, owned by the server's user, and drops a trailing newline.
+For any other scheme, such as a secrets manager, set `secret_provider` to a
+`module:callable` that your deployment installs. The server calls it with the
+whole reference, such as `aws-sm:prod/armature/db`, and uses the string it
+returns. The server calls the provider from several threads at once, so it
+must be thread-safe, and a provider that caches must keep its cache shorter
+than the rotation window. `master_key` takes the same provider schemes, and
+the provider returns the base64 key, as a key file holds it. With a provider
+set, `kms:` references go to it too. Without one, `kms:` isn't implemented.
+
+```yaml
+secret_provider: my_deploy.secrets:resolve
+database_password: aws-sm:prod/armature/db
+master_key: aws-sm:prod/armature/master-key
+```
+
+`ARMATURE_SERVER_DATABASE_PASSWORD` and `ARMATURE_SERVER_SECRET_PROVIDER`
+override these, as for other top-level settings.
 
 ## Headers the server sets
 
@@ -389,6 +425,21 @@ no runner keeps working. Instance settings control it:
   claims only jobs that list no more than these. When unset, it claims only
   jobs that list nothing, which includes every job queued before `requires:`
   existed.
+
+Any admin can change those settings from the dashboard. To set a limit they
+can't widen, set `runner.embedded_capabilities` in `server.yaml`. The
+server's worker then claims only jobs that both lists cover. An empty list
+stops it from claiming any job, while leases still expire and gates, finished
+runs, and conversations are still handled. Leave it out for no limit.
+
+```yaml
+runner:
+  embedded_capabilities: []
+```
+
+AWS environment launches and the Jobs page warnings follow the same limit.
+Test runs from the editor still run on the server, up to
+`dry_run.max_active` at once.
 
 The server's worker and a runner build the same bundle, so a job runs the
 same either way.

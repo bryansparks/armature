@@ -11,7 +11,7 @@ from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 
 from armature.server.config import ENV_PREFIX, ServerConfig, load_config, write_config
 from armature.server.crypto import keyring_from_source, write_key_file
-from armature.server.db import make_engine, migrate
+from armature.server.db import engine_for, make_engine, migrate_for
 from armature.server.users import has_admin, has_sealed_values
 
 BACKENDS = ("sqlite", "postgresql", "mysql")
@@ -87,8 +87,8 @@ def prepare(path: Path, *, database_url: str | None = None, key_file: Path | Non
     wrote = write_new_config(path, database_url=database_url, key_file=key_file)
     cfg = load_config(path)
     _sqlite_folder(cfg.database_url)
-    migrate(cfg.database_url)
-    engine = make_engine(cfg.database_url)
+    migrate_for(cfg)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn:
             sealed, exists = has_sealed_values(conn), has_admin(conn, cfg.require_totp)
@@ -102,7 +102,7 @@ def prepare(path: Path, *, database_url: str | None = None, key_file: Path | Non
                              "key. Restore the key file from backup. A new key could never open them.")
         write_key_file(key)
         new_key = key
-    keyring_from_source(cfg.master_key)
+    keyring_from_source(cfg.master_key, provider=cfg.secret_provider)
     return Prepared(cfg=cfg, wrote_config=wrote, new_key=new_key, has_admin=exists)
 
 
@@ -111,7 +111,7 @@ def needs_setup(cfg: ServerConfig) -> bool:
     url = make_url(cfg.database_url)
     if url.get_backend_name() == "sqlite" and url.database and not Path(url.database).exists():
         return True
-    engine = make_engine(cfg.database_url)
+    engine = engine_for(cfg)
     try:
         with engine.connect() as conn:
             if not inspect(conn).has_table("users"):

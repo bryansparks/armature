@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 
-from armature.server import actions, dispatch, environments, rbac, reruns
+from armature.server import actions, dispatch, environments, rbac, reruns, worker
 from armature.server.app.deps import (
     Granted,
     ScopeFrom,
@@ -65,7 +65,8 @@ def list_jobs(request: Request, team_id: str | None = Query(None, max_length=36)
         access = rbac.load_access(conn, session.user_id, bool(session.user.is_admin))
         rows = conn.execute(query.where(rbac.scope_clause(rbac.visible_scope(access), jobs.c.team_id,
                                                           jobs.c.project_id))).all()
-        warned = environments.warnings(conn, rows, srv.now(), request.app.state.environments.reasons)
+        warned = environments.warnings(conn, rows, srv.now(), request.app.state.environments.reasons,
+                                       worker.embedded_ceiling(srv.cfg))
     hidden = ("team_id", "project_id", "requires")
     return {"jobs": [{**{k: v for k, v in r._mapping.items() if k not in hidden}, "warning": warned.get(r.id)}
                      for r in rows]}

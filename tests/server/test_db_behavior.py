@@ -114,3 +114,100 @@ def test_group_grants_match_names_exactly(engine, keyring, clock):
         cfg = OIDCConfig(issuer="i", client_id="c", client_secret_ref="s",
                          group_roles={"g": [{"scope_kind": "team", "scope": "Mobile", "role": "viewer"}]})
         assert granted_roles(conn, cfg, {"g"}) == {("team", exact): "viewer"}
+
+
+SECRET = "s3cret-value"
+
+
+def leaky_provider(ref):
+    raise RuntimeError(f"backend said {SECRET}")
+
+
+def _pg_engine(monkeypatch, ref="env:ARMATURE_TEST_PGPASS", provider=None):
+    import types
+
+    from sqlalchemy import create_engine
+
+    from armature.server import db
+    error = type("Error", (Exception,), {})
+    fake_dbapi = types.SimpleNamespace(__version__="1.30.0", paramstyle="format", Error=error,
+                                       InterfaceError=type("InterfaceError", (error,), {}),
+                                       OperationalError=type("OperationalError", (error,), {}))
+    monkeypatch.setattr(db, "create_engine", lambda url, **kw: create_engine(url, module=fake_dbapi, **kw))
+    monkeypatch.setenv("ARMATURE_TEST_PGPASS", SECRET)
+    return db.make_engine("postgresql+pg8000://armature@db.example/armature", password_ref=ref, provider=provider)
+
+
+def _record_connects(engine, monkeypatch):
+    seen = []
+
+    def connect(*_args, **params):
+        seen.append(params)
+        return params
+
+    monkeypatch.setattr(engine.dialect, "connect", connect)
+    return seen
+
+
+def test_the_password_reference_is_resolved_on_connect_and_kept_out_of_the_url(monkeypatch):
+    engine = _pg_engine(monkeypatch)
+    seen = _record_connects(engine, monkeypatch)
+    (hook,) = list(engine.dialect.dispatch.do_connect)
+    assert hook(engine.dialect, None, [], {"user": "armature"}) == {"user": "armature", "password": SECRET}
+    monkeypatch.setenv("ARMATURE_TEST_PGPASS", "rotated")
+    assert hook(engine.dialect, None, [], {"user": "armature"})["password"] == "rotated"
+    assert len(seen) == 2
+    assert engine.url.password is None and SECRET not in str(engine.url)
+
+
+def test_an_unresolvable_password_is_a_database_error_without_the_value(monkeypatch):
+    import traceback
+
+    from sqlalchemy.exc import OperationalError
+    engine = _pg_engine(monkeypatch, ref="vault:db", provider="tests.server.test_db_behavior:leaky_provider")
+    seen = _record_connects(engine, monkeypatch)
+    with pytest.raises(OperationalError) as caught:
+        engine.connect()
+    assert seen == []
+    assert "vault:" in str(caught.value)
+    assert SECRET not in "".join(traceback.format_exception(caught.value))
+
+
+def test_sqlite_ignores_the_password_reference(tmp_path):
+    from armature.server.db import make_engine
+    engine = make_engine(f"sqlite:///{tmp_path / 'a.db'}", password_ref="env:ARMATURE_TEST_UNSET")
+    with engine.connect():
+        pass
+    assert not list(engine.dialect.dispatch.do_connect)
+
+
+def test_migrate_for_hands_alembic_the_reference_outside_the_url(monkeypatch):
+    from alembic import command
+
+    from armature.server.config import ServerConfig
+    from armature.server.db import migrate_for
+    captured = []
+    monkeypatch.setattr(command, "upgrade", lambda config, revision: captured.append((config, revision)))
+    migrate_for(ServerConfig(database_url="postgresql://armature@db/armature", database_password="vault:db",
+                             secret_provider="deploy.secrets:fetch"))
+    ((config, revision),) = captured
+    assert revision == "head"
+    assert config.attributes == {"password_ref": "vault:db", "secret_provider": "deploy.secrets:fetch"}
+    assert "vault" not in config.get_main_option("sqlalchemy.url")
+
+
+def test_migrations_env_passes_the_reference_to_make_engine(tmp_path, monkeypatch):
+    from alembic import command
+
+    from armature.server import db
+    real = db.make_engine
+    calls = []
+
+    def spy(url, **kwargs):
+        calls.append(kwargs)
+        return real(url)
+
+    monkeypatch.setattr(db, "make_engine", spy)
+    command.upgrade(db.alembic_config(f"sqlite:///{tmp_path / 'a.db'}", password_ref="env:ARMATURE_TEST_UNSET",
+                                      provider="deploy.secrets:fetch"), "head")
+    assert calls == [{"password_ref": "env:ARMATURE_TEST_UNSET", "provider": "deploy.secrets:fetch"}]
